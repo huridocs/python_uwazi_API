@@ -1,10 +1,10 @@
-from uwazi_adapter.CSV import CSV
-from uwazi_adapter.Entities import Entities
-from uwazi_adapter.Files import Files
-from uwazi_adapter.Settings import Settings
-from uwazi_adapter.Templates import Templates
-from uwazi_adapter.Thesauris import Thesauris
-from uwazi_adapter.UwaziRequest import UwaziRequest
+from uwazi_api.CSV import CSV
+from uwazi_api.Entities import Entities
+from uwazi_api.Files import Files
+from uwazi_api.Settings import Settings
+from uwazi_api.Templates import Templates
+from uwazi_api.Thesauris import Thesauris
+from uwazi_api.UwaziRequest import UwaziRequest
 
 
 class UwaziAdapter(object):

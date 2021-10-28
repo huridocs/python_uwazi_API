@@ -1,5 +1,5 @@
 import json
-from uwazi_adapter.UwaziRequest import UwaziRequest
+from uwazi_api.UwaziRequest import UwaziRequest
 
 
 class Templates:

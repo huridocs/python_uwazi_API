@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import List
 from requests.exceptions import RetryError
 
-from uwazi_adapter.Entities import Entities
-from uwazi_adapter.UwaziRequest import UwaziRequest
+from uwazi_api.Entities import Entities
+from uwazi_api.UwaziRequest import UwaziRequest
 
 
 class Files:
