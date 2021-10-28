@@ -1,6 +1,5 @@
 import logging
-
-from uwazi_adapter.request_retry import requests_retry_session
+from uwazi_api.request_retry import requests_retry_session
 
 
 class UwaziRequest:

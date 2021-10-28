@@ -1,10 +1,11 @@
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 
 
 def requests_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 504), session=None):
     session = session or requests.Session()
-    retry = requests.packages.urllib3.util.retry.Retry(
+    retry = urllib3.util.retry.Retry(
         total=retries,
         read=retries,
         connect=retries,

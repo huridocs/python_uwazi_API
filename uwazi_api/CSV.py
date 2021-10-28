@@ -1,4 +1,4 @@
-from uwazi_adapter.UwaziRequest import UwaziRequest
+from uwazi_api.UwaziRequest import UwaziRequest
 
 
 class CSV:
@@ -16,8 +16,8 @@ class CSV:
                                                                headers={'X-Requested-With': 'XMLHttpRequest'})
 
             if response.status_code != 200:
-                self.uwazi_request.graylog.info(f'Error uploading CSV with paragraphs', response)
+                self.uwazi_request.graylog.info(f'Error uploading CSV', response)
                 return
 
-            print('CSV with paragraphs uploaded with status ', response.status_code)
-            self.uwazi_request.graylog.info(f'CSV with paragraphs uploaded with status {response.status_code}')
+            print('CSV uploaded with status ', response.status_code)
+            self.uwazi_request.graylog.info(f'CSV uploaded with status {response.status_code}')

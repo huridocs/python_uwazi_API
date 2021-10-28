@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List
 
-from uwazi_adapter.UwaziRequest import UwaziRequest
+from uwazi_api.UwaziRequest import UwaziRequest
 
 
 class Entities:
@@ -15,7 +15,6 @@ class Entities:
                                                                    'locale': language},
                                                           params={'sharedId': shared_id, 'omitRelationships': 'true'})
 
-        # print(str(response.content.decode('utf-8')))
         if response.status_code != 200 or len(json.loads(response.text)['rows']) == 0:
             self.uwazi_request.graylog.error(f'Error getting entity {shared_id} {language}')
             raise InterruptedError(f'Error getting entity {shared_id} {language}')
@@ -88,11 +87,12 @@ class Entities:
             self.uwazi_request.graylog.error(message)
             return
 
-        self.uwazi_request.graylog.info(f'Entity uploaded {entity["_id"]}')
+        if '_id' in entity:
+            self.uwazi_request.graylog.info(f'Entity uploaded {entity["_id"]}')
         shared_id = json.loads(upload_response.text)['sharedId']
         return shared_id
 
-    def delete(self, share_id):
+    def delete(self, share_id: str):
         response = self.uwazi_request.request_adapter.delete(f'{self.uwazi_request.url}/api/documents',
                                                              headers=self.uwazi_request.headers,
                                                              params={'sharedId': share_id},
