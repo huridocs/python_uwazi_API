@@ -4,6 +4,7 @@ from uwazi_api.request_retry import requests_retry_session
 
 class UwaziRequest:
     def __init__(self, url: str, user: str, password: str):
+        url = url if url[-1] != '/' else url[:-1]
         self.url = url
         self.user = user
         self.password = password
