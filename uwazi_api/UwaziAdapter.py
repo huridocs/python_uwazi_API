@@ -21,8 +21,8 @@ class UwaziAdapter(object):
         self.csv = CSV(self.uwazi_request)
 
     def sanitize_url(self):
-        self.url = self.url if self.url[-1] != '/' else self.url[:-1]
+        self.url = self.url if self.url[-1] != "/" else self.url[:-1]
 
         for language in iso_639_choices:
-            if self.url[-3:] == f'/{language[0]}':
+            if self.url[-3:] == f"/{language[0]}":
                 self.url = self.url[:-3]

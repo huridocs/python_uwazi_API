@@ -13,6 +13,6 @@ def requests_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500,
         status_forcelist=status_forcelist,
     )
     adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
