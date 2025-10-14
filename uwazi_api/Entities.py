@@ -48,8 +48,20 @@ class Entities:
 
         return [json_entity["sharedId"] for json_entity in json.loads(response.text)["rows"]]
 
-    def get(self, template_id: str, batch_size: int, language: str = "en", published: bool = False):
-        params = {"types": f'["{template_id}"]', "unpublished": "false" if published else "true", "limit": batch_size}
+    def get(
+        self,
+        start_from: int = 0,
+        batch_size: int = 30,
+        template_id: str | None = None,
+        language: str = "en",
+        published: bool | None = None,
+    ):
+        params = {"from": start_from, "limit": batch_size}
+        if template_id:
+            params["types"] = f'["{template_id}"]'
+
+        if published is not None:
+            params["unpublished"] = not published
 
         response = self.uwazi_request.request_adapter.get(
             f"{self.uwazi_request.url}/api/search",
