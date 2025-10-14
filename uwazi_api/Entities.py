@@ -56,12 +56,11 @@ class Entities:
         language: str = "en",
         published: bool | None = None,
     ):
-        params = {"from": start_from, "limit": batch_size}
+        params = {"from": start_from, "limit": batch_size, "allAggregations": False, "sort": "creationDate", "order": "desc"}
         if template_id:
             params["types"] = f'["{template_id}"]'
 
-        if published is not None:
-            params["unpublished"] = not published
+        params["includeUnpublished"] = False if published else True
 
         response = self.uwazi_request.request_adapter.get(
             f"{self.uwazi_request.url}/api/search",
