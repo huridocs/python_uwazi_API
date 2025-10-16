@@ -1,3 +1,4 @@
+from uwazi_api.Reference import Reference, SelectionRectangle
 from uwazi_api.UwaziAdapter import UwaziAdapter
 
 
@@ -15,5 +16,30 @@ def upload_entity_to_localhost():
     print(uwazi_adapter.templates.get())
 
 
+def create_relationship():
+    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    reference = Reference(
+        text="29 DE JULIO DE 1991",
+        selection_rectangles=[
+            SelectionRectangle(
+                top=172.94667742693863,
+                left=335.66813738787613,
+                width=155.3464233398437,
+                height=17.629629629629626,
+                page="1",
+            ),
+        ],
+    )
+    uwazi_adapter.relationships.create(
+        file_entity_shared_id="0mg4pkm4y78n",
+        file_id="68f098050058648f7a83c35f",
+        reference=reference,
+        to_entity_shared_id="cos3av69d98",
+        relationship_type_id="68f097b60058648f7a83c307",
+        language="en",
+    )
+
+
 if __name__ == "__main__":
     upload_entity_to_localhost()
+    # create_relationship()

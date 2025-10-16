@@ -1,6 +1,7 @@
 from uwazi_api.CSV import CSV
 from uwazi_api.Entities import Entities
 from uwazi_api.Files import Files
+from uwazi_api.Relationships import Relationships
 from uwazi_api.Settings import Settings
 from uwazi_api.Templates import Templates
 from uwazi_api.Thesauris import Thesauris
@@ -19,6 +20,7 @@ class UwaziAdapter(object):
         self.templates = Templates(self.uwazi_request)
         self.settings = Settings(self.uwazi_request)
         self.csv = CSV(self.uwazi_request)
+        self.relationships = Relationships(self.uwazi_request)
 
     def sanitize_url(self):
         self.url = self.url if self.url[-1] != "/" else self.url[:-1]
