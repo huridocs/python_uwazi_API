@@ -164,3 +164,41 @@ class Entities:
 
         print(f"Syncer: Entities deleted {shared_ids}")
         self.uwazi_request.graylog.info(f"Syncer: Entities deleted {shared_ids}")
+
+    def get_from_text(
+        self,
+        search_term: str,
+        template_id: str | None = None,
+        start_from: int = 0,
+        batch_size: int = 30,
+        language: str = "en",
+    ):
+        params = {
+            "allAggregations": "false",
+            "from": start_from,
+            "includeUnpublished": "true",
+            "limit": batch_size,
+            "order": "desc",
+            "searchTerm": search_term,
+            "sort": "_score",
+            "treatAs": "number",
+            "unpublished": "false",
+            "aggregateGeneratedToc": "true",
+            "aggregatePublishingStatus": "true",
+            "aggregatePermissionsByUsers": "true",
+        }
+
+        if template_id:
+            params["types"] = f'["{template_id}"]'
+
+        response = self.uwazi_request.request_adapter.get(
+            f"{self.uwazi_request.url}/api/search",
+            headers=self.uwazi_request.headers,
+            params=params,
+            cookies={"connect.sid": self.uwazi_request.connect_sid, "locale": language},
+        )
+
+        if response.status_code != 200:
+            raise InterruptedError(f"Error searching entities by text")
+
+        return json.loads(response.text)["rows"]

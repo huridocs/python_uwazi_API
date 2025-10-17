@@ -40,6 +40,17 @@ def create_relationship():
     )
 
 
+def search_entities():
+    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+
+    entities = uwazi_adapter.entities.get_from_text(
+        search_term="Malawi", template_id="68f0c2400058648f7a83d39f", start_from=0, batch_size=300, language="en"
+    )
+
+    print(entities)
+
+
 if __name__ == "__main__":
-    upload_entity_to_localhost()
+    # upload_entity_to_localhost()
     # create_relationship()
+    search_entities()
