@@ -1,6 +1,8 @@
 import json
 from typing import Dict, List
 
+import pandas as pd
+
 from uwazi_api.UwaziRequest import UwaziRequest
 
 
@@ -79,6 +81,59 @@ class Entities:
             raise InterruptedError(f"Error getting entities to update")
 
         return json.loads(response.text)["rows"]
+
+    @staticmethod
+    def convert_entities_to_panda(entities):
+        flattened_entities = []
+        for entity in entities:
+            flattened = {
+                "_id": entity.get("_id"),
+                "sharedId": entity.get("sharedId"),
+                "title": entity.get("title"),
+                "template": entity.get("template"),
+                "language": entity.get("language"),
+                "published": entity.get("published"),
+                "creationDate": entity.get("creationDate"),
+                "editDate": entity.get("editDate"),
+            }
+
+            metadata = entity.get("metadata", {})
+            for key, value in metadata.items():
+                if isinstance(value, list) and len(value) > 0:
+                    if isinstance(value[0], dict):
+                        extracted_values = []
+                        for item in value:
+                            if "label" in item:
+                                extracted_values.append(item["label"])
+                            elif "value" in item:
+                                extracted_values.append(item["value"])
+
+                        if len(extracted_values) == 1:
+                            flattened[f"metadata_{key}"] = extracted_values[0]
+                        elif len(extracted_values) > 1:
+                            flattened[f"metadata_{key}"] = extracted_values
+                        else:
+                            flattened[f"metadata_{key}"] = None
+                    else:
+                        flattened[f"metadata_{key}"] = value
+                else:
+                    flattened[f"metadata_{key}"] = None
+
+            flattened_entities.append(flattened)
+
+        df = pd.DataFrame(flattened_entities)
+        return df
+
+    def get_pandas_dataframe(
+        self,
+        start_from: int = 0,
+        batch_size: int = 30,
+        template_id: str | None = None,
+        language: str = "en",
+        published: bool | None = None,
+    ) -> pd.DataFrame:
+        entities = self.get(start_from, batch_size, template_id, language, published)
+        return self.convert_entities_to_panda(entities)
 
     def get_by_id(self, entity_id):
         response = self.uwazi_request.request_adapter.get(
