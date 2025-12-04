@@ -145,5 +145,5 @@ def get_dictionaries():
 
 if __name__ == "__main__":
     df = loop_entities()
-    df_converted = convert_dates(dataframe=df, template_id="6912059adeb0c2aa4cfc8ec4")
-    print(df_converted.to_string())
+    # df_converted = convert_dates(dataframe=df, template_id="6912059adeb0c2aa4cfc8ec4")
+    print(df.to_string())

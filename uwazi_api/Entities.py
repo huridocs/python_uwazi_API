@@ -108,6 +108,9 @@ class Entities:
                             elif "value" in item:
                                 extracted_values.append(item["value"])
 
+                            if "parent" in item and "label" in item["parent"]:
+                                extracted_values[-1] = item["parent"]["label"] + "::" + str(extracted_values[-1])
+
                         if len(extracted_values) == 1:
                             flattened[f"metadata_{key}"] = extracted_values[0]
                         elif len(extracted_values) > 1:
