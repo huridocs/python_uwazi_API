@@ -93,49 +93,6 @@ def loop_entities():
         return pd.DataFrame()
 
 
-def convert_dates(dataframe: pd.DataFrame = None, template_id: str = "") -> pd.DataFrame:
-    if dataframe is None or dataframe.empty:
-        return dataframe
-
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
-    templates = uwazi_adapter.templates.get()
-
-    template = None
-    for t in templates:
-        if t["_id"] == template_id:
-            template = t
-            break
-
-    if template is None:
-        print(f"Template {template_id} not found")
-        return dataframe
-
-    date_columns = set()
-
-    for prop in template.get("commonProperties", []):
-        if prop.get("type") == "date":
-            prop_name = prop.get("name")
-            if prop_name in dataframe.columns:
-                date_columns.add(prop_name)
-
-    for prop in template.get("properties", []):
-        if prop.get("type") == "date":
-            prop_name = prop.get("name")
-            metadata_col = f"metadata_{prop_name}"
-            if metadata_col in dataframe.columns:
-                date_columns.add(metadata_col)
-
-    df_copy = dataframe.copy()
-
-    for col in date_columns:
-        if col in ["creationDate", "editDate"]:
-            df_copy[col] = pd.to_datetime(df_copy[col], unit="ms", errors="coerce").dt.strftime("%Y/%m/%d %H:%M:%S")
-        else:
-            df_copy[col] = pd.to_datetime(df_copy[col], unit="s", errors="coerce").dt.strftime("%Y/%m/%d %H:%M:%S")
-
-    return df_copy
-
-
 def get_dictionaries():
     uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
     dictionaries = uwazi_adapter.thesauris.get(language="en")
@@ -143,7 +100,13 @@ def get_dictionaries():
     return dictionaries
 
 
+def upload_dataframe(df_converted, template_id):
+    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    return uwazi_adapter.csv.upload_dataframe(df=df_converted, template_id=template_id)
+
+
 if __name__ == "__main__":
     df = loop_entities()
-    # df_converted = convert_dates(dataframe=df, template_id="6912059adeb0c2aa4cfc8ec4")
     print(df.to_string())
+    df.loc[0, "title"] = "Updated Title via CSV Upload"
+    print(upload_dataframe(df, template_id="6912059adeb0c2aa4cfc8ec4"))

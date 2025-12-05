@@ -6,7 +6,7 @@
 
 To use the API install the requirements
 
-    pip install git+https://github.com/huridocs/python_uwazi_API@2025.12.4.1
+    pip install git+https://github.com/huridocs/python_uwazi_API@2025.12.5.1
 
 and use it like this:
 
