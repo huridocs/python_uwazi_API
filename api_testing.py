@@ -1,10 +1,21 @@
+import os
+
+import load_dotenv
+
 from uwazi_api.Reference import Reference, SelectionRectangle
 from uwazi_api.UwaziAdapter import UwaziAdapter
 import pandas as pd
 
+load_dotenv.load_dotenv()
+
+UWAZI_USER = os.getenv("UWAZI_USER", "admin")
+UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
+UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
+
 
 def upload_entity_to_localhost():
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     entity = {
         "title": "title_of_the_entity",
         "template": "template_id_like_4e57cdd6f54e0a1304c0d5dd",
@@ -18,7 +29,7 @@ def upload_entity_to_localhost():
 
 
 def create_relationship():
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     reference = Reference(
         text="29 DE JULIO DE 1991",
         selection_rectangles=[
@@ -42,7 +53,7 @@ def create_relationship():
 
 
 def search_entities():
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
 
     entities = uwazi_adapter.entities.get_from_text(
         search_term="Malawi", template_id="68f0c2400058648f7a83d39f", start_from=0, batch_size=300, language="en"
@@ -58,15 +69,15 @@ def update_entity():
         "language": "en",
         "metadata": {"foo_date": [{"value": 1794355200}]},
         "sharedId": "6jcdjm1k453",
-        "template": "6912059adeb0c2aa4cfc8ec4",
+        "template": UWAZI_TEMPLATE_ID,
         "title": "1",
     }
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     uwazi_adapter.entities.upload(entity=data, language="en")
 
 
 def loop_entities():
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
 
     start = 0
     batch_size = 100
@@ -75,7 +86,7 @@ def loop_entities():
         batch = uwazi_adapter.entities.get_pandas_dataframe(
             start_from=start,
             batch_size=start + batch_size,
-            template_id="6912059adeb0c2aa4cfc8ec4",
+            template_id=UWAZI_TEMPLATE_ID,
             language="en",
             published=False,
         )
@@ -94,19 +105,19 @@ def loop_entities():
 
 
 def get_dictionaries():
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_USER, url=UWAZI_URL)
     dictionaries = uwazi_adapter.thesauris.get(language="en")
     print(dictionaries)
     return dictionaries
 
 
-def upload_dataframe(df_converted, template_name):
-    uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
-    return uwazi_adapter.csv.upload_dataframe(df=df_converted, template_name=template_name)
+def upload_dataframe(df, template_name):
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password="admin", url=UWAZI_URL)
+    return uwazi_adapter.csv.upload_dataframe(df=df, template_name=template_name)
 
 
 if __name__ == "__main__":
     df = loop_entities()
     print(df.to_string())
-    df.loc[0, "title"] = "Updated Title via CSV Upload"
-    print(upload_dataframe(df, template_name="foo"))
+    # df.loc[0, "title"] = "Updated Title via CSV Upload"
+    # print(upload_dataframe(df, template_name="foo"))
