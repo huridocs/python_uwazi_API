@@ -114,7 +114,7 @@ class Entities:
                         if len(extracted_values) == 1:
                             flattened[key] = extracted_values[0]
                         elif len(extracted_values) > 1:
-                            flattened[key] = extracted_values
+                            flattened[key] = "|".join(extracted_values)
                         else:
                             flattened[key] = None
                     else:
@@ -144,7 +144,9 @@ class Entities:
             cookies={"connect.sid": self.uwazi_request.connect_sid},
         )
         template = [t for t in json.loads(response.text)["rows"] if t["_id"] == template_id][0]
-        return self.convert_dates(dataframe, template)
+        dataframe = self.convert_dates(dataframe, template)
+        dataframe = self.convert_links(dataframe, template)
+        return self.convert_geolocations(dataframe, template)
 
     @staticmethod
     def format_timestamp(val, unit):
@@ -157,6 +159,60 @@ class Entities:
         if isinstance(val, dict) and "from" in val and "to" in val:
             return f"{self.format_timestamp(val['from'], 's')}:{self.format_timestamp(val['to'], 's')}"
         return val
+
+    def convert_geolocations(self, dataframe: pd.DataFrame | None = None, template=None) -> pd.DataFrame | None:
+        if dataframe is None or dataframe.empty:
+            return dataframe
+
+        geolocation_columns = set()
+        all_props = template.get("commonProperties", []) + template.get("properties", [])
+        for prop in all_props:
+            prop_type = prop.get("type")
+            prop_name = prop.get("name")
+            if prop_name not in dataframe.columns:
+                continue
+            if prop_type == "geolocation":
+                geolocation_columns.add(prop_name)
+
+        df_copy = dataframe.copy()
+
+        for col in geolocation_columns:
+
+            def parse_geolocation(val):
+                if isinstance(val, dict) and "lat" in val and "lon" in val:
+                    return f"{val['lat']}|{val['lon']}"
+                return val
+
+            df_copy[col] = df_copy[col].apply(parse_geolocation)
+
+        return df_copy
+
+    def convert_links(self, dataframe: pd.DataFrame | None = None, template=None) -> pd.DataFrame | None:
+        if dataframe is None or dataframe.empty:
+            return dataframe
+
+        geolocation_columns = set()
+        all_props = template.get("commonProperties", []) + template.get("properties", [])
+        for prop in all_props:
+            prop_type = prop.get("type")
+            prop_name = prop.get("name")
+            if prop_name not in dataframe.columns:
+                continue
+            if prop_type == "link":
+                geolocation_columns.add(prop_name)
+
+        df_copy = dataframe.copy()
+
+        for col in geolocation_columns:
+
+            def parse_geolocation(val):
+                if isinstance(val, dict) and "label" in val and "url" in val:
+                    return f"{val['label']}|{val['url']}"
+                return val
+
+            df_copy[col] = df_copy[col].apply(parse_geolocation)
+
+        return df_copy
 
     def convert_dates(self, dataframe: pd.DataFrame | None = None, template=None) -> pd.DataFrame | None:
         if dataframe is None or dataframe.empty:
