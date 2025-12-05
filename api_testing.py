@@ -118,6 +118,6 @@ def upload_dataframe(df, template_name):
 
 if __name__ == "__main__":
     df = loop_entities()
-    print(df.to_string())
-    # df.loc[0, "title"] = "Updated Title via CSV Upload"
-    # print(upload_dataframe(df, template_name="foo"))
+    print(df.head().to_string())
+    df.loc[0, "title"] = "Updated Title via CSV Upload 2"
+    print(upload_dataframe(df, template_name="foo"))
