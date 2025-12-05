@@ -112,15 +112,15 @@ class Entities:
                                 extracted_values[-1] = item["parent"]["label"] + "::" + str(extracted_values[-1])
 
                         if len(extracted_values) == 1:
-                            flattened[f"metadata_{key}"] = extracted_values[0]
+                            flattened[key] = extracted_values[0]
                         elif len(extracted_values) > 1:
-                            flattened[f"metadata_{key}"] = extracted_values
+                            flattened[key] = extracted_values
                         else:
-                            flattened[f"metadata_{key}"] = None
+                            flattened[key] = None
                     else:
-                        flattened[f"metadata_{key}"] = value
+                        flattened[key] = value
                 else:
-                    flattened[f"metadata_{key}"] = None
+                    flattened[key] = None
 
             flattened_entities.append(flattened)
 
@@ -136,7 +136,53 @@ class Entities:
         published: bool | None = None,
     ) -> pd.DataFrame:
         entities = self.get(start_from, batch_size, template_id, language, published)
-        return self.convert_entities_to_panda(entities)
+        dataframe = self.convert_entities_to_panda(entities)
+
+        response = self.uwazi_request.request_adapter.get(
+            url=f"{self.uwazi_request.url}/api/templates",
+            headers=self.uwazi_request.headers,
+            cookies={"connect.sid": self.uwazi_request.connect_sid},
+        )
+        template = [t for t in json.loads(response.text)["rows"] if t["_id"] == template_id][0]
+        return self.convert_dates(dataframe, template)
+
+    @staticmethod
+    def format_timestamp(val, unit):
+        return pd.to_datetime(val, unit=unit, errors="coerce").strftime("%Y/%m/%d")
+
+    def parse_daterange(self, val):
+        if isinstance(val, dict) and "from" in val and "to" in val:
+            return f"{self.format_timestamp(val['from'], 's')}:{self.format_timestamp(val['to'], 's')}"
+        return val
+
+    def convert_dates(self, dataframe: pd.DataFrame | None = None, template=None) -> pd.DataFrame | None:
+        if dataframe is None or dataframe.empty:
+            return dataframe
+
+        date_columns = set()
+        daterange_columns = set()
+        all_props = template.get("commonProperties", []) + template.get("properties", [])
+        for prop in all_props:
+            prop_type = prop.get("type")
+            prop_name = prop.get("name")
+            if prop_name not in dataframe.columns:
+                continue
+            if prop_type == "date":
+                date_columns.add(prop_name)
+            elif prop_type == "daterange":
+                daterange_columns.add(prop_name)
+
+        df_copy = dataframe.copy()
+
+        for col in date_columns:
+            unit = "ms" if col in ["creationDate", "editDate"] else "s"
+            pattern = "%Y/%m/%d %H:%M:%S" if col in ["creationDate", "editDate"] else "%Y/%m/%d"
+            df_copy[col] = pd.to_datetime(df_copy[col], unit=unit, errors="coerce").dt.strftime(pattern)
+
+        for col in daterange_columns:
+            df_copy[col] = df_copy[col].apply(self.parse_daterange)
+
+        return df_copy
 
     def get_by_id(self, entity_id):
         response = self.uwazi_request.request_adapter.get(
