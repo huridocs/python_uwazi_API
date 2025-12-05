@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest==8.4.1
 ruff==0.12.5
+pandas-stubs==2.3.3.251201
