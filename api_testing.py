@@ -100,13 +100,13 @@ def get_dictionaries():
     return dictionaries
 
 
-def upload_dataframe(df_converted, template_id):
+def upload_dataframe(df_converted, template_name):
     uwazi_adapter = UwaziAdapter(user="admin", password="admin", url="http://localhost:3000")
-    return uwazi_adapter.csv.upload_dataframe(df=df_converted, template_id=template_id)
+    return uwazi_adapter.csv.upload_dataframe(df=df_converted, template_name=template_name)
 
 
 if __name__ == "__main__":
     df = loop_entities()
     print(df.to_string())
     df.loc[0, "title"] = "Updated Title via CSV Upload"
-    print(upload_dataframe(df, template_id="6912059adeb0c2aa4cfc8ec4"))
+    print(upload_dataframe(df, template_name="foo"))

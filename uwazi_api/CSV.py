@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 
 from pandas import DataFrame
@@ -38,7 +39,7 @@ class CSV:
             return "|".join(str(v) for v in val)
         return str(val)
 
-    def upload_dataframe(self, df: DataFrame, template_id: str):
+    def upload_dataframe_by_id(self, df: DataFrame, template_id: str):
         df_converted = df.copy()
         df_converted = df_converted.apply(lambda col: col.map(self._convert_cell))
         if "_id" in df_converted.columns:
@@ -46,3 +47,15 @@ class CSV:
         csv_data = df_converted.to_csv(index=False)
         csv_bytes = BytesIO(csv_data.encode("utf-8"))
         return self._post_csv(template_id, csv_bytes)
+
+    def upload_dataframe(self, df: DataFrame, template_name: str):
+        response = self.uwazi_request.request_adapter.get(
+            url=f"{self.uwazi_request.url}/api/templates",
+            headers=self.uwazi_request.headers,
+            cookies={"connect.sid": self.uwazi_request.connect_sid},
+        )
+        template = [t for t in json.loads(response.text)["rows"] if t["name"] == template_name]
+        if not template:
+            raise ValueError(f"Template with name {template_name} not found")
+
+        self.upload_dataframe_by_id(df, template[0]["_id"])
