@@ -148,7 +148,10 @@ class Entities:
 
     @staticmethod
     def format_timestamp(val, unit):
-        return pd.to_datetime(val, unit=unit, errors="coerce").strftime("%Y/%m/%d")
+        try:
+            return pd.to_datetime(val, unit=unit, errors="coerce").strftime("%Y/%m/%d")
+        except Exception:
+            return ""
 
     def parse_daterange(self, val):
         if isinstance(val, dict) and "from" in val and "to" in val:
