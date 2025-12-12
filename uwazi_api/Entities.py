@@ -95,6 +95,8 @@ class Entities:
                 "published": entity.get("published"),
                 "creationDate": entity.get("creationDate"),
                 "editDate": entity.get("editDate"),
+                "documents": "|".join([x.get("filename", "") for x in entity.get("documents", [])]),
+                "attachments": "|".join([x.get("filename", "") for x in entity.get("attachments", [])]),
             }
 
             metadata = entity.get("metadata", {})
