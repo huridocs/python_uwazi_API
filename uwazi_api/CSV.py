@@ -58,4 +58,4 @@ class CSV:
         if not template:
             raise ValueError(f"Template with name {template_name} not found")
 
-        self.upload_dataframe_by_id(df, template[0]["_id"])
+        return self.upload_dataframe_by_id(df, template[0]["_id"])
