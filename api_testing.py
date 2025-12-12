@@ -120,6 +120,6 @@ if __name__ == "__main__":
     df = loop_entities()
     print(df.head().to_string())
 
-    df.loc[0, "title"] = "Updated Title via CSV Upload 2"
-    one_row_df = df.head(1).reset_index(drop=True)
-    print(upload_dataframe(one_row_df, template_name="API TEST"))
+    # df.loc[0, "title"] = "Updated Title via CSV Upload 2"
+    # one_row_df = df.head(1).reset_index(drop=True)
+    # print(upload_dataframe(one_row_df, template_name="API TEST"))
