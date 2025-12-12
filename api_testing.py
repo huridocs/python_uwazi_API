@@ -112,12 +112,14 @@ def get_dictionaries():
 
 
 def upload_dataframe(df, template_name):
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password="admin", url=UWAZI_URL)
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     return uwazi_adapter.csv.upload_dataframe(df=df, template_name=template_name)
 
 
 if __name__ == "__main__":
     df = loop_entities()
     print(df.head().to_string())
+
     df.loc[0, "title"] = "Updated Title via CSV Upload 2"
-    print(upload_dataframe(df, template_name="foo"))
+    one_row_df = df.head(1).reset_index(drop=True)
+    print(upload_dataframe(one_row_df, template_name="API TEST"))
