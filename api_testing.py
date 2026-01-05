@@ -116,9 +116,19 @@ def upload_dataframe(df, template_name):
     return uwazi_adapter.csv.upload_dataframe(df=df, template_name=template_name)
 
 
+def upload_pdf():
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    with open("data/test_document.pdf", "rb") as f:
+        pdf_bytes = f.read()
+        uwazi_adapter.files.upload_file_from_binary(
+            file_binary=pdf_bytes, title="test_document.pdf", share_id="u9ce1e3sfph", language="en"
+        )
+
+
 if __name__ == "__main__":
-    df = loop_entities()
-    print(df.head().to_string())
+    upload_pdf()
+    # df = loop_entities()
+    # print(df.head().to_string())
 
     # df.loc[0, "title"] = "Updated Title via CSV Upload 2"
     # one_row_df = df.head(1).reset_index(drop=True)

@@ -57,31 +57,33 @@ class Files:
     def upload_file(self, pdf_file_path, share_id, language, title):
         try:
             with open(pdf_file_path, "rb") as pdf_file:
-                unicode_escape_title = title.encode("utf-8").decode("unicode-escape")
-                response = self.uwazi_request.request_adapter.post(
-                    url=f"{self.uwazi_request.url}/api/files/upload/document",
-                    data={"entity": share_id},
-                    files={"file": (unicode_escape_title, pdf_file, "application/pdf")},
-                    cookies={"connect.sid": self.uwazi_request.connect_sid, "locale": language},
-                    headers={"X-Requested-With": "XMLHttpRequest"},
-                )
-
-                if "prettyMessage" in json.loads(response.text).keys():
-                    print(json.loads(response.text).keys())
-                    print(json.loads(response.text)["prettyMessage"])
-                    print(json.loads(response.text)["validations"])
-                    print(json.loads(response.text)["error"])
-                    return False
+                return self.upload_file_from_binary(pdf_file, share_id, language, title)
 
         except FileNotFoundError:
             self.uwazi_request.graylog.info(f"No pdf found {pdf_file_path}")
             print(f"No pdf found {pdf_file_path}")
             return False
-        except:
-            print(f"Uploading without response {share_id} {title} {pdf_file_path}")
-            return False
 
-        return True
+    def upload_file_from_binary(self, file_binary, share_id, language, title):
+        try:
+            unicode_escape_title = title.encode("utf-8").decode("unicode-escape")
+            response = self.uwazi_request.request_adapter.post(
+                url=f"{self.uwazi_request.url}/api/files/upload/document",
+                data={"entity": share_id},
+                files={"file": (unicode_escape_title, file_binary, "application/pdf")},
+                cookies={"connect.sid": self.uwazi_request.connect_sid, "locale": language},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+
+            if "prettyMessage" in json.loads(response.text).keys():
+                print(json.loads(response.text).keys())
+                print(json.loads(response.text)["prettyMessage"])
+                print(json.loads(response.text)["validations"])
+                print(json.loads(response.text)["error"])
+                return False
+        except:
+            print(f"Uploading without response {share_id} {title}")
+            return False
 
     def upload_image(self, image_binary, title, entity_shared_id, language):
         try:
