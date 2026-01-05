@@ -120,8 +120,8 @@ def upload_pdf():
     uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     with open("data/test_document.pdf", "rb") as f:
         pdf_bytes = f.read()
-        uwazi_adapter.files.upload_file_from_binary(
-            file_binary=pdf_bytes, title="test_document.pdf", share_id="u9ce1e3sfph", language="en"
+        uwazi_adapter.files.upload_file_from_bytes(
+            file_bytes=pdf_bytes, title="test_document.pdf", share_id="u9ce1e3sfph", language="en"
         )
 
 
