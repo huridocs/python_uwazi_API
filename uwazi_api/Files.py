@@ -6,6 +6,7 @@ from requests.exceptions import RetryError
 
 from uwazi_api.Entities import Entities
 from uwazi_api.UwaziRequest import UwaziRequest
+from uwazi_api.domain.FileType import FileType
 
 
 class Files:
@@ -64,13 +65,13 @@ class Files:
             print(f"No pdf found {pdf_file_path}")
             return False
 
-    def upload_file_from_bytes(self, file_bytes, share_id, language, title, file_type: str = "application/pdf"):
+    def upload_file_from_bytes(self, file_bytes, share_id, language, title, file_type: FileType = FileType.PDF):
         try:
             unicode_escape_title = title.encode("utf-8").decode("unicode-escape")
             response = self.uwazi_request.request_adapter.post(
                 url=f"{self.uwazi_request.url}/api/files/upload/document",
                 data={"entity": share_id},
-                files={"file": (unicode_escape_title, file_bytes, file_type)},
+                files={"file": (unicode_escape_title, file_bytes, str(file_type))},
                 cookies={"connect.sid": self.uwazi_request.connect_sid, "locale": language},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
