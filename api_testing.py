@@ -6,6 +6,8 @@ from uwazi_api.Reference import Reference, SelectionRectangle
 from uwazi_api.UwaziAdapter import UwaziAdapter
 import pandas as pd
 
+from uwazi_api.domain.FileType import FileType
+
 load_dotenv.load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
@@ -125,8 +127,18 @@ def upload_pdf():
         )
 
 
+def upload_odt():
+    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    with open("/home/gabo/Downloads/short.odt", "rb") as f:
+        pdf_bytes = f.read()
+        uwazi_adapter.files.upload_file_from_bytes(
+            file_bytes=pdf_bytes, title="short.odt", share_id="vwopablptgl", language="en", file_type=FileType.ODT
+        )
+
+
 if __name__ == "__main__":
-    upload_pdf()
+    upload_odt()
+    # upload_pdf()
     # df = loop_entities()
     # print(df.head().to_string())
 
