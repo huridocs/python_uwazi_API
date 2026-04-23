@@ -1,12 +1,15 @@
 import json
 from typing import List, Optional
 
+import pandas as pd
+
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.exceptions import SearchError
+from uwazi_api.domain.exceptions import SearchError, TemplateNotFoundError
 from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 
 
 class SearchRepository:
@@ -118,32 +121,13 @@ class SearchRepository:
     def _validate_and_resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> None:
         if not template_id or not self._template_repo:
             return
-        template = self._template_repo.get_by_id(template_id)
-        if not template:
-            return
-        all_props = template.properties + template.common_properties
         for prop_name, filter_value in filters.filters.items():
-            prop = self._find_template_property(all_props, prop_name, template_id)
-            self._ensure_property_filterable(prop, prop_name)
+            prop = self._template_repo.find_property(template_id, prop_name)
+            if not prop:
+                raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
+            self._template_repo.ensure_property_filterable(prop, prop_name)
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)
-
-    def _find_template_property(self, all_props, prop_name: str, template_id: str):
-        prop = next((p for p in all_props if p.name == prop_name), None)
-        if prop is None:
-            normalized = self._normalize_name(prop_name)
-            prop = next((p for p in all_props if self._normalize_name(p.name) == normalized), None)
-        if not prop:
-            raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
-        return prop
-
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        return "".join(ch if ch.isalnum() else "_" for ch in name.lower())
-
-    def _ensure_property_filterable(self, prop, prop_name: str) -> None:
-        if not prop.filter:
-            raise SearchError(f"Property '{prop_name}' is not filterable")
 
     def _resolve_select_filter(self, filter_value: SelectFilter, prop, prop_name: str, language: str) -> None:
         if not filter_value.values:
@@ -154,7 +138,7 @@ class SearchRepository:
         thesauri = self._find_thesaurus(thesauri_id, prop_name, language)
         name_to_id = {v.label: v.id for v in thesauri.values}
         filter_value.values = [
-            name_to_id[name]
+            name_to_id[name] if name != "missing" else name
             for name in filter_value.values
             if self._validate_thesaurus_value(name, name_to_id, thesauri, prop_name)
         ]
@@ -167,7 +151,7 @@ class SearchRepository:
         return thesauri
 
     def _validate_thesaurus_value(self, name: str, name_to_id: dict, thesauri, prop_name: str) -> bool:
-        if name not in name_to_id:
+        if name != "missing" and name not in name_to_id:
             raise SearchError(f"Value '{name}' not found in thesaurus '{thesauri.name}' for property '{prop_name}'")
         return True
 
@@ -215,3 +199,22 @@ class SearchRepository:
             raise SearchError(f"Error searching entities by filter: {response.status_code}")
         rows = json.loads(response.text).get("rows", [])
         return [Entity.model_validate(row) for row in rows]
+
+    def search_by_filter_to_dataframe(
+        self,
+        filters: SearchFilters,
+        template_id: Optional[str] = None,
+        start_from: int = 0,
+        batch_size: int = 30,
+        language: str = "en",
+        published: Optional[bool] = None,
+        order: str = "desc",
+        sort: str = "creationDate",
+    ) -> pd.DataFrame:
+        self._validate_and_resolve_filters(filters, template_id, language)
+        serialized_filters = self._serialize_filters(filters)
+        params = self._build_filter_search_params(
+            serialized_filters, template_id, start_from, batch_size, published, order, sort
+        )
+        entities = self._execute_search(params, language)
+        return entities_to_dataframe(entities, template_id, self._template_repo)
