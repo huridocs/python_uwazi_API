@@ -3,6 +3,7 @@ import os
 import load_dotenv
 from datetime import date
 from uwazi_api.client import UwaziClient
+from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
@@ -20,16 +21,8 @@ UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
 
 def upload_entity_to_localhost():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    entity = {
-        "title": "title_of_the_entity",
-        "template": "template_id_like_4e57cdd6f54e0a1304c0d5dd",
-        "metadata": {"property_name": [{"value": "property_value"}]},
-    }
-
-    shared_id = client.entities.upload(entity=entity, language="en")
-    print(client.entities.get_one(shared_id=shared_id, language="en"))
-    client.entities.delete(shared_id=shared_id)
-    print(client.templates.get())
+    entity = Entity(title="Test 1234", template="template_2", language="en", metadata={"date": date(2026, 5, 17)})
+    return client.entities.upload(entity=entity, language="en")
 
 
 def create_relationship():
@@ -154,10 +147,10 @@ def search_by_two_properties():
 
 
 if __name__ == "__main__":
+    print(upload_entity_to_localhost())
     # print(get_templates())
-    df = search_by_two_properties()
-    print(df.head().to_string())
-
+    # df = search_by_two_properties()
+    # print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
     # df = loop_entities()
