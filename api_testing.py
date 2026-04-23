@@ -147,19 +147,19 @@ def search_by_two_properties():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     filters: SearchFilters = SearchFilters()
     filters.add("date", DateRange(from_=date(2026, 2, 1)))
-    filters.add("select", SelectFilter(values=["item 2"]))
-    return client.search.search_by_filter(
+    filters.add("select", SelectFilter(values=["item 2", "missing"]))
+    return client.search.search_by_filter_to_dataframe(
         filters=filters, template_id="69ea16449cca41a043a57481", language="en", batch_size=100
     )
 
 
 if __name__ == "__main__":
     # print(get_templates())
-    print(search_by_two_properties())
+    df = search_by_two_properties()
     # upload_odt()
     # upload_pdf()
     # df = loop_entities()
-    # print(df.head().to_string())
+    print(df.head().to_string())
     # df.loc[0, "title"] = "Updated Title via CSV Upload 3"
     # one_row_df = df.head(1).reset_index(drop=True)
     # print(upload_dataframe(one_row_df, template_name="Document"))
