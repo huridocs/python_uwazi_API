@@ -4,6 +4,9 @@ from typing import List, Optional
 
 from uwazi_api.domain.FileType import FileType
 
+from uwazi_api.use_cases.repositories.file_repository import FileRepository
+from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+
 
 class FileService:
     language_to_file_language = {"fr": "fra", "es": "spa", "en": "eng", "pt": "prt", "ar": "arb"}

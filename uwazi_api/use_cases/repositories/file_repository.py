@@ -2,13 +2,13 @@ import json
 from requests.exceptions import RetryError
 
 from uwazi_api.domain.FileType import FileType
-from uwazi_api.drivers.http_client import HttpClient
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class FileRepository:
     language_to_file_language = {"fr": "fra", "es": "spa", "en": "eng", "pt": "prt", "ar": "arb"}
 
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
 
     def get_document_by_file_name(self, file_name: str) -> bytes | None:

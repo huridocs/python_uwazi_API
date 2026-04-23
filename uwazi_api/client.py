@@ -1,12 +1,12 @@
-from uwazi_api.drivers.http_client import HttpClient
-from uwazi_api.drivers.repositories.entity_repository import EntityRepository
-from uwazi_api.drivers.repositories.template_repository import TemplateRepository
-from uwazi_api.drivers.repositories.file_repository import FileRepository
-from uwazi_api.drivers.repositories.csv_repository import CSVRepository
-from uwazi_api.drivers.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.drivers.repositories.relationship_repository import RelationshipRepository
-from uwazi_api.drivers.repositories.settings_repository import SettingsRepository
-from uwazi_api.drivers.repositories.search_repository import SearchRepository
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
+from uwazi_api.use_cases.repositories.file_repository import FileRepository
+from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
+from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
+from uwazi_api.use_cases.repositories.relationship_repository import RelationshipRepository
+from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
+from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.file_service import FileService
 from uwazi_api.use_cases.csv_import import CSVImportUseCase
 from uwazi_api.use_cases.entity_export import EntityExportUseCase
@@ -14,7 +14,7 @@ from uwazi_api.use_cases.entity_export import EntityExportUseCase
 
 class UwaziClient:
     def __init__(self, user: str, password: str, url: str):
-        self.http = HttpClient(url, user, password)
+        self.http = HttpClientAdapter(url, user, password)
 
         # Drivers / Repositories
         self._entity_repo = EntityRepository(self.http)

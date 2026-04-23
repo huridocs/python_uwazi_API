@@ -3,11 +3,11 @@ from typing import Optional
 
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.exceptions import UploadError
-from uwazi_api.drivers.http_client import HttpClient
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class RelationshipRepository:
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
 
     def create(

@@ -7,6 +7,10 @@ from uwazi_api.domain.exceptions import (
     SearchError,
 )
 
+from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
+from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+
 
 class CSVImportUseCase:
     def __init__(
