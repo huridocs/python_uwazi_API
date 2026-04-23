@@ -1,7 +1,7 @@
 import json
 from typing import Optional
 
-from uwazi_api.domain.models import Reference
+from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.interfaces import RelationshipRepositoryInterface
 from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.drivers.http_client import HttpClient

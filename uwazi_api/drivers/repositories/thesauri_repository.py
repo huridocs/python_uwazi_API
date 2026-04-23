@@ -1,7 +1,7 @@
 import json
 from typing import List
 
-from uwazi_api.domain.models import Thesauri
+from uwazi_api.domain.thesauri import Thesauri
 from uwazi_api.domain.interfaces import ThesauriRepositoryInterface
 from uwazi_api.drivers.http_client import HttpClient
 

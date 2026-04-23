@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from uwazi_api.domain.models import Entity, Template, Thesauri, Settings, Reference
+from uwazi_api.domain.entity import Entity
+from uwazi_api.domain.settings import Settings
+from uwazi_api.domain.template import Template
+from uwazi_api.domain.thesauri import Thesauri
+from uwazi_api.domain.reference import Reference
 
 
 class _CacheClearMixin:

@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from uwazi_api.domain.models import Entity
+from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.interfaces import (
     EntityRepositoryInterface,
     TemplateRepositoryInterface,
