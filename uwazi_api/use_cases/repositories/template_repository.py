@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.template import Template
+from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
@@ -50,10 +51,20 @@ class TemplateRepository:
                 return t
         return None
 
-    def find_property(self, template_id: str, prop_name: str) -> "TemplateProperty":
-        template = self.get_by_id(template_id)
-        if not template:
+    def resolve_template_id(self, template_name_or_id: str) -> Optional[str]:
+        template = self.get_by_id(template_name_or_id)
+        if template:
+            return template.id
+        template = self.get_by_name(template_name_or_id)
+        if template:
+            return template.id
+        return None
+
+    def find_property(self, template_name_or_id: str, prop_name: str) -> PropertySchema:
+        template_id = self.resolve_template_id(template_name_or_id)
+        if not template_id:
             return None
+        template = self.get_by_id(template_id)
         all_props = template.properties + template.common_properties
         prop = next((p for p in all_props if p.name == prop_name), None)
         if prop is None:

@@ -24,9 +24,10 @@ class SearchRepository:
         self._thesauri_repo = thesauri_repo
 
     def get_shared_ids(self, to_process_template: str, batch_size: int, unpublished: bool = True) -> List[str]:
+        template_id = self._resolve_template_id(to_process_template)
         params = {
-            "_types": f'["{to_process_template}"]',
-            "types": f'["{to_process_template}"]',
+            "_types": f'["{template_id}"]',
+            "types": f'["{template_id}"]',
             "unpublished": "true" if unpublished else "false",
             "limit": batch_size,
             "order": "desc",
@@ -47,7 +48,7 @@ class SearchRepository:
         self,
         start_from: int = 0,
         batch_size: int = 30,
-        template_id: Optional[str] = None,
+        template_name: Optional[str] = None,
         language: str = "en",
         published: Optional[bool] = None,
     ) -> List[Entity]:
@@ -58,7 +59,8 @@ class SearchRepository:
             "sort": "creationDate",
             "order": "desc",
         }
-        if template_id:
+        if template_name:
+            template_id = self._resolve_template_id(template_name)
             params["types"] = f'["{template_id}"]'
         params["includeUnpublished"] = "false" if published else "true"
 
@@ -76,7 +78,7 @@ class SearchRepository:
     def search_by_text(
         self,
         search_term: str,
-        template_id: Optional[str] = None,
+        template_name: Optional[str] = None,
         start_from: int = 0,
         batch_size: int = 30,
         language: str = "en",
@@ -95,7 +97,8 @@ class SearchRepository:
             "aggregatePublishingStatus": "true",
             "aggregatePermissionsByUsers": "true",
         }
-        if template_id:
+        if template_name:
+            template_id = self._resolve_template_id(template_name)
             params["types"] = f'["{template_id}"]'
 
         return self._execute_search(params, language)
@@ -103,7 +106,7 @@ class SearchRepository:
     def search_by_filter(
         self,
         filters: SearchFilters,
-        template_id: Optional[str] = None,
+        template_name: Optional[str] = None,
         start_from: int = 0,
         batch_size: int = 30,
         language: str = "en",
@@ -111,6 +114,7 @@ class SearchRepository:
         order: str = "desc",
         sort: str = "creationDate",
     ) -> List[Entity]:
+        template_id = self._resolve_template_id(template_name) if template_name else None
         self._validate_and_resolve_filters(filters, template_id, language)
         serialized_filters = self._serialize_filters(filters)
         params = self._build_filter_search_params(
@@ -128,6 +132,14 @@ class SearchRepository:
             self._template_repo.ensure_property_filterable(prop, prop_name)
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)
+
+    def _resolve_template_id(self, template_name_or_id: str) -> str:
+        if not self._template_repo:
+            return template_name_or_id
+        template_id = self._template_repo.resolve_template_id(template_name_or_id)
+        if not template_id:
+            raise SearchError(f"Template '{template_name_or_id}' not found")
+        return template_id
 
     def _resolve_select_filter(self, filter_value: SelectFilter, prop, prop_name: str, language: str) -> None:
         if not filter_value.values:
@@ -203,7 +215,7 @@ class SearchRepository:
     def search_by_filter_to_dataframe(
         self,
         filters: SearchFilters,
-        template_id: Optional[str] = None,
+        template_name: Optional[str] = None,
         start_from: int = 0,
         batch_size: int = 30,
         language: str = "en",
@@ -211,6 +223,7 @@ class SearchRepository:
         order: str = "desc",
         sort: str = "creationDate",
     ) -> pd.DataFrame:
+        template_id = self._resolve_template_id(template_name) if template_name else None
         self._validate_and_resolve_filters(filters, template_id, language)
         serialized_filters = self._serialize_filters(filters)
         params = self._build_filter_search_params(
