@@ -146,9 +146,11 @@ def get_templates():
 def search_by_two_properties():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     filters: SearchFilters = SearchFilters()
-    filters.add("date", DateRange(from_=date(2026, 5, 1)))
+    filters.add("date", DateRange(from_=date(2026, 2, 1)))
     filters.add("select", SelectFilter(values=["item 2"]))
-    return client.search.search_by_filter(filters=filters, template_id="69ea16449cca41a043a57481", language="en")
+    return client.search.search_by_filter(
+        filters=filters, template_id="69ea16449cca41a043a57481", language="en", batch_size=100
+    )
 
 
 if __name__ == "__main__":
