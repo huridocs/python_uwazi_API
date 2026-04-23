@@ -1,14 +1,6 @@
-from io import BytesIO
 from time import sleep
-from typing import Optional
-
 import pandas as pd
 
-from uwazi_api.domain.interfaces import (
-    CSVRepositoryInterface,
-    EntityRepositoryInterface,
-    TemplateRepositoryInterface,
-)
 from uwazi_api.domain.exceptions import (
     TemplateNotFoundError,
     UploadError,
@@ -19,9 +11,9 @@ from uwazi_api.domain.exceptions import (
 class CSVImportUseCase:
     def __init__(
         self,
-        csv_repository: CSVRepositoryInterface,
-        template_repository: TemplateRepositoryInterface,
-        entity_repository: EntityRepositoryInterface,
+        csv_repository: "CSVRepository",
+        template_repository: "TemplateRepository",
+        entity_repository: "EntityRepository",
     ):
         self.csv_repo = csv_repository
         self.template_repo = template_repository
@@ -35,7 +27,7 @@ class CSVImportUseCase:
             return "|".join(str(v) for v in val)
         return str(val)
 
-    def upload_dataframe_by_id(self, df: pd.DataFrame, template_id: str) -> dict:
+    def upload_dataframe_by_id(self, df: pd.DataFrame, template_id: str) -> dict | None:
         df_converted = df.copy()
         df_converted = df_converted.apply(lambda col: col.map(self._convert_cell))
         if "_id" in df_converted.columns:
@@ -44,7 +36,7 @@ class CSVImportUseCase:
         csv_bytes = csv_data.encode("utf-8")
         return self.csv_repo.upload(template_id, csv_bytes)
 
-    def upload_dataframe(self, df: pd.DataFrame, template_name: str) -> dict:
+    def upload_dataframe(self, df: pd.DataFrame, template_name: str) -> dict | None:
         template = self.template_repo.get_by_name(template_name)
         if not template:
             raise TemplateNotFoundError(f"Template with name {template_name} not found")

@@ -1,21 +1,17 @@
 import json
-import os
-from pathlib import Path
-from typing import List, Optional
-
 from requests.exceptions import RetryError
 
-from uwazi_api.domain.interfaces import FileRepositoryInterface
+from uwazi_api.domain.FileType import FileType
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class FileRepository(FileRepositoryInterface):
+class FileRepository:
     language_to_file_language = {"fr": "fra", "es": "spa", "en": "eng", "pt": "prt", "ar": "arb"}
 
     def __init__(self, http_client: HttpClient):
         self.http = http_client
 
-    def get_document_by_file_name(self, file_name: str) -> Optional[bytes]:
+    def get_document_by_file_name(self, file_name: str) -> bytes | None:
         document_response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/files/{file_name}",
             headers=self.http.headers,
@@ -35,14 +31,14 @@ class FileRepository(FileRepositoryInterface):
             return False
 
     def upload_document_from_bytes(
-        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str
+        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: FileType = FileType.PDF
     ) -> bool:
         try:
             unicode_escape_title = title.encode("utf-8").decode("unicode-escape")
             response = self.http.request_adapter.post(
                 url=f"{self.http.url}/api/files/upload/document",
                 data={"entity": share_id},
-                files={"file": (unicode_escape_title, file_bytes, file_type)},
+                files={"file": (unicode_escape_title, file_bytes, str(file_type))},
                 cookies={"connect.sid": self.http.connect_sid, "locale": language},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
@@ -74,7 +70,7 @@ class FileRepository(FileRepositoryInterface):
             self.http.graylog.info(f"Uploading without response {share_id} {title}")
             return False
 
-    def upload_image(self, image_binary: bytes, title: str, entity_shared_id: str, language: str) -> Optional[dict]:
+    def upload_image(self, image_binary: bytes, title: str, entity_shared_id: str, language: str) -> dict | None:
         try:
             response = self.http.request_adapter.post(
                 url=f"{self.http.url}/api/files/upload/attachment",
