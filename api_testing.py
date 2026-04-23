@@ -2,8 +2,7 @@ import os
 
 import load_dotenv
 
-from uwazi_api.Reference import Reference, SelectionRectangle
-from uwazi_api.UwaziAdapter import UwaziAdapter
+from uwazi_api import UwaziClient, Reference, SelectionRectangle
 import pandas as pd
 
 from uwazi_api.domain.FileType import FileType
@@ -17,21 +16,21 @@ UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
 
 
 def upload_entity_to_localhost():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     entity = {
         "title": "title_of_the_entity",
         "template": "template_id_like_4e57cdd6f54e0a1304c0d5dd",
         "metadata": {"property_name": [{"value": "property_value"}]},
     }
 
-    shared_id = uwazi_adapter.entities.upload(entity=entity, language="en")
-    print(uwazi_adapter.entities.get_one(shared_id=shared_id, language="en"))
-    uwazi_adapter.entities.delete(share_id=shared_id)
-    print(uwazi_adapter.templates.get())
+    shared_id = client.entities.upload(entity=entity, language="en")
+    print(client.entities.get_one(shared_id=shared_id, language="en"))
+    client.entities.delete(shared_id=shared_id)
+    print(client.templates.get())
 
 
 def create_relationship():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     reference = Reference(
         text="29 DE JULIO DE 1991",
         selection_rectangles=[
@@ -44,7 +43,7 @@ def create_relationship():
             ),
         ],
     )
-    uwazi_adapter.relationships.create(
+    client.relationships.create(
         file_entity_shared_id="0mg4pkm4y78n",
         file_id="68f098050058648f7a83c35f",
         reference=reference,
@@ -55,9 +54,9 @@ def create_relationship():
 
 
 def search_entities():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
 
-    entities = uwazi_adapter.entities.get_entity_from_text(
+    entities = client.entities.search_by_text(
         search_term="Malawi", template_id="68f0c2400058648f7a83d39f", start_from=0, batch_size=300, language="en"
     )
 
@@ -74,20 +73,20 @@ def update_entity():
         "template": UWAZI_TEMPLATE_ID,
         "title": "1",
     }
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    uwazi_adapter.entities.upload(entity=data, language="en")
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client.entities.upload(entity=data, language="en")
 
 
 def loop_entities():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
 
     start = 0
     batch_size = 100
     dataframes = []
     while True:
-        batch = uwazi_adapter.entities.get_pandas_dataframe(
+        batch = client.exports.to_dataframe(
             start_from=start,
-            batch_size=start + batch_size,
+            batch_size=batch_size,
             template_id=UWAZI_TEMPLATE_ID,
             language="en",
             published=False,
@@ -107,31 +106,31 @@ def loop_entities():
 
 
 def get_dictionaries():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_USER, url=UWAZI_URL)
-    dictionaries = uwazi_adapter.thesauris.get(language="en")
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    dictionaries = client.thesauris.get(language="en")
     print(dictionaries)
     return dictionaries
 
 
 def upload_dataframe(df, template_name):
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    return uwazi_adapter.csv.upload_dataframe_and_get_shared_id(df=df, template_name=template_name)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    return client.csv.upload_dataframe_and_get_shared_id(df=df, template_name=template_name)
 
 
 def upload_pdf():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     with open("data/test_document.pdf", "rb") as f:
         pdf_bytes = f.read()
-        uwazi_adapter.files.upload_file_from_bytes(
+        client.files.upload_file_from_bytes(
             file_bytes=pdf_bytes, title="test_document.pdf", share_id="u9ce1e3sfph", language="en"
         )
 
 
 def upload_odt():
-    uwazi_adapter = UwaziAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     with open("/home/gabo/Downloads/short.odt", "rb") as f:
         pdf_bytes = f.read()
-        uwazi_adapter.files.upload_file_from_bytes(
+        client.files.upload_file_from_bytes(
             file_bytes=pdf_bytes, title="short.odt", share_id="vwopablptgl", language="en", file_type=FileType.ODT
         )
 
