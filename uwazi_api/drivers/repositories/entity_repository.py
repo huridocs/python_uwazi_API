@@ -1,9 +1,9 @@
 import json
 from typing import List, Optional
 
-from uwazi_api.domain import (
-    Entity,
-    EntityRepositoryInterface,
+from uwazi_api.domain.models import Entity
+from uwazi_api.domain.interfaces import EntityRepositoryInterface
+from uwazi_api.domain.exceptions import (
     EntityNotFoundError,
     SearchError,
     UploadError,

@@ -2,7 +2,8 @@ import os
 
 import load_dotenv
 
-from uwazi_api import UwaziClient, Reference, SelectionRectangle
+from uwazi_api.client import UwaziClient
+from uwazi_api.domain.models import Reference, SelectionRectangle
 import pandas as pd
 
 from uwazi_api.domain.FileType import FileType
@@ -140,6 +141,6 @@ if __name__ == "__main__":
     # upload_pdf()
     df = loop_entities()
     print(df.head().to_string())
-    df.loc[0, "title"] = "Updated Title via CSV Upload 2"
-    one_row_df = df.head(1).reset_index(drop=True)
-    print(upload_dataframe(one_row_df, template_name="Document"))
+    # df.loc[0, "title"] = "Updated Title via CSV Upload 2"
+    # one_row_df = df.head(1).reset_index(drop=True)
+    # print(upload_dataframe(one_row_df, template_name="Document"))

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class DomainError(Exception):
     """Base domain exception."""
+
     pass
 
 

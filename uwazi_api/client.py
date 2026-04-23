@@ -1,4 +1,4 @@
-from uwazi_api.domain import (
+from uwazi_api.domain.interfaces import (
     EntityRepositoryInterface,
     TemplateRepositoryInterface,
     FileRepositoryInterface,

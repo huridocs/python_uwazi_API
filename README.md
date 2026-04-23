@@ -10,7 +10,7 @@ To use the API install the requirements
 
 and use it like this:
 
-    from uwazi_api import UwaziClient
+    from uwazi_api.client import UwaziClient
 
     client = UwaziClient(user='admin', password='admin', url='http://localhost:3000')
     client.entities.get_one(shared_id='shared_id', language='en')

@@ -1,6 +1,5 @@
-requests==2.32.5
-urllib3==2.5.0
-pandas==2.3.3
-
-
-load-dotenv
+requests==2.33.1
+urllib3==2.6.3
+pandas==3.0.2
+pydantic==2.13.3
+load-dotenv==0.1.0

@@ -1,24 +1,34 @@
 import json
 from typing import List, Optional
 
-from uwazi_api.domain import Template, TemplateRepositoryInterface, TemplateNotFoundError
+from uwazi_api.domain.models import Template
+from uwazi_api.domain.interfaces import TemplateRepositoryInterface
+from uwazi_api.domain.exceptions import TemplateNotFoundError
 from uwazi_api.drivers.http_client import HttpClient
 
 
 class TemplateRepository(TemplateRepositoryInterface):
     def __init__(self, http_client: HttpClient):
         self.http = http_client
+        self._cache = None
 
     def get(self) -> List[Template]:
+        if self._cache is not None:
+            return self._cache
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/templates",
             headers=self.http.headers,
             cookies={"connect.sid": self.http.connect_sid},
         )
         data = json.loads(response.text)
-        return [Template.model_validate(t) for t in data.get("rows", [])]
+        self._cache = [Template.model_validate(t) for t in data.get("rows", [])]
+        return self._cache
+
+    def clear_cache(self) -> None:
+        self._cache = None
 
     def set(self, language: str, template: dict) -> dict:
+        self.clear_cache()
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/templates",
             headers=self.http.headers,

@@ -4,10 +4,12 @@ from typing import Optional
 
 import pandas as pd
 
-from uwazi_api.domain import (
+from uwazi_api.domain.interfaces import (
     CSVRepositoryInterface,
     EntityRepositoryInterface,
     TemplateRepositoryInterface,
+)
+from uwazi_api.domain.exceptions import (
     TemplateNotFoundError,
     UploadError,
     SearchError,
@@ -61,9 +63,7 @@ class CSVImportUseCase:
             raise ValueError("Title column is required in the dataframe to retrieve sharedId")
 
         for i in range(10):
-            entities = self.entity_repo.search_by_text(
-                search_term=title, template_id=None, start_from=0, batch_size=i + 2
-            )
+            entities = self.entity_repo.search_by_text(search_term=title, template_id=None, start_from=0, batch_size=i + 2)
             for entity in entities:
                 if entity.title == title:
                     return entity.shared_id

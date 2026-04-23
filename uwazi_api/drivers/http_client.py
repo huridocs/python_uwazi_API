@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from uwazi_api.domain import AuthenticationError
+from uwazi_api.domain.exceptions import AuthenticationError
 from uwazi_api.drivers.request_retry import requests_retry_session
 from uwazi_api.iso_639_choices import iso_639_choices
 

@@ -2,12 +2,12 @@ from typing import List, Optional
 
 import pandas as pd
 
-from uwazi_api.domain import (
-    Entity,
+from uwazi_api.domain.models import Entity
+from uwazi_api.domain.interfaces import (
     EntityRepositoryInterface,
     TemplateRepositoryInterface,
-    TemplateNotFoundError,
 )
+from uwazi_api.domain.exceptions import TemplateNotFoundError
 
 
 class EntityExportUseCase:
@@ -129,7 +129,9 @@ class EntityExportUseCase:
         df_copy = dataframe.copy()
         for col in link_columns:
             df_copy[col] = df_copy[col].apply(
-                lambda val: f"{val['label']}|{val['url']}" if isinstance(val, dict) and "label" in val and "url" in val else val
+                lambda val: f"{val['label']}|{val['url']}"
+                if isinstance(val, dict) and "label" in val and "url" in val
+                else val
             )
         return df_copy
 
