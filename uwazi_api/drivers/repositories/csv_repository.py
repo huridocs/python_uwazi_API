@@ -2,7 +2,8 @@ import json
 from io import BytesIO
 from typing import Optional
 
-from uwazi_api.domain import CSVRepositoryInterface, UploadError
+from uwazi_api.domain.interfaces import CSVRepositoryInterface
+from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.drivers.http_client import HttpClient
 
 

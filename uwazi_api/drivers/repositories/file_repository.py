@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from requests.exceptions import RetryError
 
-from uwazi_api.domain import FileRepositoryInterface
+from uwazi_api.domain.interfaces import FileRepositoryInterface
 from uwazi_api.drivers.http_client import HttpClient
 
 
@@ -34,7 +34,9 @@ class FileRepository(FileRepositoryInterface):
             self.http.graylog.info(f"No pdf found {pdf_file_path}")
             return False
 
-    def upload_document_from_bytes(self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str) -> bool:
+    def upload_document_from_bytes(
+        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str
+    ) -> bool:
         try:
             unicode_escape_title = title.encode("utf-8").decode("unicode-escape")
             response = self.http.request_adapter.post(
@@ -102,5 +104,3 @@ class FileRepository(FileRepositoryInterface):
         except RetryError:
             return False
         return True
-
-

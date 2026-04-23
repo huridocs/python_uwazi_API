@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from uwazi_api.domain import (
+from uwazi_api.domain.interfaces import (
     EntityRepositoryInterface,
     FileRepositoryInterface,
 )
@@ -27,10 +27,7 @@ class FileService:
         if language not in mapping:
             return None
         file_language = mapping[language]
-        docs = [
-            d for d in entity.documents
-            if d.language == file_language
-        ]
+        docs = [d for d in entity.documents if d.language == file_language]
         if not docs:
             return None
         return self.file_repo.get_document_by_file_name(docs[0].filename)
@@ -54,10 +51,14 @@ class FileService:
     def upload_file(self, pdf_file_path: str, share_id: str, language: str, title: str) -> bool:
         return self.file_repo.upload_file(pdf_file_path, share_id, language, title)
 
-    def upload_document_from_bytes(self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str) -> bool:
+    def upload_document_from_bytes(
+        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str
+    ) -> bool:
         return self.file_repo.upload_document_from_bytes(file_bytes, share_id, language, title, file_type)
 
-    def upload_file_from_bytes(self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str = "application/pdf") -> bool:
+    def upload_file_from_bytes(
+        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str = "application/pdf"
+    ) -> bool:
         return self.file_repo.upload_file_from_bytes(file_bytes, share_id, language, title, file_type)
 
     def upload_image(self, image_binary: bytes, title: str, entity_shared_id: str, language: str) -> Optional[dict]:
