@@ -2,12 +2,11 @@ import json
 from io import BytesIO
 from typing import Optional
 
-from uwazi_api.domain.interfaces import CSVRepositoryInterface
 from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class CSVRepository(CSVRepositoryInterface):
+class CSVRepository:
     def __init__(self, http_client: HttpClient):
         self.http = http_client
 

@@ -2,10 +2,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from uwazi_api.domain.interfaces import (
-    EntityRepositoryInterface,
-    FileRepositoryInterface,
-)
+from uwazi_api.domain.FileType import FileType
 
 
 class FileService:
@@ -13,8 +10,8 @@ class FileService:
 
     def __init__(
         self,
-        file_repository: FileRepositoryInterface,
-        entity_repository: EntityRepositoryInterface,
+        file_repository: "FileRepository",
+        entity_repository: "EntityRepository",
     ):
         self.file_repo = file_repository
         self.entity_repo = entity_repository
@@ -52,7 +49,7 @@ class FileService:
         return self.file_repo.upload_file(pdf_file_path, share_id, language, title)
 
     def upload_document_from_bytes(
-        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: str
+        self, file_bytes: bytes, share_id: str, language: str, title: str, file_type: FileType = FileType.PDF
     ) -> bool:
         return self.file_repo.upload_document_from_bytes(file_bytes, share_id, language, title, file_type)
 

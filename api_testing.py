@@ -123,8 +123,8 @@ def upload_pdf():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     with open("data/test_document.pdf", "rb") as f:
         pdf_bytes = f.read()
-        client.files.upload_file_from_bytes(
-            file_bytes=pdf_bytes, title="test_document.pdf", share_id="u9ce1e3sfph", language="en"
+        client.files.upload_document_from_bytes(
+            file_bytes=pdf_bytes, title="test_document.pdf", share_id="nhjjc7q30oh", language="en"
         )
 
 
@@ -133,7 +133,7 @@ def upload_odt():
     with open("/home/gabo/Downloads/short.odt", "rb") as f:
         pdf_bytes = f.read()
         client.files.upload_file_from_bytes(
-            file_bytes=pdf_bytes, title="short.odt", share_id="vwopablptgl", language="en", file_type=FileType.ODT
+            file_bytes=pdf_bytes, title="short.odt", share_id="nhjjc7q30oh", language="en", file_type=FileType.ODT
         )
 
 

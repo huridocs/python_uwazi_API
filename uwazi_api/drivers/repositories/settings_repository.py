@@ -2,11 +2,10 @@ import json
 from typing import List
 
 from uwazi_api.domain.settings import Settings
-from uwazi_api.domain.interfaces import SettingsRepositoryInterface
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class SettingsRepository(SettingsRepositoryInterface):
+class SettingsRepository:
     def __init__(self, http_client: HttpClient):
         self.http = http_client
 

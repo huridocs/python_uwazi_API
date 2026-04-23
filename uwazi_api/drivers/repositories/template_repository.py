@@ -2,12 +2,10 @@ import json
 from typing import List, Optional
 
 from uwazi_api.domain.template import Template
-from uwazi_api.domain.interfaces import TemplateRepositoryInterface
-from uwazi_api.domain.exceptions import TemplateNotFoundError
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class TemplateRepository(TemplateRepositoryInterface):
+class TemplateRepository:
     def __init__(self, http_client: HttpClient):
         self.http = http_client
         self._cache = None

@@ -3,18 +3,14 @@ from typing import List, Optional
 import pandas as pd
 
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.interfaces import (
-    EntityRepositoryInterface,
-    TemplateRepositoryInterface,
-)
 from uwazi_api.domain.exceptions import TemplateNotFoundError
 
 
 class EntityExportUseCase:
     def __init__(
         self,
-        entity_repository: EntityRepositoryInterface,
-        template_repository: TemplateRepositoryInterface,
+        entity_repository: "EntityRepository",
+        template_repository: "TemplateRepository",
     ):
         self.entity_repo = entity_repository
         self.template_repo = template_repository

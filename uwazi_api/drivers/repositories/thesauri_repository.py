@@ -2,11 +2,10 @@ import json
 from typing import List
 
 from uwazi_api.domain.thesauri import Thesauri
-from uwazi_api.domain.interfaces import ThesauriRepositoryInterface
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class ThesauriRepository(ThesauriRepositoryInterface):
+class ThesauriRepository:
     def __init__(self, http_client: HttpClient):
         self.http = http_client
         self._cache = {}

@@ -2,12 +2,11 @@ import json
 from typing import Optional
 
 from uwazi_api.domain.reference import Reference
-from uwazi_api.domain.interfaces import RelationshipRepositoryInterface
 from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.drivers.http_client import HttpClient
 
 
-class RelationshipRepository(RelationshipRepositoryInterface):
+class RelationshipRepository:
     def __init__(self, http_client: HttpClient):
         self.http = http_client
 
