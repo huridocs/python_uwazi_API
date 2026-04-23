@@ -2,11 +2,11 @@ import json
 from typing import List, Optional
 
 from uwazi_api.domain.template import Template
-from uwazi_api.drivers.http_client import HttpClient
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class TemplateRepository:
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
         self._cache = None
 

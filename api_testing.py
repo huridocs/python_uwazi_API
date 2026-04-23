@@ -137,11 +137,18 @@ def upload_odt():
         )
 
 
+def get_templates():
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    return client.templates.get()
+
+
 if __name__ == "__main__":
+    print(get_templates())
+
     # upload_odt()
     # upload_pdf()
-    df = loop_entities()
-    print(df.head().to_string())
+    # df = loop_entities()
+    # print(df.head().to_string())
     # df.loc[0, "title"] = "Updated Title via CSV Upload 3"
     # one_row_df = df.head(1).reset_index(drop=True)
     # print(upload_dataframe(one_row_df, template_name="Document"))

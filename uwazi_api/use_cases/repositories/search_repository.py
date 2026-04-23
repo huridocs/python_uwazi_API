@@ -3,11 +3,11 @@ from typing import List, Optional
 
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
-from uwazi_api.drivers.http_client import HttpClient
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class SearchRepository:
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
 
     def get_shared_ids(self, to_process_template: str, batch_size: int, unpublished: bool = True) -> List[str]:

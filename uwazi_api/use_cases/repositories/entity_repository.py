@@ -6,12 +6,12 @@ from uwazi_api.domain.exceptions import (
     EntityNotFoundError,
     UploadError,
 )
-from uwazi_api.drivers.http_client import HttpClient
-from uwazi_api.drivers.repositories.search_repository import SearchRepository
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 
 
 class EntityRepository(SearchRepository):
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         super().__init__(http_client)
 
     def get_one(self, shared_id: str, language: str) -> Entity:

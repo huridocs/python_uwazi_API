@@ -3,11 +3,11 @@ from io import BytesIO
 from typing import Optional
 
 from uwazi_api.domain.exceptions import UploadError
-from uwazi_api.drivers.http_client import HttpClient
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class CSVRepository:
-    def __init__(self, http_client: HttpClient):
+    def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
 
     def upload(self, template_id: str, csv_bytes: bytes, filename: str = "import.csv") -> Optional[dict]:

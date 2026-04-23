@@ -2,11 +2,12 @@ import logging
 from typing import Optional
 
 from uwazi_api.domain.exceptions import AuthenticationError
-from uwazi_api.drivers.request_retry import requests_retry_session
 from uwazi_api.iso_639_choices import iso_639_choices
+from uwazi_api.ports.http_port import HttpClientPort
+from uwazi_api.adapters.request_retry import requests_retry_session
 
 
-class HttpClient:
+class HttpClientAdapter(HttpClientPort):
     def __init__(self, url: str, user: str, password: str):
         url = url if url[-1] != "/" else url[:-1]
         for language in iso_639_choices:
