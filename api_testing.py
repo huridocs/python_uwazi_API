@@ -1,9 +1,10 @@
 import os
 
 import load_dotenv
-
+from datetime import date
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.reference import Reference
+from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
 import pandas as pd
 
@@ -142,9 +143,17 @@ def get_templates():
     return client.templates.get()
 
 
-if __name__ == "__main__":
-    print(get_templates())
+def search_by_two_properties():
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    filters: SearchFilters = SearchFilters()
+    filters.add("date", DateRange(from_=date(2026, 5, 1)))
+    filters.add("select", SelectFilter(values=["item 2"]))
+    return client.search.search_by_filter(filters=filters, template_id="69ea16449cca41a043a57481", language="en")
 
+
+if __name__ == "__main__":
+    # print(get_templates())
+    print(search_by_two_properties())
     # upload_odt()
     # upload_pdf()
     # df = loop_entities()

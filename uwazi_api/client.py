@@ -24,7 +24,7 @@ class UwaziClient:
         self._thesauri_repo = ThesauriRepository(self.http)
         self._relationship_repo = RelationshipRepository(self.http)
         self._settings_repo = SettingsRepository(self.http)
-        self._search_repo = SearchRepository(self.http)
+        self._search_repo = SearchRepository(self.http, self._template_repo, self._thesauri_repo)
 
         # Use cases / services
         self._file_service = FileService(self._file_repo, self._entity_repo)
