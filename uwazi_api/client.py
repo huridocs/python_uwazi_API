@@ -18,10 +18,10 @@ class UwaziClient:
 
         # Drivers / Repositories
         self._template_repo = TemplateRepository(self.http)
-        self._entity_repo = EntityRepository(self.http, template_repo=self._template_repo)
         self._file_repo = FileRepository(self.http)
         self._csv_repo = CSVRepository(self.http)
         self._thesauri_repo = ThesauriRepository(self.http)
+        self._entity_repo = EntityRepository(self.http, template_repo=self._template_repo, thesauri_repo=self._thesauri_repo)
         self._relationship_repo = RelationshipRepository(self.http)
         self._settings_repo = SettingsRepository(self.http)
         self._search_repo = SearchRepository(self.http, self._template_repo, self._thesauri_repo)
