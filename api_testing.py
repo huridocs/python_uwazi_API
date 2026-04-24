@@ -2,6 +2,9 @@ import os
 
 import load_dotenv
 from datetime import date
+
+import numpy as np
+
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.reference import Reference
@@ -165,7 +168,20 @@ def update_partially():
     return client.entities.update_partially(entity=entity, language="en")
 
 
+def create_entities_from_dataframe():
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    data_frame = loop_entities()
+    data_frame["_id"] = np.nan
+    data_frame["sharedId"] = np.nan
+    data_frame["title"] = data_frame["title"].astype(str) + " COPY"
+    return client.entities.create_entities_from_dataframe(df=data_frame, language="en")
+
+
 if __name__ == "__main__":
+    df = loop_entities()
+    print(df.head().to_string())
+    for x in create_entities_from_dataframe():
+        print(x.model_dump())
     # update_entity()
     # update_partially()
     # print(upload_entity())
@@ -174,8 +190,7 @@ if __name__ == "__main__":
     # print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
-    df = loop_entities()
-    print(df.head().to_string())
+
     # df.loc[0, "title"] = "Updated Title via CSV Upload 3"
     # one_row_df = df.head(1).reset_index(drop=True)
     # print(upload_dataframe(one_row_df, template_name="Document"))
