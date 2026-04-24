@@ -19,9 +19,10 @@ class EntityRepository(SearchRepository):
         http_client: HttpClientAdapter,
         template_repo: Optional[TemplateRepository] = None,
         thesauri_repo: Optional[ThesauriRepository] = None,
+        validator: Optional[EntityValidator] = None,
     ):
         super().__init__(http_client, template_repo=template_repo, thesauri_repo=thesauri_repo)
-        self._validator = EntityValidator(template_repo=template_repo, thesauri_repo=thesauri_repo)
+        self._validator = validator or EntityValidator(template_repo=template_repo, thesauri_repo=thesauri_repo)
 
     def get_one(self, shared_id: str, language: str) -> Entity:
         response = self.http.request_adapter.get(
