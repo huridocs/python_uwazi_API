@@ -30,26 +30,31 @@ def entities_to_dataframe(
 
         metadata = entity.metadata or {}
         for key, value in metadata.items():
-            if isinstance(value, list) and len(value) > 0:
-                if isinstance(value[0], dict):
-                    extracted_values = []
-                    for item in value:
-                        if "label" in item:
-                            extracted_values.append(str(item["label"]))
-                        elif "value" in item:
-                            extracted_values.append(str(item["value"]))
-                        if "parent" in item and "label" in item["parent"] and extracted_values:
-                            extracted_values[-1] = str(item["parent"]["label"]) + "::" + str(extracted_values[-1])
-                    if len(extracted_values) == 1:
-                        flattened[key] = extracted_values[0]
-                    elif len(extracted_values) > 1:
-                        flattened[key] = "|".join(extracted_values)
+            if isinstance(value, list):
+                if len(value) > 0:
+                    if isinstance(value[0], dict):
+                        extracted_values = []
+                        for item in value:
+                            if "label" in item:
+                                extracted_values.append(item["label"])
+                            elif "value" in item:
+                                extracted_values.append(item["value"])
+                            if "parent" in item and "label" in item["parent"] and extracted_values:
+                                parent_label = str(item["parent"]["label"])
+                                current_val = str(extracted_values[-1])
+                                extracted_values[-1] = f"{parent_label}::{current_val}"
+                        if len(extracted_values) == 1:
+                            flattened[key] = extracted_values[0]
+                        elif len(extracted_values) > 1:
+                            flattened[key] = "|".join(str(v) for v in extracted_values)
+                        else:
+                            flattened[key] = None
                     else:
-                        flattened[key] = None
+                        flattened[key] = "|".join(str(v) for v in value)
                 else:
-                    flattened[key] = "|".join(str(v) for v in value)
+                    flattened[key] = None
             else:
-                flattened[key] = None
+                flattened[key] = value
 
         flattened_entities.append(flattened)
 
@@ -111,6 +116,21 @@ def _convert_links(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     return df_copy
 
 
+def _convert_date_value(val, unit, pattern):
+    if pd.isna(val) or val is None:
+        return None
+    if isinstance(val, str) and "|" in val:
+        return "|".join(_convert_date_value(v, unit, pattern) for v in val.split("|"))
+    if isinstance(val, (int, float)):
+        return pd.to_datetime(val, unit=unit, errors="coerce").strftime(pattern)
+    if isinstance(val, str):
+        try:
+            return pd.to_datetime(float(val), unit=unit, errors="coerce").strftime(pattern)
+        except (ValueError, TypeError):
+            return val
+    return val
+
+
 def _convert_dates(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     if dataframe.empty:
         return dataframe
@@ -128,7 +148,7 @@ def _convert_dates(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     for col in date_columns:
         unit = "ms" if col in ["creationDate", "editDate"] else "s"
         pattern = "%Y/%m/%d %H:%M:%S" if col in ["creationDate", "editDate"] else "%Y/%m/%d"
-        df_copy[col] = pd.to_datetime(df_copy[col], unit=unit, errors="coerce").dt.strftime(pattern)
+        df_copy[col] = df_copy[col].apply(lambda v: _convert_date_value(v, unit, pattern))
     for col in daterange_columns:
         df_copy[col] = df_copy[col].apply(_parse_daterange)
     return df_copy
