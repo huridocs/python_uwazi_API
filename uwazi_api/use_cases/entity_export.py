@@ -20,9 +20,9 @@ class EntityExportUseCase:
         self,
         start_from: int = 0,
         batch_size: int = 30,
-        template_id: Optional[str] = None,
+        template_name: Optional[str] = None,
         language: str = "en",
         published: Optional[bool] = None,
     ) -> pd.DataFrame:
-        entities = self.entity_repo.get(start_from, batch_size, template_id, language, published)
-        return entities_to_dataframe(entities, template_id, self.template_repo)
+        entities = self.entity_repo.get(start_from, batch_size, template_name, language, published)
+        return entities_to_dataframe(entities, template_name, self.template_repo)

@@ -63,7 +63,7 @@ def loop_entities():
         batch = client.exports.to_dataframe(
             start_from=start,
             batch_size=batch_size,
-            template_id=UWAZI_TEMPLATE_ID,
+            template_name="template_2",
             language="en",
             published=False,
         )
@@ -160,22 +160,22 @@ def update_partially():
         shared_id=shared_id,
         title="Partially Updated entity 1",
         language="en",
-        metadata={"date": date(2026, 5, 12)},
+        metadata={"date": date(2026, 8, 15)},
     )
     return client.entities.update_partially(entity=entity, language="en")
 
 
 if __name__ == "__main__":
     # update_entity()
-    update_partially()
+    # update_partially()
     # print(upload_entity())
     # print(get_templates())
     # df = search_by_two_properties()
     # print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
-    # df = loop_entities()
-    # print(df.head().to_string())
+    df = loop_entities()
+    print(df.head().to_string())
     # df.loc[0, "title"] = "Updated Title via CSV Upload 3"
     # one_row_df = df.head(1).reset_index(drop=True)
     # print(upload_dataframe(one_row_df, template_name="Document"))

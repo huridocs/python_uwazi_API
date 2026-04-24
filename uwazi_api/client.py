@@ -9,7 +9,7 @@ from uwazi_api.use_cases.repositories.relationship_repository import Relationshi
 from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
 from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.file_service import FileService
-from uwazi_api.use_cases.csv_import import CSVImportUseCase
+from uwazi_api.use_cases.csv_use_case import CSVUseCase
 from uwazi_api.use_cases.entity_export import EntityExportUseCase
 
 
@@ -32,7 +32,7 @@ class UwaziClient:
 
         # Use cases / services
         self._file_service = FileService(self._file_repo, self._entity_repo)
-        self._csv_import = CSVImportUseCase(self._csv_repo, self._template_repo, self._entity_repo)
+        self._csv_import = CSVUseCase(self._csv_repo, self._template_repo, self._entity_repo)
         self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo)
 
     @property
@@ -48,7 +48,7 @@ class UwaziClient:
         return self._file_service
 
     @property
-    def csv(self) -> CSVImportUseCase:
+    def csv(self) -> CSVUseCase:
         return self._csv_import
 
     @property
