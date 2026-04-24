@@ -19,12 +19,6 @@ UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
 UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
 
 
-def upload_entity_to_localhost():
-    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    entity = Entity(title="Test 1234567890", template="template_2", language="en", metadata={"date": date(2026, 5, 17)})
-    return client.entities.upload(entity=entity, language="en")
-
-
 def create_relationship():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     reference = Reference(
@@ -145,10 +139,26 @@ def update_entity():
     return client.entities.upload(entity=entity, language="en")
 
 
+def upload_entity():
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    entity = Entity(
+        title="Test 99",
+        template="template_2",
+        language="en",
+        metadata={
+            "date": date(2026, 5, 17),
+            "select": "item 1",
+            "multiselect": ["item 1", "item 2"],
+            "numeric": 123,
+        },
+    )
+    return client.entities.upload(entity=entity, language="en")
+
+
 if __name__ == "__main__":
     # update_entity()
-    # print(upload_entity_to_localhost())
-    print(get_templates())
+    print(upload_entity())
+    # print(get_templates())
     # df = search_by_two_properties()
     # print(df.head().to_string())
     # upload_odt()
