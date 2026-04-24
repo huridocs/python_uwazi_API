@@ -179,16 +179,16 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
-    # df = loop_entities()
+    df = loop_entities()
     # print(df.head().to_string())
-    for x in create_entities_from_dataframe():
-        print(x.model_dump())
+    # for x in create_entities_from_dataframe():
+    #     print(x.model_dump())
     # update_entity()
     # update_partially()
     # print(upload_entity())
     # print(get_templates())
-    # df = search_by_two_properties()
-    # print(df.head().to_string())
+    df = search_by_two_properties()
+    print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
 
