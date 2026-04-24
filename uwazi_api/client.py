@@ -1,5 +1,6 @@
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.file_repository import FileRepository
 from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
@@ -21,7 +22,10 @@ class UwaziClient:
         self._file_repo = FileRepository(self.http)
         self._csv_repo = CSVRepository(self.http)
         self._thesauri_repo = ThesauriRepository(self.http)
-        self._entity_repo = EntityRepository(self.http, template_repo=self._template_repo, thesauri_repo=self._thesauri_repo)
+        self._validator = EntityValidator(template_repo=self._template_repo, thesauri_repo=self._thesauri_repo)
+        self._entity_repo = EntityRepository(
+            self.http, template_repo=self._template_repo, thesauri_repo=self._thesauri_repo, validator=self._validator
+        )
         self._relationship_repo = RelationshipRepository(self.http)
         self._settings_repo = SettingsRepository(self.http)
         self._search_repo = SearchRepository(self.http, self._template_repo, self._thesauri_repo)
