@@ -125,13 +125,18 @@ class SearchRepository:
     def _validate_and_resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> None:
         if not template_id or not self._template_repo:
             return
+        # Build a mapping of property name -> property ID for serialization
+        name_to_id = {}
         for prop_name, filter_value in filters.filters.items():
             prop = self._template_repo.find_property(template_id, prop_name)
             if not prop:
                 raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
             self._template_repo.ensure_property_filterable(prop, prop_name)
+            name_to_id[prop_name] = prop.id
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)
+        # Store the mapping for use in serialization
+        self._property_name_to_id = name_to_id
 
     def _resolve_template_id(self, template_name_or_id: str) -> str:
         if not self._template_repo:
@@ -168,10 +173,13 @@ class SearchRepository:
         return True
 
     def _serialize_filters(self, filters: SearchFilters) -> dict:
-        return {
-            name: (value.model_dump(exclude_none=True) if hasattr(value, "model_dump") else value)
-            for name, value in filters.filters.items()
-        }
+        result = {}
+        name_to_id = getattr(self, "_property_name_to_id", {})
+        for name, value in filters.filters.items():
+            # Use property ID if available, otherwise use the name as-is
+            key = name_to_id.get(name, name)
+            result[key] = value.model_dump(exclude_none=True) if hasattr(value, "model_dump") else value
+        return result
 
     def _build_filter_search_params(
         self,
@@ -198,6 +206,9 @@ class SearchRepository:
         }
         if template_id:
             params["types"] = f'["{template_id}"]'
+        # Clean up the mapping after use
+        if hasattr(self, "_property_name_to_id"):
+            del self._property_name_to_id
         return params
 
     def _execute_search(self, params: dict, language: str) -> list[Entity]:
