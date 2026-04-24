@@ -10,7 +10,7 @@ from uwazi_api.use_cases.repositories.template_repository import TemplateReposit
 
 def entities_to_dataframe(
     entities: list[Entity],
-    template_id: Optional[str] = None,
+    template_name: Optional[str] = None,
     template_repo: Optional[TemplateRepository] = None,
 ) -> pd.DataFrame:
     flattened_entities = []
@@ -35,11 +35,11 @@ def entities_to_dataframe(
                     extracted_values = []
                     for item in value:
                         if "label" in item:
-                            extracted_values.append(item["label"])
+                            extracted_values.append(str(item["label"]))
                         elif "value" in item:
-                            extracted_values.append(item["value"])
-                        if "parent" in item and "label" in item["parent"]:
-                            extracted_values[-1] = item["parent"]["label"] + "::" + str(extracted_values[-1])
+                            extracted_values.append(str(item["value"]))
+                        if "parent" in item and "label" in item["parent"] and extracted_values:
+                            extracted_values[-1] = str(item["parent"]["label"]) + "::" + str(extracted_values[-1])
                     if len(extracted_values) == 1:
                         flattened[key] = extracted_values[0]
                     elif len(extracted_values) > 1:
@@ -47,7 +47,7 @@ def entities_to_dataframe(
                     else:
                         flattened[key] = None
                 else:
-                    flattened[key] = value
+                    flattened[key] = "|".join(str(v) for v in value)
             else:
                 flattened[key] = None
 
@@ -55,10 +55,10 @@ def entities_to_dataframe(
 
     df = pd.DataFrame(flattened_entities)
 
-    if template_id and template_repo:
-        template = template_repo.get_by_id(template_id)
+    if template_name and template_repo:
+        template = template_repo.get_by_id(template_name) or template_repo.get_by_name(template_name)
         if not template:
-            raise TemplateNotFoundError(f"Template {template_id} not found")
+            raise TemplateNotFoundError(f"Template '{template_name}' not found")
         df = _convert_dates(df, template)
         df = _convert_links(df, template)
         df = _convert_geolocations(df, template)
