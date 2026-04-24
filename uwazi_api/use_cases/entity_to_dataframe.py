@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
 
@@ -8,7 +8,7 @@ from uwazi_api.use_cases.repositories.template_repository import TemplateReposit
 
 
 def entities_to_dataframe(
-    entities: List[Entity],
+    entities: list[Entity],
     template_id: Optional[str] = None,
     template_repo: Optional[TemplateRepository] = None,
 ) -> pd.DataFrame:

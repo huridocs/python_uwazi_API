@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional
+from typing import Optional
 
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.template import Template
@@ -12,7 +12,7 @@ class TemplateRepository:
         self.http = http_client
         self._cache = None
 
-    def get(self) -> List[Template]:
+    def get(self) -> list[Template]:
         if self._cache is not None:
             return self._cache
         response = self.http.request_adapter.get(

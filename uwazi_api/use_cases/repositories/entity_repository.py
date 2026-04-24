@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from datetime import timezone
-from typing import List, Optional
+from typing import Optional
 
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import (
@@ -163,7 +163,7 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entity deleted {shared_id}")
 
-    def publish_entities(self, shared_ids: List[str]) -> None:
+    def publish_entities(self, shared_ids: list[str]) -> None:
         payload = {"ids": shared_ids, "values": {"published": True}}
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/multipleupdate",
@@ -177,7 +177,7 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entities published {shared_ids}")
 
-    def delete_entities(self, shared_ids: List[str]) -> None:
+    def delete_entities(self, shared_ids: list[str]) -> None:
         payload = {"sharedIds": shared_ids}
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/bulkdelete",
