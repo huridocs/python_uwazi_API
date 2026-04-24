@@ -142,9 +142,9 @@ def update_entity():
 def upload_entity():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     entity = Entity(
-        title="Test 99",
+        title="Test 101",
         template="template_2",
-        language="en",
+        language="es",
         metadata={
             "date": date(2026, 5, 17),
             "select": "item 1",
