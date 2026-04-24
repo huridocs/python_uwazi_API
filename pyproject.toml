@@ -14,9 +14,10 @@ authors = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "requests==2.32.5",
-    "urllib3==2.5.0",
-    "pandas==2.3.3"
+    "requests==2.33.1",
+    "urllib3==2.6.3",
+    "pandas==3.0.2",
+    "pydantic==2.13.3"
 ]
 
 [project.optional-dependencies]
