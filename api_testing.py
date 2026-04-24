@@ -171,15 +171,16 @@ def update_partially():
 def create_entities_from_dataframe():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     data_frame = loop_entities()
-    data_frame["_id"] = np.nan
-    data_frame["sharedId"] = np.nan
-    data_frame["title"] = data_frame["title"].astype(str) + " COPY"
-    return client.entities.create_entities_from_dataframe(df=data_frame, language="en")
+    # data_frame["_id"] = np.nan
+    # data_frame["sharedId"] = np.nan
+    # data_frame["title"] = data_frame["title"].astype(str) + " COPY"
+    data_frame["date"] = "2030/01/01"
+    return client.entities.create_or_update_entities_from_dataframe(df=data_frame, language="en")
 
 
 if __name__ == "__main__":
-    df = loop_entities()
-    print(df.head().to_string())
+    # df = loop_entities()
+    # print(df.head().to_string())
     for x in create_entities_from_dataframe():
         print(x.model_dump())
     # update_entity()

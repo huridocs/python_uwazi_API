@@ -10,7 +10,7 @@
 
 ### From Git
 ```bash
-pip install git+https://github.com/huridocs/python_uwazi_API@2026.4.24.2
+pip install git+https://github.com/huridocs/python_uwazi_API@2026.4.24.3
 ```
 
 ### Local Development
@@ -96,6 +96,7 @@ entities = client.entities.search_by_text(
 
 # Search with filters
 from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
+
 filters = SearchFilters()
 filters.add("date_property", DateRange(from_=date(2026, 1, 1), to=None))
 filters.add("select_property", SelectFilter(values=["value1", "value2"]))
@@ -114,7 +115,7 @@ shared_id = client.entities.upload(entity=entity, language='en')
 shared_id = client.entities.update_partially(entity=entity, language='en')
 
 # Bulk operations
-responses = client.entities.create_entities_from_dataframe(df=df, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en')
 client.entities.publish_entities(shared_ids=['id1', 'id2'])
 client.entities.delete_entities(shared_ids=['id1', 'id2'])
 client.entities.delete(shared_id='id')

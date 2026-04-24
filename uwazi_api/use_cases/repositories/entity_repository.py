@@ -236,7 +236,7 @@ class EntityRepository(SearchRepository):
             name_map[normalized] = p.name
         return name_map
 
-    def create_entities_from_dataframe(self, df: pd.DataFrame, language: str) -> list[EntityResponse]:
+    def create_or_update_entities_from_dataframe(self, df: pd.DataFrame, language: str) -> list[EntityResponse]:
         responses = []
 
         for _, row in df.iterrows():
