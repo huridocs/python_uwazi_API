@@ -82,6 +82,31 @@ class EntityRepository(SearchRepository):
         data = json.loads(upload_response.text)
         return data["sharedId"]
 
+    def update_partially(self, entity: Entity, language: str) -> str:
+        if not entity.shared_id:
+            raise UploadError("shared_id is required for partial update")
+
+        existing = self.get_one(entity.shared_id, language)
+
+        merged_metadata = existing.metadata.copy()
+        merged_metadata.update(entity.metadata)
+
+        merged_entity = Entity(
+            _id=existing.id,
+            sharedId=existing.shared_id,
+            title=entity.title if entity.title is not None else existing.title,
+            template=entity.template if entity.template is not None else existing.template,
+            language=entity.language if entity.language is not None else existing.language,
+            published=entity.published if entity.published is not None else existing.published,
+            creationDate=existing.creation_date,
+            editDate=existing.edit_date,
+            documents=entity.documents if entity.documents else existing.documents,
+            attachments=entity.attachments if entity.attachments else existing.attachments,
+            metadata=merged_metadata,
+        )
+
+        return self.upload(merged_entity, language)
+
     def delete(self, shared_id: str) -> None:
         response = self.http.request_adapter.delete(
             f"{self.http.url}/api/documents",
