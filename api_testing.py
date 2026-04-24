@@ -127,10 +127,10 @@ def search_by_two_properties():
 
 
 def update_entity():
-    shared_id = "fjalfxxmpu"
+    shared_id = "dun73bzdlnj"
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     entity = Entity(
-        title="Updated entity 2",
+        title="Updated entity 1",
         shared_id=shared_id,
         template="template_2",
         language="en",
@@ -147,17 +147,28 @@ def upload_entity():
         language="es",
         metadata={
             "date": date(2026, 5, 17),
-            "select": "item 1",
-            "multiselect": ["item 1", "item 2"],
-            "numeric": 123,
+            "numeric": 4321,
         },
     )
     return client.entities.upload(entity=entity, language="en")
 
 
+def update_partially():
+    shared_id = "dun73bzdlnj"
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    entity = Entity(
+        shared_id=shared_id,
+        title="Partially Updated entity 1",
+        language="en",
+        metadata={"date": date(2026, 5, 12)},
+    )
+    return client.entities.update_partially(entity=entity, language="en")
+
+
 if __name__ == "__main__":
     # update_entity()
-    print(upload_entity())
+    update_partially()
+    # print(upload_entity())
     # print(get_templates())
     # df = search_by_two_properties()
     # print(df.head().to_string())
