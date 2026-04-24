@@ -58,8 +58,13 @@ class EntityRepository(SearchRepository):
         return Entity.model_validate(rows[0])
 
     def upload(self, entity: Entity, language: str) -> str:
+        if entity.shared_id and not entity.id:
+            existing = self.get_one(entity.shared_id, language)
+            entity.id = existing.id
+
         if entity.template and self._template_repo:
             entity.template = self._resolve_template_id(entity.template)
+
         self._validate_metadata(entity)
         payload = entity.model_dump(by_alias=True, exclude_none=True)
         if "metadata" in payload:

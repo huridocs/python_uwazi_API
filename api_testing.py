@@ -59,20 +59,6 @@ def search_entities():
     print(entities)
 
 
-def update_entity():
-    data = {
-        "_id": "69120830deb0c2aa4cfc8f3f",
-        "__v": 1,
-        "language": "en",
-        "metadata": {"foo_date": [{"value": 1794355200}]},
-        "sharedId": "6jcdjm1k453",
-        "template": UWAZI_TEMPLATE_ID,
-        "title": "1",
-    }
-    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    client.entities.upload(entity=data, language="en")
-
-
 def loop_entities():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
 
@@ -146,9 +132,23 @@ def search_by_two_properties():
     )
 
 
+def update_entity():
+    shared_id = "fjalfxxmpu"
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    entity = Entity(
+        title="Updated entity 2",
+        shared_id=shared_id,
+        template="template_2",
+        language="en",
+        metadata={"date": date(2026, 5, 18)},
+    )
+    return client.entities.upload(entity=entity, language="en")
+
+
 if __name__ == "__main__":
-    print(upload_entity_to_localhost())
-    # print(get_templates())
+    # update_entity()
+    # print(upload_entity_to_localhost())
+    print(get_templates())
     # df = search_by_two_properties()
     # print(df.head().to_string())
     # upload_odt()

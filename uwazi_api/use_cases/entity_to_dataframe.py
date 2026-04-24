@@ -4,6 +4,7 @@ import pandas as pd
 
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import TemplateNotFoundError
+from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 
 
@@ -84,7 +85,7 @@ def _convert_geolocations(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     geolocation_columns = set()
     all_props = template.common_properties + template.properties
     for prop in all_props:
-        if prop.type == "geolocation" and prop.name in dataframe.columns:
+        if prop.type == PropertyType.GEO_LOCATION and prop.name in dataframe.columns:
             geolocation_columns.add(prop.name)
     df_copy = dataframe.copy()
     for col in geolocation_columns:
@@ -100,7 +101,7 @@ def _convert_links(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     link_columns = set()
     all_props = template.common_properties + template.properties
     for prop in all_props:
-        if prop.type == "link" and prop.name in dataframe.columns:
+        if prop.type == PropertyType.LINK and prop.name in dataframe.columns:
             link_columns.add(prop.name)
     df_copy = dataframe.copy()
     for col in link_columns:
@@ -119,9 +120,9 @@ def _convert_dates(dataframe: pd.DataFrame, template) -> pd.DataFrame:
     for prop in all_props:
         if prop.name not in dataframe.columns:
             continue
-        if prop.type == "date":
+        if prop.type == PropertyType.DATE:
             date_columns.add(prop.name)
-        elif prop.type == "daterange":
+        elif prop.type == PropertyType.DATE_RANGE:
             daterange_columns.add(prop.name)
     df_copy = dataframe.copy()
     for col in date_columns:
