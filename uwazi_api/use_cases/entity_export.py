@@ -1,9 +1,6 @@
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
-
-from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.exceptions import TemplateNotFoundError
 
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository

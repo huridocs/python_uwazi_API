@@ -1,6 +1,4 @@
 import json
-from typing import List
-
 from uwazi_api.domain.thesauri import Thesauri
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
@@ -10,7 +8,7 @@ class ThesauriRepository:
         self.http = http_client
         self._cache = {}
 
-    def get(self, language: str) -> List[Thesauri]:
+    def get(self, language: str) -> list[Thesauri]:
         if language in self._cache:
             return self._cache[language]
         response = self.http.request_adapter.get(

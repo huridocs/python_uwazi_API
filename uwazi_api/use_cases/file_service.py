@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from uwazi_api.domain.FileType import FileType
 
@@ -32,7 +32,7 @@ class FileService:
             return None
         return self.file_repo.get_document_by_file_name(docs[0].filename)
 
-    def save_document_to_path(self, shared_id: str, languages: List[str], path: str) -> None:
+    def save_document_to_path(self, shared_id: str, languages: list[str], path: str) -> None:
         if not os.path.exists(path):
             os.makedirs(path)
         for language in languages:

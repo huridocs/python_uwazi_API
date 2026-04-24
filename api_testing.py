@@ -21,7 +21,7 @@ UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
 
 def upload_entity_to_localhost():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    entity = Entity(title="Test 1234", template="template_2", language="en", metadata={"date": date(2026, 5, 17)})
+    entity = Entity(title="Test 1234567890", template="template_2", language="en", metadata={"date": date(2026, 5, 17)})
     return client.entities.upload(entity=entity, language="en")
 
 

@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
 
@@ -23,7 +23,7 @@ class SearchRepository:
         self._template_repo = template_repo
         self._thesauri_repo = thesauri_repo
 
-    def get_shared_ids(self, to_process_template: str, batch_size: int, unpublished: bool = True) -> List[str]:
+    def get_shared_ids(self, to_process_template: str, batch_size: int, unpublished: bool = True) -> list[str]:
         template_id = self._resolve_template_id(to_process_template)
         params = {
             "_types": f'["{template_id}"]',
@@ -51,7 +51,7 @@ class SearchRepository:
         template_name: Optional[str] = None,
         language: str = "en",
         published: Optional[bool] = None,
-    ) -> List[Entity]:
+    ) -> list[Entity]:
         params = {
             "from": start_from,
             "limit": batch_size,
@@ -82,7 +82,7 @@ class SearchRepository:
         start_from: int = 0,
         batch_size: int = 30,
         language: str = "en",
-    ) -> List[Entity]:
+    ) -> list[Entity]:
         params = {
             "allAggregations": "false",
             "from": start_from,
@@ -113,7 +113,7 @@ class SearchRepository:
         published: Optional[bool] = None,
         order: str = "desc",
         sort: str = "creationDate",
-    ) -> List[Entity]:
+    ) -> list[Entity]:
         template_id = self._resolve_template_id(template_name) if template_name else None
         self._validate_and_resolve_filters(filters, template_id, language)
         serialized_filters = self._serialize_filters(filters)
@@ -200,7 +200,7 @@ class SearchRepository:
             params["types"] = f'["{template_id}"]'
         return params
 
-    def _execute_search(self, params: dict, language: str) -> List[Entity]:
+    def _execute_search(self, params: dict, language: str) -> list[Entity]:
         response = self.http.request_adapter.get(
             f"{self.http.url}/api/search",
             headers=self.http.headers,
