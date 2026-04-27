@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Optional
 
 import pandas as pd
@@ -132,7 +133,9 @@ class SearchRepository:
             if not prop:
                 raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
             self._template_repo.ensure_property_filterable(prop, prop_name)
-            name_to_id[prop_name] = prop.id
+            # Process property label: lowercase and replace all non-alphanumeric chars with _
+            filter_key = re.sub(r"[^a-z0-9]", "_", prop.name.lower())
+            name_to_id[prop_name] = filter_key
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)
         # Store the mapping for use in serialization

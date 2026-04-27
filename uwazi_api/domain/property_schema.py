@@ -6,9 +6,17 @@ from uwazi_api.domain.property_type import PropertyType
 
 
 class PropertySchema(BaseModel):
-    id: str = Field(alias="_id")
-    name: str
+    id: Optional[str] = Field(default=None, alias="_id")
+    name: str = ""
+    label: str = ""
     type: PropertyType
+    noLabel: bool = False
     required: bool = False
+    showInCard: bool = False
     filter: bool = False
+    defaultfilter: bool = False
+    prioritySorting: bool = False
+    style: str = ""
+    generatedId: bool = False
     content: Optional[str] = None
+    isCommonProperty: bool = False

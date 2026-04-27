@@ -23,3 +23,6 @@ tag:
 	echo "Creating new tag: $NEW_TAG"
 	git tag $NEW_TAG
 	git push --tag
+
+test:
+    . .venv/bin/activate && python -m pytest -v --maxfail=1 --disable-warnings
