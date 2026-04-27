@@ -27,13 +27,23 @@ class TemplateRepository:
     def clear_cache(self) -> None:
         self._cache = None
 
-    def set(self, language: str, template: dict) -> dict:
+    def set(self, language: str, template: Template) -> dict:
         self.clear_cache()
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/templates",
             headers=self.http.headers,
             cookies={"connect.sid": self.http.connect_sid, "locale": language},
-            data=json.dumps(template),
+            data=json.dumps(template.model_dump(by_alias=True, exclude_none=True)),
+        )
+        return json.loads(response.text)
+
+    def delete(self, template_id: str) -> dict:
+        self.clear_cache()
+        response = self.http.request_adapter.delete(
+            url=f"{self.http.url}/api/templates",
+            params={"_id": template_id},
+            headers=self.http.headers,
+            cookies={"connect.sid": self.http.connect_sid},
         )
         return json.loads(response.text)
 

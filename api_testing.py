@@ -129,6 +129,16 @@ def search_by_two_properties():
     )
 
 
+def search():
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    filters: SearchFilters = SearchFilters()
+    # filters.add("date", DateRange(from_=date(2026, 2, 1), to=None))
+    filters.add("Select - Property", SelectFilter(values=["1"]))
+    return client.search.search_by_filter_to_dataframe(
+        filters=filters, template_name="Template - Name", language="en", batch_size=100
+    )
+
+
 def update_entity():
     shared_id = "dun73bzdlnj"
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
@@ -179,7 +189,7 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
-    df = loop_entities()
+    # df = loop_entities()
     # print(df.head().to_string())
     # for x in create_entities_from_dataframe():
     #     print(x.model_dump())
@@ -187,7 +197,7 @@ if __name__ == "__main__":
     # update_partially()
     # print(upload_entity())
     # print(get_templates())
-    df = search_by_two_properties()
+    df = search()
     print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
