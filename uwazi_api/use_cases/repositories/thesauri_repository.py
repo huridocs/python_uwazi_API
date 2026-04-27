@@ -40,3 +40,27 @@ class ThesauriRepository:
             data=json.dumps(data),
         )
         return json.loads(response.content)
+
+    def create(self, name: str, values: list[dict], language: str) -> dict:
+        self.clear_cache(language)
+        data = {
+            "name": name,
+            "values": values,
+        }
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/thesauris",
+            headers=self.http.headers,
+            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            data=json.dumps(data),
+        )
+        return json.loads(response.content)
+
+    def delete_unassigned(self, thesauri_id: str, language: str) -> dict:
+        self.clear_cache(language)
+        response = self.http.request_adapter.delete(
+            url=f"{self.http.url}/api/thesauris",
+            headers=self.http.headers,
+            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            params={"_id": thesauri_id},
+        )
+        return json.loads(response.content)

@@ -37,7 +37,7 @@ class TemplateRepository:
         )
         return json.loads(response.text)
 
-    def delete(self, template_id: str) -> dict:
+    def delete_empty_template(self, template_id: str) -> dict:
         self.clear_cache()
         response = self.http.request_adapter.delete(
             url=f"{self.http.url}/api/templates",

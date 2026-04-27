@@ -118,7 +118,7 @@ shared_id = client.entities.update_partially(entity=entity, language='en')
 responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en')
 client.entities.publish_entities(shared_ids=['id1', 'id2'])
 client.entities.delete_entities(shared_ids=['id1', 'id2'])
-client.entities.delete(shared_id='id')
+client.entities.delete_empty_template(shared_id='id')
 
 # DataFrame export
 df = client.entities.search_by_filter_to_dataframe(
@@ -196,7 +196,7 @@ prop = client.templates.find_property(template_name_or_id='template_name_or_id',
 client.templates.set(language='en', template=template)
 
 # Delete template
-client.templates.delete(template_id='template_id')
+client.templates.delete_empty_template(template_id='template_id')
 
 # Clear cache
 client.templates.clear_cache()
@@ -331,8 +331,13 @@ class Template(BaseModel):
     id: str
     name: str
     properties: list[PropertySchema]
-    common_properties: list[PropertySchema]
+    common_properties: list[PropertySchema]  # Defaults to: title, creationDate, editDate
 ```
+
+By default, templates include three common properties:
+- **title** (text) - The entity title
+- **creationDate** (date) - Date the entity was created
+- **editDate** (date) - Date the entity was last modified
 
 ### Property Types
 
