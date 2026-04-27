@@ -75,6 +75,7 @@ class TestFileRepositoryE2E:
         entity = self.entity_repo.get_one(self.test_shared_id, "en")
         attachment = next((a for a in entity.attachments if a.id == self.uploaded_attachment_id), None)
         assert attachment is not None
+        # Use the attachment's filename to retrieve the document
         content = self.file_repo.get_document_by_file_name(attachment.filename)
         assert content is not None
         assert isinstance(content, bytes)
