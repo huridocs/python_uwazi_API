@@ -189,11 +189,14 @@ template = client.templates.get_by_id(template_id='id')
 # Resolve template (accepts name or ID)
 template_id = client.templates.resolve_template_id('Template Name or ID')
 
-# Find property in template
-prop = client.templates.find_property(template=template, prop_name='property_name')
+# Find property in template (pass template name or ID)
+prop = client.templates.find_property(template_name_or_id='template_name_or_id', prop_name='property_name')
 
 # Create/Update
-client.templates.set(language='en', template=template_dict)
+client.templates.set(language='en', template=template)
+
+# Delete template
+client.templates.delete(template_id='template_id')
 
 # Clear cache
 client.templates.clear_cache()
