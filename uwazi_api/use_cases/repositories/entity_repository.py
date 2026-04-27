@@ -128,10 +128,18 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entity deleted {shared_id}")
 
-    def publish_entities(self, shared_ids: list[str]) -> None:
-        payload = {"ids": shared_ids, "values": {"published": True}}
+    def publish_entities(self, shared_ids: list[str], permissions: Optional[list[dict]] = None) -> None:
+        if permissions is None:
+            permissions = [
+                {
+                    "refId": "public",
+                    "type": "public",
+                    "level": "read",
+                },
+            ]
+        payload = {"ids": shared_ids, "permissions": permissions}
         response = self.http.request_adapter.post(
-            url=f"{self.http.url}/api/entities/multipleupdate",
+            url=f"{self.http.url}/api/entities/permissions",
             headers=self.http.headers,
             cookies={"connect.sid": self.http.connect_sid},
             data=json.dumps(payload),
