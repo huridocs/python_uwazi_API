@@ -219,7 +219,7 @@ class TestTemplateRepositoryE2E:
     def test_19_delete_created_template(self):
         """Test delete() method to remove the created template."""
         assert self.created_template_id is not None
-        result = self.template_repo.delete(self.created_template_id)
+        result = self.template_repo.delete_empty_template(self.created_template_id)
         assert result is not None
         self.__class__.created_template_id = None
 

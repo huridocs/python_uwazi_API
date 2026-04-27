@@ -98,5 +98,5 @@ class FileRepository:
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
         except RetryError:
-            return False
+            pass
         return True
