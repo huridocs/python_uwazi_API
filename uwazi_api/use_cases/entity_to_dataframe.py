@@ -13,6 +13,18 @@ def entities_to_dataframe(
     template_name: Optional[str] = None,
     template_repo: Optional[TemplateRepository] = None,
 ) -> pd.DataFrame:
+    # Get template to check property types (for relationship handling)
+    template = None
+    if template_name and template_repo:
+        template = template_repo.get_by_id(template_name) or template_repo.get_by_name(template_name)
+
+    # Build a set of relationship property names
+    relationship_props = set()
+    if template:
+        for prop in template.properties + template.common_properties:
+            if prop.type == PropertyType.RELATIONSHIP:
+                relationship_props.add(prop.name)
+
     flattened_entities = []
     for entity in entities:
         flattened = {
@@ -25,7 +37,7 @@ def entities_to_dataframe(
             "creationDate": entity.creation_date,
             "editDate": entity.edit_date,
             "documents": "|".join([d.filename for d in entity.documents]),
-            "attachments": "|".join([a.filename for a in entity.attachments]),
+            "attachments": "|".join([a.originalname for a in entity.attachments]),
         }
 
         metadata = entity.metadata or {}
@@ -35,10 +47,15 @@ def entities_to_dataframe(
                     if isinstance(value[0], dict):
                         extracted_values = []
                         for item in value:
-                            if "label" in item:
-                                extracted_values.append(item["label"])
-                            elif "value" in item:
-                                extracted_values.append(item["value"])
+                            # For relationship properties, extract the VALUE (sharedId), not label
+                            if key in relationship_props:
+                                if "value" in item:
+                                    extracted_values.append(item["value"])
+                            else:
+                                if "label" in item:
+                                    extracted_values.append(item["label"])
+                                elif "value" in item:
+                                    extracted_values.append(item["value"])
                             if "parent" in item and "label" in item["parent"] and extracted_values:
                                 parent_label = str(item["parent"]["label"])
                                 current_val = str(extracted_values[-1])

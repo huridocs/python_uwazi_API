@@ -19,4 +19,5 @@ class PropertySchema(BaseModel):
     style: str = ""
     generatedId: bool = False
     content: Optional[str] = None
+    relationType: Optional[str] = None  # Relationship type ID for relationship properties
     isCommonProperty: bool = False

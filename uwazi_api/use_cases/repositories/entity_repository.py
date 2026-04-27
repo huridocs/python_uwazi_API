@@ -75,6 +75,7 @@ class EntityRepository(SearchRepository):
             entity.template = self._resolve_template_id(entity.template)
 
         payload = self._validator.validate_and_prepare_for_upload(entity, language)
+        print(f"DEBUG upload payload: {json.dumps(payload, indent=2)}")  # Debug
         upload_response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities",
             headers=self.http.headers,
@@ -284,7 +285,8 @@ class EntityRepository(SearchRepository):
 
                 if "attachments" in entity_dict:
                     att_filenames = [f.strip() for f in str(entity_dict["attachments"]).split("|") if f.strip()]
-                    entity_dict["attachments"] = [Attachment(filename=f) for f in att_filenames]
+                    # Use Attachment objects with originalname field
+                    entity_dict["attachments"] = [Attachment(originalname=f) for f in att_filenames]
 
                 # Get template_id for property type mapping
                 template_id = row.get("template") if pd.notna(row.get("template")) else None
@@ -327,6 +329,10 @@ class EntityRepository(SearchRepository):
                         geo = self._parse_geolocation(value)
                         if geo:
                             metadata[normalized_col] = geo
+                    elif prop_type == "relationship" and isinstance(value, str):
+                        # The DataFrame value for relationship is typically a sharedId or label
+                        # Convert to format expected by API: [{"value": "sharedId_or_label"}]
+                        metadata[normalized_col] = [{"value": value}]
                     else:
                         metadata[normalized_col] = value
                 entity_dict["metadata"] = metadata
