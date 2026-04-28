@@ -374,6 +374,15 @@ class TestEntityDataFrameE2E:
             f"Relationship value in DataFrame: {source_row[rel_prop_name].values[0] if rel_prop_name in source_row.columns else 'N/A'}"
         )
 
+        # Verify the new format: "name (id:sharedId)"
+        if rel_prop_name in source_row.columns:
+            rel_value = source_row[rel_prop_name].values[0]
+            assert "(id:" in str(rel_value), f"Expected '(id:' in relationship value, got: {rel_value}"
+            assert target_shared_id in str(rel_value), (
+                f"Expected target sharedId '{target_shared_id}' in relationship value, got: {rel_value}"
+            )
+            print(f"Verified new relationship format: {rel_value}")
+
         # Step 5: Use the DataFrame values to update the entity (roundtrip)
         # The DataFrame value should be the sharedId or label
         roundtrip_responses = self.entity_repo.create_or_update_entities_from_dataframe(source_row, language="en")

@@ -10,7 +10,7 @@
 
 ### From Git
 ```bash
-pip install git+https://github.com/huridocs/python_uwazi_API@2026.4.27.2
+pip install git+https://github.com/huridocs/python_uwazi_API@2026.4.28.1
 ```
 
 ### Local Development
@@ -300,6 +300,98 @@ df = client.exports.to_dataframe(
     published=False
 )
 ```
+
+### Relationship Properties in DataFrames
+
+When working with **relationship** properties in DataFrames, the format differs from other property types.
+
+#### Receiving DataFrame (Export)
+
+Relationship properties are exported with both the entity name and sharedId:
+
+```python
+# Single relationship
+# "Entity Name (id:abc123)"
+
+# Multiple relationships
+# "Entity 1 (id:abc123)|Entity 2 (id:def456)"
+
+# Example DataFrame output:
+df = client.exports.to_dataframe(template_name='template_name')
+# | title        | related_entities                          |
+# |--------------|-------------------------------------------|
+# | My Entity    | Target Entity (id:abc123)|Other (id:xyz) |
+```
+
+#### Uploading DataFrame
+
+When uploading a DataFrame, relationship properties can be provided in multiple formats:
+
+```python
+import pandas as pd
+
+df = pd.DataFrame({
+    'title': ['Entity with Relationship'],
+    # Format 1: Using "name (id:sharedId)" format
+    'related_entities': ['Target Entity (id:abc123)'],
+
+    # Multiple relationships with new format
+    'related_entities': ['Entity A (id:abc123)|Entity B (id:def456)'],
+
+    # Format 2: Using just sharedId (works both ways)
+    'related_entities': ['abc123'],
+
+    # Multiple with just sharedIds
+    'related_entities': ['abc123|def456'],
+
+    # Format 3: Mixed (some with name, some without)
+    'related_entities': ['Target Entity (id:abc123)|def456'],
+})
+
+# Upload
+responses = client.entities.create_or_update_entities_from_dataframe(df, language='en')
+```
+
+The upload parser automatically extracts:
+- The sharedId from `name (id:sharedId)` format
+- Raw sharedIds from `sharedId` or `sharedId|sharedId` formats
+- Strips extra whitespace from `sharedId | sharedId` format
+
+### Create or Update Behavior
+
+The `create_or_update_entities_from_dataframe` method automatically determines whether to **create** or **update** based on the presence of the `sharedId` column in the DataFrame:
+
+```python
+import pandas as pd
+
+# CREATE: sharedId column is NOT present or is empty
+df_create = pd.DataFrame({
+    'title': ['New Entity 1', 'New Entity 2'],
+    'template': ['template_name', 'template_name'],
+})
+responses = client.entities.create_or_update_entities_from_dataframe(df_create, language='en')
+
+# UPDATE: sharedId column IS present with values
+df_update = pd.DataFrame({
+    'sharedId': ['existing_id_1', 'existing_id_2'],
+    'title': ['Updated Title 1', 'Updated Title 2'],
+})
+responses = client.entities.create_or_update_entities_from_dataframe(df_update, language='en')
+
+# MIXED: Some rows have sharedId (update), some don't (create)
+df_mixed = pd.DataFrame({
+    'sharedId': ['existing_id', None, None],
+    'title': ['Updated', 'New Entity 1', 'New Entity 2'],
+    'template': [None, 'template_name', 'template_name'],
+})
+responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, language='en')
+```
+
+**Logic:**
+- If `sharedId` column exists in the DataFrame and has a value → **UPDATE** existing entity
+- If `sharedId` column is NOT present or is empty/NaN → **CREATE** new entity
+
+**Important:** The `template` column is required for creating new entities but is ignored when updating (existing template is preserved).
 
 ---
 

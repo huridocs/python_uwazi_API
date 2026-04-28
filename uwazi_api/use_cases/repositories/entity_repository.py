@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from datetime import timezone
 from typing import Any, Optional
@@ -75,7 +76,6 @@ class EntityRepository(SearchRepository):
             entity.template = self._resolve_template_id(entity.template)
 
         payload = self._validator.validate_and_prepare_for_upload(entity, language)
-        print(f"DEBUG upload payload: {json.dumps(payload, indent=2)}")  # Debug
         upload_response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities",
             headers=self.http.headers,
@@ -222,6 +222,35 @@ class EntityRepository(SearchRepository):
                     return {"from": from_ts, "to": to_ts}
         return None
 
+    @staticmethod
+    def _parse_relationship_value(value: Any) -> str:
+        if pd.isna(value):
+            return ""
+        value_str = str(value).strip()
+        # Handle "name (id:sharedId)" format (single value)
+        match = re.search(r"\(id:([a-zA-Z0-9_-]+)\)", value_str)
+        if match and "|" not in value_str:
+            return match.group(1)
+        # Handle pipe-separated values (either format)
+        if "|" in value_str:
+            parts = value_str.split("|")
+            extracted_ids = []
+            for part in parts:
+                part = part.strip()
+                # Try to match "name (id:sharedId)" pattern
+                match = re.search(r"\(id:([a-zA-Z0-9_-]+)\)", part)
+                if match:
+                    extracted_ids.append(match.group(1))
+                else:
+                    # Try to match raw sharedId
+                    match = re.match(r"^([a-zA-Z0-9_-]+)$", part)
+                    if match:
+                        extracted_ids.append(match.group(1))
+            if extracted_ids:
+                return "|".join(extracted_ids)
+        # Return as-is if no pattern matches (could be raw sharedId)
+        return value_str
+
     def _get_prop_type_map(self, template_id: str) -> dict:
         if not self._template_repo or not template_id:
             return {}
@@ -330,9 +359,9 @@ class EntityRepository(SearchRepository):
                         if geo:
                             metadata[normalized_col] = geo
                     elif prop_type == "relationship" and isinstance(value, str):
-                        # The DataFrame value for relationship is typically a sharedId or label
-                        # Convert to format expected by API: [{"value": "sharedId_or_label"}]
-                        metadata[normalized_col] = [{"value": value}]
+                        # Parse "name (id:sharedId)" format or use raw sharedId/label
+                        shared_id = self._parse_relationship_value(value)
+                        metadata[normalized_col] = [{"value": shared_id}]
                     else:
                         metadata[normalized_col] = value
                 entity_dict["metadata"] = metadata
