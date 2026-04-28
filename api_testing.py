@@ -66,7 +66,7 @@ def loop_entities():
         batch = client.exports.to_dataframe(
             start_from=start,
             batch_size=batch_size,
-            template_name="template_2",
+            template_name="test",
             language="en",
             published=False,
         )
@@ -181,24 +181,25 @@ def update_partially():
 def create_entities_from_dataframe():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     data_frame = loop_entities()
-    # data_frame["_id"] = np.nan
-    # data_frame["sharedId"] = np.nan
-    # data_frame["title"] = data_frame["title"].astype(str) + " COPY"
-    data_frame["date"] = "2030/01/01"
+    data_frame["_id"] = np.nan
+    data_frame["sharedId"] = np.nan
+    data_frame["title"] = data_frame["title"].astype(str) + " COPY"
     return client.entities.create_or_update_entities_from_dataframe(df=data_frame, language="en")
 
 
 if __name__ == "__main__":
     # df = loop_entities()
     # print(df.head().to_string())
-    # for x in create_entities_from_dataframe():
-    #     print(x.model_dump())
+
+    # print(upload_dataframe(df, template_name="Template - Name"))
+    for x in create_entities_from_dataframe():
+        print(x.model_dump())
     # update_entity()
     # update_partially()
     # print(upload_entity())
     # print(get_templates())
-    df = search()
-    print(df.head().to_string())
+    # df = search()
+    # print(df.head().to_string())
     # upload_odt()
     # upload_pdf()
 

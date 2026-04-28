@@ -47,10 +47,14 @@ def entities_to_dataframe(
                     if isinstance(value[0], dict):
                         extracted_values = []
                         for item in value:
-                            # For relationship properties, extract the VALUE (sharedId), not label
+                            # For relationship properties, extract both label and value (sharedId)
                             if key in relationship_props:
-                                if "value" in item:
-                                    extracted_values.append(item["value"])
+                                label = item.get("label", item.get("value", ""))
+                                shared_id = item.get("value", "")
+                                if label and shared_id:
+                                    extracted_values.append(f"{label} (id:{shared_id})")
+                                elif shared_id:
+                                    extracted_values.append(shared_id)
                             else:
                                 if "label" in item:
                                     extracted_values.append(item["label"])
