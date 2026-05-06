@@ -7,6 +7,7 @@ from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
+from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
 
 
 class EntityValidator:
@@ -120,17 +121,10 @@ class EntityValidator:
         all_props = template.properties + template.common_properties
         name_map = {}
         for p in all_props:
-            if self._template_repo:
-                normalized = self._template_repo._normalize_name(p.name)
-            else:
-                normalized = self._normalize_name(p.name)
+            normalized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[p.name] = p.name
             name_map[normalized] = p.name
         return name_map
-
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        return "".join(ch if ch.isalnum() else "_" for ch in name.lower())
 
     def _validate_metadata(self, entity: Entity) -> None:
         template_id = entity.template
@@ -141,9 +135,20 @@ class EntityValidator:
             raise SearchError(f"Template '{template_id}' not found")
         all_props = template.properties + template.common_properties
         prop_map = {p.name: p for p in all_props}
+        name_map = {}
+        for p in all_props:
+            normalized = PropertyLabelSanitizer.sanitize(p.name)
+            name_map[normalized] = p.name
         metadata_keys = set(entity.metadata.keys()) if entity.metadata else set()
+        resolved_keys = set()
+        for key in metadata_keys:
+            normalized = PropertyLabelSanitizer.sanitize(key)
+            if normalized in name_map:
+                resolved_keys.add(name_map[normalized])
+            else:
+                resolved_keys.add(key)
         for key in entity.metadata or {}:
-            if key not in prop_map:
+            if key not in prop_map and key not in name_map:
                 raise SearchError(f"Metadata property '{key}' not found in template '{template.name}'")
         for prop in all_props:
             if prop.required and prop.name not in metadata_keys:

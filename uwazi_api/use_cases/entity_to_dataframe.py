@@ -81,6 +81,8 @@ def entities_to_dataframe(
 
     df = pd.DataFrame(flattened_entities)
 
+    df = df.replace({pd.NA: None, float("nan"): None})
+
     if template_name and template_repo:
         template = template_repo.get_by_id(template_name) or template_repo.get_by_name(template_name)
         if not template:

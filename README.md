@@ -10,7 +10,7 @@
 
 ### From Git
 ```bash
-pip install git+https://github.com/huridocs/python_uwazi_API@2026.4.28.1
+pip install git+https://github.com/huridocs/python_uwazi_API@2026.5.6.1
 ```
 
 ### Local Development

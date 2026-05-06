@@ -1,5 +1,5 @@
 import os
-
+import numpy
 import load_dotenv
 from datetime import date
 
@@ -66,7 +66,7 @@ def loop_entities():
         batch = client.exports.to_dataframe(
             start_from=start,
             batch_size=batch_size,
-            template_name="test",
+            template_name="test 2",
             language="en",
             published=False,
         )
@@ -93,7 +93,7 @@ def get_dictionaries():
 
 def upload_dataframe(df, template_name):
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    return client.csv.upload_dataframe_and_get_shared_id(df=df, template_name=template_name)
+    return client.entities.create_or_update_entities_from_dataframe(df=df, language="en", template=template_name)
 
 
 def upload_pdf():
@@ -132,7 +132,7 @@ def search_by_two_properties():
 def search():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     filters: SearchFilters = SearchFilters()
-    # filters.add("date", DateRange(from_=date(2026, 2, 1), to=None))
+    filters.add("date", DateRange(from_=date(2026, 2, 1), to=None))
     filters.add("Select - Property", SelectFilter(values=["1"]))
     return client.search.search_by_filter_to_dataframe(
         filters=filters, template_name="Template - Name", language="en", batch_size=100
@@ -188,21 +188,15 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
-    # df = loop_entities()
-    # print(df.head().to_string())
+    df = loop_entities()
+    print(df.to_string())
 
-    # print(upload_dataframe(df, template_name="Template - Name"))
-    for x in create_entities_from_dataframe():
-        print(x.model_dump())
-    # update_entity()
-    # update_partially()
-    # print(upload_entity())
-    # print(get_templates())
-    # df = search()
-    # print(df.head().to_string())
-    # upload_odt()
-    # upload_pdf()
-
-    # df.loc[0, "title"] = "Updated Title via CSV Upload 3"
-    # one_row_df = df.head(1).reset_index(drop=True)
-    # print(upload_dataframe(one_row_df, template_name="Document"))
+    df = pd.DataFrame()
+    df["_id"] = ["69fb0e5763e9d6e9041fd928"]
+    df["sharedId"] = ["opy1w26q3is"]
+    df["title"] = ["11"]
+    df["select"] = [None]
+    df["text "] = [""]
+    #
+    print(df.to_string())
+    print(upload_dataframe(df, "test 2"))
