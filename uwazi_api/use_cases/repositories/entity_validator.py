@@ -45,7 +45,7 @@ class EntityValidator:
             return int(value.timestamp())
         if prop_type in ("geolocation",) and isinstance(value, str) and "|" in value:
             lat, lon = value.split("|")
-            return {"lat": float(lat), "lon": float(lon)}
+            return {"lat": float(lat), "lon": float(lon), "label": ""}
         if prop_type in ("relationship",) and isinstance(value, str):
             return {"label": value}
         if isinstance(value, list):
@@ -124,6 +124,12 @@ class EntityValidator:
             normalized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[p.name] = p.name
             name_map[normalized] = p.name
+            name_map[PropertyLabelSanitizer.sanitize(p.label)] = p.name
+            if p.type == "geolocation":
+                if not normalized.endswith("_geolocation"):
+                    name_map[f"{normalized}_geolocation"] = p.name
+                if not p.name.endswith("_geolocation"):
+                    name_map[f"{p.name}_geolocation"] = p.name
         return name_map
 
     def _validate_metadata(self, entity: Entity) -> None:
@@ -139,19 +145,28 @@ class EntityValidator:
         for p in all_props:
             normalized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[normalized] = p.name
-        metadata_keys = set(entity.metadata.keys()) if entity.metadata else set()
-        resolved_keys = set()
-        for key in metadata_keys:
-            normalized = PropertyLabelSanitizer.sanitize(key)
-            if normalized in name_map:
-                resolved_keys.add(name_map[normalized])
+            name_map[PropertyLabelSanitizer.sanitize(p.label)] = p.name
+            if p.type == "geolocation" and not normalized.endswith("_geolocation"):
+                name_map[f"{normalized}_geolocation"] = p.name
+        key_mapping = {}
+        for key in entity.metadata.keys() if entity.metadata else []:
+            if key in name_map:
+                key_mapping[key] = name_map[key]
             else:
-                resolved_keys.add(key)
+                normalized = PropertyLabelSanitizer.sanitize(key)
+                if normalized in name_map:
+                    key_mapping[key] = name_map[normalized]
+        if key_mapping:
+            new_metadata = {}
+            for key, value in (entity.metadata or {}).items():
+                new_key = key_mapping.get(key, key)
+                new_metadata[new_key] = value
+            entity.metadata = new_metadata
         for key in entity.metadata or {}:
             if key not in prop_map and key not in name_map:
                 raise SearchError(f"Metadata property '{key}' not found in template '{template.name}'")
         for prop in all_props:
-            if prop.required and prop.name not in metadata_keys:
+            if prop.required and prop.name not in (entity.metadata.keys() if entity.metadata else []):
                 raise SearchError(f"Required property '{prop.name}' is missing in entity metadata")
         for key, values in (entity.metadata or {}).items():
             prop = prop_map.get(key)
@@ -194,8 +209,10 @@ class EntityValidator:
             if not isinstance(value, dict) or "label" not in value or "url" not in value:
                 raise SearchError(f"Metadata property '{key}' (link) must have objects with 'label' and 'url' keys")
         elif prop_type in ("geolocation",):
-            if not isinstance(value, dict) or "lat" not in value or "lon" not in value:
-                raise SearchError(f"Metadata property '{key}' (geolocation) must have objects with 'lat' and 'lon' keys")
+            if not isinstance(value, dict) or "lat" not in value or "lon" not in value or "label" not in value:
+                raise SearchError(
+                    f"Metadata property '{key}' (geolocation) must have objects with 'lat', 'lon', and 'label' keys"
+                )
             if not isinstance(value["lat"], (int, float)) or not isinstance(value["lon"], (int, float)):
                 raise SearchError(f"Metadata property '{key}' (geolocation) 'lat' and 'lon' must be numeric")
         elif prop_type in ("select", "multiselect"):

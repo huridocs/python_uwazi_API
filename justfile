@@ -24,5 +24,9 @@ tag:
 	git tag $NEW_TAG
 	git push --tag
 
+	sed -i "s|pip install git+https://github.com/huridocs/python_uwazi_API@.*|pip install git+https://github.com/huridocs/python_uwazi_API@${NEW_TAG}|" README.md
+	git add README.md
+	git commit -m "chore: update version to ${NEW_TAG}"
+
 test:
     . .venv/bin/activate && python -m pytest -v --maxfail=1 --disable-warnings

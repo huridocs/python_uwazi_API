@@ -32,7 +32,19 @@ class DataFrameEntityMapper:
     def sanitize_dataframe(df: pd.DataFrame, template: str = "") -> pd.DataFrame:
         df = df.copy()
         default_cols = set(DataFrameEntityMapper.BASIC_COLUMNS)
-        df.columns = [col if col in default_cols else PropertyLabelSanitizer.sanitize(col) for col in df.columns]
+        sanitized_cols = []
+        for col in df.columns:
+            if col in default_cols:
+                sanitized_cols.append(col)
+            else:
+                is_geolocation = col.endswith("_geolocation")
+                original_col = col[: -len("_geolocation")] if is_geolocation else col
+                sanitized = PropertyLabelSanitizer.sanitize(original_col)
+                sanitized = sanitized + "_geolocation" if is_geolocation and sanitized else sanitized
+                if not sanitized:
+                    sanitized = col
+                sanitized_cols.append(sanitized)
+        df.columns = sanitized_cols
         if template:
             df["template"] = template
         return df
