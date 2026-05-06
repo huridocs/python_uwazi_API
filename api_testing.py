@@ -7,6 +7,7 @@ import numpy as np
 
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
+from uwazi_api.domain.entity_response import EntityResponse
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
@@ -188,15 +189,19 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
-    df = loop_entities()
-    print(df.to_string())
+    # df = loop_entities()
+    # print(df.to_string())
 
     df = pd.DataFrame()
-    df["_id"] = ["69fb0e5763e9d6e9041fd928"]
-    df["sharedId"] = ["opy1w26q3is"]
-    df["title"] = ["11"]
+    # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
+    # df["sharedId"] = ["opy1w26q3is"]
+    df["title"] = ["20"]
     df["select"] = [None]
-    df["text "] = [""]
+    df["text "] = ["ah ah"]
+
     #
     print(df.to_string())
-    print(upload_dataframe(df, "test 2"))
+    response = upload_dataframe(df, "test 2")
+
+    df = EntityResponse.get_dataframe(df, response)
+    print(df.to_string())
