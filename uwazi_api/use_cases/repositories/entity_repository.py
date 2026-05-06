@@ -183,6 +183,11 @@ class EntityRepository(SearchRepository):
             normalized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[p.name] = p.name
             name_map[normalized] = p.name
+            if p.type == "geolocation":
+                if not normalized.endswith("_geolocation"):
+                    name_map[f"{normalized}_geolocation"] = p.name
+                if not p.name.endswith("_geolocation"):
+                    name_map[f"{p.name}_geolocation"] = p.name
         return name_map
 
     def create_or_update_entities_from_dataframe(

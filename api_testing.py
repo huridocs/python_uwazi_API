@@ -191,12 +191,18 @@ def create_entities_from_dataframe():
 if __name__ == "__main__":
     # df = loop_entities()
     # print(df.to_string())
-
+    #
     df = pd.DataFrame()
-    # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
-    # df["sharedId"] = ["opy1w26q3is"]
-    df["title"] = ["25"]
-    df["select"] = [None]
-    df["text "] = ["ah ah"]
-    print(df.to_string())
+    # # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
+    # # df["sharedId"] = ["opy1w26q3is"]
+    df["title"] = ["12"]
+    # # df["select"] = [None]
+    # # df["text "] = ["ah ah"]
+    df["المهنةالمهنة"] = ["46.23685258143994 | 6.174316406250001"]
+    # df["other"] = ["46.23685258143994 | 6.174316406250001"]
+    # # print(df.to_string())
     response = upload_dataframe(df, "test 2")
+    print(response[0].model_dump())
+    #
+    # template = get_templates()
+    # print(template)
