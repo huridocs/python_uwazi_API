@@ -115,7 +115,7 @@ shared_id = client.entities.upload(entity=entity, language='en')
 shared_id = client.entities.update_partially(entity=entity, language='en')
 
 # Bulk operations
-responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en', template='template_name')
 client.entities.publish_entities(shared_ids=['id1', 'id2'])
 client.entities.delete_entities(shared_ids=['id1', 'id2'])
 client.entities.delete_empty_template(shared_id='id')
@@ -349,7 +349,7 @@ df = pd.DataFrame({
 })
 
 # Upload
-responses = client.entities.create_or_update_entities_from_dataframe(df, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df, language='en', template='template_name')
 ```
 
 The upload parser automatically extracts:
@@ -369,14 +369,14 @@ df_create = pd.DataFrame({
     'title': ['New Entity 1', 'New Entity 2'],
     'template': ['template_name', 'template_name'],
 })
-responses = client.entities.create_or_update_entities_from_dataframe(df_create, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df_create, language='en', template='template_name')
 
 # UPDATE: sharedId column IS present with values
 df_update = pd.DataFrame({
     'sharedId': ['existing_id_1', 'existing_id_2'],
     'title': ['Updated Title 1', 'Updated Title 2'],
 })
-responses = client.entities.create_or_update_entities_from_dataframe(df_update, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df_update, language='en', template='template_name')
 
 # MIXED: Some rows have sharedId (update), some don't (create)
 df_mixed = pd.DataFrame({
@@ -384,7 +384,7 @@ df_mixed = pd.DataFrame({
     'title': ['Updated', 'New Entity 1', 'New Entity 2'],
     'template': [None, 'template_name', 'template_name'],
 })
-responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, language='en')
+responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, language='en', template='template_name')
 ```
 
 **Logic:**
@@ -393,7 +393,7 @@ responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, l
 
 **Important:** The `template` column is required for creating new entities but is ignored when updating (existing template is preserved).
 
----
+The `template` parameter (passed as function argument) is used to resolve property type mappings for proper DataFrame column-to-entity property conversion. Pass the template name or ID. This parameter is optional but recommended for accurate property type handling.
 
 ## Data Models
 
