@@ -195,13 +195,8 @@ if __name__ == "__main__":
     df = pd.DataFrame()
     # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
     # df["sharedId"] = ["opy1w26q3is"]
-    df["title"] = ["20"]
+    df["title"] = ["25"]
     df["select"] = [None]
     df["text "] = ["ah ah"]
-
-    #
     print(df.to_string())
     response = upload_dataframe(df, "test 2")
-
-    df = EntityResponse.get_dataframe(df, response)
-    print(df.to_string())

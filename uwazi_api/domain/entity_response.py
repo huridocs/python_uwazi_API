@@ -11,6 +11,6 @@ class EntityResponse(BaseModel):
     error: str | None = None
 
     @staticmethod
-    def get_dataframe(df: pd.DataFrame, response_list: list[EntityResponse]) -> pd.DataFrame:
+    def get_dataframe(df: pd.DataFrame, response_list: list["EntityResponse"]) -> pd.DataFrame:
         df["sharedId"] = [r.shared_id if r.success else None for r in response_list]
         return df
