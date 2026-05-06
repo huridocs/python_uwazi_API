@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Optional
 
 import pandas as pd
@@ -11,6 +10,7 @@ from uwazi_api.use_cases.repositories.template_repository import TemplateReposit
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
+from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
 
 
 class SearchRepository:
@@ -134,7 +134,7 @@ class SearchRepository:
                 raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
             self._template_repo.ensure_property_filterable(prop, prop_name)
             # Process property label: lowercase and replace all non-alphanumeric chars with _
-            filter_key = re.sub(r"[^a-z0-9]", "_", prop.name.lower())
+            filter_key = PropertyLabelSanitizer.sanitize(prop.name)
             name_to_id[prop_name] = filter_key
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)

@@ -5,6 +5,7 @@ from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.template import Template
 from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
 
 
 class TemplateRepository:
@@ -78,14 +79,10 @@ class TemplateRepository:
         all_props = template.properties + template.common_properties
         prop = next((p for p in all_props if p.name == prop_name), None)
         if prop is None:
-            normalized = self._normalize_name(prop_name)
-            prop = next((p for p in all_props if self._normalize_name(p.name) == normalized), None)
+            normalized = PropertyLabelSanitizer.sanitize(prop_name)
+            prop = next((p for p in all_props if PropertyLabelSanitizer.sanitize(p.name) == normalized), None)
         return prop
 
     def ensure_property_filterable(self, prop, prop_name: str) -> None:
         if not prop.filter:
             raise SearchError(f"Property '{prop_name}' is not filterable")
-
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        return "".join(ch if ch.isalnum() else "_" for ch in name.lower())
