@@ -26,11 +26,37 @@ class ThesauriRepository:
         else:
             self._cache.pop(language, None)
 
-    def add_value(self, thesauri_name: str, thesauri_id: str, thesauri_values: dict, language: str) -> dict:
+    def add_value(
+        self, thesauri_name: str = None, thesauri_id: str = None, thesauri_values: dict = None, language: str = None
+    ) -> dict:
+        if not thesauri_name and not thesauri_id:
+            raise ValueError("Either thesauri_name or thesauri_id must be provided")
+        if not thesauri_values:
+            raise ValueError("thesauri_values must be provided")
+        if not language:
+            raise ValueError("language must be provided")
+
+        self.get(language)
+        resolved_name = thesauri_name
+        resolved_id = thesauri_id
+
+        for t in self._cache.get(language, []):
+            if not resolved_id and t.name == thesauri_name:
+                resolved_id = t.id
+                break
+            if not resolved_name and t.id == thesauri_id:
+                resolved_name = t.name
+                break
+
+        if not resolved_id:
+            raise ValueError(f"Thesauri with name '{thesauri_name}' not found")
+        if not resolved_name:
+            raise ValueError(f"Thesauri with id '{thesauri_id}' not found")
+
         self.clear_cache(language)
         data = {
-            "_id": thesauri_id,
-            "name": thesauri_name,
+            "_id": resolved_id,
+            "name": resolved_name,
             "values": [{"label": x, "id": thesauri_values[x]} for x in thesauri_values],
         }
         response = self.http.request_adapter.post(

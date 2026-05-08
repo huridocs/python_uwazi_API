@@ -191,10 +191,43 @@ class EntityRepository(SearchRepository):
                     name_map[f"{p.name}_geolocation"] = p.name
         return name_map
 
+    def _check_duplicate_sanitized_columns(self, df: pd.DataFrame) -> list[str]:
+        default_cols = set(DataFrameEntityMapper.BASIC_COLUMNS)
+        sanitized_map: dict[str, list[str]] = {}
+        for col in df.columns:
+            if col in default_cols:
+                continue
+            is_geolocation = col.endswith("_geolocation")
+            original_col = col[: -len("_geolocation")] if is_geolocation else col
+            sanitized = PropertyLabelSanitizer.sanitize(original_col)
+            sanitized = sanitized + "_geolocation" if is_geolocation and sanitized else sanitized
+            if not sanitized:
+                sanitized = col
+            if sanitized not in sanitized_map:
+                sanitized_map[sanitized] = []
+            sanitized_map[sanitized].append(col)
+        duplicates = []
+        for sanitized, original_cols in sanitized_map.items():
+            if len(original_cols) > 1:
+                duplicates.append(f"'{sanitized}' from columns: {original_cols}")
+        return duplicates
+
     def create_or_update_entities_from_dataframe(
         self, df: pd.DataFrame, language: str, template: str = ""
     ) -> list[EntityResponse]:
         responses = []
+
+        duplicate_columns = self._check_duplicate_sanitized_columns(df)
+        if duplicate_columns:
+            return [
+                EntityResponse(
+                    shared_id="",
+                    entity=None,
+                    success=False,
+                    error=f"Duplicate column names after sanitization detected: {', '.join(duplicate_columns)}",
+                    traceback=None,
+                )
+            ]
 
         df = DataFrameEntityMapper.sanitize_dataframe(df, template)
 
