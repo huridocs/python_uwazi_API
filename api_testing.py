@@ -193,38 +193,9 @@ if __name__ == "__main__":
     # df = loop_entities()
     # print(df.to_string())
     #
-    # df = pd.DataFrame()
-    # # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
-    # # df["sharedId"] = ["opy1w26q3is"]
-    # df["title"] = ["15"]
-    # # df["select"] = [None]
-    # # df["text "] = ["ah ah"]
-    # df["المهنةالمهنة"] = ["46.23685258143994 | 6.174316406250001"]
-    # df["other"] = ["46.23685258143994 | 6.174316406250001"]
-    # # print(df.to_string())
-    df = pd.read_csv("/home/gabo/Downloads/03.csv")
-    df = df.iloc[[0]]
-
-    remove_url = [
-        "اخطار وقف بناء_URL",
-        "اخطار هدم_URL",
-        "أثناء الهدم_URL",
-        "أثناء الهدم1_URL",
-        "صورة قبل الهدم_URL",
-        "صورة بعد الهدم_URL",
-        "وثيقة رسمية_URL",
-        "مرفقات_URL",
-    ]
-
-    df = df.drop(columns=remove_url)
+    df = pd.DataFrame()
+    df["title"] = ["15"]
+    # df["select"] = [None]
+    # df["text "] = ["ah ah"]
     print(df.to_string())
-    sanitized_columns = list()
-    original_columns = list()
-    for col in df.columns:
-        original_columns.append(col)
-        sanitized_columns.append(PropertyLabelSanitizer.sanitize(col))
-
-    # response = upload_dataframe(df, "[REMOVE]Demolition")
-    # print(response[0].model_dump())
-    # templates = get_templates()
-    # print([x.model_dump_json() for x in templates])
+    response = upload_dataframe(df, "test 2")
