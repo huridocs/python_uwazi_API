@@ -1,4 +1,5 @@
 import json
+import traceback
 from typing import Optional
 
 import pandas as pd
@@ -207,7 +208,9 @@ class EntityRepository(SearchRepository):
                 entity = mapper.map_row_to_entity(row)
 
                 shared_id = self.update_partially(entity, language) if entity.shared_id else self.upload(entity, language)
-                responses.append(EntityResponse(shared_id=shared_id, entity=entity, success=True, error=None))
+                responses.append(
+                    EntityResponse(shared_id=shared_id, entity=entity, success=True, error=None, traceback=None)
+                )
 
             except Exception as e:
                 responses.append(
@@ -215,7 +218,8 @@ class EntityRepository(SearchRepository):
                         shared_id=str(row.get("sharedId", "")) if pd.notna(row.get("sharedId")) else "",
                         entity=None,
                         success=False,
-                        error=str(e),
+                        error=f"{str(e)}",
+                        traceback=f"{str(e)}\n{traceback.format_exc()}",
                     )
                 )
 

@@ -14,6 +14,7 @@ from uwazi_api.domain.selection_rectangle import SelectionRectangle
 import pandas as pd
 
 from uwazi_api.domain.FileType import FileType
+from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
 
 load_dotenv.load_dotenv()
 
@@ -192,17 +193,38 @@ if __name__ == "__main__":
     # df = loop_entities()
     # print(df.to_string())
     #
-    df = pd.DataFrame()
+    # df = pd.DataFrame()
     # # df["_id"] = ["69fb0e5763e9d6e9041fd928"]
     # # df["sharedId"] = ["opy1w26q3is"]
-    df["title"] = ["12"]
+    # df["title"] = ["15"]
     # # df["select"] = [None]
     # # df["text "] = ["ah ah"]
-    df["المهنةالمهنة"] = ["46.23685258143994 | 6.174316406250001"]
+    # df["المهنةالمهنة"] = ["46.23685258143994 | 6.174316406250001"]
     # df["other"] = ["46.23685258143994 | 6.174316406250001"]
     # # print(df.to_string())
-    response = upload_dataframe(df, "test 2")
-    print(response[0].model_dump())
-    #
-    # template = get_templates()
-    # print(template)
+    df = pd.read_csv("/home/gabo/Downloads/03.csv")
+    df = df.iloc[[0]]
+
+    remove_url = [
+        "اخطار وقف بناء_URL",
+        "اخطار هدم_URL",
+        "أثناء الهدم_URL",
+        "أثناء الهدم1_URL",
+        "صورة قبل الهدم_URL",
+        "صورة بعد الهدم_URL",
+        "وثيقة رسمية_URL",
+        "مرفقات_URL",
+    ]
+
+    df = df.drop(columns=remove_url)
+    print(df.to_string())
+    sanitized_columns = list()
+    original_columns = list()
+    for col in df.columns:
+        original_columns.append(col)
+        sanitized_columns.append(PropertyLabelSanitizer.sanitize(col))
+
+    # response = upload_dataframe(df, "[REMOVE]Demolition")
+    # print(response[0].model_dump())
+    # templates = get_templates()
+    # print([x.model_dump_json() for x in templates])
