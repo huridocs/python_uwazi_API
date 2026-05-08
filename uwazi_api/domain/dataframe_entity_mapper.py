@@ -87,10 +87,12 @@ class DataFrameEntityMapper:
         return entity_dict
 
     def _map_metadata(self, row: pd.Series) -> dict[str, Any]:
-        metadata_columns = [col for col in row.index if col not in self.BASIC_COLUMNS and pd.notna(row[col])]
+        metadata_columns = [col for col in row.index if col not in self.BASIC_COLUMNS]
         metadata = {}
         for col in metadata_columns:
             value = row[col]
+            if pd.isna(value):
+                continue
             prop_key = self._name_map.get(col, col)
             prop_type = self._prop_type_map.get(prop_key)
             metadata[prop_key] = self._parse_property_value(value, prop_type)
