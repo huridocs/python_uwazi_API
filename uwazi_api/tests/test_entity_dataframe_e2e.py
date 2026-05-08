@@ -469,6 +469,43 @@ class TestEntityDataFrameE2E:
         for resp in valid_responses:
             self.created_shared_ids.append(resp.shared_id)
 
+    def test_14_duplicate_column_names_after_sanitization(self):
+        """Test error handling when column names collide after sanitization."""
+        data = {
+            "title": ["DF Duplicate Col Test"],
+            "template": [self.test_template_id],
+            "Test Text": ["value1"],
+            "test_text": ["value2"],
+        }
+        df = pd.DataFrame(data)
+
+        responses = self.entity_repo.create_or_update_entities_from_dataframe(df, language="en")
+
+        assert len(responses) == 1
+        assert responses[0].success is False
+        assert "Duplicate column names after sanitization" in responses[0].error
+        assert "test_text" in responses[0].error
+
+    def test_15_multiple_duplicate_column_names(self):
+        """Test error handling when multiple column names collide after sanitization."""
+        data = {
+            "title": ["DF Multiple Duplicates"],
+            "template": [self.test_template_id],
+            "Test Date": ["2024-01-01"],
+            "test_date": ["2024-01-02"],
+            "Title": ["My Title"],
+            "TITLE": ["Another Title"],
+        }
+        df = pd.DataFrame(data)
+
+        responses = self.entity_repo.create_or_update_entities_from_dataframe(df, language="en")
+
+        assert len(responses) == 1
+        assert responses[0].success is False
+        assert "Duplicate column names after sanitization" in responses[0].error
+        assert "test_date" in responses[0].error
+        assert "title" in responses[0].error
+
     @classmethod
     def teardown_class(cls):
         """Clean up created entities and template."""
