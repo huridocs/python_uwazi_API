@@ -98,6 +98,11 @@ def upload_dataframe(df, template_name):
     return client.entities.create_or_update_entities_from_dataframe(df=df, language="en", template=template_name)
 
 
+def create_thesaury(df, template_name):
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    return client.thesauri_from_df.execute(df=df, language="en", template_name=template_name)
+
+
 def upload_pdf():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     with open("data/test_document.pdf", "rb") as f:
@@ -195,7 +200,9 @@ if __name__ == "__main__":
     #
     df = pd.DataFrame()
     df["title"] = ["15"]
-    # df["select"] = [None]
-    # df["text "] = ["ah ah"]
+    df["select"] = ["aa"]
+    df["multi-select-1 space"] = [""]
     print(df.to_string())
-    response = upload_dataframe(df, "test 2")
+    # response = upload_dataframe(df, "test 2")
+    response = create_thesaury(df, "test 2")
+    print(response)

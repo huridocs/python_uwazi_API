@@ -11,6 +11,7 @@ from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.file_service import FileService
 from uwazi_api.use_cases.csv_use_case import CSVUseCase
 from uwazi_api.use_cases.entity_export import EntityExportUseCase
+from uwazi_api.use_cases.thesauri_from_dataframe_use_case import ThesauriFromDataframeUseCase
 
 
 class UwaziClient:
@@ -34,6 +35,7 @@ class UwaziClient:
         self._file_service = FileService(self._file_repo, self._entity_repo)
         self._csv_import = CSVUseCase(self._csv_repo, self._template_repo, self._entity_repo)
         self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo)
+        self._thesauri_from_df = ThesauriFromDataframeUseCase(self._template_repo, self._thesauri_repo)
 
     @property
     def entities(self) -> "EntityRepository":
@@ -70,3 +72,7 @@ class UwaziClient:
     @property
     def exports(self) -> EntityExportUseCase:
         return self._entity_export
+
+    @property
+    def thesauri_from_df(self) -> ThesauriFromDataframeUseCase:
+        return self._thesauri_from_df
