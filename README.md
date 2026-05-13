@@ -29,17 +29,21 @@ pip install -e ".[dev]"
 ```python
 from uwazi_api.client import UwaziClient
 
+# Authenticated client (full access)
 client = UwaziClient(
     user='admin',
     password='admin',
     url='http://localhost:3000'
 )
 
+# Public client (read-only, no credentials needed)
+client = UwaziClient.public('https://public.uwazi.org')
+
+# Search entities by text
+results = client.search.search_by_text(search_term='Malawi')
+
 # Get an entity
 entity = client.entities.get_one(shared_id='shared_id', language='en')
-
-# Get documents
-pdf_bytes = client.files.get_document(shared_id='shared_id', language='en')
 
 # Export to DataFrame
 import pandas as pd
@@ -64,6 +68,7 @@ The `UwaziClient` provides access to these services:
 | Templates | `client.templates` | Manage entity templates |
 | Files | `client.files` | File upload/download operations |
 | Thesauri | `client.thesauris` | Manage thesauri/vocabularies |
+| Thesauri from DataFrame | `client.thesauri_from_df` | Add thesauri values from a DataFrame |
 | Settings | `client.settings` | System settings and languages |
 | Search | `client.search` | Search entities with filters |
 | CSV | `client.csv` | CSV import operations |
@@ -218,7 +223,27 @@ client.thesauris.add_value(
 
 # Clear cache
 client.thesauris.clear_cache(language='en')
+
+
+### Thesauri from DataFrame
+
+Automatically add new thesauri values from a DataFrame by matching columns to template properties:
+
+```python
+import pandas as pd
+
+df = pd.DataFrame({
+    'country': ['Malawi', 'Zambia', 'Mozambique'],
+    'city': ['Lilongwe', 'Lusaka', 'Maputo'],
+})
+
+# Adds "Malawi", "Zambia", "Mozambique" to the thesaurus linked to the
+# "country" property, and "Lilongwe", "Lusaka", "Maputo" to the thesaurus
+# linked to the "city" property in the given template.
+client.thesauri_from_df.execute(df=df, template_name='Template Name', language='en')
 ```
+
+Existing values are preserved — only new, unseen values are added.
 
 ### Settings
 
@@ -454,7 +479,7 @@ class ThesauriValue(BaseModel):
 
 ### Environment Variables
 
-Create a `.env` file in your working directory:
+Create a `.env` file in your working directory (only needed for authenticated instances):
 
 ```
 UWAZI_USER=admin
@@ -464,7 +489,9 @@ UWAZI_URL=http://localhost:3000
 
 ### Authentication
 
-Authentication is handled automatically when creating the client. The client logs in via `/api/login` and stores the session cookie for subsequent requests.
+Authentication is handled automatically when `user` and `password` are provided. The client logs in via `/api/login` and stores the session cookie for subsequent requests.
+
+For **public instances**, no credentials are needed — simply use `UwaziClient.public(url)` or `UwaziClient(url=url)`. Public endpoints like search work without authentication, while write operations will return a 401 error.
 
 ---
 
