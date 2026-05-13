@@ -19,7 +19,7 @@ class TemplateRepository:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/templates",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         data = json.loads(response.text)
         self._cache = [Template.model_validate(t) for t in data.get("rows", [])]
@@ -33,7 +33,7 @@ class TemplateRepository:
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/templates",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             data=json.dumps(template.model_dump(by_alias=True, exclude_none=True)),
         )
         return json.loads(response.text)
@@ -44,7 +44,7 @@ class TemplateRepository:
             url=f"{self.http.url}/api/templates",
             params={"_id": template_id},
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         return json.loads(response.text)
 

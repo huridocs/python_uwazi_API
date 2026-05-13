@@ -198,11 +198,15 @@ if __name__ == "__main__":
     # df = loop_entities()
     # print(df.to_string())
     #
-    df = pd.DataFrame()
-    df["title"] = ["15"]
-    df["select"] = ["aa"]
-    df["multi-select-1 space"] = [""]
-    print(df.to_string())
+    # df = pd.DataFrame()
+    # df["title"] = ["15"]
+    # df["select"] = ["aa"]
+    # df["multi-select-1 space"] = [""]
+    # print(df.to_string())
     # response = upload_dataframe(df, "test 2")
-    response = create_thesaury(df, "test 2")
-    print(response)
+    # response = create_thesaury(df, "test 2")
+    # print(response)
+
+    client = UwaziClient(url="https://upr-info-database.uwazi.io/")
+    df = client.search.search_by_filter_to_dataframe(language="en", batch_size=2, filters=SearchFilters())
+    print(df.to_string())

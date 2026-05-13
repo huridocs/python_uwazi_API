@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
 from uwazi_api.domain.exceptions import AuthenticationError
 from uwazi_api.iso_639_choices import iso_639_choices
@@ -8,7 +9,7 @@ from uwazi_api.adapters.request_retry import requests_retry_session
 
 
 class HttpClientAdapter(HttpClientPort):
-    def __init__(self, url: str, user: str, password: str):
+    def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None):
         url = url if url[-1] != "/" else url[:-1]
         for language in iso_639_choices:
             if url[-3:] == f"/{language[0]}":
@@ -22,7 +23,7 @@ class HttpClientAdapter(HttpClientPort):
             "Content-Type": "application/json",
         }
         self.graylog = logging.getLogger("graylog")
-        self.connect_sid = self._get_connect_sid()
+        self.connect_sid = self._get_connect_sid() if user and password else None
 
     def _get_connect_sid(self) -> str:
         response = self.request_adapter.post(
@@ -36,4 +37,6 @@ class HttpClientAdapter(HttpClientPort):
         cookie = response.cookies.get("connect.sid")
         if not cookie:
             raise AuthenticationError("No connect.sid cookie received")
+        parsed = urlparse(self.url)
+        self.request_adapter.cookies.set("connect.sid", cookie, domain=parsed.hostname, path="/")
         return cookie

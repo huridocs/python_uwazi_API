@@ -38,7 +38,7 @@ class SearchRepository:
             f"{self.http.url}/api/search",
             headers=self.http.headers,
             params=params,
-            cookies={"connect.sid": self.http.connect_sid, "locale": "en"},
+            cookies={"locale": "en"},
         )
         if response.status_code != 200:
             raise SearchError("Error getting entities shared ids")
@@ -69,7 +69,7 @@ class SearchRepository:
             f"{self.http.url}/api/search",
             headers=self.http.headers,
             params=params,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
         )
         if response.status_code != 200:
             raise SearchError("Error getting entities")
@@ -219,7 +219,7 @@ class SearchRepository:
             f"{self.http.url}/api/search",
             headers=self.http.headers,
             params=params,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
         )
         if response.status_code != 200:
             raise SearchError(f"Error searching entities by filter: {response.status_code}")
@@ -245,3 +245,17 @@ class SearchRepository:
         )
         entities = self._execute_search(params, language)
         return entities_to_dataframe(entities, template_id, self._template_repo)
+
+    def search_to_dataframe(
+        self,
+        template_name: Optional[str] = None,
+        start_from: int = 0,
+        batch_size: int = 30,
+        language: str = "en",
+        published: Optional[bool] = None,
+        order: str = "desc",
+        sort: str = "creationDate",
+    ) -> pd.DataFrame:
+        return self.search_by_filter_to_dataframe(
+            SearchFilters(), template_name, start_from, batch_size, language, published, order, sort
+        )

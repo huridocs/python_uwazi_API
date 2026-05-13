@@ -15,7 +15,7 @@ class FileRepository:
         document_response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/files/{file_name}",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         if document_response.status_code != 200:
             self.http.graylog.info(f"No document found for {file_name}")
@@ -39,7 +39,7 @@ class FileRepository:
                 url=f"{self.http.url}/api/files/upload/document",
                 data={"entity": share_id},
                 files={"file": (unicode_escape_title, file_bytes, str(file_type))},
-                cookies={"connect.sid": self.http.connect_sid, "locale": language},
+                cookies={"locale": language},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
             data = json.loads(response.text)
@@ -58,7 +58,7 @@ class FileRepository:
                 url=f"{self.http.url}/api/files/upload/attachment",
                 data={"entity": share_id},
                 files={"file": (unicode_escape_title, file_bytes, file_type)},
-                cookies={"connect.sid": self.http.connect_sid, "locale": language},
+                cookies={"locale": language},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
             data = json.loads(response.text)
@@ -76,7 +76,7 @@ class FileRepository:
                 url=f"{self.http.url}/api/files/upload/attachment",
                 data={"entity": entity_shared_id},
                 files={"file": (title, image_binary, "image/png")},
-                cookies={"connect.sid": self.http.connect_sid, "locale": language},
+                cookies={"locale": language},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
             data = json.loads(response.text)
@@ -93,7 +93,7 @@ class FileRepository:
         try:
             self.http.request_adapter.delete(
                 url=f"{self.http.url}/api/files",
-                cookies={"connect.sid": self.http.connect_sid},
+                cookies={},
                 params=params,
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )

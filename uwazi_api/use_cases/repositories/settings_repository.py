@@ -12,7 +12,7 @@ class SettingsRepository:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/settings",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         data = json.loads(response.text)
         return Settings.model_validate(data)

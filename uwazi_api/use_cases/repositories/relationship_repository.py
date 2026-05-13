@@ -18,7 +18,7 @@ class RelationshipRepository:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/relationtypes",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         data = json.loads(response.text)
         if isinstance(data, list):
@@ -36,7 +36,7 @@ class RelationshipRepository:
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/relationtypes",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             json=json_data,
         )
         return json.loads(response.text)
@@ -88,7 +88,7 @@ class RelationshipRepository:
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/relationships/bulk",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             data=json.dumps(json_data),
         )
         if response.status_code != 200:
