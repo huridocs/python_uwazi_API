@@ -1,3 +1,5 @@
+from typing import Optional
+
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
 from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
@@ -15,7 +17,7 @@ from uwazi_api.use_cases.thesauri_from_dataframe_use_case import ThesauriFromDat
 
 
 class UwaziClient:
-    def __init__(self, user: str, password: str, url: str):
+    def __init__(self, user: Optional[str] = None, password: Optional[str] = None, url: Optional[str] = None):
         self.http = HttpClientAdapter(url, user, password)
 
         # Drivers / Repositories
@@ -36,6 +38,10 @@ class UwaziClient:
         self._csv_import = CSVUseCase(self._csv_repo, self._template_repo, self._entity_repo)
         self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo)
         self._thesauri_from_df = ThesauriFromDataframeUseCase(self._template_repo, self._thesauri_repo)
+
+    @classmethod
+    def public(cls, url: str) -> "UwaziClient":
+        return cls(url=url)
 
     @property
     def entities(self) -> "EntityRepository":

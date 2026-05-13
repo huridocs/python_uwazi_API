@@ -14,7 +14,7 @@ class ThesauriRepository:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/thesauris",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
         )
         data = json.loads(response.content.decode("utf-8"))
         self._cache[language] = [Thesauri.model_validate(t) for t in data.get("rows", [])]
@@ -62,7 +62,7 @@ class ThesauriRepository:
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/thesauris",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             data=json.dumps(data),
         )
         return json.loads(response.content)
@@ -76,7 +76,7 @@ class ThesauriRepository:
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/thesauris",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             data=json.dumps(data),
         )
         return json.loads(response.content)
@@ -86,7 +86,7 @@ class ThesauriRepository:
         response = self.http.request_adapter.delete(
             url=f"{self.http.url}/api/thesauris",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             params={"_id": thesauri_id},
         )
         return json.loads(response.content)

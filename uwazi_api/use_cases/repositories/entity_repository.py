@@ -34,7 +34,7 @@ class EntityRepository(SearchRepository):
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/entities",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             params={"sharedId": shared_id, "omitRelationships": "true"},
         )
         if response.status_code != 200:
@@ -55,7 +55,7 @@ class EntityRepository(SearchRepository):
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/entities",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
             params={"_id": entity_id, "omitRelationships": "true"},
         )
         if response.status_code != 200:
@@ -77,7 +77,7 @@ class EntityRepository(SearchRepository):
         upload_response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid, "locale": language},
+            cookies={"locale": language},
             data=json.dumps(payload),
         )
         if upload_response.status_code != 200:
@@ -119,7 +119,7 @@ class EntityRepository(SearchRepository):
             f"{self.http.url}/api/documents",
             headers=self.http.headers,
             params={"sharedId": shared_id},
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
         )
         if response.status_code != 200:
             message = f"Error ({response.status_code}) deleting entity {shared_id}"
@@ -140,7 +140,7 @@ class EntityRepository(SearchRepository):
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/permissions",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
             data=json.dumps(payload),
         )
         if response.status_code != 200:
@@ -154,7 +154,7 @@ class EntityRepository(SearchRepository):
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/bulkdelete",
             headers=self.http.headers,
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
             data=json.dumps(payload),
         )
         if response.status_code != 200:

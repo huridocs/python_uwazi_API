@@ -14,7 +14,7 @@ class CSVRepository:
             url=f"{self.http.url}/api/import",
             data={"template": template_id},
             files={"file": (filename, BytesIO(csv_bytes), "application/csv")},
-            cookies={"connect.sid": self.http.connect_sid},
+            cookies={},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         if response.status_code != 200:
