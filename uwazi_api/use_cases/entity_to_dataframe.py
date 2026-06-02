@@ -83,6 +83,9 @@ def entities_to_dataframe(
 
     df = df.replace({pd.NA: None, float("nan"): None})
 
+    if template_repo:
+        df = _resolve_template_names(df, template_repo)
+
     if template_name and template_repo:
         template = template_repo.get_by_id(template_name) or template_repo.get_by_name(template_name)
         if not template:
@@ -92,6 +95,18 @@ def entities_to_dataframe(
         df = _convert_geolocations(df, template)
 
     return df
+
+
+def _resolve_template_names(dataframe: pd.DataFrame, template_repo: TemplateRepository) -> pd.DataFrame:
+    if dataframe.empty or "template" not in dataframe.columns:
+        return dataframe
+    templates = template_repo.get()
+    id_to_name = {t.id: t.name for t in templates if t.id}
+    if not id_to_name:
+        return dataframe
+    df_copy = dataframe.copy()
+    df_copy["template"] = df_copy["template"].apply(lambda x: id_to_name.get(x, x) if pd.notna(x) and x in id_to_name else x)
+    return df_copy
 
 
 def _format_timestamp(val, unit):
