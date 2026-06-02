@@ -163,19 +163,23 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entities deleted {shared_ids}")
 
-    def _get_prop_type_map(self, template_id: str) -> dict:
-        if not self._template_repo or not template_id:
-            return {}
-        template = self._template_repo.get_by_id(template_id)
+    def _resolve_template(self, template_name_or_id: str):
+        if not self._template_repo or not template_name_or_id:
+            return None
+        template = self._template_repo.get_by_id(template_name_or_id)
+        if template:
+            return template
+        return self._template_repo.get_by_name(template_name_or_id)
+
+    def _get_prop_type_map(self, template_name_or_id: str) -> dict:
+        template = self._resolve_template(template_name_or_id)
         if not template:
             return {}
         all_props = template.properties + template.common_properties
         return {p.name: p.type for p in all_props}
 
-    def _get_name_map(self, template_id: str) -> dict:
-        if not self._template_repo or not template_id:
-            return {}
-        template = self._template_repo.get_by_id(template_id)
+    def _get_name_map(self, template_name_or_id: str) -> dict:
+        template = self._resolve_template(template_name_or_id)
         if not template:
             return {}
         all_props = template.properties + template.common_properties
