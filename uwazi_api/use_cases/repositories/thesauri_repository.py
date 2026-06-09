@@ -17,7 +17,7 @@ class ThesauriRepository:
             cookies={"locale": language},
         )
         data = json.loads(response.content.decode("utf-8"))
-        self._cache[language] = [Thesauri.model_validate(t) for t in data.get("rows", [])]
+        self._cache[language] = [Thesauri.model_validate(t) for t in data.get("rows", []) if t.get("type", "") != "template"]
         return self._cache[language]
 
     def clear_cache(self, language: str = None) -> None:
