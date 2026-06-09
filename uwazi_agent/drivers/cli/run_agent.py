@@ -17,18 +17,9 @@ UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
-TASK_DESCRIPTION = (
-    "List the names of all thesauri currently defined in this Uwazi instance, "
-    "then create a new thesaurus called 'Driver Smoke Test Thesauri' with the "
-    "values ['alpha', 'beta', 'gamma']. Report what you found and what you did."
-)
+TASK_DESCRIPTION = "Can we have two thesauris with the same name?"
 
-CONTEXT = (
-    "You are running inside the uwazi_agent CLI driver. The Uwazi adapter has "
-    "already authenticated with the credentials from the .env file, so any "
-    "tool you call will hit a real instance. Be concise and prefer reading "
-    "before writing."
-)
+CONTEXT = ""
 
 
 async def main() -> None:
@@ -37,7 +28,7 @@ async def main() -> None:
     use_case = RunAgentUseCase(llm=llm, api=uwazi_api)
 
     print("Sending task to OpenRouter via RunAgentUseCase...\n")
-    output = await use_case.execute(task_description=TASK_DESCRIPTION, context="")
+    output = await use_case.execute(task_description=TASK_DESCRIPTION, context=CONTEXT)
     print("=== Agent output ===")
     print(output)
 
