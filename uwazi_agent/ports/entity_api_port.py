@@ -1,10 +1,8 @@
 from abc import ABC, abstractmethod
 
-from uwazi_agent.domain.agent_entity import (
-    AgentEntity,
-    AgentEntityMutationResult,
-    AgentEntitySearchResult,
-)
+from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
+from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 
 
 class EntityApiPort(ABC):

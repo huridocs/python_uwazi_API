@@ -4,12 +4,10 @@ from typing import Optional
 from uwazi_agent.adapters.template_mapper import TemplateMapperAdapter
 from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
 from uwazi_agent.adapters.uwazi_api.thesaurus_gateway import build_template_mapper_from_client
-from uwazi_agent.domain.agent_entity import (
-    AgentEntity,
-    AgentEntityMutationResult,
-    AgentEntitySearchResult,
-    AgentEntitySummary,
-)
+from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
+from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
+from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
 from uwazi_agent.ports.entity_api_port import EntityApiPort
