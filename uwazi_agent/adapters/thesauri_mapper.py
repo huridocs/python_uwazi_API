@@ -1,7 +1,7 @@
 import uuid
 
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
-from uwazi_agent.ports.mapper_port import ThesauriMapperPort
+from uwazi_agent.ports.thesauri_mapper_port import ThesauriMapperPort
 from uwazi_api.domain.thesauri import Thesauri
 from uwazi_api.domain.thesauri_value import ThesauriValue
 

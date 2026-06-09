@@ -1,0 +1,58 @@
+from typing import Sequence
+
+from pydantic_ai import Agent
+from pydantic_ai.models import Model
+from pydantic_ai.tools import Tool
+
+from .tools.create_template import create_template
+from .tools.create_thesauri import create_thesauri
+from .tools.delete_template import delete_template
+from .tools.delete_thesauri import delete_thesauri
+from .tools.get_template_names import get_template_names
+from .tools.get_templates_by_names import get_templates_by_names
+from .tools.get_thesauris_by_names import get_thesauris_by_names
+from .tools.get_thesauris_names import get_thesauris_names
+from .tools.update_template import update_template
+from .tools.update_thesauri import update_thesauri
+
+
+def build_thesauri_tools() -> list[Tool]:
+    return [
+        Tool(get_thesauris_by_names, takes_ctx=True),
+        Tool(get_thesauris_names, takes_ctx=True),
+        Tool(create_thesauri, takes_ctx=True),
+        Tool(update_thesauri, takes_ctx=True),
+        Tool(delete_thesauri, takes_ctx=True),
+    ]
+
+
+def build_template_tools() -> list[Tool]:
+    return [
+        Tool(get_templates_by_names, takes_ctx=True),
+        Tool(get_template_names, takes_ctx=True),
+        Tool(create_template, takes_ctx=True),
+        Tool(update_template, takes_ctx=True),
+        Tool(delete_template, takes_ctx=True),
+    ]
+
+
+def build_uwazi_agent(
+    model: Model,
+    deps_type: type,
+    instructions: str | None = None,
+    extra_tools: Sequence[Tool] = (),
+    include_thesauri: bool = True,
+    include_templates: bool = True,
+) -> Agent:
+    tools: list[Tool] = []
+    if include_thesauri:
+        tools.extend(build_thesauri_tools())
+    if include_templates:
+        tools.extend(build_template_tools())
+    tools.extend(extra_tools)
+    return Agent(
+        model,
+        deps_type=deps_type,
+        instructions=instructions,
+        tools=tools,
+    )

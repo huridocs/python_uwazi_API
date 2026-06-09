@@ -25,7 +25,12 @@ CONTEXT = ""
 async def main() -> None:
     uwazi_api = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     llm = OpenRouterAdapter(api_key=OPENROUTER_API_KEY)
-    use_case = RunAgentUseCase(llm=llm, api=uwazi_api)
+    use_case = RunAgentUseCase(
+        llm=llm,
+        thesauri_api=uwazi_api,
+        template_api=uwazi_api,
+        template_mapper=uwazi_api.template_mapper,
+    )
 
     print("Sending task to OpenRouter via RunAgentUseCase...\n")
     output = await use_case.execute(task_description=TASK_DESCRIPTION, context=CONTEXT)

@@ -1,26 +1,25 @@
 from pydantic_ai import RunContext
 
-from uwazi_agent.use_cases.tools.dependencies import ThesauriToolsDependencies
+from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
 async def update_thesauri(
-    ctx: RunContext[ThesauriToolsDependencies],
+    ctx: RunContext[UwaziAgentToolsDependencies],
     name: str,
     values: list[str],
     language: str = "en",
 ) -> dict:
-    """Add new value labels to an existing thesaurus.
+    """Add the given value labels to an existing thesaurus.
 
-    Use this when the user wants to extend a thesaurus with additional
-    options. Existing labels are preserved; only new labels are added.
+    Existing values are kept; new labels are added. To remove a value, ask
+    the user to do it manually through the Uwazi UI.
 
     Args:
-        name: The name of the thesaurus to update.
-        values: New value labels to add. Labels that already exist are kept
-            as-is and not duplicated.
+        name: The thesaurus name to update.
+        values: Value labels to ensure exist in the thesaurus.
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
-        The API response payload for the updated thesaurus.
+        The API response payload for the update.
     """
-    return await ctx.deps.api.update_thesauri(name=name, values=values, language=language)
+    return await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language)
