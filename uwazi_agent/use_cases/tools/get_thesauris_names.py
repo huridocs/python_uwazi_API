@@ -1,10 +1,10 @@
 from pydantic_ai import RunContext
 
-from uwazi_agent.use_cases.tools.dependencies import ThesauriToolsDependencies
+from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
 async def get_thesauris_names(
-    ctx: RunContext[ThesauriToolsDependencies],
+    ctx: RunContext[UwaziAgentToolsDependencies],
     language: str = "en",
 ) -> list[str]:
     """List the names of all thesauri available in the Uwazi instance.
@@ -18,5 +18,5 @@ async def get_thesauris_names(
     Returns:
         The list of thesaurus names currently defined.
     """
-    thesauris = await ctx.deps.api.get_thesauris(language=language)
+    thesauris = await ctx.deps.thesauri_api.get_thesauris(language=language)
     return [t.name for t in thesauris]

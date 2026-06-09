@@ -1,11 +1,11 @@
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
-from uwazi_agent.use_cases.tools.dependencies import ThesauriToolsDependencies
+from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
 async def get_thesauris_by_names(
-    ctx: RunContext[ThesauriToolsDependencies],
+    ctx: RunContext[UwaziAgentToolsDependencies],
     names: list[str],
     language: str = "en",
 ) -> list[AgentThesauri]:
@@ -22,4 +22,4 @@ async def get_thesauris_by_names(
     Returns:
         The matching thesauri, each with its current list of value labels.
     """
-    return await ctx.deps.api.get_thesauris_by_names(names=names, language=language)
+    return await ctx.deps.thesauri_api.get_thesauris_by_names(names=names, language=language)

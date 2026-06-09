@@ -22,3 +22,7 @@ class TemplateNotFoundError(DomainError):
 
 class AuthenticationError(DomainError):
     pass
+
+
+class PageNotFoundError(DomainError):
+    pass

@@ -1,23 +1,23 @@
 from pydantic_ai import RunContext
 
-from uwazi_agent.use_cases.tools.dependencies import ThesauriToolsDependencies
+from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
 async def delete_thesauri(
-    ctx: RunContext[ThesauriToolsDependencies],
+    ctx: RunContext[UwaziAgentToolsDependencies],
     name: str,
     language: str = "en",
 ) -> dict:
-    """Delete a thesaurus by name.
+    """Delete a thesaurus by its human-readable name.
 
-    Use this to remove a thesaurus that is no longer referenced by any
-    entity. Uwazi only allows deletion of unassigned thesauri.
+    The thesaurus must not be in use by any template, property, or entity —
+    otherwise the Uwazi instance will reject the deletion.
 
     Args:
-        name: The name of the thesaurus to delete.
+        name: The thesaurus name to delete.
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
         The API response payload for the deletion.
     """
-    return await ctx.deps.api.delete_thesauri(name=name, language=language)
+    return await ctx.deps.thesauri_api.delete_thesauri(name=name, language=language)
