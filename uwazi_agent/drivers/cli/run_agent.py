@@ -17,7 +17,12 @@ UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
-TASK_DESCRIPTION = "Create a template to hold information regarding books with as many properties types as it makes sense"
+TASK_DESCRIPTION = (
+    "Create a new film entity for 'Spirited Away' and fill in metadata that makes sense "
+    "for it (director, release year, country, genre, etc.). Use an existing template whose "
+    "properties fit a film; if none exists, create a suitable 'Film' template first, then "
+    "create the entity. Report back the shared_id of the entity you created."
+)
 
 CONTEXT = ""
 

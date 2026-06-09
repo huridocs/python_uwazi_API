@@ -4,6 +4,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
 
+from .tools.create_entities import create_entities
 from .tools.create_template import create_template
 from .tools.create_thesauri import create_thesauri
 from .tools.delete_entities_by_shared_ids import delete_entities_by_shared_ids
@@ -44,6 +45,7 @@ def build_entity_tools() -> list[Tool]:
     return [
         Tool(search_entities_by_text, takes_ctx=True),
         Tool(get_entities_by_shared_ids, takes_ctx=True),
+        Tool(create_entities, takes_ctx=True),
         Tool(update_entities, takes_ctx=True),
         Tool(delete_entities_by_shared_ids, takes_ctx=True),
     ]
