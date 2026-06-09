@@ -3,3 +3,4 @@ urllib3==2.6.3
 pandas==3.0.2
 pydantic==2.13.3
 load-dotenv==0.1.0
+fastapi
