@@ -17,7 +17,7 @@ UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
-TASK_DESCRIPTION = "Can we have two thesauris with the same name?"
+TASK_DESCRIPTION = "Create a template to hold information regarding books with as many properties types as it makes sense"
 
 CONTEXT = ""
 
@@ -30,6 +30,7 @@ async def main() -> None:
         thesauri_api=uwazi_api,
         template_api=uwazi_api,
         template_mapper=uwazi_api.template_mapper,
+        entity_api=uwazi_api,
     )
 
     print("Sending task to OpenRouter via RunAgentUseCase...\n")
