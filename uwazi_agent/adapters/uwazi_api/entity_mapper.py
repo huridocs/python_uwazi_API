@@ -11,6 +11,7 @@ from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriReposit
 from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
 
 from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 
 
 _SIMPLE_PROPS: set[PropertyType] = {
@@ -78,25 +79,61 @@ class EntityMapper:
         agent_entity: AgentEntity,
         language: str = "en",
     ) -> Entity:
-        if not agent_entity.template_name:
-            raise SearchError(f"Entity {agent_entity.shared_id}: `template_name` is required so metadata can be coerced.")
-        template = self._template_repo.get_by_name(agent_entity.template_name) or self._template_repo.get_by_id(
-            agent_entity.template_name
-        )
-        if not template:
-            raise SearchError(f"Template '{agent_entity.template_name}' not found")
-
-        template_id = template.id or agent_entity.template_name
-        coerced_metadata: dict[str, Any] = {}
-        if agent_entity.metadata:
-            coerced_metadata = self._coerce_metadata(agent_entity.metadata, template, language)
-
-        return Entity(
-            sharedId=agent_entity.shared_id,
+        return self._build_api_entity(
+            template_name=agent_entity.template_name,
             title=agent_entity.title,
-            template=template_id,
+            metadata=agent_entity.metadata,
             language=agent_entity.language or language,
             published=agent_entity.published,
+            shared_id=agent_entity.shared_id,
+        )
+
+    def to_api_for_create(
+        self,
+        agent_entity: AgentEntityCreate,
+        language: str = "en",
+    ) -> Entity:
+        """Build an API ``Entity`` for a brand-new entity (no ``shared_id``).
+
+        Leaving ``sharedId`` unset signals Uwazi to mint a fresh entity on
+        upload rather than overwrite an existing one.
+        """
+        return self._build_api_entity(
+            template_name=agent_entity.template_name,
+            title=agent_entity.title,
+            metadata=agent_entity.metadata,
+            language=agent_entity.language or language,
+            published=agent_entity.published,
+            shared_id=None,
+        )
+
+    def _build_api_entity(
+        self,
+        template_name: str,
+        title: str,
+        metadata: dict[str, Any],
+        language: str,
+        published: Optional[bool],
+        shared_id: Optional[str],
+    ) -> Entity:
+        if not template_name:
+            ref = shared_id or title or "<new entity>"
+            raise SearchError(f"Entity {ref}: `template_name` is required so metadata can be coerced.")
+        template = self._template_repo.get_by_name(template_name) or self._template_repo.get_by_id(template_name)
+        if not template:
+            raise SearchError(f"Template '{template_name}' not found")
+
+        template_id = template.id or template_name
+        coerced_metadata: dict[str, Any] = {}
+        if metadata:
+            coerced_metadata = self._coerce_metadata(metadata, template, language)
+
+        return Entity(
+            sharedId=shared_id,
+            title=title,
+            template=template_id,
+            language=language,
+            published=published,
             metadata=coerced_metadata,
         )
 

@@ -23,12 +23,15 @@ DEFAULT_INSTRUCTIONS = (
     "the mapper will resolve it to the Uwazi id. Property types of ``relationship`` are "
     "not supported yet (TODO).\n\n"
     "Entities belong to a template; their ``metadata`` shape is defined by the template's "
-    "properties. Before updating entities in bulk, look up the template to know each "
-    "property's type and which thesaurus values are valid. Identify every entity by its "
-    "``shared_id`` — never by title (titles are not unique and can change). To find ids, "
-    "search first with ``search_entities_by_text``; to inspect details, fetch by id with "
-    "``get_entities_by_shared_ids``. ``update_entities`` performs a partial merge: only "
-    "the fields you provide are changed. Pass thesaurus values as labels, never as UUIDs."
+    "properties. Before creating or updating entities in bulk, look up the template to "
+    "know each property's type and which thesaurus values are valid. To create brand-new "
+    "entities use ``create_entities`` — provide a ``title`` and ``template_name`` and never "
+    "a ``shared_id`` (Uwazi mints it and returns it to you). To change existing entities "
+    "use ``update_entities``, which performs a partial merge: only the fields you provide "
+    "are changed. Identify existing entities by their ``shared_id`` — never by title (titles "
+    "are not unique and can change). To find ids, search first with ``search_entities_by_text``; "
+    "to inspect details, fetch by id with ``get_entities_by_shared_ids``. Pass thesaurus "
+    "values as labels, never as UUIDs."
 )
 
 

@@ -5,6 +5,7 @@ from uwazi_agent.adapters.template_mapper import TemplateMapperAdapter
 from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
 from uwazi_agent.adapters.uwazi_api.thesaurus_gateway import build_template_mapper_from_client
 from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
@@ -161,6 +162,26 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort):
         return await asyncio.to_thread(_call)
 
     # --- EntityApiPort ----------------------------------------------------
+
+    async def create_entities(self, entities: list[AgentEntityCreate], language: str) -> list[AgentEntityMutationResult]:
+        def _call() -> list[AgentEntityMutationResult]:
+            results: list[AgentEntityMutationResult] = []
+            for agent_entity in entities:
+                try:
+                    api_entity = self._entity_mapper.to_api_for_create(agent_entity, language=language)
+                    new_shared_id = self._entity_repo.upload(api_entity, language)
+                    results.append(AgentEntityMutationResult(shared_id=new_shared_id, success=True))
+                except (UploadError, ValueError, SearchError) as exc:
+                    results.append(
+                        AgentEntityMutationResult(
+                            shared_id="",
+                            success=False,
+                            error=str(exc),
+                        )
+                    )
+            return results
+
+        return await asyncio.to_thread(_call)
 
     async def get_entities_by_shared_ids(self, shared_ids: list[str], language: str) -> list[AgentEntity]:
         def _fetch() -> list[AgentEntity]:
