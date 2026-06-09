@@ -1,6 +1,6 @@
 from pydantic_ai import RunContext
 
-from uwazi_agent.domain.agent_entity import AgentEntitySearchResult
+from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
