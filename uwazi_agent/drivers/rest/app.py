@@ -88,6 +88,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             template_mapper=uwazi_api.template_mapper,
             entity_api=uwazi_api,
             page_api=uwazi_api,
+            relationship_type_api=uwazi_api,
         )
 
         context = session.get_context()

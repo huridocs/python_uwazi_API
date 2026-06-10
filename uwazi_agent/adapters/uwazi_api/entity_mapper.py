@@ -174,9 +174,10 @@ class EntityMapper:
                     if label is not None:
                         extracted.append(label)
                 elif prop.type == PropertyType.RELATIONSHIP:
-                    label = item.get("label") or item.get("value")
-                    if label:
-                        extracted.append(label)
+                    shared_id = item.get("value")
+                    title = item.get("label")
+                    if shared_id or title:
+                        extracted.append({"shared_id": shared_id or "", "title": title or ""})
                 elif prop.type == PropertyType.LINK:
                     # On-disk envelope: {"value": {"label": ..., "url": ...}}
                     inner = item.get("value") if isinstance(item.get("value"), dict) else item
@@ -263,9 +264,7 @@ class EntityMapper:
                 return [_resolve_thesaurus_label(prop, value, self._thesauri_repo, language)]
             return [_resolve_thesaurus_label(prop, v, self._thesauri_repo, language) for v in _to_list(value)]
         if prop_type == PropertyType.RELATIONSHIP:
-            if isinstance(value, dict):
-                return _to_value_list(value)
-            return _to_value_list({"label": str(value)})
+            return _coerce_relationship(value, prop_name=prop.name)
         return _to_value_list(value)
 
 
@@ -274,7 +273,47 @@ def _is_repeated_type(prop_type: PropertyType) -> bool:
         PropertyType.MULTI_DATE,
         PropertyType.MULTI_DATE_RANGE,
         PropertyType.MULTI_SELECT,
+        PropertyType.RELATIONSHIP,
     }
+
+
+def _relationship_shared_id(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        # Accept the LLM-facing read shape ({shared_id, title}), the on-disk
+        # envelope ({value, label}), and a few common aliases.
+        for key in ("shared_id", "sharedId", "value", "entity"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def _coerce_relationship(value: Any, prop_name: str = "") -> list[dict[str, Any]]:
+    """Normalize a relationship value into the Uwazi envelope ``[{"value": sharedId}]``.
+
+    The agent provides the related entities by their ``shared_id``. Accepted
+    shapes: a single ``shared_id`` string, a list of ``shared_id`` strings, a
+    dict with a ``shared_id`` (or ``value``) key, or a list of such dicts (this
+    handles the on-read shape ``[{"shared_id": ..., "title": ...}]`` being
+    echoed back). Only the ``shared_id`` is sent; Uwazi resolves the title.
+    """
+    if value is None or value == "":
+        return []
+    items = value if isinstance(value, list) else [value]
+    result: list[dict[str, Any]] = []
+    for item in items:
+        shared_id = _relationship_shared_id(item)
+        if not shared_id:
+            raise SearchError(
+                f"Relationship value for property '{prop_name}' must be a related entity "
+                "``shared_id`` (string), a list of shared_ids, or "
+                '`{"shared_id": "<id>"}` objects. Search for the target entities to get '
+                f"their shared_id, got {item!r}"
+            )
+        result.append({"value": shared_id})
+    return result
 
 
 def _to_list(value: Any) -> list[Any]:

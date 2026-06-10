@@ -4,6 +4,7 @@ from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
+from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 
 
 class EntityApiPort(ABC):
@@ -33,7 +34,22 @@ class EntityApiPort(ABC):
     ) -> AgentEntitySearchResult: ...
 
     @abstractmethod
+    async def search_entities_by_filter(
+        self,
+        template_name: str,
+        filters: list[AgentSearchFilter],
+        language: str,
+        limit: int,
+        published: bool | None = None,
+    ) -> AgentEntitySearchResult: ...
+
+    @abstractmethod
     async def update_entities(self, updates: list[AgentEntity], language: str) -> list[AgentEntityMutationResult]: ...
 
     @abstractmethod
     async def delete_entities_by_shared_ids(self, shared_ids: list[str]) -> list[AgentEntityMutationResult]: ...
+
+    @abstractmethod
+    async def set_entities_publish_status(
+        self, shared_ids: list[str], published: bool
+    ) -> list[AgentEntityMutationResult]: ...

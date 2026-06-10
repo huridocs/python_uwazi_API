@@ -18,14 +18,21 @@ async def update_template(
 
     Use this when the user wants to change the set of custom properties on
     a template. The provided list **replaces** the existing custom property
-    list; pass the full desired set, not a diff.
+    list; pass the full desired set, not a diff. To preserve a property,
+    re-send it (look it up first with ``get_templates_by_names``); to keep its
+    capability flags, re-send those too.
 
     The platform-managed common properties (title, creationDate, editDate)
     are always preserved and are not part of the input.
 
-    For properties of type ``select`` or ``multiselect``, set ``thesaurus_name``
-    to the name of the thesaurus to link to. Property types of ``relationship``
-    are not supported yet (TODO).
+    Each property supports the same fields as in ``create_template``:
+        * ``use_as_filter`` — show as a sidebar filter and make filterable.
+        * ``show_in_card`` — show on entity summary cards.
+        * ``required`` — require a value before an entity can be saved.
+        * ``thesaurus_name`` — for ``select``/``multiselect``, the thesaurus
+          to link to.
+        * ``relationship_type_name`` (and optional ``related_template_name``)
+          — for ``relationship`` properties. The mapper resolves names to ids.
 
     Args:
         name: The template name to update.

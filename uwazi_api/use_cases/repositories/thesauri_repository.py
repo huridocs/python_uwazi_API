@@ -81,6 +81,30 @@ class ThesauriRepository:
         )
         return json.loads(response.content)
 
+    def update(self, thesauri_id: str, name: str, values: list[dict], language: str) -> dict:
+        """Replace a thesaurus' entire value tree.
+
+        ``values`` is the full desired list of values. Each item is either a
+        flat value ``{"label": ...}`` or a group ``{"label": ..., "values":
+        [{"label": ...}, ...]}``. Items may also carry an ``id`` to preserve
+        existing value ids. Posting to ``/api/thesauris`` with an ``_id``
+        replaces the whole vocabulary, so callers that want to keep existing
+        values must include them here.
+        """
+        self.clear_cache(language)
+        data = {
+            "_id": thesauri_id,
+            "name": name,
+            "values": values,
+        }
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/thesauris",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            data=json.dumps(data),
+        )
+        return json.loads(response.content)
+
     def delete_unassigned(self, thesauri_id: str, language: str) -> dict:
         self.clear_cache(language)
         response = self.http.request_adapter.delete(

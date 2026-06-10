@@ -21,10 +21,23 @@ async def create_template(
     The platform-managed common properties (title, creationDate, editDate)
     are added automatically — never include them.
 
-    For properties of type ``select`` or ``multiselect``, set ``thesaurus_name``
-    to the name of the thesaurus to link to. The mapper will resolve it to the
-    Uwazi id under the hood. Property types of ``relationship`` are not
-    supported yet (TODO).
+    Each property has a ``name`` and ``type`` plus three Uwazi capability flags
+    you can set:
+        * ``use_as_filter`` — show the property as a library sidebar filter and
+          make it searchable with ``search_entities_by_filter``.
+        * ``show_in_card`` — display the property's value on entity summary
+          cards in list/search views.
+        * ``required`` — forbid saving an entity unless the property has a
+          value.
+
+    Linking properties to other data:
+        * For ``select``/``multiselect``: set ``thesaurus_name`` to the
+          thesaurus to draw values from (created with ``create_thesauri``).
+        * For ``relationship``: set ``relationship_type_name`` to an existing
+          relationship type (list with ``get_relationship_type_names`` or
+          create with ``create_relationship_type``) and, optionally,
+          ``related_template_name`` to restrict which template's entities can
+          be linked (omit to allow any). The mapper resolves all names to ids.
 
     Args:
         name: The unique name for the new template.

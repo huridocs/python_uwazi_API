@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
+from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
@@ -15,6 +16,7 @@ class UwaziAgentToolsDependencies(BaseModel):
     thesauri_api: ThesauriApiPort
     template_api: TemplateApiPort
     template_mapper: TemplateMapperPort
+    relationship_type_api: RelationshipTypeApiPort | None = None
     entity_api: EntityApiPort | None = None
     page_api: PageApiPort | None = None
     entity_store: EntityStore = Field(default_factory=EntityStore)

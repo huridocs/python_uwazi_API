@@ -46,5 +46,13 @@ AGENT_PROPERTY_TYPE_FORMATS: dict[AgentPropertyType, str] = {
         "On read, the LLM sees `[lat, lon]` pairs; never echo back the read "
         "shape with extra `label`/`lat`/`lon` keys — the mapper will reject it."
     ),
-    AgentPropertyType.RELATIONSHIP: "TODO: id of a related entity (not yet supported in agent tools)",
+    AgentPropertyType.RELATIONSHIP: (
+        "a list of related entities, identified by their stable ``shared_id`` "
+        '(e.g. `["k7d2x9ab1cd"]`). You may also pass the on-read shape '
+        '`[{"shared_id": "k7d2x9ab1cd", "title": "The Great Gatsby"}]`; only the '
+        "``shared_id`` is used on write (the title is informational). To discover "
+        "the ``shared_id`` of the entities you want to link to, search for them "
+        "first with the entity search tools. On read you receive "
+        '`[{"shared_id": ..., "title": ...}]` for each linked entity.'
+    ),
 }

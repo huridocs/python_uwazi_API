@@ -39,6 +39,39 @@ class RelationshipRepository:
             cookies={"locale": language},
             json=json_data,
         )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) creating relation type '{name}': {response.text}"
+            self.http.graylog.error(message)
+            raise UploadError(message)
+        return json.loads(response.text)
+
+    def update_relation_type(self, relation_type_id: str, name: str, language: str = "en") -> dict:
+        self.clear_cache()
+        json_data = {"_id": relation_type_id, "name": name}
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/relationtypes",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            json=json_data,
+        )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) updating relation type '{name}': {response.text}"
+            self.http.graylog.error(message)
+            raise UploadError(message)
+        return json.loads(response.text)
+
+    def delete_relation_type(self, relation_type_id: str, language: str = "en") -> dict:
+        self.clear_cache()
+        response = self.http.request_adapter.delete(
+            url=f"{self.http.url}/api/relationtypes",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            params={"_id": relation_type_id},
+        )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) deleting relation type {relation_type_id}: {response.text}"
+            self.http.graylog.error(message)
+            raise UploadError(message)
         return json.loads(response.text)
 
     def get_relation_type_by_name(self, name: str) -> Optional[RelationshipType]:

@@ -54,6 +54,11 @@ async def create_entities(
           list of objects with ``label``/``lat``/``lon`` keys — that is
           the on-disk envelope and the mapper will reject it.
         * ``image`` / ``media``: URL or file reference.
+        * ``relationship``: a list of related entities by their ``shared_id``
+          (e.g. ``["k7d2x9ab1cd"]``). Search for the target entities first to
+          obtain their ids. On read you receive
+          ``[{"shared_id": ..., "title": ...}]``; only ``shared_id`` is used on
+          write.
 
     Args:
         entities: The list of new entities to create.
