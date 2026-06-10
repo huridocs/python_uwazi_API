@@ -1,14 +1,19 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
+from uwazi_agent.configuration import ENTITIES_LIMIT_FOR_LLM_MODEL
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def get_entities_by_shared_ids(
     ctx: RunContext[UwaziAgentToolsDependencies],
     shared_ids: list[str],
     language: str = "en",
-) -> list[AgentEntity]:
+    limit: int = 10000,
+) -> list[AgentEntity] | str:
+    logger.info("get_entities_by_shared_ids(shared_ids={!r}, language={!r}, limit={!r})", shared_ids, language, limit)
     """Fetch full entity details by their Uwazi ``shared_id``.
 
     Use this when you already know the stable ``shared_id`` of one or more
@@ -30,6 +35,13 @@ async def get_entities_by_shared_ids(
     The heavy ``documents`` and ``attachments`` payloads are stripped because
     they are not useful for reasoning and would bloat the context.
 
+    Entity store:
+        * All fetched entities are automatically stored in the session entity
+          store for batch processing via the Python agent.
+        * When the result count exceeds ``ENTITIES_LIMIT_FOR_LLM_MODEL``,
+          suggest using the Python agent for processing instead of handling
+          entities individually.
+
     Args:
         shared_ids: The list of Uwazi shared ids to look up. Unknown ids are
             silently skipped from the result.
@@ -37,7 +49,22 @@ async def get_entities_by_shared_ids(
 
     Returns:
         The matching entities with their full metadata, labels resolved.
+        On error, returns a string describing the problem.
     """
     if ctx.deps.entity_api is None:
-        raise RuntimeError("Entity tools are not configured: `entity_api` is missing on dependencies.")
-    return await ctx.deps.entity_api.get_entities_by_shared_ids(shared_ids=shared_ids, language=language)
+        return "Error: Entity tools are not configured: `entity_api` is missing on dependencies."
+    try:
+        entities = await ctx.deps.entity_api.get_entities_by_shared_ids(
+            shared_ids=shared_ids, language=language, limit=limit
+        )
+    except DomainError as exc:
+        return f"Error fetching entities by shared_ids: {exc}. Please verify the shared_ids and retry."
+    ctx.deps.entity_store.add_entities(entities)
+    if len(entities) > ENTITIES_LIMIT_FOR_LLM_MODEL:
+        ctx.deps.entity_store.needs_python_agent = True
+        return (
+            f"{len(entities)} entities fetched and stored in the entity store. "
+            f"This exceeds the LLM limit of {ENTITIES_LIMIT_FOR_LLM_MODEL}. "
+            f"You MUST delegate to the Python agent for batch processing."
+        )
+    return entities

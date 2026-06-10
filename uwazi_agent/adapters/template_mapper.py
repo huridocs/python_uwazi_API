@@ -3,6 +3,7 @@ from typing import Optional, Protocol
 from uwazi_agent.adapters.property_type_mapper import agent_to_api_property_type, api_to_agent_property_type
 from uwazi_agent.domain.agent_property import AgentProperty
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
+from uwazi_agent.domain.agent_property_type_formats import AGENT_PROPERTY_TYPE_FORMATS
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_api.domain.property_schema import PropertySchema
@@ -35,6 +36,7 @@ class TemplateMapperAdapter(TemplateMapperPort):
                     name=p.name,
                     type=agent_type,
                     thesaurus_name=thesaurus_name,
+                    format_instructions=AGENT_PROPERTY_TYPE_FORMATS.get(agent_type),
                 )
             )
         return AgentTemplate(name=api_template.name, properties=agent_props)

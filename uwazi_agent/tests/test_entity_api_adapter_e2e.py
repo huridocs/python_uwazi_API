@@ -89,6 +89,26 @@ class TestEntityApiAdapterE2E:
         finally:
             self._delete(shared_id)
 
+    def test_02b_get_entities_by_template_returns_summary_and_examples(self):
+        marker = f"{self.unique_marker}_by_tpl"
+        shared_id = self._create_entity(title=marker, metadata={})
+        try:
+            result = None
+            for _ in range(10):
+                result = _run(self.adapter.get_entities_by_template(self.test_template_name, "en", limit=100))
+                if any(e.shared_id == shared_id for e in result._all_entities):
+                    break
+                time.sleep(0.5)
+            assert result.summary.count >= 1
+            assert self.test_template_name in result.summary.by_template
+            assert shared_id in result.summary.shared_ids or any(e.shared_id == shared_id for e in result._all_entities)
+            assert len(result.examples) >= 1
+            for example in result.examples:
+                assert isinstance(example, AgentEntity)
+                assert example.template_name == self.test_template_name
+        finally:
+            self._delete(shared_id)
+
     def test_03_update_entities_partial_merge_preserves_omitted_fields(self):
         shared_id = self._create_entity(title=f"{self.unique_marker}_upd", metadata={})
         try:

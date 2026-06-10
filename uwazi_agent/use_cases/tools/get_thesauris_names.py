@@ -1,12 +1,15 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def get_thesauris_names(
     ctx: RunContext[UwaziAgentToolsDependencies],
     language: str = "en",
-) -> list[str]:
+) -> list[str] | str:
+    logger.info("get_thesauris_names(language={!r})", language)
     """List the names of all thesauri available in the Uwazi instance.
 
     Use this to discover what controlled vocabularies exist before the user
@@ -16,7 +19,11 @@ async def get_thesauris_names(
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
-        The list of thesaurus names currently defined.
+        The list of thesaurus names currently defined. On error, returns
+        a string describing the problem.
     """
-    thesauris = await ctx.deps.thesauri_api.get_thesauris(language=language)
-    return [t.name for t in thesauris]
+    try:
+        thesauris = await ctx.deps.thesauri_api.get_thesauris(language=language)
+        return [t.name for t in thesauris]
+    except DomainError as exc:
+        return f"Error listing thesauri names: {exc}. Please check the Uwazi connection and retry."

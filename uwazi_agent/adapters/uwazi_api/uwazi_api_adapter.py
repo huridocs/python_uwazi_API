@@ -197,10 +197,12 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
 
         return await asyncio.to_thread(_call)
 
-    async def get_entities_by_shared_ids(self, shared_ids: list[str], language: str) -> list[AgentEntity]:
+    async def get_entities_by_shared_ids(
+        self, shared_ids: list[str], language: str, limit: int = 10000
+    ) -> list[AgentEntity]:
         def _fetch() -> list[AgentEntity]:
             result: list[AgentEntity] = []
-            for shared_id in shared_ids:
+            for shared_id in shared_ids[:limit]:
                 try:
                     api_entity = self._entity_repo.get_one(shared_id, language)
                 except EntityNotFoundError:
@@ -228,6 +230,23 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
             return self._summarize(entities, limit, language)
 
         return await asyncio.to_thread(_search)
+
+    async def get_entities_by_template(
+        self,
+        template_name: str,
+        language: str,
+        limit: int,
+    ) -> AgentEntitySearchResult:
+        def _fetch() -> AgentEntitySearchResult:
+            entities = self._search_repo.get(
+                start_from=0,
+                batch_size=limit,
+                template_name=template_name,
+                language=language,
+            )
+            return self._summarize(entities, limit, language)
+
+        return await asyncio.to_thread(_fetch)
 
     async def update_entities(self, updates: list[AgentEntity], language: str) -> list[AgentEntityMutationResult]:
         def _call() -> list[AgentEntityMutationResult]:
@@ -393,8 +412,9 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
 
         example_count = min(3, count, limit)
         examples = [self._trim_entity(e, language) for e in entities[:example_count]]
+        all_agent_entities = [self._trim_entity(e, language) for e in entities]
 
-        return AgentEntitySearchResult(
+        result = AgentEntitySearchResult(
             summary=AgentEntitySummary(
                 count=count,
                 by_template=by_template,
@@ -403,3 +423,5 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
             ),
             examples=examples,
         )
+        result._all_entities = all_agent_entities
+        return result

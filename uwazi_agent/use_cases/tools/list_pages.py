@@ -1,13 +1,16 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def list_pages(
     ctx: RunContext[UwaziAgentToolsDependencies],
     language: str = "en",
-) -> list[AgentPageSummary]:
+) -> list[AgentPageSummary] | str:
+    logger.info("list_pages(language={!r})", language)
     """List the Settings → Pages of a Uwazi instance as compact summaries.
 
     Use this to discover which pages exist and to find a page's
@@ -22,7 +25,11 @@ async def list_pages(
     Returns:
         One summary per page: ``shared_id``, ``title``, ``language``,
         public ``url``, and the ``has_markdown`` / ``has_javascript`` flags.
+        On error, returns a string describing the problem.
     """
     if ctx.deps.page_api is None:
-        raise RuntimeError("Page tools are not configured: `page_api` is missing on dependencies.")
-    return await ctx.deps.page_api.list_pages(language=language)
+        return "Error: Page tools are not configured: `page_api` is missing on dependencies."
+    try:
+        return await ctx.deps.page_api.list_pages(language=language)
+    except DomainError as exc:
+        return f"Error listing pages: {exc}. Please check the Uwazi connection and retry."

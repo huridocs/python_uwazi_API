@@ -1,7 +1,10 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_property import AgentProperty
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_agent.use_cases.tools.fail_forward import suggest_template_names
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def update_template(
@@ -9,7 +12,8 @@ async def update_template(
     name: str,
     properties: list[AgentProperty],
     language: str = "en",
-) -> dict:
+) -> dict | str:
+    logger.info("update_template(name={!r}, properties_count={}, language={!r})", name, len(properties), language)
     """Replace the custom properties of an existing template.
 
     Use this when the user wants to change the set of custom properties on
@@ -29,9 +33,15 @@ async def update_template(
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
-        The API response payload for the update.
+        The API response payload for the update. On error, returns a
+        string with suggestions.
     """
     from uwazi_agent.domain.agent_template import AgentTemplate
 
-    template = AgentTemplate(name=name, properties=properties)
-    return await ctx.deps.template_api.update_template(template=template, language=language)
+    try:
+        template = AgentTemplate(name=name, properties=properties)
+        return await ctx.deps.template_api.update_template(template=template, language=language)
+    except DomainError as exc:
+        if "not found" in str(exc).lower():
+            return await suggest_template_names(ctx.deps, name)
+        return f"Error updating template '{name}': {exc}. Please check the template name and properties, then retry."

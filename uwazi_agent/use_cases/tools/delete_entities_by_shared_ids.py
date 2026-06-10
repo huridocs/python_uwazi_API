@@ -1,13 +1,16 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def delete_entities_by_shared_ids(
     ctx: RunContext[UwaziAgentToolsDependencies],
     shared_ids: list[str],
-) -> list[AgentEntityMutationResult]:
+) -> list[AgentEntityMutationResult] | str:
+    logger.info("delete_entities_by_shared_ids(shared_ids={!r})", shared_ids)
     """Delete one or more entities by their ``shared_id``.
 
     Deletions are **irreversible** and will remove the entity along with
@@ -32,8 +35,12 @@ async def delete_entities_by_shared_ids(
 
     Returns:
         A per-entity result indicating success or a descriptive error
-        (e.g. unknown shared_id, permission denied).
+        (e.g. unknown shared_id, permission denied). On catastrophic
+        error, returns a string describing the problem.
     """
     if ctx.deps.entity_api is None:
-        raise RuntimeError("Entity tools are not configured: `entity_api` is missing on dependencies.")
-    return await ctx.deps.entity_api.delete_entities_by_shared_ids(shared_ids=shared_ids)
+        return "Error: Entity tools are not configured: `entity_api` is missing on dependencies."
+    try:
+        return await ctx.deps.entity_api.delete_entities_by_shared_ids(shared_ids=shared_ids)
+    except DomainError as exc:
+        return f"Error deleting entities: {exc}. Please verify the shared_ids and retry."
