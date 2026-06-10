@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 from pydantic_ai import RunContext
 
+from uwazi_agent import configuration
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -122,4 +123,9 @@ async def run_python_code(
 
     entities = ctx.deps.entity_store.entities
 
-    return await asyncio.to_thread(_execute_python_code, code, entities, ctx.deps.entity_api, language)
+    output = await asyncio.to_thread(_execute_python_code, code, entities, ctx.deps.entity_api, language)
+    limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
+    if len(output) > limit:
+        logger.warning("Output truncated from {} to {} characters", len(output), limit)
+        output = output[:limit] + "\n... [output truncated]"
+    return output
