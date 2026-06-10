@@ -18,10 +18,13 @@ UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 TASK_DESCRIPTION = (
-    "Create a new film entity for 'Spirited Away' and fill in metadata that makes sense "
-    "for it (director, release year, country, genre, etc.). Use an existing template whose "
-    "properties fit a film; if none exists, create a suitable 'Film' template first, then "
-    "create the entity. Report back the shared_id of the entity you created."
+    "Create a new, beautiful Uwazi page titled 'About Our Human Rights Archive'. "
+    "Write a polished Markdown body that uses a centered hero section (an HTML "
+    '<div align="center"> with a big heading and a short tagline), a horizontal rule, '
+    "an '## Our Mission' section with a couple of sentences, a '## What You'll Find' "
+    "section with a bulleted list (documents, entities, thematic collections), and a "
+    "closing call-to-action. Keep it self-contained (no external images required). "
+    "After creating it, report back the page's shared_id and its public url."
 )
 
 CONTEXT = ""
@@ -36,6 +39,7 @@ async def main() -> None:
         template_api=uwazi_api,
         template_mapper=uwazi_api.template_mapper,
         entity_api=uwazi_api,
+        page_api=uwazi_api,
     )
 
     print("Sending task to OpenRouter via RunAgentUseCase...\n")
