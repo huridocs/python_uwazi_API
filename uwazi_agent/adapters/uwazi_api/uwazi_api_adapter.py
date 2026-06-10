@@ -3,23 +3,30 @@ from typing import Optional
 
 from uwazi_agent.adapters.template_mapper import TemplateMapperAdapter
 from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
+from uwazi_agent.adapters.uwazi_api.page_mapper import PageMapper
 from uwazi_agent.adapters.uwazi_api.thesaurus_gateway import build_template_mapper_from_client
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
+from uwazi_agent.domain.agent_page import AgentPage
+from uwazi_agent.domain.agent_page_create import AgentPageCreate
+from uwazi_agent.domain.agent_page_mutation_result import AgentPageMutationResult
+from uwazi_agent.domain.agent_page_summary import AgentPageSummary
+from uwazi_agent.domain.agent_page_update import AgentPageUpdate
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
 from uwazi_agent.ports.entity_api_port import EntityApiPort
+from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.exceptions import EntityNotFoundError, SearchError, UploadError
+from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
 
 
-class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort):
+class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort):
     def __init__(
         self,
         user: Optional[str] = None,
@@ -27,20 +34,27 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort):
         url: Optional[str] = None,
         template_mapper: Optional[TemplateMapperAdapter] = None,
         entity_mapper: Optional[EntityMapper] = None,
+        page_mapper: Optional[PageMapper] = None,
     ):
         self.client = UwaziClient(user=user, password=password, url=url)
         self._thesauri_repo = self.client.thesauris
         self._template_repo = self.client.templates
         self._entity_repo = self.client.entities
         self._search_repo = self.client.search
+        self._pages_repo = self.client.pages
         self._template_mapper = template_mapper or build_template_mapper_from_client(self.client)
         self._entity_mapper = entity_mapper or EntityMapper(
             template_repo=self._template_repo, thesauri_repo=self._thesauri_repo
         )
+        self._page_mapper = page_mapper or PageMapper(base_url=self.client.http.url)
 
     @property
     def entity_mapper(self) -> EntityMapper:
         return self._entity_mapper
+
+    @property
+    def page_mapper(self) -> PageMapper:
+        return self._page_mapper
 
     @property
     def template_mapper(self) -> TemplateMapperAdapter:
@@ -257,6 +271,99 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort):
                             error=str(exc),
                         )
                     )
+            return results
+
+        return await asyncio.to_thread(_call)
+
+    # --- PageApiPort ------------------------------------------------------
+
+    async def list_pages(self, language: str) -> list[AgentPageSummary]:
+        def _fetch() -> list[AgentPageSummary]:
+            return [self._page_mapper.to_summary(p) for p in self._pages_repo.get_all(language)]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def get_pages_by_shared_ids(self, shared_ids: list[str], language: str) -> list[AgentPage]:
+        def _fetch() -> list[AgentPage]:
+            result: list[AgentPage] = []
+            for shared_id in shared_ids:
+                try:
+                    page = self._pages_repo.get_by_shared_id(shared_id, language)
+                except PageNotFoundError:
+                    continue
+                result.append(self._page_mapper.to_agent(page))
+            return result
+
+        return await asyncio.to_thread(_fetch)
+
+    async def create_pages(self, pages: list[AgentPageCreate], language: str) -> list[AgentPageMutationResult]:
+        def _call() -> list[AgentPageMutationResult]:
+            results: list[AgentPageMutationResult] = []
+            for page in pages:
+                try:
+                    created = self._pages_repo.create(
+                        title=page.title,
+                        content=page.content,
+                        script=page.javascript,
+                        entity_view=page.entity_view,
+                        language=page.language or language,
+                    )
+                    results.append(
+                        AgentPageMutationResult(
+                            shared_id=created.shared_id or "",
+                            success=True,
+                            url=self._page_mapper.page_url(created),
+                        )
+                    )
+                except (UploadError, ValueError, PageNotFoundError) as exc:
+                    results.append(AgentPageMutationResult(shared_id="", success=False, error=str(exc)))
+            return results
+
+        return await asyncio.to_thread(_call)
+
+    async def update_pages(self, updates: list[AgentPageUpdate], language: str) -> list[AgentPageMutationResult]:
+        def _call() -> list[AgentPageMutationResult]:
+            results: list[AgentPageMutationResult] = []
+            for update in updates:
+                page_language = update.language or language
+                try:
+                    existing = self._pages_repo.get_by_shared_id(update.shared_id, page_language)
+                    if update.title is not None:
+                        existing.title = update.title
+                    if update.entity_view is not None:
+                        existing.entity_view = update.entity_view
+                    metadata = dict(existing.metadata or {})
+                    if update.content is not None:
+                        metadata["content"] = update.content
+                    if update.javascript is not None:
+                        if update.javascript == "":
+                            metadata.pop("script", None)
+                        else:
+                            metadata["script"] = update.javascript
+                    existing.metadata = metadata
+                    saved = self._pages_repo.update(existing)
+                    results.append(
+                        AgentPageMutationResult(
+                            shared_id=saved.shared_id or update.shared_id,
+                            success=True,
+                            url=self._page_mapper.page_url(saved),
+                        )
+                    )
+                except (UploadError, ValueError, PageNotFoundError) as exc:
+                    results.append(AgentPageMutationResult(shared_id=update.shared_id, success=False, error=str(exc)))
+            return results
+
+        return await asyncio.to_thread(_call)
+
+    async def delete_pages_by_shared_ids(self, shared_ids: list[str], language: str) -> list[AgentPageMutationResult]:
+        def _call() -> list[AgentPageMutationResult]:
+            results: list[AgentPageMutationResult] = []
+            for shared_id in shared_ids:
+                try:
+                    self._pages_repo.delete(shared_id, language)
+                    results.append(AgentPageMutationResult(shared_id=shared_id, success=True))
+                except (PageNotFoundError, UploadError) as exc:
+                    results.append(AgentPageMutationResult(shared_id=shared_id, success=False, error=str(exc)))
             return results
 
         return await asyncio.to_thread(_call)

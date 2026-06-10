@@ -1,7 +1,8 @@
 import json
+from typing import Optional
 
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
-from uwazi_api.domain.exceptions import PageNotFoundError
+from uwazi_api.domain.exceptions import PageNotFoundError, UploadError
 from uwazi_api.domain.page import Page
 
 
@@ -9,11 +10,11 @@ class PagesRepository:
     def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client
 
-    def get_all(self) -> list[Page]:
+    def get_all(self, language: str = "en") -> list[Page]:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/pages",
             headers=self.http.headers,
-            cookies={},
+            cookies={"locale": language},
         )
         if response.status_code != 200:
             message = f"Error ({response.status_code}) getting pages"
@@ -21,11 +22,11 @@ class PagesRepository:
             raise PageNotFoundError(message)
         return [Page.model_validate(p) for p in response.json()]
 
-    def get_by_shared_id(self, shared_id: str) -> Page:
+    def get_by_shared_id(self, shared_id: str, language: str = "en") -> Page:
         response = self.http.request_adapter.get(
             url=f"{self.http.url}/api/pages",
             headers=self.http.headers,
-            cookies={},
+            cookies={"locale": language},
             params={"sharedId": shared_id},
         )
         if response.status_code != 200:
@@ -39,29 +40,67 @@ class PagesRepository:
             return Page.model_validate(data[0])
         return Page.model_validate(data)
 
-    def create(self, shared_id: str = "", entity_view: bool = False, locales: dict | None = None) -> dict:
-        if locales is None:
-            locales = {}
+    def create(
+        self,
+        title: str,
+        content: str = "",
+        script: Optional[str] = None,
+        entity_view: bool = False,
+        language: str = "en",
+    ) -> Page:
+        metadata: dict[str, str] = {"content": content or ""}
+        if script:
+            metadata["script"] = script
         payload = {
-            "sharedId": shared_id,
+            "title": title,
+            "language": language,
             "entityView": entity_view,
-            "locales": locales,
+            "metadata": metadata,
         }
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/pages",
             headers=self.http.headers,
-            cookies={},
+            cookies={"locale": language},
             data=json.dumps(payload),
         )
-        response.raise_for_status()
-        return response.json()
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) creating page '{title}': {response.text}"
+            self.http.graylog.info(message)
+            raise UploadError(message)
+        return Page.model_validate(response.json())
 
-    def delete(self, shared_id: str) -> None:
+    def update(self, page: Page) -> Page:
+        if not page.id or not page.shared_id:
+            raise UploadError("Updating a page requires both its '_id' and 'sharedId'.")
+        language = page.language or "en"
+        # The /api/pages schema rejects additional properties, so only send
+        # the fields it accepts (not the model defaults like draft/releases).
+        payload = {
+            "_id": page.id,
+            "sharedId": page.shared_id,
+            "title": page.title,
+            "language": language,
+            "entityView": page.entity_view,
+            "metadata": page.metadata or {},
+        }
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/pages",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            data=json.dumps(payload),
+        )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) updating page {page.shared_id}: {response.text}"
+            self.http.graylog.info(message)
+            raise UploadError(message)
+        return Page.model_validate(response.json())
+
+    def delete(self, shared_id: str, language: str = "en") -> None:
         response = self.http.request_adapter.delete(
             url=f"{self.http.url}/api/pages",
             headers=self.http.headers,
             params={"sharedId": shared_id},
-            cookies={},
+            cookies={"locale": language},
         )
         if response.status_code != 200:
             message = f"Error ({response.status_code}) deleting page {shared_id}"

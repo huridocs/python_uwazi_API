@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 
 from uwazi_agent.ports.entity_api_port import EntityApiPort
+from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
@@ -15,3 +16,4 @@ class UwaziAgentToolsDependencies(BaseModel):
     template_mapper: TemplateMapperPort
     thesauri_mapper: ThesauriMapperPort | None = None
     entity_api: EntityApiPort | None = None
+    page_api: PageApiPort | None = None
