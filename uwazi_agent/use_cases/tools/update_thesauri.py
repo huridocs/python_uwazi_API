@@ -43,6 +43,7 @@ async def update_thesauri(
     try:
         return await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language, groups=groups)
     except DomainError as exc:
+        logger.error("update_thesauri FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():
             return await suggest_thesauri_names(ctx.deps, name, language)
         return f"Error updating thesaurus '{name}': {exc}. Please check the thesaurus name and values, then retry."

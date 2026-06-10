@@ -45,4 +45,5 @@ async def update_pages(
     try:
         return await ctx.deps.page_api.update_pages(updates=updates, language=language)
     except DomainError as exc:
+        logger.error("update_pages FAILED: {}", exc)
         return f"Error updating pages: {exc}. Please verify the shared_ids and retry."

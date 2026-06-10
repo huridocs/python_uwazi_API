@@ -28,6 +28,7 @@ async def delete_thesauri(
     try:
         return await ctx.deps.thesauri_api.delete_thesauri(name=name, language=language)
     except DomainError as exc:
+        logger.error("delete_thesauri FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():
             return await suggest_thesauri_names(ctx.deps, name, language)
         return f"Error deleting thesaurus '{name}': {exc}. The thesaurus may be in use by a template — remove the reference first, then retry."

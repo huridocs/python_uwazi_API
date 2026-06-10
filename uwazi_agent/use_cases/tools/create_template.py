@@ -54,4 +54,5 @@ async def create_template(
         template = AgentTemplate(name=name, properties=properties)
         return await ctx.deps.template_api.create_template(template=template, language=language)
     except DomainError as exc:
+        logger.error("create_template FAILED: name={} error={}", name, exc)
         return f"Error creating template '{name}': {exc}. Please check the template name and properties, then retry."

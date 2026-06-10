@@ -1,11 +1,13 @@
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from uwazi_agent.adapters.llm.openrouter_adapter import OpenRouterAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
+from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
 
 
@@ -22,6 +24,8 @@ MAX_CONTEXT_EXCHANGES = 10
 
 
 async def main() -> None:
+    setup_logging(url=UWAZI_URL, user=UWAZI_USER)
+
     uwazi_api = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     llm = OpenRouterAdapter(api_key=OPENROUTER_API_KEY)
     use_case = RunAgentUseCase(
@@ -32,13 +36,15 @@ async def main() -> None:
         entity_api=uwazi_api,
         page_api=uwazi_api,
         relationship_type_api=uwazi_api,
+        settings_api=uwazi_api,
     )
 
     context_parts: list[str] = []
 
     while True:
-        print("\n--- Enter your task (or press Enter or type 'exit' to quit) ---")
-        task = input("Task: ").strip()
+        print("\n--- Enter your task (or press Enter or type 'exit' to quit) ---", file=sys.stderr)
+        print("Task: ", end="", file=sys.stderr, flush=True)
+        task = input().strip()
         if not task or task.lower() == "exit":
             break
 
@@ -46,11 +52,15 @@ async def main() -> None:
 
         print("Sending task to OpenRouter via RunAgentUseCase...\n")
         result = await use_case.execute(task_description=task, context=context)
-        print("=== Agent output ===")
+
+        sys.stderr.flush()
+        print("\n=== Agent output ===")
         print(result.output)
         if result.thinking:
             print("\n=== Agent thinking ===")
             print(result.thinking)
+
+        sys.stdout.flush()
 
         context_parts.append(f"Previous task: {task}\nPrevious answer: {result.output}")
         if len(context_parts) > MAX_CONTEXT_EXCHANGES:

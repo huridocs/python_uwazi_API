@@ -32,6 +32,7 @@ async def update_relationship_type(
     try:
         return await ctx.deps.relationship_type_api.update_relationship_type(name=name, new_name=new_name, language=language)
     except DomainError as exc:
+        logger.error("update_relationship_type FAILED: name={} new_name={} error={}", name, new_name, exc)
         return (
             f"Error updating relationship type '{name}': {exc}. "
             "Use get_relationship_type_names to see existing types and retry."

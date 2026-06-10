@@ -22,15 +22,19 @@ from uwazi_agent.domain.agent_thesauri import AgentThesauri, AgentThesauriGroup
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
+from uwazi_agent.ports.settings_api_port import SettingsApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
+from uwazi_api.domain.language import Language
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 
 
-class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort):
+class UwaziApiAdapter(
+    ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort, SettingsApiPort
+):
     def __init__(
         self,
         user: Optional[str] = None,
@@ -47,6 +51,7 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
         self._search_repo = self.client.search
         self._pages_repo = self.client.pages
         self._relationship_repo = self.client.relationships
+        self._settings_repo = self.client.settings
         self._template_mapper = template_mapper or build_template_mapper_from_client(self.client)
         self._entity_mapper = entity_mapper or EntityMapper(
             template_repo=self._template_repo, thesauri_repo=self._thesauri_repo
@@ -523,6 +528,12 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
         )
         result._all_entities = all_agent_entities
         return result
+
+    async def get_languages(self) -> list[Language]:
+        def _fetch() -> list[Language]:
+            return self._settings_repo.get_languages()
+
+        return await asyncio.to_thread(_fetch)
 
 
 def _to_agent_thesauri(api_thesauri) -> AgentThesauri:

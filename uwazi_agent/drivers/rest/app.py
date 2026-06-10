@@ -5,6 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from loguru import logger
 
 from uwazi_agent.adapters.llm.openrouter_adapter import OpenRouterAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
@@ -13,6 +14,7 @@ from uwazi_agent.drivers.rest.models.ai_job_response import AIJobResponse
 from uwazi_agent.drivers.rest.models.ai_job_status import AIJobStatus
 from uwazi_agent.drivers.rest.models.ai_job_status_response import AIJobStatusResponse
 from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
+from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
 
 chat_storage = InMemoryChatStorage()
@@ -73,6 +75,8 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
     if session is None:
         return
 
+    setup_logging(url=request.credentials.url, user=request.credentials.username)
+
     try:
         uwazi_api = UwaziApiAdapter(
             user=request.credentials.username,
@@ -89,6 +93,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             entity_api=uwazi_api,
             page_api=uwazi_api,
             relationship_type_api=uwazi_api,
+            settings_api=uwazi_api,
         )
 
         context = session.get_context()
@@ -97,7 +102,9 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
         session.add_message("assistant", result.output)
         session.result = result.output
         session.status = AIJobStatus.COMPLETED
+        logger.info("JOB COMPLETED: job_id={} prompt={}", job_id, request.message[:200])
 
     except Exception as e:
         session.result = f"Error: {str(e)}"
         session.status = AIJobStatus.FAILED
+        logger.error("JOB FAILED: job_id={} prompt={} error={}", job_id, request.message[:200], e)

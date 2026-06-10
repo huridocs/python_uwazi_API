@@ -25,4 +25,5 @@ async def get_relationship_type_names(
     try:
         return await ctx.deps.relationship_type_api.get_relationship_type_names()
     except DomainError as exc:
+        logger.error("get_relationship_type_names FAILED: {}", exc)
         return f"Error listing relationship types: {exc}. Please check the Uwazi connection and retry."

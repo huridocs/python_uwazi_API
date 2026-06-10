@@ -49,6 +49,7 @@ async def update_template(
         template = AgentTemplate(name=name, properties=properties)
         return await ctx.deps.template_api.update_template(template=template, language=language)
     except DomainError as exc:
+        logger.error("update_template FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():
             return await suggest_template_names(ctx.deps, name)
         return f"Error updating template '{name}': {exc}. Please check the template name and properties, then retry."

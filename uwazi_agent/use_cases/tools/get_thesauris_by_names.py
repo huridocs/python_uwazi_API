@@ -34,4 +34,5 @@ async def get_thesauris_by_names(
         ctx.deps.schema_store.add_thesauri(thesauri)
         return thesauri
     except DomainError as exc:
+        logger.error("get_thesauris_by_names FAILED: names={} error={}", names, exc)
         return f"Error looking up thesauri: {exc}. Use get_thesauris_names to see available thesauri and retry."

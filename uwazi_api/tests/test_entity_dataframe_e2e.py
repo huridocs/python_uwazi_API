@@ -553,6 +553,42 @@ class TestGroupedMultiselectE2E:
         cls.existing_template_name = "test_3"
         cls.existing_prop_name: Optional[str] = None
 
+        cls._ensure_seed_entity()
+
+    @classmethod
+    def _ensure_seed_entity(cls):
+        template = cls.template_repo.get_by_name(cls.existing_template_name)
+        if not template:
+            return
+        prop = next((p for p in template.properties if "number_letters" in p.name), None)
+        if not prop:
+            return
+
+        cls.thesauri_repo.clear_cache("en")
+        th = next((t for t in cls.thesauri_repo.get("en") if t.id == prop.content), None)
+        if not th:
+            return
+
+        top_label = th.values[0].label
+        groups = [v for v in th.values if v.values]
+        if len(groups) < 2:
+            return
+        group_a, group_b = groups[0], groups[1]
+        child_a = group_a.values[0]
+        child_b = group_b.values[0]
+
+        prop_col = prop.name
+        data = {
+            "title": ["Grouped Seed Entity"],
+            "template": [cls.existing_template_name],
+            prop_col: [f"{top_label}|{group_a.label}::{child_a.label}|{group_b.label}::{child_b.label}"],
+        }
+        df = pd.DataFrame(data)
+        responses = cls.entity_repo.create_or_update_entities_from_dataframe(df=df, language="en")
+        if responses and responses[0].success:
+            cls.created_shared_ids.append(responses[0].shared_id)
+            time.sleep(2)
+
     def test_01_export_to_dataframe_produces_grouped_format(self):
         """Verify that exporting an entity with grouped multiselect values produces `Parent::Child` format."""
         df = self.client.exports.to_dataframe(

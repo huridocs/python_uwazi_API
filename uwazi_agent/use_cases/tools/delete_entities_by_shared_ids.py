@@ -43,4 +43,5 @@ async def delete_entities_by_shared_ids(
     try:
         return await ctx.deps.entity_api.delete_entities_by_shared_ids(shared_ids=shared_ids)
     except DomainError as exc:
+        logger.error("delete_entities_by_shared_ids FAILED: shared_ids={} error={}", shared_ids, exc)
         return f"Error deleting entities: {exc}. Please verify the shared_ids and retry."

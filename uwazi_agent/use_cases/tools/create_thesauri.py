@@ -45,4 +45,5 @@ async def create_thesauri(
     try:
         return await ctx.deps.thesauri_api.create_thesauri(name=name, values=values, language=language, groups=groups)
     except DomainError as exc:
+        logger.error("create_thesauri FAILED: name={} error={}", name, exc)
         return f"Error creating thesaurus '{name}': {exc}. Use get_thesauris_names to check existing thesauri and retry."

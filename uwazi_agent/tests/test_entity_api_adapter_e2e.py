@@ -144,6 +144,7 @@ class TestEntityApiAdapterE2E:
 
     def test_05_delete_entities_by_shared_ids(self):
         shared_id = self._create_entity(title=f"{self.unique_marker}_del", metadata={})
+        self._wait_for_search_index(shared_id)
         results = _run(self.adapter.delete_entities_by_shared_ids([shared_id]))
         assert len(results) == 1
         assert results[0].success is True
@@ -163,8 +164,20 @@ class TestEntityApiAdapterE2E:
         self.created_shared_ids.append(shared_id)
         return shared_id
 
+    def _wait_for_search_index(self, shared_id: str, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                result = _run(self.adapter.search_entities_by_text(self.unique_marker, None, "en", limit=100))
+                if shared_id in result.summary.shared_ids:
+                    return
+            except Exception:
+                pass
+            time.sleep(0.5)
+
     def _delete(self, shared_id: str) -> None:
         try:
+            self._wait_for_search_index(shared_id)
             self.entity_repo.delete(shared_id)
         finally:
             if shared_id in self.created_shared_ids:
@@ -174,6 +187,7 @@ class TestEntityApiAdapterE2E:
     def teardown_class(cls):
         for shared_id in list(cls.created_shared_ids):
             try:
+                time.sleep(2)
                 cls.entity_repo.delete(shared_id)
             except Exception:
                 pass

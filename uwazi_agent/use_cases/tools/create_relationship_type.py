@@ -32,6 +32,7 @@ async def create_relationship_type(
     try:
         return await ctx.deps.relationship_type_api.create_relationship_type(name=name, language=language)
     except DomainError as exc:
+        logger.error("create_relationship_type FAILED: name={} error={}", name, exc)
         return (
             f"Error creating relationship type '{name}': {exc}. "
             "Use get_relationship_type_names to check existing types and retry."

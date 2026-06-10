@@ -35,4 +35,5 @@ async def get_templates_by_names(
         ctx.deps.schema_store.add_templates(templates)
         return templates
     except DomainError as exc:
+        logger.error("get_templates_by_names FAILED: names={} error={}", names, exc)
         return f"Error looking up templates: {exc}. Use get_template_names to see available templates and retry."
