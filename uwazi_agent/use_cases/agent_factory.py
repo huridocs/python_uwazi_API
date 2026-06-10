@@ -11,10 +11,12 @@ from .instructions import (
 )
 from .tools.create_entities import create_entities
 from .tools.create_pages import create_pages
+from .tools.create_relationship_type import create_relationship_type
 from .tools.create_template import create_template
 from .tools.create_thesauri import create_thesauri
 from .tools.delete_entities_by_shared_ids import delete_entities_by_shared_ids
 from .tools.delete_pages_by_shared_ids import delete_pages_by_shared_ids
+from .tools.delete_relationship_type import delete_relationship_type
 from .tools.delete_template import delete_template
 from .tools.delete_thesauri import delete_thesauri
 from .tools.dependencies import UwaziAgentToolsDependencies
@@ -22,15 +24,19 @@ from .tools.get_entities_by_shared_ids import get_entities_by_shared_ids
 from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
+from .tools.get_relationship_type_names import get_relationship_type_names
 from .tools.get_template_names import get_template_names
 from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
 from .tools.get_thesauris_names import get_thesauris_names
 from .tools.list_pages import list_pages
 from .tools.python_code_executor import run_python_code
+from .tools.search_entities_by_filter import search_entities_by_filter
 from .tools.search_entities_by_text import search_entities_by_text
+from .tools.set_entities_publish_status import set_entities_publish_status
 from .tools.update_entities import update_entities
 from .tools.update_pages import update_pages
+from .tools.update_relationship_type import update_relationship_type
 from .tools.update_template import update_template
 from .tools.update_thesauri import update_thesauri
 
@@ -42,6 +48,10 @@ def build_templates_tools() -> list[Tool]:
         Tool(create_thesauri, takes_ctx=True),
         Tool(update_thesauri, takes_ctx=True),
         Tool(delete_thesauri, takes_ctx=True),
+        Tool(get_relationship_type_names, takes_ctx=True),
+        Tool(create_relationship_type, takes_ctx=True),
+        Tool(update_relationship_type, takes_ctx=True),
+        Tool(delete_relationship_type, takes_ctx=True),
         Tool(get_templates_by_names, takes_ctx=True),
         Tool(get_template_names, takes_ctx=True),
         Tool(create_template, takes_ctx=True),
@@ -53,10 +63,12 @@ def build_templates_tools() -> list[Tool]:
 def build_entity_tools() -> list[Tool]:
     return [
         Tool(search_entities_by_text, takes_ctx=True),
+        Tool(search_entities_by_filter, takes_ctx=True),
         Tool(get_entities_by_shared_ids, takes_ctx=True),
         Tool(get_entities_by_template, takes_ctx=True),
         Tool(create_entities, takes_ctx=True),
         Tool(update_entities, takes_ctx=True),
+        Tool(set_entities_publish_status, takes_ctx=True),
         Tool(delete_entities_by_shared_ids, takes_ctx=True),
     ]
 
@@ -75,6 +87,7 @@ def build_python_tools() -> list[Tool]:
     return [
         Tool(run_python_code, takes_ctx=True),
         Tool(search_entities_by_text, takes_ctx=True),
+        Tool(search_entities_by_filter, takes_ctx=True),
         Tool(get_entities_by_template, takes_ctx=True),
         Tool(get_entities_by_shared_ids, takes_ctx=True),
         Tool(get_entity_store_status, takes_ctx=True),

@@ -149,6 +149,20 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entities published {shared_ids}")
 
+    def unpublish_entities(self, shared_ids: list[str]) -> None:
+        payload = {"ids": shared_ids, "permissions": []}
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/entities/permissions",
+            headers=self.http.headers,
+            cookies={},
+            data=json.dumps(payload),
+        )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) unpublishing entities {shared_ids}"
+            self.http.graylog.info(message)
+            raise UploadError(message)
+        self.http.graylog.info(f"Entities unpublished {shared_ids}")
+
     def delete_entities(self, shared_ids: list[str]) -> None:
         payload = {"sharedIds": shared_ids}
         response = self.http.request_adapter.post(

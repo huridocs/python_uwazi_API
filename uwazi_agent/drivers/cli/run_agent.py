@@ -31,6 +31,7 @@ async def main() -> None:
         template_mapper=uwazi_api.template_mapper,
         entity_api=uwazi_api,
         page_api=uwazi_api,
+        relationship_type_api=uwazi_api,
     )
 
     context_parts: list[str] = []

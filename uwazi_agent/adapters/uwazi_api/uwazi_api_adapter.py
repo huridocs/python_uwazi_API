@@ -15,18 +15,22 @@ from uwazi_agent.domain.agent_page_create import AgentPageCreate
 from uwazi_agent.domain.agent_page_mutation_result import AgentPageMutationResult
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
+from uwazi_agent.domain.agent_relationship_type import AgentRelationshipType
+from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.domain.agent_template import AgentTemplate
-from uwazi_agent.domain.agent_thesauri import AgentThesauri
+from uwazi_agent.domain.agent_thesauri import AgentThesauri, AgentThesauriGroup
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
+from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
+from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 
 
-class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort):
+class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort):
     def __init__(
         self,
         user: Optional[str] = None,
@@ -42,6 +46,7 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
         self._entity_repo = self.client.entities
         self._search_repo = self.client.search
         self._pages_repo = self.client.pages
+        self._relationship_repo = self.client.relationships
         self._template_mapper = template_mapper or build_template_mapper_from_client(self.client)
         self._entity_mapper = entity_mapper or EntityMapper(
             template_repo=self._template_repo, thesauri_repo=self._thesauri_repo
@@ -62,9 +67,7 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
 
     async def get_thesauris(self, language: str) -> list[AgentThesauri]:
         def _fetch() -> list[AgentThesauri]:
-            return [
-                AgentThesauri(name=t.name, values=[v.label for v in t.values]) for t in self._thesauri_repo.get(language)
-            ]
+            return [_to_agent_thesauri(t) for t in self._thesauri_repo.get(language)]
 
         return await asyncio.to_thread(_fetch)
 
@@ -77,36 +80,41 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
                 found = all_by_name.get(name) or all_by_id.get(name)
                 if found is None:
                     continue
-                result.append(
-                    AgentThesauri(
-                        name=found.name,
-                        values=[v.label for v in found.values],
-                    )
-                )
+                result.append(_to_agent_thesauri(found))
             return result
 
         return await asyncio.to_thread(_fetch)
 
-    async def create_thesauri(self, name: str, values: list[str], language: str) -> dict:
+    async def create_thesauri(
+        self,
+        name: str,
+        values: list[str],
+        language: str,
+        groups: list[AgentThesauriGroup] | None = None,
+    ) -> dict:
         def _call() -> dict:
-            payload = [{"label": label} for label in values]
+            payload = _build_thesauri_values(values, groups)
             return self._thesauri_repo.create(name=name, values=payload, language=language)
 
         return await asyncio.to_thread(_call)
 
-    async def update_thesauri(self, name: str, values: list[str], language: str) -> dict:
+    async def update_thesauri(
+        self,
+        name: str,
+        values: list[str],
+        language: str,
+        groups: list[AgentThesauriGroup] | None = None,
+    ) -> dict:
         def _call() -> dict:
             existing = self._thesauri_repo.get(language)
             target = next((t for t in existing if t.name == name), None)
             if target is None:
                 raise ValueError(f"Thesauri '{name}' not found")
-            existing_map = {v.label: v.id for v in target.values}
-            for label in values:
-                existing_map.setdefault(label, label)
-            return self._thesauri_repo.add_value(
+            merged_values = _merge_thesauri_values(target, values, groups)
+            return self._thesauri_repo.update(
                 thesauri_id=target.id,
-                thesauri_name=target.name,
-                thesauri_values=existing_map,
+                name=target.name,
+                values=merged_values,
                 language=language,
             )
 
@@ -248,6 +256,40 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
 
         return await asyncio.to_thread(_fetch)
 
+    async def search_entities_by_filter(
+        self,
+        template_name: str,
+        filters: list[AgentSearchFilter],
+        language: str,
+        limit: int,
+        published: bool | None = None,
+    ) -> AgentEntitySearchResult:
+        def _search() -> AgentEntitySearchResult:
+            search_filters = SearchFilters()
+            for f in filters:
+                if f.values is not None:
+                    search_filters.add(f.property_name, SelectFilter(values=list(f.values)))
+                elif f.date_from is not None or f.date_to is not None:
+                    search_filters.add(
+                        f.property_name,
+                        DateRange(from_=f.date_from, to=f.date_to),
+                    )
+                else:
+                    raise SearchError(
+                        f"Filter on '{f.property_name}' must set either 'values' (select) or 'date_from'/'date_to' (date)."
+                    )
+            entities = self._search_repo.search_by_filter(
+                filters=search_filters,
+                template_name=template_name,
+                start_from=0,
+                batch_size=limit,
+                language=language,
+                published=published,
+            )
+            return self._summarize(entities, limit, language)
+
+        return await asyncio.to_thread(_search)
+
     async def update_entities(self, updates: list[AgentEntity], language: str) -> list[AgentEntityMutationResult]:
         def _call() -> list[AgentEntityMutationResult]:
             results: list[AgentEntityMutationResult] = []
@@ -291,6 +333,62 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
                         )
                     )
             return results
+
+        return await asyncio.to_thread(_call)
+
+    async def set_entities_publish_status(self, shared_ids: list[str], published: bool) -> list[AgentEntityMutationResult]:
+        def _call() -> list[AgentEntityMutationResult]:
+            try:
+                if published:
+                    self._entity_repo.publish_entities(list(shared_ids))
+                else:
+                    self._entity_repo.unpublish_entities(list(shared_ids))
+                return [AgentEntityMutationResult(shared_id=sid, success=True) for sid in shared_ids]
+            except (UploadError, ValueError) as exc:
+                return [AgentEntityMutationResult(shared_id=sid, success=False, error=str(exc)) for sid in shared_ids]
+
+        return await asyncio.to_thread(_call)
+
+    # --- RelationshipTypeApiPort -----------------------------------------
+
+    async def get_relationship_types(self) -> list[AgentRelationshipType]:
+        def _fetch() -> list[AgentRelationshipType]:
+            self._relationship_repo.clear_cache()
+            return [AgentRelationshipType(name=rt.name) for rt in self._relationship_repo.get_relation_types()]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def get_relationship_type_names(self) -> list[str]:
+        def _fetch() -> list[str]:
+            self._relationship_repo.clear_cache()
+            return [rt.name for rt in self._relationship_repo.get_relation_types()]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def create_relationship_type(self, name: str, language: str) -> dict:
+        def _call() -> dict:
+            existing = self._relationship_repo.get_relation_type_by_name(name)
+            if existing is not None:
+                raise ValueError(f"Relationship type '{name}' already exists")
+            return self._relationship_repo.create_relation_type(name=name, language=language)
+
+        return await asyncio.to_thread(_call)
+
+    async def update_relationship_type(self, name: str, new_name: str, language: str) -> dict:
+        def _call() -> dict:
+            target = self._relationship_repo.get_relation_type_by_name(name)
+            if target is None:
+                raise ValueError(f"Relationship type '{name}' not found")
+            return self._relationship_repo.update_relation_type(relation_type_id=target.id, name=new_name, language=language)
+
+        return await asyncio.to_thread(_call)
+
+    async def delete_relationship_type(self, name: str, language: str) -> dict:
+        def _call() -> dict:
+            target = self._relationship_repo.get_relation_type_by_name(name)
+            if target is None:
+                raise ValueError(f"Relationship type '{name}' not found")
+            return self._relationship_repo.delete_relation_type(relation_type_id=target.id, language=language)
 
         return await asyncio.to_thread(_call)
 
@@ -425,3 +523,84 @@ class UwaziApiAdapter(ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPo
         )
         result._all_entities = all_agent_entities
         return result
+
+
+def _to_agent_thesauri(api_thesauri) -> AgentThesauri:
+    """Split a Uwazi thesaurus into top-level values and named groups.
+
+    A Uwazi value is a *group* when it carries its own nested ``values``; its
+    children become the group's value labels. All other values are top-level.
+    """
+    top_values: list[str] = []
+    groups: list[AgentThesauriGroup] = []
+    for value in api_thesauri.values:
+        if value.values:
+            groups.append(AgentThesauriGroup(name=value.label, values=[child.label for child in value.values]))
+        else:
+            top_values.append(value.label)
+    return AgentThesauri(name=api_thesauri.name, values=top_values, groups=groups)
+
+
+def _build_thesauri_values(
+    values: list[str],
+    groups: list[AgentThesauriGroup] | None,
+) -> list[dict]:
+    """Build the Uwazi value payload from flat values plus named groups."""
+    payload: list[dict] = [{"label": label} for label in values]
+    for group in groups or []:
+        payload.append(
+            {
+                "label": group.name,
+                "values": [{"label": child} for child in group.values],
+            }
+        )
+    return payload
+
+
+def _merge_thesauri_values(
+    existing,
+    values: list[str],
+    groups: list[AgentThesauriGroup] | None,
+) -> list[dict]:
+    """Merge new flat values and groups into an existing thesaurus' value tree.
+
+    Existing values and their ids are preserved (Uwazi keeps a value id stable
+    so entities that reference it are not broken). New flat labels are appended.
+    For each incoming group, an existing group with the same name is extended
+    with any new child labels; otherwise the group is created.
+    """
+    merged: list[dict] = []
+    existing_top_labels: set[str] = set()
+    existing_groups: dict[str, dict] = {}
+
+    for value in existing.values:
+        if value.values:
+            group_entry = {
+                "label": value.label,
+                "id": value.id,
+                "values": [{"label": child.label, "id": child.id} for child in value.values],
+            }
+            merged.append(group_entry)
+            existing_groups[value.label] = group_entry
+        else:
+            merged.append({"label": value.label, "id": value.id})
+            existing_top_labels.add(value.label)
+
+    for label in values:
+        if label not in existing_top_labels:
+            merged.append({"label": label})
+            existing_top_labels.add(label)
+
+    for group in groups or []:
+        target = existing_groups.get(group.name)
+        if target is None:
+            target = {"label": group.name, "values": []}
+            merged.append(target)
+            existing_groups[group.name] = target
+        existing_children = {child["label"] for child in target["values"]}
+        for child in group.values:
+            if child not in existing_children:
+                target["values"].append({"label": child})
+                existing_children.add(child)
+
+    return merged

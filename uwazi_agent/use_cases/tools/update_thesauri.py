@@ -1,6 +1,7 @@
 from loguru import logger
 from pydantic_ai import RunContext
 
+from uwazi_agent.domain.agent_thesauri import AgentThesauriGroup
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.fail_forward import suggest_thesauri_names
 from uwazi_api.domain.exceptions import DomainError
@@ -11,24 +12,36 @@ async def update_thesauri(
     name: str,
     values: list[str],
     language: str = "en",
+    groups: list[AgentThesauriGroup] | None = None,
 ) -> dict | str:
-    logger.info("update_thesauri(name={!r}, values_count={}, language={!r})", name, len(values), language)
-    """Add the given value labels to an existing thesaurus.
+    logger.info(
+        "update_thesauri(name={!r}, values_count={}, groups_count={}, language={!r})",
+        name,
+        len(values),
+        len(groups or []),
+        language,
+    )
+    """Add value labels and/or groups to an existing thesaurus (additive merge).
 
-    Existing values are kept; new labels are added. To remove a value, ask
-    the user to do it manually through the Uwazi UI.
+    This is additive: existing values and groups are preserved (their ids stay
+    stable so entities that reference them are not broken). New top-level labels
+    in ``values`` are appended. For each entry in ``groups``, a group with the
+    same name is extended with any new child labels, or created if it does not
+    exist yet. To remove a value, ask the user to do it through the Uwazi UI.
 
     Args:
         name: The thesaurus name to update.
-        values: Value labels to ensure exist in the thesaurus.
+        values: Top-level value labels to ensure exist in the thesaurus.
         language: ISO 639-1 language code. Defaults to "en".
+        groups: Optional named groups to add or extend, each with its own
+            child value labels.
 
     Returns:
         The API response payload for the update. On error, returns a
         string with suggestions.
     """
     try:
-        return await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language)
+        return await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language, groups=groups)
     except DomainError as exc:
         if "not found" in str(exc).lower():
             return await suggest_thesauri_names(ctx.deps, name, language)

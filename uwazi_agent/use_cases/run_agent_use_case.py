@@ -5,6 +5,7 @@ from pydantic_ai.usage import RunUsage
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.page_api_port import PageApiPort
+from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
@@ -28,6 +29,7 @@ class RunAgentUseCase:
         template_mapper: TemplateMapperPort,
         entity_api: EntityApiPort,
         page_api: PageApiPort,
+        relationship_type_api: RelationshipTypeApiPort | None = None,
     ):
         self.llm = llm
         self.thesauri_api = thesauri_api
@@ -35,6 +37,7 @@ class RunAgentUseCase:
         self.template_mapper = template_mapper
         self.entity_api = entity_api
         self.page_api = page_api
+        self.relationship_type_api = relationship_type_api
 
     async def execute(self, task_description: str, context: str = "") -> AgentExecutionResult:
         prompt = self._compose_prompt(task_description=task_description, context=context)
@@ -42,6 +45,7 @@ class RunAgentUseCase:
             thesauri_api=self.thesauri_api,
             template_api=self.template_api,
             template_mapper=self.template_mapper,
+            relationship_type_api=self.relationship_type_api,
             entity_api=self.entity_api,
             page_api=self.page_api,
         )
