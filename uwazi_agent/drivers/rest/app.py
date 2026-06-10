@@ -1,21 +1,30 @@
-import random
+import asyncio
+import os
 import sys
-from pathlib import Path
+import uuid
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
+from uwazi_agent.adapters.llm.openrouter_adapter import OpenRouterAdapter
+from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.drivers.rest.models.ai_job_request import AIJobRequest
 from uwazi_agent.drivers.rest.models.ai_job_response import AIJobResponse
 from uwazi_agent.drivers.rest.models.ai_job_status import AIJobStatus
 from uwazi_agent.drivers.rest.models.ai_job_status_response import AIJobStatusResponse
+from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
+from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
 
-app = FastAPI()
+chat_storage = InMemoryChatStorage()
 
-data_path = Path("data.json")
-params_path = Path("params.json")
-options_path = Path("options.json")
 
-jobs_store: dict[str, AIJobStatusResponse] = {}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    chat_storage._sessions.clear()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/info")
@@ -25,35 +34,69 @@ async def info():
 
 @app.post("/api/v1/jobs")
 async def create_job(request: AIJobRequest) -> AIJobResponse:
-    job_id = request.job_id or str(random.randint(100000, 999999))
-    result_markdown = "Using the **Template Inspector** tool to analyze the template structure."
-    jobs_store[job_id] = AIJobStatusResponse(job_id=job_id, status=AIJobStatus.RUNNING, result=result_markdown)
+    job_id = request.job_id or str(uuid.uuid4())[:8]
+
+    session = chat_storage.create_session(job_id)
+    session.status = AIJobStatus.RUNNING
+    session.add_message("user", request.message)
+
+    asyncio.create_task(_run_agent(job_id, request))
+
     return AIJobResponse(job_id=job_id, message=request.message, status=AIJobStatus.PENDING)
 
 
 @app.get("/api/v1/jobs/{job_id}")
 async def get_job(job_id: str) -> AIJobStatusResponse:
-    job = jobs_store.get(job_id, AIJobStatusResponse(job_id=job_id, status=AIJobStatus.FAILED)).model_copy()
-    if job.status == AIJobStatus.RUNNING:
-        result_markdown = """
-        ## Task Execution Summary
+    session = chat_storage.get_session(job_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-        I have completed the requested operation by leveraging the following tools:
+    return AIJobStatusResponse(
+        job_id=session.job_id,
+        status=session.status,
+        result=session.result,
+    )
 
-        ### Tools Used
 
-        1. **Template Inspector** — Loaded and parsed the target template definition to identify its structure and bound entities.
-        2. **Entity Remover** — Removed the specified entities from the underlying data store, ensuring referential integrity was preserved.
+@app.delete("/api/v1/jobs/{job_id}")
+async def delete_job(job_id: str) -> dict:
+    session = chat_storage.get_session(job_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-        ### Results
+    chat_storage.delete_session(job_id)
+    return {"job_id": job_id, "status": "deleted"}
 
-        | Step | Tool | Status |
-        |------|------|--------|
-        | 1 | Template Inspector | Completed |
-        | 2 | Entity Remover | Completed |
 
-        > All operations finished successfully. No further action is required.
-            """
-        jobs_store[job_id] = AIJobStatusResponse(job_id=job_id, status=AIJobStatus.COMPLETED, result=result_markdown)
+async def _run_agent(job_id: str, request: AIJobRequest) -> None:
+    session = chat_storage.get_session(job_id)
+    if session is None:
+        return
 
-    return job
+    try:
+        uwazi_api = UwaziApiAdapter(
+            user=request.credentials.username,
+            password=request.credentials.password,
+            url=request.credentials.url,
+        )
+        llm = OpenRouterAdapter(api_key=os.environ.get("OPENROUTER_API_KEY"))
+
+        use_case = RunAgentUseCase(
+            llm=llm,
+            thesauri_api=uwazi_api,
+            template_api=uwazi_api,
+            template_mapper=uwazi_api.template_mapper,
+            entity_api=uwazi_api,
+            page_api=uwazi_api,
+        )
+
+        context = session.get_context()
+        result = await use_case.execute(task_description=request.message, context=context)
+
+        session.add_message("assistant", result.output)
+        session.result = result.output
+        session.status = AIJobStatus.COMPLETED
+
+    except Exception as e:
+        session.result = f"Error: {str(e)}"
+        session.status = AIJobStatus.FAILED
