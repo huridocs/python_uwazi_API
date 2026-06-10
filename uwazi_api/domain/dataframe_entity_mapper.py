@@ -165,9 +165,32 @@ class DataFrameEntityMapper:
         return DataFrameEntityMapper._parse_date_to_timestamp(value)
 
     @staticmethod
-    def _parse_select_value(value: Any) -> list[str] | Any:
-        if isinstance(value, str) and "|" in value:
-            return [v.strip() for v in value.split("|") if v.strip()]
+    def _parse_select_value(value: Any) -> list[Any] | Any:
+        if not isinstance(value, str):
+            return value
+
+        def _split_part(part: str) -> dict[str, Any]:
+            part = part.strip()
+            if "::" in part:
+                parent_label, _, child_value = part.partition("::")
+                parent_label = parent_label.strip()
+                child_value = child_value.strip()
+                if parent_label and child_value:
+                    return {"value": child_value, "parent": {"label": parent_label}}
+            return {"value": part}
+
+        if "|" in value:
+            items = [_split_part(p) for p in value.split("|")]
+            items = [it for it in items if it.get("value")]
+            return items
+
+        if "::" in value:
+            parent_label, _, child_value = value.partition("::")
+            parent_label = parent_label.strip()
+            child_value = child_value.strip()
+            if parent_label and child_value:
+                return [{"value": child_value, "parent": {"label": parent_label}}]
+
         return value
 
     @staticmethod

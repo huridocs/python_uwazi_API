@@ -72,7 +72,7 @@ class TestThesauriRepositoryE2E:
             created = next((t for t in thesauris if t.name == self.test_thesauri_name), None)
             if created and hasattr(created, "id") and created.id:
                 self.__class__.created_thesauri_id = created.id
-        assert self.created_thesauri_id is not None or True
+        assert self.created_thesauri_id is not None, "Created thesauri ID should not be None"
 
     def test_07_add_value_to_thesauri(self):
         """Test add_value() method."""

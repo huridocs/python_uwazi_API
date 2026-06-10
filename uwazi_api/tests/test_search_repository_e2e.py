@@ -186,6 +186,9 @@ class TestSearchRepositoryE2E:
         """Test search_by_text() method returns matching entities."""
         entities = self.search_repo.search_by_text(search_term=self.test_entity_title, start_from=0, batch_size=10)
         assert isinstance(entities, list)
+        assert len(entities) >= 1, "Search should return at least one entity"
+        titles = [e.title for e in entities]
+        assert self.test_entity_title in titles, f"Expected {self.test_entity_title} in results, got {titles}"
 
     def test_09_search_by_text_with_template_filter(self):
         """Test search_by_text() filters by template."""
@@ -193,6 +196,10 @@ class TestSearchRepositoryE2E:
             search_term=self.test_entity_title, template_name=self.filter_template_name, start_from=0, batch_size=10
         )
         assert isinstance(entities, list)
+        assert len(entities) >= 1, "Search with template filter should return at least one entity"
+        assert all(e.template == self.filter_template_id for e in entities), (
+            f"All entities should have template {self.filter_template_id}"
+        )
 
     def test_10_search_by_text_nonexistent_term(self):
         """Test search_by_text() with nonexistent term returns empty list."""
@@ -303,6 +310,8 @@ class TestSearchRepositoryE2E:
         """Test get() method respects language parameter."""
         entities = self.search_repo.get(start_from=0, batch_size=10, language="en")
         assert isinstance(entities, list)
+        assert len(entities) > 0, "Should return at least one entity"
+        assert all(e.language == "en" for e in entities), "All entities should have language 'en'"
 
     def test_18_search_by_text_with_language(self):
         """Test search_by_text() respects language parameter."""
@@ -310,6 +319,8 @@ class TestSearchRepositoryE2E:
             search_term=self.test_entity_title, language="en", start_from=0, batch_size=10
         )
         assert isinstance(entities, list)
+        assert len(entities) >= 1, "Search should return at least one entity"
+        assert all(e.language == "en" for e in entities), "All entities should have language 'en'"
 
     def test_19_search_by_filter_with_language(self):
         """Test search_by_filter() respects language parameter."""
@@ -318,6 +329,10 @@ class TestSearchRepositoryE2E:
             filters=filters, template_name=self.filter_template_name, language="en", start_from=0, batch_size=10
         )
         assert isinstance(entities, list)
+        assert len(entities) >= 1, "Filter search should return at least one entity"
+        assert all(e.template == self.filter_template_id for e in entities), (
+            f"All entities should have template {self.filter_template_id}"
+        )
 
     @classmethod
     def teardown_class(cls):

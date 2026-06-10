@@ -219,15 +219,18 @@ class TestTemplateRepositoryE2E:
     def test_19_delete_created_template(self):
         """Test delete() method to remove the created template."""
         assert self.created_template_id is not None
+        # Store the ID before deletion so test_20 can verify it's gone
+        self.__class__.deleted_template_id = self.created_template_id
         result = self.template_repo.delete_empty_template(self.created_template_id)
         assert result is not None
         self.__class__.created_template_id = None
 
     def test_20_verify_template_deleted(self):
         """Verify the template was deleted."""
-        if self.created_template_id:
-            retrieved = self.template_repo.get_by_id(self.created_template_id)
-            assert retrieved is None
+        if hasattr(self, "deleted_template_id") and self.deleted_template_id:
+            self.template_repo.clear_cache()
+            retrieved = self.template_repo.get_by_id(self.deleted_template_id)
+            assert retrieved is None, f"Template {self.deleted_template_id} should be deleted but still exists"
 
     def test_21_cache_behavior(self):
         """Test that caching works correctly."""
