@@ -26,7 +26,12 @@ async def get_thesauris_by_names(
         The matching thesauri, each with its current list of value labels.
         On error, returns a string describing the problem.
     """
+    cached = [ctx.deps.schema_store.thesauri[n] for n in names if n in ctx.deps.schema_store.thesauri]
+    if len(cached) == len(names):
+        return cached
     try:
-        return await ctx.deps.thesauri_api.get_thesauris_by_names(names=names, language=language)
+        thesauri = await ctx.deps.thesauri_api.get_thesauris_by_names(names=names, language=language)
+        ctx.deps.schema_store.add_thesauri(thesauri)
+        return thesauri
     except DomainError as exc:
         return f"Error looking up thesauri: {exc}. Use get_thesauris_names to see available thesauri and retry."

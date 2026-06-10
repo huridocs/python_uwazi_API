@@ -124,7 +124,9 @@ def _make_delegation_tool(
 ) -> Tool:
     async def delegate(ctx: RunContext[UwaziAgentToolsDependencies], task: str) -> str:
         try:
-            result = await sub_agent.run(task, deps=ctx.deps, usage=ctx.usage)
+            schema_context = ctx.deps.schema_store.to_prompt_context()
+            enriched_task = f"{schema_context}\n\n{task}" if schema_context else task
+            result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
             return result.output
         except Exception as exc:
             return f"Sub-agent error ({name}): {exc}. Please rephrase the task or break it into smaller steps and retry."

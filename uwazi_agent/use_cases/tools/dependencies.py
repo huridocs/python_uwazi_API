@@ -6,6 +6,7 @@ from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_agent.use_cases.tools.entity_store import EntityStore
+from uwazi_agent.use_cases.tools.schema_store import SchemaStore
 
 
 class UwaziAgentToolsDependencies(BaseModel):
@@ -17,3 +18,4 @@ class UwaziAgentToolsDependencies(BaseModel):
     entity_api: EntityApiPort | None = None
     page_api: PageApiPort | None = None
     entity_store: EntityStore = Field(default_factory=EntityStore)
+    schema_store: SchemaStore = Field(default_factory=SchemaStore)

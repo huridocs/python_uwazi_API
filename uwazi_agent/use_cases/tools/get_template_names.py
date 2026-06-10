@@ -18,7 +18,11 @@ async def get_template_names(
         The list of template names currently defined. On error, returns
         a string describing the problem.
     """
+    if ctx.deps.schema_store.template_names:
+        return ctx.deps.schema_store.template_names
     try:
-        return await ctx.deps.template_api.get_template_names()
+        names = await ctx.deps.template_api.get_template_names()
+        ctx.deps.schema_store.add_template_names(names)
+        return names
     except DomainError as exc:
         return f"Error listing template names: {exc}. Please check the Uwazi connection and retry."
