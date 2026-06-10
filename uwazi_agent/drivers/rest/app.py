@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/info")
+@app.get("/")
 async def info():
     return sys.version
 

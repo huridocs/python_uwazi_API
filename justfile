@@ -31,3 +31,6 @@ tag:
 
 test:
     . .venv/bin/activate && python -m pytest -v --maxfail=1 --disable-warnings
+
+start:
+    docker compose up --build
