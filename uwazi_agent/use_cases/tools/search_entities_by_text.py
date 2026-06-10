@@ -71,6 +71,7 @@ async def search_entities_by_text(
             limit=limit,
         )
     except DomainError as exc:
+        logger.error("search_entities_by_text FAILED: search_term={} template={} error={}", search_term, template_name, exc)
         if template_name and "template" in str(exc).lower():
             return await suggest_template_names(ctx.deps, template_name)
         return f"Error searching entities: {exc}. Please check your search parameters and retry."

@@ -1,5 +1,6 @@
 import json
 
+from uwazi_api.domain.language import Language
 from uwazi_api.domain.settings import Settings
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
@@ -17,6 +18,6 @@ class SettingsRepository:
         data = json.loads(response.text)
         return Settings.model_validate(data)
 
-    def get_languages(self) -> list[str]:
+    def get_languages(self) -> list[Language]:
         settings = self.get()
-        return [lang.key for lang in settings.languages]
+        return settings.languages

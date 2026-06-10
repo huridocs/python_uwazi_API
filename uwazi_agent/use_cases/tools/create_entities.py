@@ -1,3 +1,4 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
@@ -12,6 +13,11 @@ async def create_entities(
     entities: list[AgentEntityCreate],
     language: str = "en",
 ) -> list[AgentEntityMutationResult] | str:
+    logger.info(
+        "create_entities(entities_count={}, language={!r})",
+        len(entities),
+        language,
+    )
     """Create one or more brand-new entities in Uwazi.
 
     Use this when the user wants to add new records (entities), not change
@@ -77,6 +83,7 @@ async def create_entities(
     try:
         return await ctx.deps.entity_api.create_entities(entities=entities, language=language)
     except DomainError as exc:
+        logger.error("create_entities FAILED: {}", exc)
         template_names = {e.template_name for e in entities if e.template_name}
         if "template" in str(exc).lower() and template_names:
             first_bad = next(iter(template_names))

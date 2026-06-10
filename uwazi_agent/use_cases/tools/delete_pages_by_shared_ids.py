@@ -35,4 +35,5 @@ async def delete_pages_by_shared_ids(
     try:
         return await ctx.deps.page_api.delete_pages_by_shared_ids(shared_ids=shared_ids, language=language)
     except DomainError as exc:
+        logger.error("delete_pages_by_shared_ids FAILED: shared_ids={} error={}", shared_ids, exc)
         return f"Error deleting pages: {exc}. Please verify the shared_ids and retry."

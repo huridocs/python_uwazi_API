@@ -29,6 +29,7 @@ async def delete_template(
     try:
         return await ctx.deps.template_api.delete_template(name=name, language=language)
     except DomainError as exc:
+        logger.error("delete_template FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():
             return await suggest_template_names(ctx.deps, name)
         return (

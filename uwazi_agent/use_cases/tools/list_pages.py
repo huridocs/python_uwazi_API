@@ -32,4 +32,5 @@ async def list_pages(
     try:
         return await ctx.deps.page_api.list_pages(language=language)
     except DomainError as exc:
+        logger.error("list_pages FAILED: {}", exc)
         return f"Error listing pages: {exc}. Please check the Uwazi connection and retry."

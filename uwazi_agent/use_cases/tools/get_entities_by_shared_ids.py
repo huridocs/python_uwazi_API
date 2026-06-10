@@ -58,6 +58,7 @@ async def get_entities_by_shared_ids(
             shared_ids=shared_ids, language=language, limit=limit
         )
     except DomainError as exc:
+        logger.error("get_entities_by_shared_ids FAILED: shared_ids={} error={}", shared_ids, exc)
         return f"Error fetching entities by shared_ids: {exc}. Please verify the shared_ids and retry."
     ctx.deps.entity_store.add_entities(entities)
     if len(entities) > ENTITIES_LIMIT_FOR_LLM_MODEL:

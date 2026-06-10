@@ -30,6 +30,7 @@ async def delete_relationship_type(
     try:
         return await ctx.deps.relationship_type_api.delete_relationship_type(name=name, language=language)
     except DomainError as exc:
+        logger.error("delete_relationship_type FAILED: name={} error={}", name, exc)
         return (
             f"Error deleting relationship type '{name}': {exc}. "
             "It may still be referenced by a template property. Use get_relationship_type_names to verify."

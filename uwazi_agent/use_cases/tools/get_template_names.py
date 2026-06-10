@@ -25,4 +25,5 @@ async def get_template_names(
         ctx.deps.schema_store.add_template_names(names)
         return names
     except DomainError as exc:
+        logger.error("get_template_names FAILED: {}", exc)
         return f"Error listing template names: {exc}. Please check the Uwazi connection and retry."

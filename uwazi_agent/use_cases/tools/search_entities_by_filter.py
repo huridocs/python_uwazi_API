@@ -76,6 +76,7 @@ async def search_entities_by_filter(
             published=published,
         )
     except DomainError as exc:
+        logger.error("search_entities_by_filter FAILED: template={} filters={} error={}", template_name, filters, exc)
         if "not found" in str(exc).lower() and "template" in str(exc).lower():
             return await suggest_template_names(ctx.deps, template_name)
         return (

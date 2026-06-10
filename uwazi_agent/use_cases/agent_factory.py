@@ -1,3 +1,7 @@
+import functools
+from typing import Any, Callable
+
+from loguru import logger
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
@@ -9,6 +13,7 @@ from .instructions import (
     PYTHON_INSTRUCTIONS,
     TEMPLATES_INSTRUCTIONS,
 )
+from .tools.agent_context import get_current_agent, set_current_agent
 from .tools.create_entities import create_entities
 from .tools.create_pages import create_pages
 from .tools.create_relationship_type import create_relationship_type
@@ -29,6 +34,7 @@ from .tools.get_template_names import get_template_names
 from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
 from .tools.get_thesauris_names import get_thesauris_names
+from .tools.get_languages import get_languages
 from .tools.list_pages import list_pages
 from .tools.python_code_executor import run_python_code
 from .tools.search_entities_by_filter import search_entities_by_filter
@@ -41,55 +47,174 @@ from .tools.update_template import update_template
 from .tools.update_thesauri import update_thesauri
 
 
+_TEMPLATE_READ_TOOLS = {"get_template_names", "get_templates_by_names"}
+_THESAURI_READ_TOOLS = {"get_thesauris_names", "get_thesauris_by_names"}
+_RELATIONSHIP_READ_TOOLS = {"get_relationship_type_names"}
+_ENTITY_READ_TOOLS = {
+    "search_entities_by_text",
+    "search_entities_by_filter",
+    "get_entities_by_shared_ids",
+    "get_entities_by_template",
+}
+_PAGE_READ_TOOLS = {"list_pages", "get_pages_by_shared_ids"}
+_LANGUAGE_READ_TOOLS = {"get_languages"}
+
+_WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
+    "create_template": (
+        _TEMPLATE_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_templates(),
+    ),
+    "update_template": (
+        _TEMPLATE_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_templates(),
+    ),
+    "delete_template": (
+        _TEMPLATE_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_templates(),
+    ),
+    "create_thesauri": (
+        _THESAURI_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_thesauri(),
+    ),
+    "update_thesauri": (
+        _THESAURI_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_thesauri(),
+    ),
+    "delete_thesauri": (
+        _THESAURI_READ_TOOLS,
+        lambda deps: deps.schema_store.clear_thesauri(),
+    ),
+    "create_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
+    "update_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
+    "delete_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
+    "create_entities": (_ENTITY_READ_TOOLS, None),
+    "update_entities": (_ENTITY_READ_TOOLS, None),
+    "delete_entities_by_shared_ids": (_ENTITY_READ_TOOLS, None),
+    "set_entities_publish_status": (_ENTITY_READ_TOOLS, None),
+    "create_pages": (_PAGE_READ_TOOLS, None),
+    "update_pages": (_PAGE_READ_TOOLS, None),
+    "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
+    "run_python_code": (_ENTITY_READ_TOOLS, None),
+}
+
+
+def _extract_params(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]:
+    import inspect
+
+    sig = inspect.signature(func)
+    params = list(sig.parameters.keys())
+    result: dict[str, Any] = {}
+    for i, arg in enumerate(args):
+        if i < len(params):
+            result[params[i]] = arg
+    result.update(kwargs)
+    return result
+
+
+def _wrap_read_tool(func: Callable) -> Callable:
+    @functools.wraps(func)
+    async def wrapper(ctx: RunContext[UwaziAgentToolsDependencies], *args: Any, **kwargs: Any) -> Any:
+        agent_name = get_current_agent()
+        params = _extract_params(args, kwargs, func)
+        cached = ctx.deps.tool_cache.get(func.__name__, params)
+        if cached is not None:
+            logger.info("[{}] CACHE HIT: {}({})", agent_name, func.__name__, params)
+            return cached
+        logger.info("[{}] CALLING: {}({})", agent_name, func.__name__, params)
+        result = await func(ctx, *args, **kwargs)
+        if not isinstance(result, str) or not result.startswith("Error"):
+            ctx.deps.tool_cache.set(func.__name__, params, result)
+        return result
+
+    return wrapper
+
+
+def _wrap_write_tool(func: Callable) -> Callable:
+    tool_name = func.__name__
+    invalidated_tools, schema_invalidator = _WRITE_INVALIDATION_MAP.get(tool_name, (set(), None))
+
+    @functools.wraps(func)
+    async def wrapper(ctx: RunContext[UwaziAgentToolsDependencies], *args: Any, **kwargs: Any) -> Any:
+        agent_name = get_current_agent()
+        params = _extract_params(args, kwargs, func)
+        logger.info("[{}] CALLING: {}({})", agent_name, tool_name, params)
+        result = await func(ctx, *args, **kwargs)
+        is_error = isinstance(result, str) and result.startswith("Error")
+        if not is_error:
+            if invalidated_tools:
+                ctx.deps.tool_cache.invalidate_tools(invalidated_tools)
+                logger.info(
+                    "[{}] CACHE INVALIDATED: {} -> {}",
+                    agent_name,
+                    tool_name,
+                    invalidated_tools,
+                )
+            if schema_invalidator is not None:
+                schema_invalidator(ctx.deps)
+        return result
+
+    return wrapper
+
+
+def _read_tool(func: Callable) -> Tool:
+    return Tool(_wrap_read_tool(func), takes_ctx=True)
+
+
+def _write_tool(func: Callable) -> Tool:
+    return Tool(_wrap_write_tool(func), takes_ctx=True)
+
+
 def build_templates_tools() -> list[Tool]:
     return [
-        Tool(get_thesauris_by_names, takes_ctx=True),
-        Tool(get_thesauris_names, takes_ctx=True),
-        Tool(create_thesauri, takes_ctx=True),
-        Tool(update_thesauri, takes_ctx=True),
-        Tool(delete_thesauri, takes_ctx=True),
-        Tool(get_relationship_type_names, takes_ctx=True),
-        Tool(create_relationship_type, takes_ctx=True),
-        Tool(update_relationship_type, takes_ctx=True),
-        Tool(delete_relationship_type, takes_ctx=True),
-        Tool(get_templates_by_names, takes_ctx=True),
-        Tool(get_template_names, takes_ctx=True),
-        Tool(create_template, takes_ctx=True),
-        Tool(update_template, takes_ctx=True),
-        Tool(delete_template, takes_ctx=True),
+        _read_tool(get_languages),
+        _read_tool(get_thesauris_by_names),
+        _read_tool(get_thesauris_names),
+        _write_tool(create_thesauri),
+        _write_tool(update_thesauri),
+        _write_tool(delete_thesauri),
+        _read_tool(get_relationship_type_names),
+        _write_tool(create_relationship_type),
+        _write_tool(update_relationship_type),
+        _write_tool(delete_relationship_type),
+        _read_tool(get_templates_by_names),
+        _read_tool(get_template_names),
+        _write_tool(create_template),
+        _write_tool(update_template),
+        _write_tool(delete_template),
     ]
 
 
 def build_entity_tools() -> list[Tool]:
     return [
-        Tool(search_entities_by_text, takes_ctx=True),
-        Tool(search_entities_by_filter, takes_ctx=True),
-        Tool(get_entities_by_shared_ids, takes_ctx=True),
-        Tool(get_entities_by_template, takes_ctx=True),
-        Tool(create_entities, takes_ctx=True),
-        Tool(update_entities, takes_ctx=True),
-        Tool(set_entities_publish_status, takes_ctx=True),
-        Tool(delete_entities_by_shared_ids, takes_ctx=True),
+        _read_tool(get_languages),
+        _read_tool(search_entities_by_text),
+        _read_tool(search_entities_by_filter),
+        _read_tool(get_entities_by_shared_ids),
+        _read_tool(get_entities_by_template),
+        _write_tool(create_entities),
+        _write_tool(update_entities),
+        _write_tool(set_entities_publish_status),
+        _write_tool(delete_entities_by_shared_ids),
     ]
 
 
 def build_page_tools() -> list[Tool]:
     return [
-        Tool(list_pages, takes_ctx=True),
-        Tool(get_pages_by_shared_ids, takes_ctx=True),
-        Tool(create_pages, takes_ctx=True),
-        Tool(update_pages, takes_ctx=True),
-        Tool(delete_pages_by_shared_ids, takes_ctx=True),
+        _read_tool(list_pages),
+        _read_tool(get_pages_by_shared_ids),
+        _write_tool(create_pages),
+        _write_tool(update_pages),
+        _write_tool(delete_pages_by_shared_ids),
     ]
 
 
 def build_python_tools() -> list[Tool]:
     return [
-        Tool(run_python_code, takes_ctx=True),
-        Tool(search_entities_by_text, takes_ctx=True),
-        Tool(search_entities_by_filter, takes_ctx=True),
-        Tool(get_entities_by_template, takes_ctx=True),
-        Tool(get_entities_by_shared_ids, takes_ctx=True),
+        _write_tool(run_python_code),
+        _read_tool(search_entities_by_text),
+        _read_tool(search_entities_by_filter),
+        _read_tool(get_entities_by_template),
+        _read_tool(get_entities_by_shared_ids),
         Tool(get_entity_store_status, takes_ctx=True),
     ]
 
@@ -135,14 +260,23 @@ def _make_delegation_tool(
     name: str,
     description: str,
 ) -> Tool:
+    agent_label = name.replace("delegate_to_", "")
+
     async def delegate(ctx: RunContext[UwaziAgentToolsDependencies], task: str) -> str:
+        parent_agent = get_current_agent()
+        logger.info("[{}] DELEGATING to {} (task: {}...)", parent_agent, agent_label, task[:100])
+        set_current_agent(agent_label)
         try:
             schema_context = ctx.deps.schema_store.to_prompt_context()
             enriched_task = f"{schema_context}\n\n{task}" if schema_context else task
             result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
+            logger.info("[{}] DELEGATION COMPLETE", agent_label)
             return result.output
         except Exception as exc:
+            logger.error("[{}] DELEGATION FAILED: {}", agent_label, exc)
             return f"Sub-agent error ({name}): {exc}. Please rephrase the task or break it into smaller steps and retry."
+        finally:
+            set_current_agent(parent_agent)
 
     delegate.__name__ = name
     delegate.__qualname__ = name
@@ -161,7 +295,9 @@ def build_orchestrator(
         _make_delegation_tool(
             schema_agent,
             "delegate_to_schema_agent",
-            "Delegate schema-related tasks (thesauri and templates) to the schema sub-agent.",
+            "Delegate schema mutation tasks (create, update, delete thesauri, templates, "
+            "relationship types) to the schema sub-agent. Do NOT use this for reading schema "
+            "data — use the read tools directly instead.",
         ),
     ]
     if entity_agent is not None:
@@ -169,7 +305,9 @@ def build_orchestrator(
             _make_delegation_tool(
                 entity_agent,
                 "delegate_to_entity_agent",
-                "Delegate entity tasks (search, create, update, delete) to the entity sub-agent.",
+                "Delegate entity mutation tasks (create, update, delete, publish/unpublish "
+                "entities) to the entity sub-agent. Do NOT use this for reading entities — "
+                "use the read tools directly instead.",
             )
         )
     if page_agent is not None:
@@ -177,7 +315,8 @@ def build_orchestrator(
             _make_delegation_tool(
                 page_agent,
                 "delegate_to_page_agent",
-                "Delegate page tasks (list, create, update, delete) to the page sub-agent.",
+                "Delegate page mutation tasks (create, update, delete pages) to the page "
+                "sub-agent. Do NOT use this for reading pages — use the read tools directly instead.",
             )
         )
     if python_agent is not None:
@@ -193,15 +332,41 @@ def build_orchestrator(
             )
         )
 
-    delegation_tools.append(
+    read_tools = [
+        _read_tool(get_template_names),
+        _read_tool(get_templates_by_names),
+        _read_tool(get_thesauris_names),
+        _read_tool(get_thesauris_by_names),
+        _read_tool(get_relationship_type_names),
+        _read_tool(get_languages),
         Tool(get_entity_store_status, takes_ctx=True),
-    )
+    ]
+
+    if entity_agent is not None:
+        read_tools.extend(
+            [
+                _read_tool(search_entities_by_text),
+                _read_tool(search_entities_by_filter),
+                _read_tool(get_entities_by_shared_ids),
+                _read_tool(get_entities_by_template),
+            ]
+        )
+
+    if page_agent is not None:
+        read_tools.extend(
+            [
+                _read_tool(list_pages),
+                _read_tool(get_pages_by_shared_ids),
+            ]
+        )
+
+    all_tools = delegation_tools + read_tools
 
     return Agent(
         model,
         deps_type=UwaziAgentToolsDependencies,
         instructions=ORCHESTRATOR_INSTRUCTIONS,
-        tools=delegation_tools,
+        tools=all_tools,
     )
 
 

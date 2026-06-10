@@ -38,5 +38,6 @@ async def set_entities_publish_status(
     try:
         return await ctx.deps.entity_api.set_entities_publish_status(shared_ids=shared_ids, published=published)
     except DomainError as exc:
+        logger.error("set_entities_publish_status FAILED: shared_ids={} published={} error={}", shared_ids, published, exc)
         action = "publishing" if published else "unpublishing"
         return f"Error {action} entities: {exc}. Please verify the shared_ids and retry."

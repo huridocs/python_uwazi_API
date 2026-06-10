@@ -1,3 +1,4 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_entity import AgentEntity
@@ -77,6 +78,7 @@ async def update_entities(
     try:
         return await ctx.deps.entity_api.update_entities(updates=updates, language=language)
     except DomainError as exc:
+        logger.error("update_entities FAILED: {}", exc)
         template_names = {e.template_name for e in updates if e.template_name}
         if "template" in str(exc).lower() and template_names:
             first_bad = next(iter(template_names))

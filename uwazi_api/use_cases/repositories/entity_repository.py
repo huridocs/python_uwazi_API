@@ -109,6 +109,7 @@ class EntityRepository(SearchRepository):
             editDate=existing.edit_date,
             documents=entity.documents if entity.documents else existing.documents,
             attachments=entity.attachments if entity.attachments else existing.attachments,
+            permissions=list(existing.permissions),
             metadata=merged_metadata,
         )
 
@@ -127,15 +128,21 @@ class EntityRepository(SearchRepository):
             raise UploadError(message)
         self.http.graylog.info(f"Entity deleted {shared_id}")
 
-    def publish_entities(self, shared_ids: list[str], permissions: Optional[list[dict]] = None) -> None:
-        if permissions is None:
-            permissions = [
-                {
-                    "refId": "public",
-                    "type": "public",
-                    "level": "read",
-                },
-            ]
+    def _get_entity_permissions(self, shared_id: str) -> list[dict]:
+        response = self.http.request_adapter.get(
+            url=f"{self.http.url}/api/entities",
+            headers=self.http.headers,
+            cookies={},
+            params={"sharedId": shared_id, "omitRelationships": "true"},
+        )
+        if response.status_code != 200:
+            return []
+        rows = json.loads(response.text).get("rows", [])
+        if not rows:
+            return []
+        return rows[0].get("permissions", [])
+
+    def _set_permissions(self, shared_ids: list[str], permissions: list[dict]) -> None:
         payload = {"ids": shared_ids, "permissions": permissions}
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/permissions",
@@ -144,23 +151,28 @@ class EntityRepository(SearchRepository):
             data=json.dumps(payload),
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) publishing entities {shared_ids}"
+            message = f"Error ({response.status_code}) setting permissions for {shared_ids}"
             self.http.graylog.info(message)
             raise UploadError(message)
+
+    def publish_entities(self, shared_ids: list[str], permissions: Optional[list[dict]] = None) -> None:
+        public_perm = {"refId": "public", "type": "public", "level": "read"}
+        for shared_id in shared_ids:
+            if permissions is not None:
+                merged = list(permissions)
+            else:
+                existing = self._get_entity_permissions(shared_id)
+                merged = [p for p in existing if p.get("refId") != "public" or p.get("type") != "public"]
+            if not any(p.get("refId") == "public" and p.get("type") == "public" for p in merged):
+                merged.append(public_perm)
+            self._set_permissions([shared_id], merged)
         self.http.graylog.info(f"Entities published {shared_ids}")
 
     def unpublish_entities(self, shared_ids: list[str]) -> None:
-        payload = {"ids": shared_ids, "permissions": []}
-        response = self.http.request_adapter.post(
-            url=f"{self.http.url}/api/entities/permissions",
-            headers=self.http.headers,
-            cookies={},
-            data=json.dumps(payload),
-        )
-        if response.status_code != 200:
-            message = f"Error ({response.status_code}) unpublishing entities {shared_ids}"
-            self.http.graylog.info(message)
-            raise UploadError(message)
+        for shared_id in shared_ids:
+            existing = self._get_entity_permissions(shared_id)
+            filtered = [p for p in existing if not (p.get("refId") == "public" and p.get("type") == "public")]
+            self._set_permissions([shared_id], filtered)
         self.http.graylog.info(f"Entities unpublished {shared_ids}")
 
     def delete_entities(self, shared_ids: list[str]) -> None:

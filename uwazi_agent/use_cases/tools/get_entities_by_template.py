@@ -62,7 +62,8 @@ async def get_entities_by_template(
             language=language,
             limit=limit,
         )
-    except DomainError:
+    except DomainError as exc:
+        logger.error("get_entities_by_template FAILED: template={} error={}", template_name, exc)
         return await suggest_template_names(ctx.deps, template_name)
     all_entities = result._all_entities
     if all_entities:

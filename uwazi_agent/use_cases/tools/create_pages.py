@@ -53,4 +53,5 @@ async def create_pages(
     try:
         return await ctx.deps.page_api.create_pages(pages=pages, language=language)
     except DomainError as exc:
+        logger.error("create_pages FAILED: {}", exc)
         return f"Error creating pages: {exc}. Please check the page data and retry."

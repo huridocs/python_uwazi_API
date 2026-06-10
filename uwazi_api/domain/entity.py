@@ -18,6 +18,7 @@ class Entity(BaseModel):
     documents: list[Document] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    permissions: list[dict[str, Any]] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

@@ -31,4 +31,5 @@ async def get_thesauris_names(
         ctx.deps.schema_store.add_thesauri(thesauris)
         return names
     except DomainError as exc:
+        logger.error("get_thesauris_names FAILED: {}", exc)
         return f"Error listing thesauri names: {exc}. Please check the Uwazi connection and retry."
