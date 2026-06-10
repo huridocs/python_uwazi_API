@@ -262,7 +262,11 @@ class TestEntityDataFrameE2E:
         assert entity.title == "DF Multidate Test Entity"
 
     def test_07_upload_with_documents(self):
-        """Test uploading entities with documents field."""
+        """Test uploading entities with documents metadata field.
+
+        Note: This tests that the API accepts documents metadata without error.
+        Actual file uploads require using the file repository directly.
+        """
         data = {
             "title": ["DF Documents Test Entity"],
             "template": [self.test_template_id],
@@ -273,11 +277,15 @@ class TestEntityDataFrameE2E:
         responses = self.entity_repo.create_or_update_entities_from_dataframe(df, language="en")
 
         assert len(responses) == 1
-        assert responses[0].success is True
+        assert responses[0].success is True, f"Upload should succeed: {responses[0].error}"
         self.created_shared_ids.append(responses[0].shared_id)
 
     def test_08_upload_with_attachments(self):
-        """Test uploading entities with attachments field."""
+        """Test uploading entities with attachments metadata field.
+
+        Note: This tests that the API accepts attachments metadata without error.
+        Actual file uploads require using the file repository directly.
+        """
         data = {
             "title": ["DF Attachments Test Entity"],
             "template": [self.test_template_id],
@@ -288,7 +296,7 @@ class TestEntityDataFrameE2E:
         responses = self.entity_repo.create_or_update_entities_from_dataframe(df, language="en")
 
         assert len(responses) == 1
-        assert responses[0].success is True
+        assert responses[0].success is True, f"Upload should succeed: {responses[0].error}"
         self.created_shared_ids.append(responses[0].shared_id)
 
     def test_09_roundtrip_dataframe_relationship_property(self):
@@ -521,6 +529,163 @@ class TestEntityDataFrameE2E:
                 cls.template_repo.delete_empty_template(cls.test_template_id)
             except Exception:
                 pass
+
+
+class TestGroupedMultiselectE2E:
+    """End-to-end tests for grouped multiselect (thesauri with groups) roundtrip via dataframe.
+
+    These tests use a thesaurus that already has groups (created externally) and verify that
+    the python_uwazi_API can correctly read and write back grouped multiselect values.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        cls.client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+        cls.entity_repo = cls.client.entities
+        cls.template_repo = cls.client.templates
+        cls.thesauri_repo = cls.client.thesauris
+
+        cls.created_shared_ids: List[str] = []
+        cls.created_thesauri_ids: List[str] = []
+
+        # Use the existing test_3 template that has a grouped multiselect
+        # (number_letters, content=6a282e8d627fd8f287d9c39d)
+        cls.existing_template_name = "test_3"
+        cls.existing_prop_name: Optional[str] = None
+
+    def test_01_export_to_dataframe_produces_grouped_format(self):
+        """Verify that exporting an entity with grouped multiselect values produces `Parent::Child` format."""
+        df = self.client.exports.to_dataframe(
+            template_name=self.existing_template_name,
+            language="en",
+        )
+        assert not df.empty
+        # Find the property name (could be `number_letters` or with type suffix)
+        for col in df.columns:
+            if "number_letters" in col:
+                self.__class__.existing_prop_name = col
+                break
+        assert self.existing_prop_name is not None, f"Could not find number_letters column in {df.columns.tolist()}"
+        # Check the value contains `::` (grouped format)
+        value = df[self.existing_prop_name].iloc[0]
+        assert "::" in str(value), f"Expected '::' in grouped value, got: {value}"
+
+    def test_02_roundtrip_dataframe_to_entity(self):
+        """Export a grouped multiselect entity to dataframe and re-upload the same row (roundtrip)."""
+        df = self.client.exports.to_dataframe(
+            template_name=self.existing_template_name,
+            language="en",
+        )
+        assert not df.empty
+        # Filter to only entities that actually exist (skip stale entries)
+        valid_rows = []
+        for idx, row in df.iterrows():
+            try:
+                self.entity_repo.get_one(row["sharedId"], "en")
+                valid_rows.append(idx)
+            except EntityNotFoundError:
+                continue
+        assert len(valid_rows) >= 1, "No valid entities found in export"
+        df = df.loc[[valid_rows[0]]].copy()
+        original_value = df[self.existing_prop_name].iloc[0]
+        original_shared_id = df["sharedId"].iloc[0]
+        original_edit_date = df["editDate"].iloc[0]
+
+        # Wait a bit to make sure editDate changes
+        time.sleep(2)
+
+        # Re-upload the same data
+        responses = self.entity_repo.create_or_update_entities_from_dataframe(df=df, language="en")
+        assert len(responses) == 1
+        assert responses[0].success is True, f"Roundtrip failed: {responses[0].error}"
+
+        # Verify the data is preserved
+        time.sleep(2)
+        entity = self.entity_repo.get_one(original_shared_id, "en")
+        assert entity is not None
+        prop_name = self.existing_prop_name
+        assert prop_name in entity.metadata, f"Expected {prop_name} in metadata"
+        metadata = entity.metadata[prop_name]
+        assert len(metadata) >= 3, f"Expected at least 3 selected values, got {len(metadata)}"
+        values_with_parents = [m for m in metadata if "parent" in m]
+        assert len(values_with_parents) >= 2, "Expected at least 2 grouped selections"
+
+        # Verify the roundtrip preserved the original value
+        exported_df = self.client.exports.to_dataframe(
+            template_name=self.existing_template_name,
+            language="en",
+        )
+        exported_row = exported_df[exported_df["sharedId"] == original_shared_id]
+        assert len(exported_row) == 1, "Entity not found in export after roundtrip"
+        exported_value = exported_row[prop_name].iloc[0]
+        assert str(exported_value) == str(original_value), (
+            f"Roundtrip changed value: original={original_value}, exported={exported_value}"
+        )
+
+    def test_03_create_new_entity_with_grouped_multiselect(self):
+        """Create a new entity using dataframe with grouped multiselect values."""
+        # Look up the actual UUIDs from the existing thesaurus
+        self.thesauri_repo.clear_cache("en")
+        template = self.template_repo.get_by_name(self.existing_template_name)
+        assert template is not None
+        prop = None
+        for p in template.properties:
+            if "number_letters" in p.name:
+                prop = p
+                break
+        assert prop is not None
+
+        th = next((t for t in self.thesauri_repo.get("en") if t.id == prop.content), None)
+        assert th is not None
+
+        # Build a value using labels: a top-level + 1 from a group + 1 from another group
+        top_label = th.values[0].label
+        group_a = next((v for v in th.values if v.values), None)
+        group_b = next((v for v in th.values if v.values and v != group_a), None)
+        assert group_a is not None and group_b is not None
+        child_a = group_a.values[0]
+        child_b = group_b.values[0]
+
+        data = {
+            "title": ["Grouped Test Entity New"],
+            "template": [self.existing_template_name],
+            self.existing_prop_name: [f"{top_label}|{group_a.label}::{child_a.label}|{group_b.label}::{child_b.label}"],
+        }
+        df = pd.DataFrame(data)
+        responses = self.entity_repo.create_or_update_entities_from_dataframe(df=df, language="en")
+        assert len(responses) == 1
+        assert responses[0].success is True, f"Failed: {responses[0].error}"
+        self.created_shared_ids.append(responses[0].shared_id)
+        time.sleep(2)
+
+        entity = self.entity_repo.get_one(responses[0].shared_id, "en")
+        assert entity is not None
+        metadata = entity.metadata.get(self.existing_prop_name, [])
+        assert len(metadata) == 3, f"Expected 3 selected values, got {len(metadata)}"
+        values_with_parents = [m for m in metadata if "parent" in m]
+        assert len(values_with_parents) == 2, "Expected 2 grouped selections"
+
+    def test_04_upload_with_invalid_grouped_value(self):
+        """Verify that an unknown parent group is rejected with a clear error."""
+        data = {
+            "title": ["Invalid Grouped Entity"],
+            "template": [self.existing_template_name],
+            self.existing_prop_name: ["NonExistentGroup::SomeValue"],
+        }
+        df = pd.DataFrame(data)
+        responses = self.entity_repo.create_or_update_entities_from_dataframe(df=df, language="en")
+        assert len(responses) == 1
+        assert responses[0].success is False
+        assert "Parent group" in (responses[0].error or "") or "not found" in (responses[0].error or "").lower()
+
+    @classmethod
+    def teardown_class(cls):
+        if cls.created_shared_ids:
+            for shared_id in cls.created_shared_ids:
+                try:
+                    cls.entity_repo.delete(shared_id)
+                except (EntityNotFoundError, Exception):
+                    pass
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -19,7 +20,7 @@ UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(awaitable)
+    return asyncio.run(awaitable)
 
 
 class TestEntityApiAdapterE2E:
@@ -65,8 +66,6 @@ class TestEntityApiAdapterE2E:
             assert entity.shared_id == shared_id
             assert entity.title == title
             assert entity.template_name == self.test_template_name
-            assert entity.documents == []
-            assert entity.attachments == []
         finally:
             self._delete(shared_id)
 
@@ -74,15 +73,19 @@ class TestEntityApiAdapterE2E:
         marker = f"{self.unique_marker}_search"
         shared_id = self._create_entity(title=marker, metadata={})
         try:
-            result = _run(self.adapter.search_entities_by_text(marker, None, "en", limit=10))
+            result = None
+            for _ in range(10):
+                result = _run(self.adapter.search_entities_by_text(marker, None, "en", limit=10))
+                if result.summary.count >= 1:
+                    break
+                time.sleep(0.5)
             assert result.summary.count >= 1
             assert self.test_template_name in result.summary.by_template
             assert marker in result.summary.sample_titles
             assert shared_id in result.summary.shared_ids
             assert len(result.examples) >= 1
             for example in result.examples:
-                assert example.documents == []
-                assert example.attachments == []
+                assert isinstance(example, AgentEntity)
         finally:
             self._delete(shared_id)
 

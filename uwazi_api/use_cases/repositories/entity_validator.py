@@ -77,7 +77,7 @@ class EntityValidator:
         if not template:
             return
         all_props = template.properties + template.common_properties
-        thesauri_cache = {}
+        thesauri_cache: dict = {}
         uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
         for key, values in metadata.items():
             prop = next((p for p in all_props if p.name == key), None)
@@ -93,14 +93,45 @@ class EntityValidator:
                     continue
                 label_to_id = {v.label: v.id for v in thesaurus.values}
                 valid_ids = {v.id for v in thesaurus.values}
-                thesauri_cache[thesaurus_id] = (label_to_id, valid_ids)
+                parent_label_to_id = {}
+                parent_label_to_children: dict[str, dict[str, str]] = {}
+                for v in thesaurus.values:
+                    if v.values:
+                        parent_label_to_id[v.label] = v.id
+                        parent_label_to_children[v.label] = {child.label: child.id for child in v.values}
+                        for child in v.values:
+                            valid_ids.add(child.id)
+                thesauri_cache[thesaurus_id] = (
+                    label_to_id,
+                    valid_ids,
+                    parent_label_to_id,
+                    parent_label_to_children,
+                )
             else:
-                label_to_id, valid_ids = thesauri_cache[thesaurus_id]
+                label_to_id, valid_ids, parent_label_to_id, parent_label_to_children = thesauri_cache[thesaurus_id]
             for item in values:
                 if not isinstance(item, dict) or "value" not in item:
                     continue
                 val = item["value"]
                 if not isinstance(val, str):
+                    continue
+                parent_info = item.get("parent")
+                if isinstance(parent_info, dict):
+                    parent_label = parent_info.get("label", "")
+                    if parent_label not in parent_label_to_children:
+                        raise SearchError(f"Parent group '{parent_label}' not found in thesaurus for property '{key}'")
+                    child_map = parent_label_to_children[parent_label]
+                    if val in child_map:
+                        item["value"] = child_map[val]
+                    elif val not in valid_ids and not uuid_pattern.match(val):
+                        raise SearchError(
+                            f"Value '{val}' not found in group '{parent_label}' of thesaurus for property '{key}'"
+                        )
+                    if "value" not in parent_info and parent_label in parent_label_to_id:
+                        item["parent"] = {
+                            "value": parent_label_to_id[parent_label],
+                            "label": parent_label,
+                        }
                     continue
                 if val in label_to_id:
                     item["value"] = label_to_id[val]
