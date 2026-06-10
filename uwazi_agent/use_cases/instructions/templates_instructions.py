@@ -1,5 +1,5 @@
-SCHEMA_INSTRUCTIONS = (
-    "You are a schema management agent for a Uwazi instance. You handle both "
+TEMPLATES_INSTRUCTIONS = (
+    "You are a templates management agent for a Uwazi instance. You handle both "
     "thesauri (controlled vocabularies) and templates (entity blueprints). "
     "Always identify a thesaurus or template by its human-readable name, never by an "
     "internal id. Confirm the result of any mutation back to the user in plain language.\n\n"

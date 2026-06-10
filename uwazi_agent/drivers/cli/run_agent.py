@@ -17,18 +17,6 @@ UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
-TASK_DESCRIPTION = (
-    "Create a new, beautiful Uwazi page titled 'About Our Human Rights Archive'. "
-    "Write a polished Markdown body that uses a centered hero section (an HTML "
-    '<div align="center"> with a big heading and a short tagline), a horizontal rule, '
-    "an '## Our Mission' section with a couple of sentences, a '## What You'll Find' "
-    "section with a bulleted list (documents, entities, thematic collections), and a "
-    "closing call-to-action. Keep it self-contained (no external images required). "
-    "After creating it, report back the page's shared_id and its public url."
-)
-
-CONTEXT = ""
-
 
 async def main() -> None:
     uwazi_api = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
@@ -42,10 +30,25 @@ async def main() -> None:
         page_api=uwazi_api,
     )
 
-    print("Sending task to OpenRouter via RunAgentUseCase...\n")
-    output = await use_case.execute(task_description=TASK_DESCRIPTION, context=CONTEXT)
-    print("=== Agent output ===")
-    print(output)
+    context_parts = []
+
+    while True:
+        print("\n--- Enter your task (or press Enter or type 'exit' to quit) ---")
+        task = input("Task: ").strip()
+        if not task or task.lower() == "exit":
+            break
+
+        context = "\n\n".join(context_parts) if context_parts else ""
+
+        print("Sending task to OpenRouter via RunAgentUseCase...\n")
+        result = await use_case.execute(task_description=task, context=context)
+        print("=== Agent output ===")
+        print(result.output)
+        if result.thinking:
+            print("\n=== Agent thinking ===")
+            print(result.thinking)
+
+        context_parts.append(f"Previous task: {task}\nPrevious answer: {result.output}")
 
 
 if __name__ == "__main__":

@@ -178,15 +178,19 @@ class EntityMapper:
                     if label:
                         extracted.append(label)
                 elif prop.type == PropertyType.LINK:
-                    label = item.get("label")
-                    url = item.get("url")
+                    # On-disk envelope: {"value": {"label": ..., "url": ...}}
+                    inner = item.get("value") if isinstance(item.get("value"), dict) else item
+                    label = inner.get("label")
+                    url = inner.get("url")
                     if label and url:
                         extracted.append({"label": label, "url": url})
                     elif label or url:
                         extracted.append({"label": label or "", "url": url or ""})
                 elif prop.type == PropertyType.GEO_LOCATION:
-                    lat = item.get("lat")
-                    lon = item.get("lon")
+                    # On-disk envelope: {"value": {"lat": ..., "lon": ..., "label": ...}}
+                    inner = item.get("value") if isinstance(item.get("value"), dict) else item
+                    lat = inner.get("lat")
+                    lon = inner.get("lon")
                     if lat is not None and lon is not None:
                         extracted.append([lat, lon])
                 elif "value" in item:
@@ -247,13 +251,13 @@ class EntityMapper:
         if prop_type == PropertyType.MULTI_DATE:
             return [_to_epoch(v) for v in _to_list(value)]
         if prop_type == PropertyType.DATE_RANGE:
-            return _to_value_list(_coerce_daterange(value))
+            return _to_value_list(_coerce_daterange(value, prop_name=prop.name))
         if prop_type == PropertyType.MULTI_DATE_RANGE:
-            return [_coerce_daterange(v) for v in _to_list(value)]
+            return [_coerce_daterange(v, prop_name=prop.name) for v in _to_list(value)]
         if prop_type == PropertyType.LINK:
-            return _to_value_list(_coerce_link(value))
+            return _to_value_list(_coerce_link(value, prop_name=prop.name))
         if prop_type == PropertyType.GEO_LOCATION:
-            return _to_value_list(_coerce_geolocation(value))
+            return _to_value_list(_coerce_geolocation(value, prop_name=prop.name))
         if prop_type in (PropertyType.SELECT, PropertyType.MULTI_SELECT):
             if prop_type == PropertyType.SELECT:
                 return [_resolve_thesaurus_label(prop, value, self._thesauri_repo, language)]
@@ -317,24 +321,42 @@ def _to_epoch(value: Any) -> Any:
     return value
 
 
-def _coerce_daterange(value: Any) -> dict[str, Any]:
+def _coerce_daterange(value: Any, prop_name: str = "") -> dict[str, Any]:
+    if isinstance(value, list) and len(value) == 1:
+        # Defensive: accept [envelope] and a single-element list wrapping the value.
+        value = value[0]
+    if isinstance(value, dict) and "value" in value and isinstance(value["value"], dict):
+        # Defensive: accept the on-disk envelope [{"value": {"from": ..., "to": ...}}]
+        # shape in case the LLM echoes back what it saw on read.
+        value = value["value"]
     if not isinstance(value, dict):
         if isinstance(value, str) and "->" in value:
             f, t = value.split("->", 1)
             value = {"from": f, "to": t}
         else:
-            raise SearchError(f"Date range value must be an object with 'from' and 'to', got {value!r}")
+            raise SearchError(
+                f"Date range value for property '{prop_name}' must be "
+                "`{'from': 'YYYY-MM-DD', 'to': 'YYYY-MM-DD'}` or 'YYYY-MM-DD->YYYY-MM-DD', "
+                f"got {value!r}"
+            )
     out: dict[str, Any] = {}
     if value.get("from") is not None:
         out["from"] = _to_epoch(value["from"])
     if value.get("to") is not None:
         out["to"] = _to_epoch(value["to"])
     if "from" not in out and "to" not in out:
-        raise SearchError(f"Date range must define at least 'from' or 'to', got {value!r}")
+        raise SearchError(f"Date range for property '{prop_name}' must define at least 'from' or 'to', got {value!r}")
     return out
 
 
-def _coerce_link(value: Any) -> dict[str, Any]:
+def _coerce_link(value: Any, prop_name: str = "") -> dict[str, Any]:
+    if isinstance(value, list) and len(value) == 1:
+        # Defensive: accept [envelope] and a single-element list wrapping the value.
+        value = value[0]
+    if isinstance(value, dict) and "value" in value and isinstance(value["value"], dict):
+        # Defensive: accept the on-disk envelope [{"value": {"label": ..., "url": ...}}]
+        # shape in case the LLM echoes back what it saw on read.
+        value = value["value"]
     if isinstance(value, dict):
         return {"label": str(value.get("label", "")), "url": str(value.get("url", ""))}
     if isinstance(value, str) and "|" in value:
@@ -342,22 +364,62 @@ def _coerce_link(value: Any) -> dict[str, Any]:
         return {"label": label, "url": url}
     if isinstance(value, str):
         return {"label": value, "url": value}
-    raise SearchError(f"Link value must be an object with 'label' and 'url' or a 'label|url' string, got {value!r}")
+    raise SearchError(
+        f"Link value for property '{prop_name}' must be "
+        "`{'label': '<text>', 'url': '<url>'}` or '<text>|<url>', got {value!r}"
+    )
 
 
-def _coerce_geolocation(value: Any) -> dict[str, Any]:
+def _coerce_geolocation(value: Any, prop_name: str = "") -> dict[str, Any]:
+    """Normalize a geolocation value into the Uwazi envelope ``{lat, lon, label}``.
+
+    Accepted input shapes (any of these works on the way in):
+      * ``{"lat": <float>, "lon": <float>}`` (a dict)
+      * ``[<float>, <float>]`` or ``(<float>, <float>)`` (a list/tuple)
+      * ``"<float>|<float>"`` (a string)
+      * ``{"value": {"lat": ..., "lon": ..., "label": ...}}`` (the Uwazi
+        on-disk envelope; the ``label`` key is optional and is preserved)
+      * ``[{"lat": ..., "lon": ..., "label": ...}, ...]`` (a list of
+        on-disk envelopes; the first one is used). This handles the
+        common LLM round-trip mistake of re-emitting the read shape.
+      * ``[[<float>, <float>], ...]`` (a list of ``[lat, lon]`` pairs, the
+        read shape the LLM sees; the first pair is used).
+
+    The ``label`` key, when present, is preserved; when absent, it
+    defaults to an empty string. The function never raises on the
+    defensive envelope unwrap — it falls through to the standard error.
+    """
+    # Defensive: unwrap the on-disk envelope {"value": {"lat": ..., "lon": ...}}
+    if isinstance(value, dict) and set(value.keys()) == {"value"} and isinstance(value["value"], dict):
+        value = value["value"]
+    if (
+        isinstance(value, list)
+        and len(value) >= 1
+        and all(isinstance(item, (list, tuple)) and len(item) >= 2 and not isinstance(item[0], dict) for item in value)
+    ):
+        # Read shape: a list of [lat, lon] pairs. Use the first.
+        first = value[0]
+        return {"lat": float(first[0]), "lon": float(first[1]), "label": ""}
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        # [envelope] -> envelope
+        if "lat" in value[0] and "lon" in value[0]:
+            value = value[0]
     if isinstance(value, dict):
         lat = value.get("lat")
         lon = value.get("lon")
         if lat is None or lon is None:
-            raise SearchError(f"Geolocation value must contain 'lat' and 'lon', got {value!r}")
+            raise SearchError(f"Geolocation value for property '{prop_name}' must contain 'lat' and 'lon', got {value!r}")
         return {"lat": float(lat), "lon": float(lon), "label": str(value.get("label", ""))}
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
+    if isinstance(value, (list, tuple)) and len(value) >= 2 and not isinstance(value[0], dict):
         return {"lat": float(value[0]), "lon": float(value[1]), "label": ""}
-    if isinstance(value, str) and "|" in value:
+    if isinstance(value, str) and "|" in value and _looks_like_geo(value):
         lat, lon = value.split("|", 1)
         return {"lat": float(lat), "lon": float(lon), "label": ""}
-    raise SearchError(f"Geolocation value must be [lat, lon] or 'lat|lon', got {value!r}")
+    raise SearchError(
+        f"Geolocation value for property '{prop_name}' must be one of "
+        "`[lat, lon]`, `{'lat': <float>, 'lon': <float>}`, or '<lat>|<lon>', "
+        f"got {value!r}"
+    )
 
 
 def _looks_like_geo(value: str) -> bool:

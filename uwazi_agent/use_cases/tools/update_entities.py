@@ -3,13 +3,15 @@ from pydantic_ai import RunContext
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_agent.use_cases.tools.fail_forward import suggest_template_names
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def update_entities(
     ctx: RunContext[UwaziAgentToolsDependencies],
     updates: list[AgentEntity],
     language: str = "en",
-) -> list[AgentEntityMutationResult]:
+) -> list[AgentEntityMutationResult] | str:
     """Apply partial updates to one or more existing entities.
 
     This is a *partial merge*: only the metadata fields you provide are
@@ -30,6 +32,31 @@ async def update_entities(
           ``template_name``. The new template's required properties must
           be present in ``metadata`` (omitted fields will be left blank).
 
+    Metadata value shapes (must match exactly):
+        * ``text`` / ``markdown`` / ``numeric`` / ``date``: scalar
+          (`"hello"`, `42`, `"2024-01-15"`).
+        * ``daterange``: ``{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}`` or
+          the shorthand `"YYYY-MM-DD->YYYY-MM-DD"`.
+        * ``multidate``: list of ISO date strings.
+        * ``multidaterange``: list of `{"from", "to"}` dicts.
+        * ``select``: a thesaurus label string (e.g. `"Approved"`). Never
+          a UUID.
+        * ``multiselect``: list of label strings.
+        * ``link``: ``{"label": "<text>", "url": "<url>"}`` or
+          `"<text>|<url>"`.
+        * ``geolocation``: ONE of ``[<lat>, <lon>]``,
+          ``{"lat": <lat>, "lon": <lon>}``, or ``"<lat>|<lon>"``. For
+          multiple points, wrap any of those in a list. Never build a
+          list of objects with ``label``/``lat``/``lon`` keys — that is
+          the on-disk envelope and the mapper will reject it.
+        * ``image`` / ``media``: URL or file reference.
+
+    Round-tripping: entities returned by ``get_entities_by_shared_ids``,
+    ``search_entities_by_text``, and ``get_entities_by_template`` are
+    already in these shapes. When you copy a metadata value into an
+    update payload, copy it verbatim — including ``[lat, lon]`` pairs
+    for geolocation.
+
     Args:
         updates: The list of partial entity updates to apply.
         language: ISO 639-1 language code. Defaults to "en".
@@ -37,8 +64,16 @@ async def update_entities(
     Returns:
         A per-entity result indicating success or a descriptive error
         (e.g. unknown shared_id, unknown template, invalid thesaurus
-        label). Failures in one entity do not abort the rest.
+        label). Failures in one entity do not abort the rest. On
+        catastrophic error, returns a string with suggestions.
     """
     if ctx.deps.entity_api is None:
-        raise RuntimeError("Entity tools are not configured: `entity_api` is missing on dependencies.")
-    return await ctx.deps.entity_api.update_entities(updates=updates, language=language)
+        return "Error: Entity tools are not configured: `entity_api` is missing on dependencies."
+    try:
+        return await ctx.deps.entity_api.update_entities(updates=updates, language=language)
+    except DomainError as exc:
+        template_names = {e.template_name for e in updates if e.template_name}
+        if "template" in str(exc).lower() and template_names:
+            first_bad = next(iter(template_names))
+            return await suggest_template_names(ctx.deps, first_bad)
+        return f"Error updating entities: {exc}. Please check the entity data and template names, then retry."

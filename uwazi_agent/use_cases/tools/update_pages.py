@@ -1,15 +1,18 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_page_mutation_result import AgentPageMutationResult
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def update_pages(
     ctx: RunContext[UwaziAgentToolsDependencies],
     updates: list[AgentPageUpdate],
     language: str = "en",
-) -> list[AgentPageMutationResult]:
+) -> list[AgentPageMutationResult] | str:
+    logger.info("update_pages(updates_count={}, language={!r})", len(updates), language)
     """Apply partial updates to one or more existing pages.
 
     This is a *partial merge*: only the fields you set are changed; any field
@@ -34,8 +37,12 @@ async def update_pages(
     Returns:
         A per-page result indicating success (with the public ``url``) or a
         descriptive ``error`` (e.g. unknown shared_id). One failure does not
-        abort the rest.
+        abort the rest. On catastrophic error, returns a string describing
+        the problem.
     """
     if ctx.deps.page_api is None:
-        raise RuntimeError("Page tools are not configured: `page_api` is missing on dependencies.")
-    return await ctx.deps.page_api.update_pages(updates=updates, language=language)
+        return "Error: Page tools are not configured: `page_api` is missing on dependencies."
+    try:
+        return await ctx.deps.page_api.update_pages(updates=updates, language=language)
+    except DomainError as exc:
+        return f"Error updating pages: {exc}. Please verify the shared_ids and retry."

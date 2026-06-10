@@ -11,13 +11,23 @@ class EntityApiPort(ABC):
     async def create_entities(self, entities: list[AgentEntityCreate], language: str) -> list[AgentEntityMutationResult]: ...
 
     @abstractmethod
-    async def get_entities_by_shared_ids(self, shared_ids: list[str], language: str) -> list[AgentEntity]: ...
+    async def get_entities_by_shared_ids(
+        self, shared_ids: list[str], language: str, limit: int = 10000
+    ) -> list[AgentEntity]: ...
 
     @abstractmethod
     async def search_entities_by_text(
         self,
         search_term: str,
         template_name: str | None,
+        language: str,
+        limit: int,
+    ) -> AgentEntitySearchResult: ...
+
+    @abstractmethod
+    async def get_entities_by_template(
+        self,
+        template_name: str,
         language: str,
         limit: int,
     ) -> AgentEntitySearchResult: ...

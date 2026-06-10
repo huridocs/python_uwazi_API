@@ -9,3 +9,4 @@ class AgentProperty(BaseModel):
     name: str
     type: AgentPropertyType
     thesaurus_name: Optional[str] = None
+    format_instructions: Optional[str] = None

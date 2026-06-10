@@ -1,4 +1,6 @@
-from typing import Optional
+from dataclasses import dataclass
+
+from pydantic_ai.usage import RunUsage
 
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
@@ -6,9 +8,15 @@ from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
-from uwazi_agent.ports.thesauri_mapper_port import ThesauriMapperPort
 from uwazi_agent.use_cases.agent_factory import build_uwazi_agents
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+
+
+@dataclass
+class AgentExecutionResult:
+    output: str
+    thinking: str | None
+    usage: RunUsage
 
 
 class RunAgentUseCase:
@@ -18,25 +26,22 @@ class RunAgentUseCase:
         thesauri_api: ThesauriApiPort,
         template_api: TemplateApiPort,
         template_mapper: TemplateMapperPort,
-        thesauri_mapper: Optional[ThesauriMapperPort] = None,
-        entity_api: Optional[EntityApiPort] = None,
-        page_api: Optional[PageApiPort] = None,
+        entity_api: EntityApiPort,
+        page_api: PageApiPort,
     ):
         self.llm = llm
         self.thesauri_api = thesauri_api
         self.template_api = template_api
         self.template_mapper = template_mapper
-        self.thesauri_mapper = thesauri_mapper
         self.entity_api = entity_api
         self.page_api = page_api
 
-    async def execute(self, task_description: str, context: str = "") -> str:
+    async def execute(self, task_description: str, context: str = "") -> AgentExecutionResult:
         prompt = self._compose_prompt(task_description=task_description, context=context)
         deps = UwaziAgentToolsDependencies(
             thesauri_api=self.thesauri_api,
             template_api=self.template_api,
             template_mapper=self.template_mapper,
-            thesauri_mapper=self.thesauri_mapper,
             entity_api=self.entity_api,
             page_api=self.page_api,
         )
@@ -46,7 +51,11 @@ class RunAgentUseCase:
             include_pages=self.page_api is not None,
         )
         result = await agent.run(prompt, deps=deps)
-        return result.output
+        return AgentExecutionResult(
+            output=result.output,
+            thinking=result.response.thinking,
+            usage=result.usage,
+        )
 
     @staticmethod
     def _compose_prompt(task_description: str, context: str) -> str:

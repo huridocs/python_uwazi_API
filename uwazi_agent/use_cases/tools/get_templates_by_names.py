@@ -1,13 +1,16 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def get_templates_by_names(
     ctx: RunContext[UwaziAgentToolsDependencies],
     names: list[str],
-) -> list[AgentTemplate]:
+) -> list[AgentTemplate] | str:
+    logger.info("get_templates_by_names(names={!r})", names)
     """Look up templates by their human-readable name.
 
     Use this when the user references a template by name and you need its
@@ -21,6 +24,10 @@ async def get_templates_by_names(
         names: The template names to look up.
 
     Returns:
-        The matching templates with their custom properties.
+        The matching templates with their custom properties. On error,
+        returns a string describing the problem.
     """
-    return await ctx.deps.template_api.get_templates_by_names(names=names)
+    try:
+        return await ctx.deps.template_api.get_templates_by_names(names=names)
+    except DomainError as exc:
+        return f"Error looking up templates: {exc}. Use get_template_names to see available templates and retry."

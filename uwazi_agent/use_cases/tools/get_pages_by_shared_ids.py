@@ -1,14 +1,17 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_page import AgentPage
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def get_pages_by_shared_ids(
     ctx: RunContext[UwaziAgentToolsDependencies],
     shared_ids: list[str],
     language: str = "en",
-) -> list[AgentPage]:
+) -> list[AgentPage] | str:
+    logger.info("get_pages_by_shared_ids(shared_ids={!r}, language={!r})", shared_ids, language)
     """Fetch full page details (body + JavaScript) by their ``shared_id``.
 
     Use this when you already know the ``shared_id`` of one or more pages
@@ -24,7 +27,11 @@ async def get_pages_by_shared_ids(
 
     Returns:
         The matching pages with their full ``content`` and ``javascript``.
+        On error, returns a string describing the problem.
     """
     if ctx.deps.page_api is None:
-        raise RuntimeError("Page tools are not configured: `page_api` is missing on dependencies.")
-    return await ctx.deps.page_api.get_pages_by_shared_ids(shared_ids=shared_ids, language=language)
+        return "Error: Page tools are not configured: `page_api` is missing on dependencies."
+    try:
+        return await ctx.deps.page_api.get_pages_by_shared_ids(shared_ids=shared_ids, language=language)
+    except DomainError as exc:
+        return f"Error fetching pages: {exc}. Please verify the shared_ids and retry."

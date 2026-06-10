@@ -1,7 +1,9 @@
+from loguru import logger
 from pydantic_ai import RunContext
 
 from uwazi_agent.domain.agent_property import AgentProperty
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_api.domain.exceptions import DomainError
 
 
 async def create_template(
@@ -9,7 +11,8 @@ async def create_template(
     name: str,
     properties: list[AgentProperty],
     language: str = "en",
-) -> dict:
+) -> dict | str:
+    logger.info("create_template(name={!r}, properties_count={}, language={!r})", name, len(properties), language)
     """Create a new template with the given custom properties.
 
     Use this when the user wants to define a brand-new template. Provide the
@@ -29,9 +32,13 @@ async def create_template(
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
-        The API response payload for the created template.
+        The API response payload for the created template. On error,
+        returns a string describing the problem.
     """
     from uwazi_agent.domain.agent_template import AgentTemplate
 
-    template = AgentTemplate(name=name, properties=properties)
-    return await ctx.deps.template_api.create_template(template=template, language=language)
+    try:
+        template = AgentTemplate(name=name, properties=properties)
+        return await ctx.deps.template_api.create_template(template=template, language=language)
+    except DomainError as exc:
+        return f"Error creating template '{name}': {exc}. Please check the template name and properties, then retry."
