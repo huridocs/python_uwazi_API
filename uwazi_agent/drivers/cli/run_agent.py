@@ -18,6 +18,9 @@ UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 
+MAX_CONTEXT_EXCHANGES = 10
+
+
 async def main() -> None:
     uwazi_api = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     llm = OpenRouterAdapter(api_key=OPENROUTER_API_KEY)
@@ -30,7 +33,7 @@ async def main() -> None:
         page_api=uwazi_api,
     )
 
-    context_parts = []
+    context_parts: list[str] = []
 
     while True:
         print("\n--- Enter your task (or press Enter or type 'exit' to quit) ---")
@@ -49,6 +52,8 @@ async def main() -> None:
             print(result.thinking)
 
         context_parts.append(f"Previous task: {task}\nPrevious answer: {result.output}")
+        if len(context_parts) > MAX_CONTEXT_EXCHANGES:
+            context_parts = context_parts[-MAX_CONTEXT_EXCHANGES:]
 
 
 if __name__ == "__main__":
