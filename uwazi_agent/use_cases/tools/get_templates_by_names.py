@@ -27,7 +27,12 @@ async def get_templates_by_names(
         The matching templates with their custom properties. On error,
         returns a string describing the problem.
     """
+    cached = [ctx.deps.schema_store.templates[n] for n in names if n in ctx.deps.schema_store.templates]
+    if len(cached) == len(names):
+        return cached
     try:
-        return await ctx.deps.template_api.get_templates_by_names(names=names)
+        templates = await ctx.deps.template_api.get_templates_by_names(names=names)
+        ctx.deps.schema_store.add_templates(templates)
+        return templates
     except DomainError as exc:
         return f"Error looking up templates: {exc}. Use get_template_names to see available templates and retry."

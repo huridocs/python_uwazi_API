@@ -22,8 +22,13 @@ async def get_thesauris_names(
         The list of thesaurus names currently defined. On error, returns
         a string describing the problem.
     """
+    if ctx.deps.schema_store.thesauri_names:
+        return ctx.deps.schema_store.thesauri_names
     try:
         thesauris = await ctx.deps.thesauri_api.get_thesauris(language=language)
-        return [t.name for t in thesauris]
+        names = [t.name for t in thesauris]
+        ctx.deps.schema_store.add_thesauri_names(names)
+        ctx.deps.schema_store.add_thesauri(thesauris)
+        return names
     except DomainError as exc:
         return f"Error listing thesauri names: {exc}. Please check the Uwazi connection and retry."
