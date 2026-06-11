@@ -373,3 +373,37 @@ class TestRoundTrip:
         assert agent_entity.metadata["source"] == {"label": "Uwazi", "url": "https://uwazi.io"}
         api_entity2 = mapper.to_api(agent_entity)
         assert api_entity2.metadata == {"source": [{"value": {"label": "Uwazi", "url": "https://uwazi.io"}}]}
+
+
+class TestTimestampRead:
+    """``AgentEntity`` exposes ``creation_date`` and ``edit_date`` so the LLM
+    can reason about ordering without guessing. The Uwazi API returns them
+    as epoch-millis; the mapper converts them to ISO 8601 UTC strings.
+    """
+
+    def setup_method(self):
+        self.mapper = _make_mapper_with_template(
+            _build_template_with([PropertySchema(name="k", label="K", type=PropertyType.TEXT)])
+        )
+
+    def test_read_converts_epoch_millis_to_iso(self):
+        entity = _build_entity({}, "k", PropertyType.TEXT)
+        entity.creation_date = 1_700_000_000_000
+        entity.edit_date = 1_700_000_500_000
+        agent = self.mapper.to_agent(entity, template_name="T")
+        assert agent.creation_date == "2023-11-14T22:13:20Z"
+        assert agent.edit_date == "2023-11-14T22:21:40Z"
+
+    def test_read_handles_missing_timestamps(self):
+        entity = _build_entity({}, "k", PropertyType.TEXT)
+        entity.creation_date = None
+        entity.edit_date = None
+        agent = self.mapper.to_agent(entity, template_name="T")
+        assert agent.creation_date is None
+        assert agent.edit_date is None
+
+    def test_read_handles_unparseable_timestamps(self):
+        entity = _build_entity({}, "k", PropertyType.TEXT)
+        entity.creation_date = "not-a-number"
+        agent = self.mapper.to_agent(entity, template_name="T")
+        assert agent.creation_date is None

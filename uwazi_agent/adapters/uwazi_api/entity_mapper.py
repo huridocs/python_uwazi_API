@@ -74,6 +74,8 @@ class EntityMapper:
             metadata=metadata,
             language=api_entity.language or "en",
             published=api_entity.published,
+            creation_date=_epoch_ms_to_iso(api_entity.creation_date),
+            edit_date=_epoch_ms_to_iso(api_entity.edit_date),
         )
 
     def to_api(
@@ -532,3 +534,18 @@ def _flatten_values(values: list) -> list:
         if v.values:
             result.extend(_flatten_values(v.values))
     return result
+
+
+def _epoch_ms_to_iso(value: Any) -> Optional[str]:
+    """Convert a Uwazi epoch-millis timestamp to an ISO 8601 UTC string.
+
+    Returns ``None`` for missing or unparseable values so the LLM does not see
+    a misleading "1970-01-01T00:00:00" placeholder.
+    """
+    if value is None:
+        return None
+    try:
+        millis = float(value)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
