@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from uwazi_agent.adapters.llm.openrouter_adapter import OpenRouterAdapter
+from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
@@ -17,7 +17,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 UWAZI_URL = os.environ["UWAZI_URL"]
 UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 
 MAX_CONTEXT_EXCHANGES = 10
@@ -27,7 +26,7 @@ async def main() -> None:
     setup_logging(url=UWAZI_URL, user=UWAZI_USER)
 
     uwazi_api = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
-    llm = OpenRouterAdapter(api_key=OPENROUTER_API_KEY)
+    llm = OllamaAdapter()
     use_case = RunAgentUseCase(
         llm=llm,
         thesauri_api=uwazi_api,
@@ -37,6 +36,7 @@ async def main() -> None:
         page_api=uwazi_api,
         relationship_type_api=uwazi_api,
         settings_api=uwazi_api,
+        stats_api=uwazi_api,
     )
 
     context_parts: list[str] = []

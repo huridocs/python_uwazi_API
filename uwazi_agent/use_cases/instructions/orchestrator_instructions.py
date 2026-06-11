@@ -7,6 +7,8 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "- ``get_thesauris_names`` / ``get_thesauris_by_names`` — inspect thesauri.\n"
     "- ``get_relationship_type_names`` — inspect relationship types.\n"
     "- ``get_languages`` — discover configured languages.\n"
+    "- ``get_stats`` — total entities, entity counts per template, and "
+    "usage counts per thesaurus value.\n"
     "- ``search_entities_by_text`` — fuzzy free-text entity search.\n"
     "- ``search_entities_by_filter`` — structured exact-match entity queries.\n"
     "- ``get_entities_by_shared_ids`` — fetch full entity details by known ids.\n"

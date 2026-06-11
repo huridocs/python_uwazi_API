@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -7,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 
-from uwazi_agent.adapters.llm.openrouter_adapter import OpenRouterAdapter
+from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.drivers.rest.models.ai_job_request import AIJobRequest
 from uwazi_agent.drivers.rest.models.ai_job_response import AIJobResponse
@@ -88,7 +87,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             password=request.credentials.password,
             url=request.credentials.url,
         )
-        llm = OpenRouterAdapter(api_key=os.environ.get("OPENROUTER_API_KEY"))
+        llm = OllamaAdapter()
 
         use_case = RunAgentUseCase(
             llm=llm,
@@ -99,6 +98,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             page_api=uwazi_api,
             relationship_type_api=uwazi_api,
             settings_api=uwazi_api,
+            stats_api=uwazi_api,
         )
 
         context = session.get_context()
