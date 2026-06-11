@@ -66,5 +66,16 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "entities and stored them in the entity store, you MUST immediately "
     "delegate to the Python agent with the user's original question. Do not "
     "try to process them yourself or delegate to the entity agent. Then relay "
-    "the Python agent's answer to the user."
+    "the Python agent's answer to the user.\n\n"
+    "Python agent output is HARD-CAPPED at 2500 characters "
+    "(``configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT``). When you "
+    "delegate to the Python agent, phrase the task so the answer it returns "
+    "fits in that cap: ask for summaries, counts, or the first N items "
+    "instead of full dumps. When the Python agent's reply looks truncated "
+    "(it ends with ``... [output truncated]`` or seems suspiciously short "
+    'for the dataset size), do NOT call it again to "get the rest" — the '
+    "tail is gone. Instead, either reformulate the task as a follow-up "
+    "question that itself fits the 2500-char budget, or ask the user how to "
+    "summarise further. Never assume the Python agent can produce an "
+    "unbounded answer."
 )
