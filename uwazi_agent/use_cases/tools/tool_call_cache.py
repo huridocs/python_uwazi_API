@@ -1,7 +1,11 @@
 from typing import Any
 
+from pydantic import BaseModel
+
 
 def _freeze(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _freeze(value.model_dump())
     if isinstance(value, dict):
         return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
     if isinstance(value, (list, tuple)):

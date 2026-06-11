@@ -53,10 +53,15 @@ async def get_job(job_id: str) -> AIJobStatusResponse:
     if session is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    result = session.result
+    if session.status in (AIJobStatus.PENDING, AIJobStatus.RUNNING):
+        progress = session.progress
+        result = progress[-1] if progress else "Task is starting..."
+
     return AIJobStatusResponse(
         job_id=session.job_id,
         status=session.status,
-        result=session.result,
+        result=result,
     )
 
 
@@ -97,7 +102,11 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
         )
 
         context = session.get_context()
-        result = await use_case.execute(task_description=request.message, context=context)
+        result = await use_case.execute(
+            task_description=request.message,
+            context=context,
+            tool_progress=session.progress,
+        )
 
         session.add_message("assistant", result.output)
         session.result = result.output

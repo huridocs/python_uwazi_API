@@ -4,13 +4,13 @@ from typing import Optional
 import pandas as pd
 
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.exceptions import SearchError, TemplateNotFoundError
-from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
+from uwazi_api.domain.exceptions import SearchError
+from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
-from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
 class SearchRepository:
@@ -116,30 +116,27 @@ class SearchRepository:
         sort: str = "creationDate",
     ) -> list[Entity]:
         template_id = self._resolve_template_id(template_name) if template_name else None
-        self._validate_and_resolve_filters(filters, template_id, language)
-        serialized_filters = self._serialize_filters(filters)
+        property_name_to_id = self._validate_and_resolve_filters(filters, template_id, language)
+        serialized_filters = self._serialize_filters(filters, property_name_to_id)
         params = self._build_filter_search_params(
             serialized_filters, template_id, start_from, batch_size, published, order, sort
         )
         return self._execute_search(params, language)
 
-    def _validate_and_resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> None:
+    def _validate_and_resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> dict:
         if not template_id or not self._template_repo:
-            return
-        # Build a mapping of property name -> property ID for serialization
+            return {}
         name_to_id = {}
         for prop_name, filter_value in filters.filters.items():
             prop = self._template_repo.find_property(template_id, prop_name)
             if not prop:
                 raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
             self._template_repo.ensure_property_filterable(prop, prop_name)
-            # Process property label: lowercase and replace all non-alphanumeric chars with _
             filter_key = PropertyLabelSanitizer.sanitize(prop.name)
             name_to_id[prop_name] = filter_key
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
                 self._resolve_select_filter(filter_value, prop, prop_name, language)
-        # Store the mapping for use in serialization
-        self._property_name_to_id = name_to_id
+        return name_to_id
 
     def _resolve_template_id(self, template_name_or_id: str) -> str:
         if not self._template_repo:
@@ -156,7 +153,15 @@ class SearchRepository:
         if not thesauri_id:
             raise SearchError(f"Property '{prop_name}' has no thesauri content")
         thesauri = self._find_thesaurus(thesauri_id, prop_name, language)
-        name_to_id = {v.label: v.id for v in thesauri.values}
+        name_to_id = {}
+        valid_ids = set()
+        for v in thesauri.values:
+            name_to_id[v.label] = v.id
+            valid_ids.add(v.id)
+            if v.values:
+                for child in v.values:
+                    name_to_id[child.label] = child.id
+                    valid_ids.add(child.id)
         filter_value.values = [
             name_to_id[name] if name != "missing" else name
             for name in filter_value.values
@@ -175,12 +180,10 @@ class SearchRepository:
             raise SearchError(f"Value '{name}' not found in thesaurus '{thesauri.name}' for property '{prop_name}'")
         return True
 
-    def _serialize_filters(self, filters: SearchFilters) -> dict:
+    def _serialize_filters(self, filters: SearchFilters, property_name_to_id: dict) -> dict:
         result = {}
-        name_to_id = getattr(self, "_property_name_to_id", {})
         for name, value in filters.filters.items():
-            # Use property ID if available, otherwise use the name as-is
-            key = name_to_id.get(name, name)
+            key = property_name_to_id.get(name, name)
             result[key] = value.model_dump(exclude_none=True) if hasattr(value, "model_dump") else value
         return result
 
@@ -209,9 +212,6 @@ class SearchRepository:
         }
         if template_id:
             params["types"] = f'["{template_id}"]'
-        # Clean up the mapping after use
-        if hasattr(self, "_property_name_to_id"):
-            del self._property_name_to_id
         return params
 
     def _execute_search(self, params: dict, language: str) -> list[Entity]:
@@ -238,13 +238,13 @@ class SearchRepository:
         sort: str = "creationDate",
     ) -> pd.DataFrame:
         template_id = self._resolve_template_id(template_name) if template_name else None
-        self._validate_and_resolve_filters(filters, template_id, language)
-        serialized_filters = self._serialize_filters(filters)
+        property_name_to_id = self._validate_and_resolve_filters(filters, template_id, language)
+        serialized_filters = self._serialize_filters(filters, property_name_to_id)
         params = self._build_filter_search_params(
             serialized_filters, template_id, start_from, batch_size, published, order, sort
         )
         entities = self._execute_search(params, language)
-        return entities_to_dataframe(entities, template_id, self._template_repo)
+        return entities_to_dataframe(entities, template_name, self._template_repo)
 
     def search_to_dataframe(
         self,

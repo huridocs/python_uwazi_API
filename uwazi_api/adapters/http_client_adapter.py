@@ -10,7 +10,9 @@ from uwazi_api.adapters.request_retry import requests_retry_session
 
 class HttpClientAdapter(HttpClientPort):
     def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None):
-        url = url if url[-1] != "/" else url[:-1]
+        if not url:
+            raise ValueError("URL is required and cannot be None or empty")
+        url = url.rstrip("/")
         for language in iso_639_choices:
             if url[-3:] == f"/{language[0]}":
                 url = url[:-3]

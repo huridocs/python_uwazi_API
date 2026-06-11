@@ -25,3 +25,4 @@ class UwaziAgentToolsDependencies(BaseModel):
     entity_store: EntityStore = Field(default_factory=EntityStore)
     schema_store: SchemaStore = Field(default_factory=SchemaStore)
     tool_cache: ToolCallCache = Field(default_factory=ToolCallCache)
+    tool_progress: list[str] = Field(default_factory=list)

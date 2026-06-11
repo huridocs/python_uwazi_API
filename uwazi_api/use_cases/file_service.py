@@ -3,14 +3,13 @@ from pathlib import Path
 from typing import Optional
 
 from uwazi_api.domain.FileType import FileType
+from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
 
 from uwazi_api.use_cases.repositories.file_repository import FileRepository
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
 
 
 class FileService:
-    language_to_file_language = {"fr": "fra", "es": "spa", "en": "eng", "pt": "prt", "ar": "arb"}
-
     def __init__(
         self,
         file_repository: "FileRepository",
@@ -23,7 +22,7 @@ class FileService:
 
     def get_document(self, shared_id: str, language: str) -> Optional[bytes]:
         entity = self.entity_repo.get_one(shared_id, language)
-        mapping = self.language_to_file_language
+        mapping = LANGUAGE_TO_FILE_LANGUAGE
         if language not in mapping:
             return None
         file_language = mapping[language]

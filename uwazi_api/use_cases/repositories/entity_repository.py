@@ -12,14 +12,13 @@ from uwazi_api.domain.exceptions import (
 )
 from uwazi_api.domain.dataframe_entity_mapper import DataFrameEntityMapper
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
-from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
-from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
-class EntityRepository(SearchRepository):
+class EntityRepository:
     def __init__(
         self,
         http_client: HttpClientAdapter,
@@ -27,7 +26,9 @@ class EntityRepository(SearchRepository):
         thesauri_repo: Optional[ThesauriRepository] = None,
         validator: Optional[EntityValidator] = None,
     ):
-        super().__init__(http_client, template_repo=template_repo, thesauri_repo=thesauri_repo)
+        self.http = http_client
+        self._template_repo = template_repo
+        self._thesauri_repo = thesauri_repo
         self._validator = validator or EntityValidator(template_repo=template_repo, thesauri_repo=thesauri_repo)
 
     def get_one(self, shared_id: str, language: str) -> Entity:
@@ -103,7 +104,7 @@ class EntityRepository(SearchRepository):
             sharedId=existing.shared_id,
             title=entity.title if entity.title is not None else existing.title,
             template=entity.template if entity.template is not None else existing.template,
-            language=entity.language if entity.language is not None else existing.language,
+            language=language,
             published=entity.published if entity.published is not None else existing.published,
             creationDate=existing.creation_date,
             editDate=existing.edit_date,
@@ -188,6 +189,14 @@ class EntityRepository(SearchRepository):
             self.http.graylog.info(message)
             raise UploadError(message)
         self.http.graylog.info(f"Entities deleted {shared_ids}")
+
+    def _resolve_template_id(self, template_name_or_id: str) -> str:
+        if not self._template_repo:
+            return template_name_or_id
+        template_id = self._template_repo.resolve_template_id(template_name_or_id)
+        if not template_id:
+            raise UploadError(f"Template '{template_name_or_id}' not found")
+        return template_id
 
     def _resolve_template(self, template_name_or_id: str):
         if not self._template_repo or not template_name_or_id:

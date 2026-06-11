@@ -7,7 +7,7 @@ from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
 class EntityValidator:

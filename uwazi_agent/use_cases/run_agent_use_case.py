@@ -43,7 +43,9 @@ class RunAgentUseCase:
         self.relationship_type_api = relationship_type_api
         self.settings_api = settings_api
 
-    async def execute(self, task_description: str, context: str = "") -> AgentExecutionResult:
+    async def execute(
+        self, task_description: str, context: str = "", tool_progress: list[str] | None = None
+    ) -> AgentExecutionResult:
         prompt = self._compose_prompt(task_description=task_description, context=context)
         logger.info("PROMPT: {}", prompt)
         deps = UwaziAgentToolsDependencies(
@@ -55,11 +57,9 @@ class RunAgentUseCase:
             page_api=self.page_api,
             settings_api=self.settings_api,
         )
-        agent = build_uwazi_agents(
-            model=self.llm.get_model(),
-            include_entities=self.entity_api is not None,
-            include_pages=self.page_api is not None,
-        )
+        if tool_progress is not None:
+            deps.tool_progress = tool_progress
+        agent = build_uwazi_agents(model=self.llm.get_model())
         try:
             result = await agent.run(prompt, deps=deps)
             logger.info("PROMPT SUCCEEDED: {}", task_description[:200])

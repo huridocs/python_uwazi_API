@@ -30,6 +30,7 @@ class TestCSVUseCaseE2E:
         cls.csv_use_case = cls.client.csv
         cls.template_repo = cls.client.templates
         cls.entity_repo = cls.client.entities
+        cls.search_repo = cls.client.search
 
         # Create unique test template name
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -118,7 +119,7 @@ class TestCSVUseCaseE2E:
         # Verify entities were created by searching for them
         for title in data["title"]:
             # Use search to find entities by title
-            search_results = self.entity_repo.get()
+            search_results = self.search_repo.get(template_name=self.test_template_name)
             matching_entities = [e for e in search_results if e.title == title and e.template == self.test_template_id]
             assert len(matching_entities) > 0
             entity = matching_entities[0]
@@ -148,7 +149,7 @@ class TestCSVUseCaseE2E:
 
         # Verify entities were created
         for title in data["title"]:
-            search_results = self.entity_repo.get()
+            search_results = self.search_repo.get(template_name=self.test_template_name)
             matching_entities = [e for e in search_results if e.title == title and e.template == self.test_template_id]
             assert len(matching_entities) > 0
             entity = matching_entities[0]
