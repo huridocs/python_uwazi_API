@@ -123,6 +123,18 @@ async def run_python_code(
     or debugging info. Example: for "give me all titles", set
     ``result = '\\n'.join(e['title'] for e in entities)``.
 
+    IMPORTANT — Hard output cap (2500 characters):
+    The returned string is HARD-CAPPED at
+    ``configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT`` characters (500).
+    Any output past that limit is silently truncated and replaced with
+    ``"\n... [output truncated]"``. The full output is NOT available later —
+    the Python agent has no way to fetch the truncated tail. Therefore the
+    ``result`` string MUST be designed to fit within this cap. If the natural
+    answer would exceed it, return a summary (count, first N items, aggregated
+    stats) instead of the raw data. The orchestrator that reads this tool's
+    output will also assume the answer is complete, so anything lost to
+    truncation is lost to the whole conversation.
+
     Args:
         code: Python code to execute. Must set ``result`` to a string.
         language: ISO 639-1 language code for CRUD operations. Defaults to "en".
