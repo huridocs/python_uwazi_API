@@ -3,8 +3,7 @@ services:
     build: .
     network_mode: host
     environment:
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-deepseek/deepseek-v4-flash}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - GRAYLOG_HOST=${GRAYLOG_HOST:-}
       - GRAYLOG_PORT=${GRAYLOG_PORT:-12201}
     restart: unless-stopped

@@ -30,6 +30,7 @@ from .tools.get_entities_by_shared_ids import get_entities_by_shared_ids
 from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
+from .tools.get_stats import get_stats
 from .tools.get_relationship_type_names import get_relationship_type_names
 from .tools.get_template_names import get_template_names
 from .tools.get_templates_by_names import get_templates_by_names
@@ -59,30 +60,31 @@ _ENTITY_READ_TOOLS = {
 }
 _PAGE_READ_TOOLS = {"list_pages", "get_pages_by_shared_ids"}
 _LANGUAGE_READ_TOOLS = {"get_languages"}
+_STATS_READ_TOOLS = {"get_stats"}
 
 _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_template": (
-        _TEMPLATE_READ_TOOLS,
+        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
         None,
     ),
     "update_template": (
-        _TEMPLATE_READ_TOOLS,
+        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
         lambda deps: deps.schema_store.clear_templates(),
     ),
     "delete_template": (
-        _TEMPLATE_READ_TOOLS,
+        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
         lambda deps: deps.schema_store.clear_templates(),
     ),
     "create_thesauri": (
-        _THESAURI_READ_TOOLS,
+        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
     "update_thesauri": (
-        _THESAURI_READ_TOOLS,
+        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
     "delete_thesauri": (
-        _THESAURI_READ_TOOLS,
+        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
     "create_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
@@ -356,6 +358,7 @@ def build_orchestrator(
         _read_tool(get_thesauris_by_names),
         _read_tool(get_relationship_type_names),
         _read_tool(get_languages),
+        _read_tool(get_stats),
         _read_tool(search_entities_by_text),
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),

@@ -10,6 +10,7 @@ from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.settings_api_port import SettingsApiPort
+from uwazi_agent.ports.stats_api_port import StatsApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
@@ -35,6 +36,7 @@ class RunAgentUseCase:
         page_api: PageApiPort,
         relationship_type_api: RelationshipTypeApiPort | None = None,
         settings_api: SettingsApiPort | None = None,
+        stats_api: StatsApiPort | None = None,
     ):
         self.llm = llm
         self.thesauri_api = thesauri_api
@@ -44,6 +46,7 @@ class RunAgentUseCase:
         self.page_api = page_api
         self.relationship_type_api = relationship_type_api
         self.settings_api = settings_api
+        self.stats_api = stats_api
 
     async def execute(
         self, task_description: str, context: str = "", tool_progress: list[str] | None = None
@@ -58,6 +61,7 @@ class RunAgentUseCase:
             entity_api=self.entity_api,
             page_api=self.page_api,
             settings_api=self.settings_api,
+            stats_api=self.stats_api,
         )
         if tool_progress is not None:
             deps.tool_progress = tool_progress

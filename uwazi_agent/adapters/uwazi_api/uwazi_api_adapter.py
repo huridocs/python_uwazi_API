@@ -23,17 +23,19 @@ from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.settings_api_port import SettingsApiPort
+from uwazi_agent.ports.stats_api_port import StatsApiPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
+from uwazi_api.domain.stats import SearchStats
 from uwazi_api.domain.language import Language
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 
 
 class UwaziApiAdapter(
-    ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort, SettingsApiPort
+    ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort, SettingsApiPort, StatsApiPort
 ):
     def __init__(
         self,
@@ -52,6 +54,7 @@ class UwaziApiAdapter(
         self._pages_repo = self.client.pages
         self._relationship_repo = self.client.relationships
         self._settings_repo = self.client.settings
+        self._stats_repo = self.client.stats
         self._template_mapper = template_mapper or build_template_mapper_from_client(self.client)
         self._entity_mapper = entity_mapper or EntityMapper(
             template_repo=self._template_repo, thesauri_repo=self._thesauri_repo
@@ -532,6 +535,14 @@ class UwaziApiAdapter(
     async def get_languages(self) -> list[Language]:
         def _fetch() -> list[Language]:
             return self._settings_repo.get_languages()
+
+        return await asyncio.to_thread(_fetch)
+
+    # --- StatsApiPort -------------------------------------------------------
+
+    async def get_stats(self, language: str = "en") -> SearchStats:
+        def _fetch() -> SearchStats:
+            return self._stats_repo.get_stats(language=language)
 
         return await asyncio.to_thread(_fetch)
 

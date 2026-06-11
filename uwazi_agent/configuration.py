@@ -1,4 +1,5 @@
-MODEL = "deepseek/deepseek-v4-flash"
+MODEL = "deepseek-v4-flash:cloud"
 ENTITIES_LIMIT_FOR_LLM_MODEL = 5
 PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT = 500
 REQUEST_LIMIT = 150
+OLLAMA_BASE_URL = "https://ollama.com/v1"
