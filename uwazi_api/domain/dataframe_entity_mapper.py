@@ -7,7 +7,7 @@ import pandas as pd
 from uwazi_api.domain.attachment import Attachment
 from uwazi_api.domain.document import Document
 from uwazi_api.domain.entity import Entity
-from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
 class DataFrameEntityMapper:

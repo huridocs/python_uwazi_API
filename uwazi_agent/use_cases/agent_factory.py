@@ -98,6 +98,21 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
 }
 
 
+def _format_progress_msg(agent_name: str, tool_name: str, params: dict[str, Any]) -> str:
+    name = params.get("name") or ""
+    template_name = params.get("template_name") or ""
+    search_term = params.get("search_term") or ""
+    label = name or template_name
+    quoted = f" '{label}'" if label else ""
+    search = f" for '{search_term}'" if search_term else ""
+
+    tool_label = tool_name.replace("_", " ")
+    agent_label = agent_name.replace("_", " ").title() if agent_name != "orchestrator" else ""
+    prefix = f"{agent_label}: " if agent_label else ""
+
+    return f"{prefix}{tool_label}{quoted}{search}..."
+
+
 def _extract_params(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]:
     import inspect
 
@@ -121,6 +136,7 @@ def _wrap_read_tool(func: Callable) -> Callable:
             logger.info("[{}] CACHE HIT: {}({})", agent_name, func.__name__, params)
             return cached
         logger.info("[{}] CALLING: {}({})", agent_name, func.__name__, params)
+        ctx.deps.tool_progress.append(_format_progress_msg(agent_name, func.__name__, params))
         result = await func(ctx, *args, **kwargs)
         if not isinstance(result, str) or not result.startswith("Error"):
             ctx.deps.tool_cache.set(func.__name__, params, result)
@@ -138,6 +154,7 @@ def _wrap_write_tool(func: Callable) -> Callable:
         agent_name = get_current_agent()
         params = _extract_params(args, kwargs, func)
         logger.info("[{}] CALLING: {}({})", agent_name, tool_name, params)
+        ctx.deps.tool_progress.append(_format_progress_msg(agent_name, tool_name, params))
         result = await func(ctx, *args, **kwargs)
         is_error = isinstance(result, str) and result.startswith("Error")
         if not is_error:
@@ -265,6 +282,7 @@ def _make_delegation_tool(
     async def delegate(ctx: RunContext[UwaziAgentToolsDependencies], task: str) -> str:
         parent_agent = get_current_agent()
         logger.info("[{}] DELEGATING to {} (task: {}...)", parent_agent, agent_label, task[:100])
+        ctx.deps.tool_progress.append(f"Delegating to {agent_label} agent...")
         set_current_agent(agent_label)
         try:
             schema_context = ctx.deps.schema_store.to_prompt_context()
@@ -287,9 +305,9 @@ def _make_delegation_tool(
 def build_orchestrator(
     model: Model,
     schema_agent: Agent[UwaziAgentToolsDependencies, str],
-    entity_agent: Agent[UwaziAgentToolsDependencies, str] | None = None,
-    page_agent: Agent[UwaziAgentToolsDependencies, str] | None = None,
-    python_agent: Agent[UwaziAgentToolsDependencies, str] | None = None,
+    entity_agent: Agent[UwaziAgentToolsDependencies, str],
+    page_agent: Agent[UwaziAgentToolsDependencies, str],
+    python_agent: Agent[UwaziAgentToolsDependencies, str],
 ) -> Agent[UwaziAgentToolsDependencies, str]:
     delegation_tools = [
         _make_delegation_tool(
@@ -299,38 +317,29 @@ def build_orchestrator(
             "relationship types) to the schema sub-agent. Do NOT use this for reading schema "
             "data — use the read tools directly instead.",
         ),
+        _make_delegation_tool(
+            entity_agent,
+            "delegate_to_entity_agent",
+            "Delegate entity mutation tasks (create, update, delete, publish/unpublish "
+            "entities) to the entity sub-agent. Do NOT use this for reading entities — "
+            "use the read tools directly instead.",
+        ),
+        _make_delegation_tool(
+            page_agent,
+            "delegate_to_page_agent",
+            "Delegate page mutation tasks (create, update, delete pages) to the page "
+            "sub-agent. Do NOT use this for reading pages — use the read tools directly instead.",
+        ),
+        _make_delegation_tool(
+            python_agent,
+            "delegate_to_python_agent",
+            "Delegate batch processing of large entity sets to the Python sub-agent. "
+            "Use this when the entity agent reports that entities exceed the LLM limit of 5. "
+            "The Python agent is the ONLY agent allowed to process more than 5 entities. "
+            "It generates and executes Python code with CRUD capabilities "
+            "on entities stored in the session entity store.",
+        ),
     ]
-    if entity_agent is not None:
-        delegation_tools.append(
-            _make_delegation_tool(
-                entity_agent,
-                "delegate_to_entity_agent",
-                "Delegate entity mutation tasks (create, update, delete, publish/unpublish "
-                "entities) to the entity sub-agent. Do NOT use this for reading entities — "
-                "use the read tools directly instead.",
-            )
-        )
-    if page_agent is not None:
-        delegation_tools.append(
-            _make_delegation_tool(
-                page_agent,
-                "delegate_to_page_agent",
-                "Delegate page mutation tasks (create, update, delete pages) to the page "
-                "sub-agent. Do NOT use this for reading pages — use the read tools directly instead.",
-            )
-        )
-    if python_agent is not None:
-        delegation_tools.append(
-            _make_delegation_tool(
-                python_agent,
-                "delegate_to_python_agent",
-                "Delegate batch processing of large entity sets to the Python sub-agent. "
-                "Use this when the entity agent reports that entities exceed the LLM limit of 5. "
-                "The Python agent is the ONLY agent allowed to process more than 5 entities. "
-                "It generates and executes Python code with CRUD capabilities "
-                "on entities stored in the session entity store.",
-            )
-        )
 
     read_tools = [
         _read_tool(get_template_names),
@@ -339,26 +348,14 @@ def build_orchestrator(
         _read_tool(get_thesauris_by_names),
         _read_tool(get_relationship_type_names),
         _read_tool(get_languages),
+        _read_tool(search_entities_by_text),
+        _read_tool(search_entities_by_filter),
+        _read_tool(get_entities_by_shared_ids),
+        _read_tool(get_entities_by_template),
+        _read_tool(list_pages),
+        _read_tool(get_pages_by_shared_ids),
         Tool(get_entity_store_status, takes_ctx=True),
     ]
-
-    if entity_agent is not None:
-        read_tools.extend(
-            [
-                _read_tool(search_entities_by_text),
-                _read_tool(search_entities_by_filter),
-                _read_tool(get_entities_by_shared_ids),
-                _read_tool(get_entities_by_template),
-            ]
-        )
-
-    if page_agent is not None:
-        read_tools.extend(
-            [
-                _read_tool(list_pages),
-                _read_tool(get_pages_by_shared_ids),
-            ]
-        )
 
     all_tools = delegation_tools + read_tools
 
@@ -372,22 +369,11 @@ def build_orchestrator(
 
 def build_uwazi_agents(
     model: Model,
-    include_entities: bool = True,
-    include_pages: bool = True,
 ) -> Agent[UwaziAgentToolsDependencies, str]:
-    schema_agent = build_templates_agent(model)
-
-    if not include_entities and not include_pages:
-        return schema_agent
-
-    entity_agent = build_entity_agent(model) if include_entities else None
-    page_agent = build_page_agent(model) if include_pages else None
-    python_agent = build_python_agent(model) if include_entities else None
-
     return build_orchestrator(
         model=model,
-        schema_agent=schema_agent,
-        entity_agent=entity_agent,
-        page_agent=page_agent,
-        python_agent=python_agent,
+        schema_agent=build_templates_agent(model),
+        entity_agent=build_entity_agent(model),
+        page_agent=build_page_agent(model),
+        python_agent=build_python_agent(model),
     )

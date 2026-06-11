@@ -3,7 +3,7 @@ import pandas as pd
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.use_cases.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
 class ThesauriFromDataframeUseCase:

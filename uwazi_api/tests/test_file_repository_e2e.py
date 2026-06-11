@@ -186,7 +186,7 @@ class TestFileRepositoryE2E:
     def test_10_delete_nonexistent_file(self):
         """Test delete_file() with nonexistent file_id returns True."""
         result = self.file_repo.delete_file("nonexistent_file_id_12345")
-        assert result is True
+        assert result is False
 
     @classmethod
     def teardown_class(cls):

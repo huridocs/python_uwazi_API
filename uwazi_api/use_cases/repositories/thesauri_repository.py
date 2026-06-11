@@ -39,13 +39,16 @@ class ThesauriRepository:
         self.get(language)
         resolved_name = thesauri_name
         resolved_id = thesauri_id
+        existing_thesaurus = None
 
         for t in self._cache.get(language, []):
             if not resolved_id and t.name == thesauri_name:
                 resolved_id = t.id
+                existing_thesaurus = t
                 break
             if not resolved_name and t.id == thesauri_id:
                 resolved_name = t.name
+                existing_thesaurus = t
                 break
 
         if not resolved_id:
@@ -53,11 +56,27 @@ class ThesauriRepository:
         if not resolved_name:
             raise ValueError(f"Thesauri with id '{thesauri_id}' not found")
 
+        existing_value_ids = set()
+        merged_values = []
+        if existing_thesaurus:
+            for v in existing_thesaurus.values:
+                value_dict = {"label": v.label, "id": v.id}
+                existing_value_ids.add(v.id)
+                if v.values:
+                    value_dict["values"] = [{"label": child.label, "id": child.id} for child in v.values]
+                    for child in v.values:
+                        existing_value_ids.add(child.id)
+                merged_values.append(value_dict)
+
+        for label, value_id in thesauri_values.items():
+            if value_id not in existing_value_ids:
+                merged_values.append({"label": label, "id": value_id})
+
         self.clear_cache(language)
         data = {
             "_id": resolved_id,
             "name": resolved_name,
-            "values": [{"label": x, "id": thesauri_values[x]} for x in thesauri_values],
+            "values": merged_values,
         }
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/thesauris",

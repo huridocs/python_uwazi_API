@@ -38,7 +38,7 @@ class UwaziClient:
         # Use cases / services
         self._file_service = FileService(self._file_repo, self._entity_repo)
         self._csv_import = CSVUseCase(self._csv_repo, self._template_repo, self._entity_repo)
-        self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo)
+        self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo, self._search_repo)
         self._thesauri_from_df = ThesauriFromDataframeUseCase(self._template_repo, self._thesauri_repo)
 
     @classmethod

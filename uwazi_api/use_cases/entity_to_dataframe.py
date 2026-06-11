@@ -158,7 +158,9 @@ def _convert_date_value(val, unit, pattern):
     if pd.isna(val) or val is None:
         return None
     if isinstance(val, str) and "|" in val:
-        return "|".join(_convert_date_value(v, unit, pattern) for v in val.split("|"))
+        parts = [_convert_date_value(v, unit, pattern) for v in val.split("|")]
+        valid_parts = [p for p in parts if p is not None]
+        return "|".join(valid_parts) if valid_parts else None
     if isinstance(val, (int, float)):
         return pd.to_datetime(val, unit=unit, errors="coerce").strftime(pattern)
     if isinstance(val, str):

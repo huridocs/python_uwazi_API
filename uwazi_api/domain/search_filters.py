@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -12,7 +12,7 @@ class DateRange(BaseModel):
         extra = "ignore"
 
     def _to_timestamp(self, d: date) -> float:
-        return datetime.combine(d, datetime.min.time()).timestamp()
+        return datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc).timestamp()
 
     def model_dump(self, **kwargs):
         d = super().model_dump(**kwargs)

@@ -12,7 +12,7 @@ async def update_template(
     name: str,
     properties: list[AgentProperty],
     language: str = "en",
-) -> dict | str:
+) -> str:
     logger.info("update_template(name={!r}, properties_count={}, language={!r})", name, len(properties), language)
     """Replace the custom properties of an existing template.
 
@@ -40,14 +40,19 @@ async def update_template(
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
-        The API response payload for the update. On error, returns a
+        A confirmation string on success. On error, returns a
         string with suggestions.
     """
     from uwazi_agent.domain.agent_template import AgentTemplate
 
     try:
         template = AgentTemplate(name=name, properties=properties)
-        return await ctx.deps.template_api.update_template(template=template, language=language)
+        await ctx.deps.template_api.update_template(template=template, language=language)
+        property_names = [p.name for p in properties]
+        return (
+            f"Template '{name}' updated successfully. "
+            f"It now has {len(properties)} custom properties: {', '.join(property_names)}."
+        )
     except DomainError as exc:
         logger.error("update_template FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():

@@ -1,11 +1,6 @@
-from time import sleep
 import pandas as pd
 
-from uwazi_api.domain.exceptions import (
-    TemplateNotFoundError,
-    UploadError,
-    SearchError,
-)
+from uwazi_api.domain.exceptions import TemplateNotFoundError
 
 from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository

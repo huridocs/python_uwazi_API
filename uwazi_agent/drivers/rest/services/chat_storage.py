@@ -14,6 +14,7 @@ class ChatSession:
     messages: list[ChatMessage] = field(default_factory=list)
     status: str = "pending"
     result: Optional[str] = None
+    progress: list[str] = field(default_factory=list)
 
     def add_message(self, role: str, content: str) -> None:
         self.messages.append(ChatMessage(role=role, content=content))
