@@ -11,7 +11,6 @@ async def delete_template(
     name: str,
     language: str = "en",
 ) -> dict | str:
-    logger.info("delete_template(name={!r}, language={!r})", name, language)
     """Delete a template by its human-readable name.
 
     The template must be empty (no entities assigned to it) for Uwazi to

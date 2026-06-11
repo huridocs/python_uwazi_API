@@ -13,7 +13,6 @@ async def get_entities_by_shared_ids(
     language: str = "en",
     limit: int = 10000,
 ) -> list[AgentEntity] | str:
-    logger.info("get_entities_by_shared_ids(shared_ids={!r}, language={!r}, limit={!r})", shared_ids, language, limit)
     """Fetch full entity details by their Uwazi ``shared_id``.
 
     Use this when you already know the stable ``shared_id`` of one or more

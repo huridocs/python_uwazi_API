@@ -17,14 +17,6 @@ async def search_entities_by_filter(
     limit: int = 10000,
     published: bool | None = None,
 ) -> AgentEntitySearchResult | str:
-    logger.info(
-        "search_entities_by_filter(template_name={!r}, filters={!r}, language={!r}, limit={!r}, published={!r})",
-        template_name,
-        filters,
-        language,
-        limit,
-        published,
-    )
     """Find entities of a template by exact-match filters on its properties.
 
     Use this for structured queries — "all Films from Japan", "Refugees who

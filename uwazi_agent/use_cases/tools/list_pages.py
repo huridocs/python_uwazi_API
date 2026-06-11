@@ -10,7 +10,6 @@ async def list_pages(
     ctx: RunContext[UwaziAgentToolsDependencies],
     language: str = "en",
 ) -> list[AgentPageSummary] | str:
-    logger.info("list_pages(language={!r})", language)
     """List the Settings → Pages of a Uwazi instance as compact summaries.
 
     Use this to discover which pages exist and to find a page's

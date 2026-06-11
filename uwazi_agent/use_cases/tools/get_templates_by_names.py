@@ -10,7 +10,6 @@ async def get_templates_by_names(
     ctx: RunContext[UwaziAgentToolsDependencies],
     names: list[str],
 ) -> list[AgentTemplate] | str:
-    logger.info("get_templates_by_names(names={!r})", names)
     """Look up templates by their human-readable name.
 
     Use this when the user references a template by name and you need its
@@ -36,4 +35,4 @@ async def get_templates_by_names(
         return templates
     except DomainError as exc:
         logger.error("get_templates_by_names FAILED: names={} error={}", names, exc)
-        return f"Error looking up templates: {exc}. Use get_template_names to see available templates and retry."
+        return f"Error looking up templates: {exc}. Use list_templates to see available templates and retry."

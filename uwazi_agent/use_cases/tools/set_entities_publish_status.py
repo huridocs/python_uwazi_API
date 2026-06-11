@@ -11,7 +11,6 @@ async def set_entities_publish_status(
     shared_ids: list[str],
     published: bool,
 ) -> list[AgentEntityMutationResult] | str:
-    logger.info("set_entities_publish_status(shared_ids={!r}, published={!r})", shared_ids, published)
     """Publish or unpublish one or more entities.
 
     Publishing makes an entity visible to the public (anonymous) audience;

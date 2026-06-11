@@ -12,7 +12,6 @@ async def create_template(
     properties: list[AgentProperty],
     language: str = "en",
 ) -> dict | str:
-    logger.info("create_template(name={!r}, properties_count={}, language={!r})", name, len(properties), language)
     """Create a new template with the given custom properties.
 
     Use this when the user wants to define a brand-new template. Provide the

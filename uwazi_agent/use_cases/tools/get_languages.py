@@ -9,7 +9,6 @@ from uwazi_api.domain.language import Language
 async def get_languages(
     ctx: RunContext[UwaziAgentToolsDependencies],
 ) -> list[Language] | str:
-    logger.info("get_languages()")
     """List all languages configured in the Uwazi instance.
 
     Use this to discover which languages are available before working with

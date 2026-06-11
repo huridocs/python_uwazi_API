@@ -13,11 +13,6 @@ async def create_entities(
     entities: list[AgentEntityCreate],
     language: str = "en",
 ) -> list[AgentEntityMutationResult] | str:
-    logger.info(
-        "create_entities(entities_count={}, language={!r})",
-        len(entities),
-        language,
-    )
     """Create one or more brand-new entities in Uwazi.
 
     Use this when the user wants to add new records (entities), not change

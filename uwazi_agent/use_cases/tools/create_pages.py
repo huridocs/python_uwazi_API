@@ -12,7 +12,6 @@ async def create_pages(
     pages: list[AgentPageCreate],
     language: str = "en",
 ) -> list[AgentPageMutationResult] | str:
-    logger.info("create_pages(pages_count={}, language={!r})", len(pages), language)
     """Create one or more brand-new Settings → Pages in Uwazi.
 
     Use this to publish rich, standalone pages (landing pages, about pages,

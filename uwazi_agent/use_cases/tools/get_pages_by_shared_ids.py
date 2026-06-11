@@ -11,7 +11,6 @@ async def get_pages_by_shared_ids(
     shared_ids: list[str],
     language: str = "en",
 ) -> list[AgentPage] | str:
-    logger.info("get_pages_by_shared_ids(shared_ids={!r}, language={!r})", shared_ids, language)
     """Fetch full page details (body + JavaScript) by their ``shared_id``.
 
     Use this when you already know the ``shared_id`` of one or more pages

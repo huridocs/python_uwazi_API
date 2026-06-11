@@ -8,7 +8,6 @@ from uwazi_api.domain.exceptions import DomainError
 async def get_relationship_type_names(
     ctx: RunContext[UwaziAgentToolsDependencies],
 ) -> list[str] | str:
-    logger.info("get_relationship_type_names()")
     """List the names of all relationship types defined in the Uwazi instance.
 
     Relationship types name the meaning of a connection between two entities

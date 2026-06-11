@@ -11,7 +11,6 @@ async def delete_thesauri(
     name: str,
     language: str = "en",
 ) -> dict | str:
-    logger.info("delete_thesauri(name={!r}, language={!r})", name, language)
     """Delete a thesaurus by its human-readable name.
 
     The thesaurus must not be in use by any template, property, or entity —

@@ -5,15 +5,16 @@ from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_api.domain.exceptions import DomainError
 
 
-async def get_thesauris_names(
+async def list_thesauri(
     ctx: RunContext[UwaziAgentToolsDependencies],
     language: str = "en",
 ) -> list[str] | str:
-    logger.info("get_thesauris_names(language={!r})", language)
     """List the names of all thesauri available in the Uwazi instance.
 
     Use this to discover what controlled vocabularies exist before the user
-    asks to read, create, update or delete one.
+    asks to read, create, update or delete one. To inspect a thesaurus's
+    values and how heavily each one is used, follow up with
+    ``get_thesauris_by_names``.
 
     Args:
         language: ISO 639-1 language code. Defaults to "en".
@@ -31,5 +32,5 @@ async def get_thesauris_names(
         ctx.deps.schema_store.add_thesauri(thesauris)
         return names
     except DomainError as exc:
-        logger.error("get_thesauris_names FAILED: {}", exc)
-        return f"Error listing thesauri names: {exc}. Please check the Uwazi connection and retry."
+        logger.error("list_thesauri FAILED: {}", exc)
+        return f"Error listing thesauri: {exc}. Please check the Uwazi connection and retry."
