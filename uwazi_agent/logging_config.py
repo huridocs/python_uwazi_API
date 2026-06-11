@@ -2,11 +2,20 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 _LOG_CONTEXT: dict[str, Any] = {}
+
+
+def _patch_record(record: dict[str, Any]) -> None:
+    """Inject a ``file_name`` field (basename of the source file, no extension)
+    so loguru's format string can show e.g. ``agent_factory`` instead of the
+    full module path ``uwazi_agent.use_cases.agent_factory``.
+    """
+    record["extra"]["file_name"] = Path(record["file"].path).stem
 
 
 def _gelf_message(record: dict[str, Any]) -> dict[str, Any]:
@@ -59,7 +68,7 @@ def setup_logging(url: str = "", user: str = "") -> None:
     fmt = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan> | "
+        "<cyan>{extra[file_name]}</cyan> | "
         "url={extra[uwazi_url]} user={extra[uwazi_user]} | "
         "<level>{message}</level>"
     )
@@ -89,13 +98,14 @@ def setup_logging(url: str = "", user: str = "") -> None:
             format=(
                 "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
                 "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan> | "
+                "<cyan>{extra[file_name]}</cyan> | "
                 "<level>{message}</level>"
             ),
             filter=lambda record: not all(key in record["extra"] for key in ("uwazi_url", "uwazi_user")),
         )
 
     logger.configure(extra={"uwazi_url": url, "uwazi_user": user})
+    logger.configure(patcher=_patch_record)
 
 
 def bind_context(**kwargs: Any) -> None:
