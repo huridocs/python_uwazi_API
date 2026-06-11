@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 
 from loguru import logger
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.usage import RunUsage, UsageLimits
 
+from uwazi_agent.configuration import REQUEST_LIMIT
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.page_api_port import PageApiPort
@@ -60,13 +62,23 @@ class RunAgentUseCase:
         if tool_progress is not None:
             deps.tool_progress = tool_progress
         agent = build_uwazi_agents(model=self.llm.get_model())
+        usage_limits = UsageLimits(request_limit=REQUEST_LIMIT)
         try:
-            result = await agent.run(prompt, deps=deps)
+            result = await agent.run(prompt, deps=deps, usage_limits=usage_limits)
             logger.info("PROMPT SUCCEEDED: {}", task_description[:200])
             return AgentExecutionResult(
                 output=result.output,
                 thinking=result.response.thinking,
                 usage=result.usage,
+            )
+        except UsageLimitExceeded as exc:
+            logger.error("PROMPT FAILED (request limit): {} | error: {}", task_description[:200], exc)
+            return AgentExecutionResult(
+                output=f"The agent exceeded the request limit of {REQUEST_LIMIT} and could not complete the task. "
+                f"The task may be too complex or the agent may have entered an error loop. "
+                f"Try breaking it into smaller steps.",
+                thinking=None,
+                usage=RunUsage(),
             )
         except Exception as exc:
             logger.error("PROMPT FAILED: {} | error: {}", task_description[:200], exc)

@@ -149,10 +149,11 @@ class EntityMapper:
         for p in all_props:
             sanitized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[p.name] = p.name
-            if sanitized:
+            if sanitized and sanitized != p.name:
                 name_map[sanitized] = p.name
+            name_map[p.label] = p.name
             sanitized_label = PropertyLabelSanitizer.sanitize(p.label)
-            if sanitized_label:
+            if sanitized_label and sanitized_label != p.label:
                 name_map[sanitized_label] = p.name
 
         result: dict[str, Any] = {}
@@ -210,11 +211,21 @@ class EntityMapper:
             return value
         for thesaurus in self._thesauri_repo.get(language=language):
             if thesaurus.id == prop.content:
-                for v in thesaurus.values:
-                    if v.id == value:
-                        return v.label
+                found = self._find_label_in_values(thesaurus.values, value)
+                if found is not None:
+                    return found
                 break
         return value
+
+    def _find_label_in_values(self, values: list, target_id: str) -> Optional[str]:
+        for v in values:
+            if v.id == target_id:
+                return v.label
+            if v.values:
+                found = self._find_label_in_values(v.values, target_id)
+                if found is not None:
+                    return found
+        return None
 
     def _coerce_metadata(
         self,
@@ -228,10 +239,11 @@ class EntityMapper:
         for p in all_props:
             sanitized = PropertyLabelSanitizer.sanitize(p.name)
             name_map[p.name] = p.name
-            if sanitized:
+            if sanitized and sanitized != p.name:
                 name_map[sanitized] = p.name
+            name_map[p.label] = p.name
             sanitized_label = PropertyLabelSanitizer.sanitize(p.label)
-            if sanitized_label:
+            if sanitized_label and sanitized_label != p.label:
                 name_map[sanitized_label] = p.name
 
         result: dict[str, Any] = {}
@@ -486,16 +498,32 @@ def _resolve_thesaurus_label(
     label_to_id: dict[str, str] = {}
     for thesaurus in thesauri_repo.get(language=language):
         if thesaurus.id == prop.content:
-            label_to_id = {v.label: v.id for v in thesaurus.values}
+            _build_label_map(thesaurus.values, label_to_id)
             break
     if value in label_to_id:
         return label_to_id[value]
     for thesaurus in thesauri_repo.get(language=language):
         if thesaurus.id == prop.content:
-            for v in thesaurus.values:
+            for v in _flatten_values(thesaurus.values):
                 if v.id == value:
                     return v.id
     raise SearchError(
         f"Value '{value}' is not a valid thesaurus label for property '{prop.name}' "
         f"(thesaurus id {prop.content}). Pass a label, not a UUID."
     )
+
+
+def _build_label_map(values: list, label_map: dict[str, str]) -> None:
+    for v in values:
+        label_map[v.label] = v.id
+        if v.values:
+            _build_label_map(v.values, label_map)
+
+
+def _flatten_values(values: list) -> list:
+    result: list = []
+    for v in values:
+        result.append(v)
+        if v.values:
+            result.extend(_flatten_values(v.values))
+    return result

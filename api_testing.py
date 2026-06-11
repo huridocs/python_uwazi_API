@@ -211,8 +211,12 @@ if __name__ == "__main__":
     # df = client.exports.to_dataframe(template_name="State", batch_size=5)
     #
     client = UwaziClient(url=UWAZI_URL, user=UWAZI_USER, password=UWAZI_PASSWORD)
-    df = client.exports.to_dataframe(template_name="test_3", batch_size=5)
+    # df = client.exports.to_dataframe(template_name="test_3", batch_size=5)
 
     # client.entities.create_or_update_entities_from_dataframe()
     # df = client.search.search_by_filter_to_dataframe(language="en", batch_size=2, filters=SearchFilters())
-    print(df.to_string())
+    # print(df.to_string())
+    stats = client.stats.get_stats()
+    print(stats.total_entities)
+    print(stats.templates)
+    print(stats.thesauri)
