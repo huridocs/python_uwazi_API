@@ -31,6 +31,7 @@ from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
 from uwazi_api.domain.stats import SearchStats
 from uwazi_api.domain.language import Language
+from uwazi_api.domain.menu_link import MenuLink
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 
 
@@ -54,6 +55,7 @@ class UwaziApiAdapter(
         self._pages_repo = self.client.pages
         self._relationship_repo = self.client.relationships
         self._settings_repo = self.client.settings
+        self._menu_links_repo = self.client.menu_links
         self._stats_repo = self.client.stats
         self._template_mapper = template_mapper or build_template_mapper_from_client(self.client)
         self._entity_mapper = entity_mapper or EntityMapper(
@@ -537,6 +539,18 @@ class UwaziApiAdapter(
             return self._settings_repo.get_languages()
 
         return await asyncio.to_thread(_fetch)
+
+    async def get_menu_links(self) -> list[MenuLink]:
+        def _fetch() -> list[MenuLink]:
+            return self._menu_links_repo.get_all()
+
+        return await asyncio.to_thread(_fetch)
+
+    async def set_menu_links(self, links: list[MenuLink]) -> list[MenuLink]:
+        def _call() -> list[MenuLink]:
+            return self._menu_links_repo.replace_all(links)
+
+        return await asyncio.to_thread(_call)
 
     # --- StatsApiPort -------------------------------------------------------
 

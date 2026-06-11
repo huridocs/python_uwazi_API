@@ -11,6 +11,7 @@ from uwazi_api.use_cases.repositories.relationship_repository import Relationshi
 from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
 from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.repositories.stats_repository import StatsRepository
+from uwazi_api.use_cases.repositories.menu_links_repository import MenuLinksRepository
 from uwazi_api.use_cases.repositories.pages_repository import PagesRepository
 from uwazi_api.use_cases.file_service import FileService
 from uwazi_api.use_cases.csv_use_case import CSVUseCase
@@ -36,6 +37,7 @@ class UwaziClient:
         self._search_repo = SearchRepository(self.http, self._template_repo, self._thesauri_repo)
         self._stats_repo = StatsRepository(self.http, self._template_repo, self._thesauri_repo)
         self._pages_repo = PagesRepository(self.http)
+        self._menu_links_repo = MenuLinksRepository(self.http)
 
         # Use cases / services
         self._file_service = FileService(self._file_repo, self._entity_repo)
@@ -90,6 +92,10 @@ class UwaziClient:
     @property
     def pages(self) -> PagesRepository:
         return self._pages_repo
+
+    @property
+    def menu_links(self) -> MenuLinksRepository:
+        return self._menu_links_repo
 
     @property
     def stats(self) -> StatsRepository:

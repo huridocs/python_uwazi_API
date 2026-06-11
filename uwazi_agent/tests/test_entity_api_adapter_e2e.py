@@ -23,6 +23,16 @@ def _run(awaitable: Any) -> Any:
     return asyncio.run(awaitable)
 
 
+def _is_iso8601(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
 class TestEntityApiAdapterE2E:
     """End-to-end tests for the entity-side of ``UwaziApiAdapter``.
 
@@ -66,6 +76,8 @@ class TestEntityApiAdapterE2E:
             assert entity.shared_id == shared_id
             assert entity.title == title
             assert entity.template_name == self.test_template_name
+            assert _is_iso8601(entity.creation_date)
+            assert _is_iso8601(entity.edit_date)
         finally:
             self._delete(shared_id)
 
@@ -106,6 +118,8 @@ class TestEntityApiAdapterE2E:
             for example in result.examples:
                 assert isinstance(example, AgentEntity)
                 assert example.template_name == self.test_template_name
+                assert _is_iso8601(example.creation_date)
+                assert _is_iso8601(example.edit_date)
         finally:
             self._delete(shared_id)
 

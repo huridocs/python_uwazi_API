@@ -15,6 +15,7 @@ from .instructions import (
     TEMPLATES_INSTRUCTIONS,
 )
 from .tools.agent_context import get_current_agent, set_current_agent
+from .tools.add_page_menu_links import add_page_menu_links
 from .tools.create_entities import create_entities
 from .tools.create_pages import create_pages
 from .tools.create_relationship_type import create_relationship_type
@@ -95,6 +96,7 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_pages": (_PAGE_READ_TOOLS, None),
     "update_pages": (_PAGE_READ_TOOLS, None),
     "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
+    "add_page_menu_links": (_PAGE_READ_TOOLS, None),
 }
 
 
@@ -231,6 +233,7 @@ def build_page_tools() -> list[Tool]:
         _write_tool(create_pages),
         _write_tool(update_pages),
         _write_tool(delete_pages_by_shared_ids),
+        _write_tool(add_page_menu_links),
     ]
 
 
@@ -346,8 +349,10 @@ def build_orchestrator(
         _make_delegation_tool(
             page_agent,
             "delegate_to_page_agent",
-            "Delegate page mutation tasks (create, update, delete pages) to the page "
-            "sub-agent. Do NOT use this for reading pages — use the read tools directly instead.",
+            "Delegate page mutation tasks (create, update, delete pages) and "
+            "page menu-link tasks (register a new page in Settings → Links) to "
+            "the page sub-agent. Do NOT use this for reading pages — use the "
+            "read tools directly instead.",
         ),
         _make_delegation_tool(
             python_agent,
