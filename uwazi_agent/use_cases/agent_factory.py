@@ -30,12 +30,11 @@ from .tools.get_entities_by_shared_ids import get_entities_by_shared_ids
 from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
-from .tools.get_stats import get_stats
 from .tools.get_relationship_type_names import get_relationship_type_names
-from .tools.get_template_names import get_template_names
+from .tools.get_template_names import list_templates
 from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
-from .tools.get_thesauris_names import get_thesauris_names
+from .tools.get_thesauris_names import list_thesauri
 from .tools.get_languages import get_languages
 from .tools.list_pages import list_pages
 from .tools.python_code_executor import run_python_code
@@ -48,9 +47,8 @@ from .tools.update_relationship_type import update_relationship_type
 from .tools.update_template import update_template
 from .tools.update_thesauri import update_thesauri
 
-
-_TEMPLATE_READ_TOOLS = {"get_template_names", "get_templates_by_names"}
-_THESAURI_READ_TOOLS = {"get_thesauris_names", "get_thesauris_by_names"}
+_TEMPLATE_READ_TOOLS = {"list_templates", "get_templates_by_names"}
+_THESAURI_READ_TOOLS = {"list_thesauri", "get_thesauris_by_names"}
 _RELATIONSHIP_READ_TOOLS = {"get_relationship_type_names"}
 _ENTITY_READ_TOOLS = {
     "search_entities_by_text",
@@ -60,7 +58,7 @@ _ENTITY_READ_TOOLS = {
 }
 _PAGE_READ_TOOLS = {"list_pages", "get_pages_by_shared_ids"}
 _LANGUAGE_READ_TOOLS = {"get_languages"}
-_STATS_READ_TOOLS = {"get_stats"}
+_STATS_READ_TOOLS = {"list_templates", "list_thesauri", "get_thesauris_by_names"}
 
 _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_template": (
@@ -97,7 +95,6 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_pages": (_PAGE_READ_TOOLS, None),
     "update_pages": (_PAGE_READ_TOOLS, None),
     "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
-    "run_python_code": (_ENTITY_READ_TOOLS, None),
 }
 
 
@@ -129,12 +126,21 @@ def _extract_params(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]
     return result
 
 
+def _normalize_cache_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Normalize params for cache-key purposes so that semantically-equivalent
+    calls share the same cache entry."""
+    if tool_name == "get_entities_by_template" and "limit" in params:
+        params = {**params, "limit": 10000}
+    return params
+
+
 def _wrap_read_tool(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(ctx: RunContext[UwaziAgentToolsDependencies], *args: Any, **kwargs: Any) -> Any:
         agent_name = get_current_agent()
         params = _extract_params(args, kwargs, func)
-        cached = ctx.deps.tool_cache.get(func.__name__, params)
+        cache_params = _normalize_cache_params(func.__name__, params)
+        cached = ctx.deps.tool_cache.get(func.__name__, cache_params)
         if cached is not None:
             logger.info("[{}] CACHE HIT: {}({})", agent_name, func.__name__, params)
             return cached
@@ -142,7 +148,7 @@ def _wrap_read_tool(func: Callable) -> Callable:
         ctx.deps.tool_progress.append(_format_progress_msg(agent_name, func.__name__, params))
         result = await func(ctx, *args, **kwargs)
         if not isinstance(result, str) or not result.startswith("Error"):
-            ctx.deps.tool_cache.set(func.__name__, params, result)
+            ctx.deps.tool_cache.set(func.__name__, cache_params, result)
         return result
 
     return wrapper
@@ -188,7 +194,7 @@ def build_templates_tools() -> list[Tool]:
     return [
         _read_tool(get_languages),
         _read_tool(get_thesauris_by_names),
-        _read_tool(get_thesauris_names),
+        _read_tool(list_thesauri),
         _write_tool(create_thesauri),
         _write_tool(update_thesauri),
         _write_tool(delete_thesauri),
@@ -197,7 +203,7 @@ def build_templates_tools() -> list[Tool]:
         _write_tool(update_relationship_type),
         _write_tool(delete_relationship_type),
         _read_tool(get_templates_by_names),
-        _read_tool(get_template_names),
+        _read_tool(list_templates),
         _write_tool(create_template),
         _write_tool(update_template),
         _write_tool(delete_template),
@@ -289,7 +295,10 @@ def _make_delegation_tool(
         set_current_agent(agent_label)
         try:
             schema_context = ctx.deps.schema_store.to_prompt_context()
-            enriched_task = f"{schema_context}\n\n{task}" if schema_context else task
+            entity_context = ctx.deps.entity_store.to_context_summary()
+            context_parts = [p for p in [schema_context, entity_context] if p]
+            context_str = "\n\n".join(context_parts)
+            enriched_task = f"{context_str}\n\n{task}" if context_parts else task
             result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
             logger.info("[{}] DELEGATION COMPLETE", agent_label)
             return result.output
@@ -352,13 +361,12 @@ def build_orchestrator(
     ]
 
     read_tools = [
-        _read_tool(get_template_names),
+        _read_tool(list_templates),
         _read_tool(get_templates_by_names),
-        _read_tool(get_thesauris_names),
+        _read_tool(list_thesauri),
         _read_tool(get_thesauris_by_names),
         _read_tool(get_relationship_type_names),
         _read_tool(get_languages),
-        _read_tool(get_stats),
         _read_tool(search_entities_by_text),
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),

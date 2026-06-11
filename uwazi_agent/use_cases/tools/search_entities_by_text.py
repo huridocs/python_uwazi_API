@@ -15,13 +15,6 @@ async def search_entities_by_text(
     language: str = "en",
     limit: int = 10000,
 ) -> AgentEntitySearchResult | str:
-    logger.info(
-        "search_entities_by_text(search_term={!r}, template_name={!r}, language={!r}, limit={!r})",
-        search_term,
-        template_name,
-        language,
-        limit,
-    )
     """Search Uwazi entities by free-text matching their content.
 
     This is the only way to discover a ``shared_id`` from a title or any

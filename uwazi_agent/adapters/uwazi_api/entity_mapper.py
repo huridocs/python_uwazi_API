@@ -2,6 +2,8 @@ from datetime import date, datetime
 from datetime import timezone
 from typing import Any, Optional
 
+from loguru import logger
+
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
@@ -252,6 +254,9 @@ class EntityMapper:
             prop = prop_map.get(key)
             if not prop:
                 raise SearchError(f"Metadata property '{raw_key}' is not defined in template '{template.name}'.")
+            if prop.type in (PropertyType.IMAGE, PropertyType.MEDIA):
+                logger.info("Skipping image/media property '{}' (type {})", raw_key, prop.type)
+                continue
             result[key] = self._coerce_value(raw_value, prop, language)
         return result
 

@@ -48,13 +48,13 @@ class SchemaStore(BaseModel):
                     if prop.show_in_card:
                         flags.append("card")
                     flag_str = f" [{', '.join(flags)}]" if flags else ""
-                    if prop.type in (AgentPropertyType.SELECT, AgentPropertyType.MULTI_SELECT):
-                        metadata_key = prop.thesaurus_name or prop.name
-                    else:
-                        metadata_key = prop.name
-                    extra = f", metadata_key={metadata_key}"
+                    extra = f", KEY={prop.name}"
                     if prop.thesaurus_name:
-                        extra += f", thesaurus={prop.thesaurus_name}"
+                        extra += (
+                            f", thesaurus={prop.thesaurus_name} "
+                            "(KEY is the property name, NOT the thesaurus name; "
+                            "use a thesaurus LABEL as the value, e.g. 'Fantasy')"
+                        )
                     if prop.format_instructions:
                         extra += f", format={prop.format_instructions}"
                     if prop.relationship_type_name:

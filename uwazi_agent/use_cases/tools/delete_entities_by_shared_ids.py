@@ -10,7 +10,6 @@ async def delete_entities_by_shared_ids(
     ctx: RunContext[UwaziAgentToolsDependencies],
     shared_ids: list[str],
 ) -> list[AgentEntityMutationResult] | str:
-    logger.info("delete_entities_by_shared_ids(shared_ids={!r})", shared_ids)
     """Delete one or more entities by their ``shared_id``.
 
     Deletions are **irreversible** and will remove the entity along with

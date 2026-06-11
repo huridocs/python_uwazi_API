@@ -11,7 +11,6 @@ async def delete_pages_by_shared_ids(
     shared_ids: list[str],
     language: str = "en",
 ) -> list[AgentPageMutationResult] | str:
-    logger.info("delete_pages_by_shared_ids(shared_ids={!r}, language={!r})", shared_ids, language)
     """Delete one or more pages by their ``shared_id``.
 
     Deletions are **irreversible**. Always confirm with the user before

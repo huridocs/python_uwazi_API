@@ -11,7 +11,6 @@ async def update_relationship_type(
     new_name: str,
     language: str = "en",
 ) -> dict | str:
-    logger.info("update_relationship_type(name={!r}, new_name={!r}, language={!r})", name, new_name, language)
     """Rename an existing relationship type.
 
     Identify the relationship type by its current ``name`` and give the

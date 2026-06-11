@@ -16,6 +16,17 @@ class EntityStore(BaseModel):
                 self.entities.append(entity)
                 existing_ids.add(entity.shared_id)
 
+    def to_context_summary(self) -> str:
+        if not self.entities:
+            return ""
+        templates = sorted({e.template_name for e in self.entities})
+        return (
+            f"Entity store already has {len(self.entities)} entities loaded "
+            f"(templates: {', '.join(templates)}). "
+            "Check ``entities`` in your Python code before calling fetch tools — "
+            "re-fetching wastes an API call."
+        )
+
     def clear(self) -> None:
         self.entities.clear()
         self.needs_python_agent = False

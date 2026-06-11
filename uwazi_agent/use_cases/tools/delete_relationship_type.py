@@ -10,7 +10,6 @@ async def delete_relationship_type(
     name: str,
     language: str = "en",
 ) -> dict | str:
-    logger.info("delete_relationship_type(name={!r}, language={!r})", name, language)
     """Delete a relationship type by name.
 
     A relationship type can only be removed when no template property still

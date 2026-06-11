@@ -13,13 +13,6 @@ async def create_thesauri(
     language: str = "en",
     groups: list[AgentThesauriGroup] | None = None,
 ) -> dict | str:
-    logger.info(
-        "create_thesauri(name={!r}, values_count={}, groups_count={}, language={!r})",
-        name,
-        len(values),
-        len(groups or []),
-        language,
-    )
     """Create a new thesaurus (controlled vocabulary), optionally with groups.
 
     Use this when the user wants to add a brand-new controlled vocabulary.
@@ -46,4 +39,4 @@ async def create_thesauri(
         return await ctx.deps.thesauri_api.create_thesauri(name=name, values=values, language=language, groups=groups)
     except DomainError as exc:
         logger.error("create_thesauri FAILED: name={} error={}", name, exc)
-        return f"Error creating thesaurus '{name}': {exc}. Use get_thesauris_names to check existing thesauri and retry."
+        return f"Error creating thesaurus '{name}': {exc}. Use list_thesauri to check existing thesauri and retry."

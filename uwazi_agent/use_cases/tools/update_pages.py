@@ -12,7 +12,6 @@ async def update_pages(
     updates: list[AgentPageUpdate],
     language: str = "en",
 ) -> list[AgentPageMutationResult] | str:
-    logger.info("update_pages(updates_count={}, language={!r})", len(updates), language)
     """Apply partial updates to one or more existing pages.
 
     This is a *partial merge*: only the fields you set are changed; any field

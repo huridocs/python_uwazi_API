@@ -14,13 +14,6 @@ async def update_thesauri(
     language: str = "en",
     groups: list[AgentThesauriGroup] | None = None,
 ) -> dict | str:
-    logger.info(
-        "update_thesauri(name={!r}, values_count={}, groups_count={}, language={!r})",
-        name,
-        len(values),
-        len(groups or []),
-        language,
-    )
     """Add value labels and/or groups to an existing thesaurus (additive merge).
 
     This is additive: existing values and groups are preserved (their ids stay

@@ -10,7 +10,6 @@ async def create_relationship_type(
     name: str,
     language: str = "en",
 ) -> dict | str:
-    logger.info("create_relationship_type(name={!r}, language={!r})", name, language)
     """Create a new relationship type.
 
     A relationship type is the labelled, reusable kind of connection that a

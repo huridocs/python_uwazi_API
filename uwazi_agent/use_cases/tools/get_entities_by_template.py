@@ -14,7 +14,6 @@ async def get_entities_by_template(
     language: str = "en",
     limit: int = 10000,
 ) -> AgentEntitySearchResult | str:
-    logger.info("get_entities_by_template(template_name={!r}, language={!r}, limit={!r})", template_name, language, limit)
     """Fetch all entities belonging to a specific template.
 
     Use this tool to list every entity of a given template without needing a

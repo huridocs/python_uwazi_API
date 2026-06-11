@@ -16,27 +16,39 @@ from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
+from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
+
+_ENTITY_READ_TOOLS = {
+    "search_entities_by_text",
+    "search_entities_by_filter",
+    "get_entities_by_shared_ids",
+    "get_entities_by_template",
+}
 
 
 def _build_sync_crud_functions(
     entity_api: EntityApiPort,
     default_language: str,
     loop: asyncio.AbstractEventLoop,
+    tool_cache: ToolCallCache,
 ) -> tuple:
     def create_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         lang = language or default_language
         entities = [AgentEntityCreate(**e) for e in entities_dicts]
         results = loop.run_until_complete(entity_api.create_entities(entities, lang))
+        tool_cache.invalidate_tools(_ENTITY_READ_TOOLS)
         return [r.model_dump() for r in results]
 
     def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         lang = language or default_language
         entities = [AgentEntity(**e) for e in entities_dicts]
         results = loop.run_until_complete(entity_api.update_entities(entities, lang))
+        tool_cache.invalidate_tools(_ENTITY_READ_TOOLS)
         return [r.model_dump() for r in results]
 
     def delete_entities(shared_ids: list[str]) -> list[dict]:
         results = loop.run_until_complete(entity_api.delete_entities_by_shared_ids(shared_ids))
+        tool_cache.invalidate_tools(_ENTITY_READ_TOOLS)
         return [r.model_dump() for r in results]
 
     return create_entities, update_entities, delete_entities
@@ -47,13 +59,14 @@ def _execute_python_code(
     entities: list[AgentEntity],
     entity_api: EntityApiPort,
     language: str,
+    tool_cache: ToolCallCache,
 ) -> str:
     # Create a dedicated event loop for this thread so CRUD helpers can run
     # async port methods without calling asyncio.run() inside a running loop.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        create_fn, update_fn, delete_fn = _build_sync_crud_functions(entity_api, language, loop)
+        create_fn, update_fn, delete_fn = _build_sync_crud_functions(entity_api, language, loop, tool_cache)
 
         namespace: dict[str, Any] = {
             "entities": [e.model_dump() for e in entities],
@@ -87,7 +100,6 @@ async def run_python_code(
     code: str,
     language: str = "en",
 ) -> str:
-    logger.info("run_python_code(code_len={}, language={!r})", len(code), language)
     """Execute Python code that processes entities stored in the session entity store.
 
     The execution environment provides:
@@ -123,7 +135,9 @@ async def run_python_code(
 
     entities = ctx.deps.entity_store.entities
 
-    output = await asyncio.to_thread(_execute_python_code, code, entities, ctx.deps.entity_api, language)
+    output = await asyncio.to_thread(
+        _execute_python_code, code, entities, ctx.deps.entity_api, language, ctx.deps.tool_cache
+    )
     limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
     if len(output) > limit:
         logger.warning("Output truncated from {} to {} characters", len(output), limit)

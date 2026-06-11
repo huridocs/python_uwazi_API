@@ -13,7 +13,6 @@ async def update_template(
     properties: list[AgentProperty],
     language: str = "en",
 ) -> str:
-    logger.info("update_template(name={!r}, properties_count={}, language={!r})", name, len(properties), language)
     """Replace the custom properties of an existing template.
 
     Use this when the user wants to change the set of custom properties on
