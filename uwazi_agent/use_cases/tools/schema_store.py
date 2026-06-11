@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
 
@@ -47,7 +48,11 @@ class SchemaStore(BaseModel):
                     if prop.show_in_card:
                         flags.append("card")
                     flag_str = f" [{', '.join(flags)}]" if flags else ""
-                    extra = ""
+                    if prop.type in (AgentPropertyType.SELECT, AgentPropertyType.MULTI_SELECT):
+                        metadata_key = prop.thesaurus_name or prop.name
+                    else:
+                        metadata_key = prop.name
+                    extra = f", metadata_key={metadata_key}"
                     if prop.thesaurus_name:
                         extra += f", thesaurus={prop.thesaurus_name}"
                     if prop.format_instructions:

@@ -52,7 +52,12 @@ async def create_template(
 
     try:
         template = AgentTemplate(name=name, properties=properties)
-        return await ctx.deps.template_api.create_template(template=template, language=language)
+        result = await ctx.deps.template_api.create_template(template=template, language=language)
+        if isinstance(result, dict):
+            refreshed = await ctx.deps.template_api.get_templates_by_names(names=[name])
+            if refreshed:
+                ctx.deps.schema_store.add_templates(refreshed)
+        return result
     except DomainError as exc:
         logger.error("create_template FAILED: name={} error={}", name, exc)
         return f"Error creating template '{name}': {exc}. Please check the template name and properties, then retry."

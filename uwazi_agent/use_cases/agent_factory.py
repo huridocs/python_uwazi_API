@@ -3,6 +3,7 @@ from typing import Any, Callable
 
 from loguru import logger
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
 
@@ -62,7 +63,7 @@ _LANGUAGE_READ_TOOLS = {"get_languages"}
 _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_template": (
         _TEMPLATE_READ_TOOLS,
-        lambda deps: deps.schema_store.clear_templates(),
+        None,
     ),
     "update_template": (
         _TEMPLATE_READ_TOOLS,
@@ -290,6 +291,13 @@ def _make_delegation_tool(
             result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
             logger.info("[{}] DELEGATION COMPLETE", agent_label)
             return result.output
+        except UsageLimitExceeded as exc:
+            logger.error("[{}] DELEGATION BUDGET EXHAUSTED: {}", agent_label, exc)
+            return (
+                f"Sub-agent budget exhausted ({exc}). "
+                f"The task was too complex or the agent entered an error loop. "
+                f"Try breaking it into smaller steps and retrying."
+            )
         except Exception as exc:
             logger.error("[{}] DELEGATION FAILED: {}", agent_label, exc)
             return f"Sub-agent error ({name}): {exc}. Please rephrase the task or break it into smaller steps and retry."

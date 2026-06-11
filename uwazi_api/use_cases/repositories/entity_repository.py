@@ -1,4 +1,5 @@
 import json
+import time
 import traceback
 from typing import Optional
 
@@ -88,7 +89,9 @@ class EntityRepository:
         if entity.id:
             self.http.graylog.info(f"Entity uploaded {entity.id}")
         data = json.loads(upload_response.text)
-        return data["sharedId"]
+        shared_id = data["sharedId"]
+        self._wait_for_entity_indexed(shared_id)
+        return shared_id
 
     def update_partially(self, entity: Entity, language: str) -> str:
         if not entity.shared_id:
@@ -116,7 +119,18 @@ class EntityRepository:
 
         return self.upload(merged_entity, language)
 
+    def _wait_for_entity_indexed(self, shared_id: str, timeout: float = 3.0, interval: float = 0.5) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                self.get_one(shared_id, "en")
+                time.sleep(2)
+                return
+            except EntityNotFoundError:
+                time.sleep(interval)
+
     def delete(self, shared_id: str) -> None:
+        self._wait_for_entity_indexed(shared_id)
         response = self.http.request_adapter.delete(
             f"{self.http.url}/api/documents",
             headers=self.http.headers,
@@ -177,6 +191,8 @@ class EntityRepository:
         self.http.graylog.info(f"Entities unpublished {shared_ids}")
 
     def delete_entities(self, shared_ids: list[str]) -> None:
+        for shared_id in shared_ids:
+            self._wait_for_entity_indexed(shared_id)
         payload = {"sharedIds": shared_ids}
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/bulkdelete",
