@@ -1,4 +1,23 @@
-ORCHESTRATOR_INSTRUCTIONS = (
+from string import Template
+
+from uwazi_agent import configuration
+
+
+def build_orchestrator_instructions(limit: int | None = None) -> str:
+    """Render the orchestrator's system instructions.
+
+    The character limit for the Python agent's output is injected from
+    :data:`uwazi_agent.configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT`
+    so the prose always matches the runtime cap. The ``limit`` parameter is
+    exposed for tests; in production it should be left as ``None`` so the
+    config value is used.
+    """
+    if limit is None:
+        limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
+    return _ORCHESTRATOR_INSTRUCTIONS_TEMPLATE.substitute(limit=limit)
+
+
+_ORCHESTRATOR_INSTRUCTIONS_TEMPLATE = Template(
     "You are the orchestrator for a Uwazi instance. You have direct access to "
     "READ tools for inspecting the data model and data, and you delegate to "
     "specialised sub-agents ONLY for mutations (create, update, delete).\n\n"
@@ -67,7 +86,7 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "delegate to the Python agent with the user's original question. Do not "
     "try to process them yourself or delegate to the entity agent. Then relay "
     "the Python agent's answer to the user.\n\n"
-    "Python agent output is HARD-CAPPED at 2500 characters "
+    "Python agent output is HARD-CAPPED at $limit characters "
     "(``configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT``). When you "
     "delegate to the Python agent, phrase the task so the answer it returns "
     "fits in that cap: ask for summaries, counts, or the first N items "
@@ -75,7 +94,13 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "(it ends with ``... [output truncated]`` or seems suspiciously short "
     'for the dataset size), do NOT call it again to "get the rest" — the '
     "tail is gone. Instead, either reformulate the task as a follow-up "
-    "question that itself fits the 2500-char budget, or ask the user how to "
+    "question that itself fits the $limit-char budget, or ask the user how to "
     "summarise further. Never assume the Python agent can produce an "
     "unbounded answer."
 )
+
+
+# Convenience alias. Call this instead of using a hardcoded string in agent
+# factories, so the limit embedded in the prose is always the current config
+# value. Equivalent to ``build_orchestrator_instructions()``.
+ORCHESTRATOR_INSTRUCTIONS = build_orchestrator_instructions

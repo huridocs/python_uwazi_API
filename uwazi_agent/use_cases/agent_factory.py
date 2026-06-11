@@ -276,7 +276,7 @@ def build_python_agent(model: Model) -> Agent[UwaziAgentToolsDependencies, str]:
     return Agent(
         model,
         deps_type=UwaziAgentToolsDependencies,
-        instructions=PYTHON_INSTRUCTIONS,
+        instructions=PYTHON_INSTRUCTIONS(),
         tools=build_python_tools(),
     )
 
@@ -381,7 +381,7 @@ def build_orchestrator(
     return Agent(
         model,
         deps_type=UwaziAgentToolsDependencies,
-        instructions=ORCHESTRATOR_INSTRUCTIONS,
+        instructions=ORCHESTRATOR_INSTRUCTIONS(),
         tools=all_tools,
     )
 

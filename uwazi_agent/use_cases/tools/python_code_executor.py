@@ -123,10 +123,11 @@ async def run_python_code(
     or debugging info. Example: for "give me all titles", set
     ``result = '\\n'.join(e['title'] for e in entities)``.
 
-    IMPORTANT — Hard output cap (2500 characters):
+    IMPORTANT — Hard output cap:
     The returned string is HARD-CAPPED at
-    ``configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT`` characters (500).
-    Any output past that limit is silently truncated and replaced with
+    ``configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT`` characters (the
+    current value lives in ``uwazi_agent.configuration``). Any output past
+    that limit is silently truncated and replaced with
     ``"\n... [output truncated]"``. The full output is NOT available later —
     the Python agent has no way to fetch the truncated tail. Therefore the
     ``result`` string MUST be designed to fit within this cap. If the natural

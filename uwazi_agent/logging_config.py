@@ -59,7 +59,7 @@ def setup_logging(url: str = "", user: str = "") -> None:
     fmt = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+        "<cyan>{name}</cyan> | "
         "url={extra[uwazi_url]} user={extra[uwazi_user]} | "
         "<level>{message}</level>"
     )
@@ -89,7 +89,7 @@ def setup_logging(url: str = "", user: str = "") -> None:
             format=(
                 "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
                 "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+                "<cyan>{name}</cyan> | "
                 "<level>{message}</level>"
             ),
             filter=lambda record: not all(key in record["extra"] for key in ("uwazi_url", "uwazi_user")),
