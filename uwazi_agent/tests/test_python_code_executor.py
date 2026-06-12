@@ -28,6 +28,11 @@ def mock_entity_api():
             AgentEntityMutationResult(shared_id="abc123", success=True, error=None),
         ]
     )
+    api.set_entities_publish_status = AsyncMock(
+        return_value=[
+            AgentEntityMutationResult(shared_id="abc123", success=True, error=None),
+        ]
+    )
     return api
 
 
@@ -158,3 +163,73 @@ result = str(create_entities([{'title': 'A', 'template_name': 'T'}]) +
         ctx = MockRunContext(mock_deps)
         output = await run_python_code(ctx, code)
         assert mock_deps.entity_api.create_entities.await_count == 2
+
+    @pytest.mark.anyio
+    async def test_publish_entities_available(self, mock_deps):
+        code = """
+result = str(publish_entities(['id1', 'id2']))
+"""
+        ctx = MockRunContext(mock_deps)
+        output = await run_python_code(ctx, code)
+        mock_deps.entity_api.set_entities_publish_status.assert_awaited_once()
+        kwargs = mock_deps.entity_api.set_entities_publish_status.await_args.kwargs
+        assert kwargs["shared_ids"] == ["id1", "id2"]
+        assert kwargs["published"] is True
+        assert "success_count" in output
+
+    @pytest.mark.anyio
+    async def test_unpublish_entities_available(self, mock_deps):
+        code = """
+result = str(unpublish_entities(['id1']))
+"""
+        ctx = MockRunContext(mock_deps)
+        output = await run_python_code(ctx, code)
+        mock_deps.entity_api.set_entities_publish_status.assert_awaited_once()
+        kwargs = mock_deps.entity_api.set_entities_publish_status.await_args.kwargs
+        assert kwargs["shared_ids"] == ["id1"]
+        assert kwargs["published"] is False
+        assert "success_count" in output
+
+    @pytest.mark.anyio
+    async def test_set_publish_status_available(self, mock_deps):
+        code = """
+result = str(set_publish_status(['id1'], True))
+"""
+        ctx = MockRunContext(mock_deps)
+        output = await run_python_code(ctx, code)
+        mock_deps.entity_api.set_entities_publish_status.assert_awaited_once()
+        kwargs = mock_deps.entity_api.set_entities_publish_status.await_args.kwargs
+        assert kwargs["shared_ids"] == ["id1"]
+        assert kwargs["published"] is True
+        assert "abc123" in output
+
+    @pytest.mark.anyio
+    async def test_publish_entities_returns_structured_summary(self, mock_deps):
+        mock_deps.entity_api.set_entities_publish_status = AsyncMock(
+            return_value=[
+                AgentEntityMutationResult(shared_id="id1", success=True),
+                AgentEntityMutationResult(
+                    shared_id="id2",
+                    success=False,
+                    error="429 too many requests",
+                    error_code="RATE_LIMITED",
+                ),
+                AgentEntityMutationResult(
+                    shared_id="id3",
+                    success=False,
+                    error="403 forbidden",
+                    error_code="PERMISSION_DENIED",
+                ),
+            ]
+        )
+        code = """
+result = str(publish_entities(['id1', 'id2', 'id3']))
+"""
+        ctx = MockRunContext(mock_deps)
+        output = await run_python_code(ctx, code)
+        mock_deps.entity_api.set_entities_publish_status.assert_awaited_once()
+        assert "success_count" in output
+        assert "1" in output
+        assert "id2" in output
+        assert "id3" in output
+        assert "RATE_LIMITED" in output or "rate_limited" in output

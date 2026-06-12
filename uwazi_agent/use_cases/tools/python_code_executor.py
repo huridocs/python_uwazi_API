@@ -51,7 +51,34 @@ def _build_sync_crud_functions(
         tool_cache.invalidate_tools(_ENTITY_READ_TOOLS)
         return [r.model_dump() for r in results]
 
-    return create_entities, update_entities, delete_entities
+    def set_publish_status(shared_ids: list[str], published: bool) -> list[dict]:
+        results = loop.run_until_complete(entity_api.set_entities_publish_status(shared_ids=shared_ids, published=published))
+        tool_cache.invalidate_tools(_ENTITY_READ_TOOLS)
+        return [r.model_dump() for r in results]
+
+    def publish_entities(shared_ids: list[str]) -> dict:
+        results = set_publish_status(shared_ids, True)
+        return {
+            "success_count": sum(1 for r in results if r["success"]),
+            "failure_count": sum(1 for r in results if not r["success"]),
+            "rate_limited": [r["shared_id"] for r in results if r.get("error_code") == "RATE_LIMITED"],
+            "permission_denied": [r["shared_id"] for r in results if r.get("error_code") == "PERMISSION_DENIED"],
+            "not_found": [r["shared_id"] for r in results if r.get("error_code") == "NOT_FOUND"],
+            "errors": [r for r in results if not r["success"]],
+        }
+
+    def unpublish_entities(shared_ids: list[str]) -> dict:
+        results = set_publish_status(shared_ids, False)
+        return {
+            "success_count": sum(1 for r in results if r["success"]),
+            "failure_count": sum(1 for r in results if not r["success"]),
+            "rate_limited": [r["shared_id"] for r in results if r.get("error_code") == "RATE_LIMITED"],
+            "permission_denied": [r["shared_id"] for r in results if r.get("error_code") == "PERMISSION_DENIED"],
+            "not_found": [r["shared_id"] for r in results if r.get("error_code") == "NOT_FOUND"],
+            "errors": [r for r in results if not r["success"]],
+        }
+
+    return create_entities, update_entities, delete_entities, publish_entities, unpublish_entities, set_publish_status
 
 
 def _execute_python_code(
@@ -66,13 +93,18 @@ def _execute_python_code(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        create_fn, update_fn, delete_fn = _build_sync_crud_functions(entity_api, language, loop, tool_cache)
+        create_fn, update_fn, delete_fn, publish_fn, unpublish_fn, set_publish_fn = _build_sync_crud_functions(
+            entity_api, language, loop, tool_cache
+        )
 
         namespace: dict[str, Any] = {
             "entities": [e.model_dump() for e in entities],
             "create_entities": create_fn,
             "update_entities": update_fn,
             "delete_entities": delete_fn,
+            "publish_entities": publish_fn,
+            "unpublish_entities": unpublish_fn,
+            "set_publish_status": set_publish_fn,
             "json": json,
             "re": re,
             "collections": collections,
@@ -105,12 +137,22 @@ async def run_python_code(
     The execution environment provides:
     - ``entities``: list of dicts with keys shared_id, title, template_name, metadata,
       language, published. These are the entities stored from previous search or fetch
-      operations.
+      operations. Note: ``published`` is a READ-ONLY mirror of Uwazi's stored flag —
+      it is NOT a publication control. Visibility in Uwazi is governed by the entity's
+      ``permissions`` array, not by this field. To publish or unpublish, use the
+      helpers below.
     - ``create_entities(entities_dicts, language='en')``: Create new entities. Each dict
       must have 'title' and 'template_name'. Returns list of mutation result dicts.
     - ``update_entities(entities_dicts, language='en')``: Update existing entities. Each
       dict must have 'shared_id' and 'template_name'. Returns list of mutation result dicts.
     - ``delete_entities(shared_ids)``: Delete entities by shared_id list. Returns list of
+      mutation result dicts.
+    - ``publish_entities(shared_ids)``: Make entities public (visible to anonymous
+      users). Returns list of mutation result dicts.
+    - ``unpublish_entities(shared_ids)``: Make entities private again (visible only
+      to logged-in users with permission). Returns list of mutation result dicts.
+    - ``set_publish_status(shared_ids, published)``: General form of the two above;
+      pass ``published=True`` to publish, ``False`` to unpublish. Returns list of
       mutation result dicts.
     - Standard libraries: json, re, collections, itertools, datetime, math.
 

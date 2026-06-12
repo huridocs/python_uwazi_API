@@ -170,25 +170,39 @@ class EntityRepository:
             self.http.graylog.info(message)
             raise UploadError(message)
 
-    def publish_entities(self, shared_ids: list[str], permissions: Optional[list[dict]] = None) -> None:
+    def publish_entities(self, shared_ids: list[str], permissions: Optional[list[dict]] = None) -> dict[str, Optional[str]]:
         public_perm = {"refId": "public", "type": "public", "level": "read"}
+        results: dict[str, Optional[str]] = {}
         for shared_id in shared_ids:
-            if permissions is not None:
-                merged = list(permissions)
-            else:
-                existing = self._get_entity_permissions(shared_id)
-                merged = [p for p in existing if p.get("refId") != "public" or p.get("type") != "public"]
-            if not any(p.get("refId") == "public" and p.get("type") == "public" for p in merged):
-                merged.append(public_perm)
-            self._set_permissions([shared_id], merged)
+            try:
+                if permissions is not None:
+                    merged = list(permissions)
+                else:
+                    existing = self._get_entity_permissions(shared_id)
+                    merged = [p for p in existing if p.get("refId") != "public" or p.get("type") != "public"]
+                if not any(p.get("refId") == "public" and p.get("type") == "public" for p in merged):
+                    merged.append(public_perm)
+                self._set_permissions([shared_id], merged)
+                results[shared_id] = None
+            except Exception as exc:
+                self.http.graylog.info(f"publish failed for {shared_id}: {exc}")
+                results[shared_id] = str(exc)
         self.http.graylog.info(f"Entities published {shared_ids}")
+        return results
 
-    def unpublish_entities(self, shared_ids: list[str]) -> None:
+    def unpublish_entities(self, shared_ids: list[str]) -> dict[str, Optional[str]]:
+        results: dict[str, Optional[str]] = {}
         for shared_id in shared_ids:
-            existing = self._get_entity_permissions(shared_id)
-            filtered = [p for p in existing if not (p.get("refId") == "public" and p.get("type") == "public")]
-            self._set_permissions([shared_id], filtered)
+            try:
+                existing = self._get_entity_permissions(shared_id)
+                filtered = [p for p in existing if not (p.get("refId") == "public" and p.get("type") == "public")]
+                self._set_permissions([shared_id], filtered)
+                results[shared_id] = None
+            except Exception as exc:
+                self.http.graylog.info(f"unpublish failed for {shared_id}: {exc}")
+                results[shared_id] = str(exc)
         self.http.graylog.info(f"Entities unpublished {shared_ids}")
+        return results
 
     def delete_entities(self, shared_ids: list[str]) -> None:
         for shared_id in shared_ids:

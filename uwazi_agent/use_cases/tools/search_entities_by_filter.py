@@ -6,7 +6,7 @@ from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResul
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.fail_forward import suggest_template_names
-from uwazi_api.domain.exceptions import DomainError
+from uwazi_api.domain.exceptions import DomainError, PropertyNotFilterableError
 
 
 async def search_entities_by_filter(
@@ -66,6 +66,21 @@ async def search_entities_by_filter(
             language=language,
             limit=limit,
             published=published,
+        )
+    except PropertyNotFilterableError as exc:
+        logger.error(
+            "search_entities_by_filter REJECTED: template={} property={} filterable={}",
+            template_name,
+            exc.property_name,
+            exc.filterable_properties,
+        )
+        return (
+            f"Error: property '{exc.property_name}' is not filterable on template "
+            f"'{exc.template_name}'. Only properties with `use_as_filter` set on the template "
+            f"can be passed to search_entities_by_filter. Filterable properties on this "
+            f"template: {exc.filterable_properties}. Call get_templates_by_names to inspect "
+            f"the template's properties and their `use_as_filter` flag, then retry with a "
+            f"filterable property."
         )
     except DomainError as exc:
         logger.error("search_entities_by_filter FAILED: template={} filters={} error={}", template_name, filters, exc)

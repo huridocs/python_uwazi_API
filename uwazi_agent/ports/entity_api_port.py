@@ -4,6 +4,7 @@ from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
+from uwazi_agent.domain.agent_publish_status import AgentPublishStatus
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 
 
@@ -53,3 +54,6 @@ class EntityApiPort(ABC):
     async def set_entities_publish_status(
         self, shared_ids: list[str], published: bool
     ) -> list[AgentEntityMutationResult]: ...
+
+    @abstractmethod
+    async def get_publish_status(self, shared_ids: list[str], language: str) -> list[AgentPublishStatus]: ...

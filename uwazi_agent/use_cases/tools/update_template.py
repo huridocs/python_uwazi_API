@@ -11,6 +11,7 @@ async def update_template(
     ctx: RunContext[UwaziAgentToolsDependencies],
     name: str,
     properties: list[AgentProperty],
+    color: str = "",
     language: str = "en",
 ) -> str:
     """Replace the custom properties of an existing template.
@@ -36,6 +37,10 @@ async def update_template(
     Args:
         name: The template name to update.
         properties: The new full list of custom properties.
+        color: Optional tint color for the template in the Uwazi UI. Accepts a
+            hex string (e.g. ``"#A5915F"``) or a CSS color name (e.g.
+            ``"purple"``, ``"steelblue"``); named colors are mapped to their hex
+            equivalent. If omitted, the template's existing color is preserved.
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
@@ -45,7 +50,12 @@ async def update_template(
     from uwazi_agent.domain.agent_template import AgentTemplate
 
     try:
-        template = AgentTemplate(name=name, properties=properties)
+        resolved_color = color
+        if not resolved_color:
+            existing = ctx.deps.schema_store.templates.get(name)
+            if existing is not None:
+                resolved_color = existing.color
+        template = AgentTemplate(name=name, properties=properties, color=resolved_color)
         await ctx.deps.template_api.update_template(template=template, language=language)
         property_names = [p.name for p in properties]
         return (

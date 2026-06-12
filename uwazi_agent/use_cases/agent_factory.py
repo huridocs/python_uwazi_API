@@ -31,6 +31,7 @@ from .tools.get_entities_by_shared_ids import get_entities_by_shared_ids
 from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
+from .tools.get_publish_status import get_publish_status
 from .tools.get_relationship_type_names import get_relationship_type_names
 from .tools.get_template_names import list_templates
 from .tools.get_templates_by_names import get_templates_by_names
@@ -219,6 +220,7 @@ def build_entity_tools() -> list[Tool]:
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),
         _read_tool(get_entities_by_template),
+        _read_tool(get_publish_status),
         _write_tool(create_entities),
         _write_tool(update_entities),
         _write_tool(set_entities_publish_status),
@@ -240,10 +242,12 @@ def build_page_tools() -> list[Tool]:
 def build_python_tools() -> list[Tool]:
     return [
         _write_tool(run_python_code),
+        _write_tool(set_entities_publish_status),
         _read_tool(search_entities_by_text),
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_template),
         _read_tool(get_entities_by_shared_ids),
+        _read_tool(get_publish_status),
         Tool(get_entity_store_status, takes_ctx=True),
     ]
 
@@ -376,6 +380,7 @@ def build_orchestrator(
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),
         _read_tool(get_entities_by_template),
+        _read_tool(get_publish_status),
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
         Tool(get_entity_store_status, takes_ctx=True),
