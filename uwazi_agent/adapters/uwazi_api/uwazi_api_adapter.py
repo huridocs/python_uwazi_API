@@ -1,5 +1,8 @@
 import asyncio
-from typing import Optional
+from typing import Optional, cast
+
+from loguru import logger
+from requests.exceptions import RequestException
 
 from uwazi_agent.adapters.template_mapper import TemplateMapperAdapter
 from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
@@ -15,6 +18,7 @@ from uwazi_agent.domain.agent_page_create import AgentPageCreate
 from uwazi_agent.domain.agent_page_mutation_result import AgentPageMutationResult
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
+from uwazi_agent.domain.agent_publish_status import AgentPublishStatus
 from uwazi_agent.domain.agent_relationship_type import AgentRelationshipType
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.domain.agent_template import AgentTemplate
@@ -28,11 +32,48 @@ from uwazi_agent.ports.template_api_port import TemplateApiPort
 from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.exceptions import EntityNotFoundError, PageNotFoundError, SearchError, UploadError
+from uwazi_api.domain.exceptions import (
+    EntityNotFoundError,
+    PageNotFoundError,
+    PropertyNotFilterableError,
+    SearchError,
+    UploadError,
+)
 from uwazi_api.domain.stats import SearchStats
 from uwazi_api.domain.language import Language
 from uwazi_api.domain.menu_link import MenuLink
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
+
+
+def _categorize_publish_error(exc: Exception) -> str:
+    msg = str(exc).lower()
+    if "429" in msg or "rate" in msg or "too many" in msg:
+        return "RATE_LIMITED"
+    if "not found" in msg or "404" in msg:
+        return "NOT_FOUND"
+    if "permission" in msg or "403" in msg or "401" in msg or "unauthor" in msg:
+        return "PERMISSION_DENIED"
+    if isinstance(exc, RequestException):
+        return "RATE_LIMITED"
+    return "INTERNAL"
+
+
+def _coerce_error_code(code: str):
+    from uwazi_agent.domain.agent_entity_mutation_result import MutationErrorCode
+
+    valid: tuple[MutationErrorCode, ...] = (
+        "NOT_FOUND",
+        "ALREADY_PUBLISHED",
+        "NOT_PUBLISHED",
+        "PERMISSION_DENIED",
+        "RATE_LIMITED",
+        "TEMPLATE_MISMATCH",
+        "INVALID_LABEL",
+        "INTERNAL",
+    )
+    if code in valid:
+        return cast(MutationErrorCode, code)
+    return cast(MutationErrorCode, "INTERNAL")
 
 
 class UwaziApiAdapter(
@@ -178,7 +219,7 @@ class UwaziApiAdapter(
             existing = self._template_repo.get_by_name(template.name)
             if existing is None:
                 raise ValueError(f"Template '{template.name}' not found")
-            api_template = self._template_mapper.to_api(template)
+            api_template = self._template_mapper.to_api(template, existing=existing)
             api_template.id = existing.id
             return self._template_repo.set(language=language, template=api_template)
 
@@ -275,6 +316,7 @@ class UwaziApiAdapter(
         published: bool | None = None,
     ) -> AgentEntitySearchResult:
         def _search() -> AgentEntitySearchResult:
+            self._validate_filter_properties(template_name, filters)
             search_filters = SearchFilters()
             for f in filters:
                 if f.values is not None:
@@ -299,6 +341,36 @@ class UwaziApiAdapter(
             return self._summarize(entities, limit, language)
 
         return await asyncio.to_thread(_search)
+
+    def _validate_filter_properties(
+        self,
+        template_name: str,
+        filters: list[AgentSearchFilter],
+    ) -> None:
+        """Raise ``PropertyNotFilterableError`` if any filter targets a property
+        that is not flagged ``useAsFilter`` on the template.
+
+        Runs as a synchronous helper inside the adapter's own worker thread
+        (the whole ``search_entities_by_filter`` body is wrapped in
+        ``asyncio.to_thread``) so the template lookup hits the cached
+        ``template_repo.get()`` instead of a fresh HTTP request.
+        """
+        if not filters:
+            return
+        template = self._template_repo.get_by_name(template_name)
+        if template is None:
+            return
+        all_props = list(template.properties) + list(template.common_properties)
+        filterable = {p.name for p in all_props if p.filter}
+        prop_by_name = {p.name: p for p in all_props}
+        for f in filters:
+            prop = prop_by_name.get(f.property_name)
+            if prop is not None and not prop.filter:
+                raise PropertyNotFilterableError(
+                    property_name=f.property_name,
+                    template_name=template_name,
+                    filterable_properties=sorted(filterable),
+                )
 
     async def update_entities(self, updates: list[AgentEntity], language: str) -> list[AgentEntityMutationResult]:
         def _call() -> list[AgentEntityMutationResult]:
@@ -347,15 +419,72 @@ class UwaziApiAdapter(
         return await asyncio.to_thread(_call)
 
     async def set_entities_publish_status(self, shared_ids: list[str], published: bool) -> list[AgentEntityMutationResult]:
+        def _call_once() -> dict[str, Optional[str]]:
+            if published:
+                return self._entity_repo.publish_entities(list(shared_ids))
+            return self._entity_repo.unpublish_entities(list(shared_ids))
+
         def _call() -> list[AgentEntityMutationResult]:
             try:
-                if published:
-                    self._entity_repo.publish_entities(list(shared_ids))
-                else:
-                    self._entity_repo.unpublish_entities(list(shared_ids))
-                return [AgentEntityMutationResult(shared_id=sid, success=True) for sid in shared_ids]
+                per_id = _call_once()
             except (UploadError, ValueError) as exc:
-                return [AgentEntityMutationResult(shared_id=sid, success=False, error=str(exc)) for sid in shared_ids]
+                logger.error("set_entities_publish_status FAILED: {}", exc)
+                return [
+                    AgentEntityMutationResult(
+                        shared_id=sid,
+                        success=False,
+                        error=str(exc),
+                        error_code=_categorize_publish_error(exc),
+                    )
+                    for sid in shared_ids
+                ]
+            except RequestException as exc:
+                logger.error("set_entities_publish_status NETWORK FAILED: {}", exc)
+                return [
+                    AgentEntityMutationResult(
+                        shared_id=sid,
+                        success=False,
+                        error=str(exc),
+                        error_code="RATE_LIMITED",
+                    )
+                    for sid in shared_ids
+                ]
+
+            results: list[AgentEntityMutationResult] = []
+            for sid in shared_ids:
+                err = per_id.get(sid)
+                if err is None:
+                    results.append(AgentEntityMutationResult(shared_id=sid, success=True))
+                else:
+                    results.append(
+                        AgentEntityMutationResult(
+                            shared_id=sid,
+                            success=False,
+                            error=err,
+                            error_code=_categorize_publish_error(Exception(err)),
+                        )
+                    )
+            return results
+
+        return await asyncio.to_thread(_call)
+
+    async def get_publish_status(self, shared_ids: list[str], language: str) -> list[AgentPublishStatus]:
+        def _call() -> list[AgentPublishStatus]:
+            results: list[AgentPublishStatus] = []
+            for shared_id in shared_ids:
+                try:
+                    permissions = self._entity_repo._get_entity_permissions(shared_id)
+                except Exception:
+                    permissions = []
+                is_public = any(p.get("refId") == "public" and p.get("type") == "public" for p in permissions)
+                results.append(
+                    AgentPublishStatus(
+                        shared_id=shared_id,
+                        published=is_public,
+                        permissions=permissions,
+                    )
+                )
+            return results
 
         return await asyncio.to_thread(_call)
 

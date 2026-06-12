@@ -16,7 +16,9 @@ class AgentProperty(BaseModel):
         description=(
             "Uwazi 'useAsFilter'. When true, this property appears as a sidebar "
             "filter in the library and can be used by the entity filter-search "
-            "tool. Only filterable properties can be searched with filters."
+            "tool. Only filterable properties can be searched with filters. "
+            "search_entities_by_filter will reject any filter whose property_name "
+            "is not flagged use_as_filter on the template."
         ),
     )
     show_in_card: bool = Field(

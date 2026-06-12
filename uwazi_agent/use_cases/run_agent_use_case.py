@@ -78,9 +78,11 @@ class RunAgentUseCase:
         except UsageLimitExceeded as exc:
             logger.error("PROMPT FAILED (request limit): {} | error: {}", task_description[:200], exc)
             return AgentExecutionResult(
-                output=f"The agent exceeded the request limit of {REQUEST_LIMIT} and could not complete the task. "
-                f"The task may be too complex or the agent may have entered an error loop. "
-                f"Try breaking it into smaller steps.",
+                output=(
+                    f"The agent exceeded the request limit of {REQUEST_LIMIT} and could not complete the task."
+                    f" The task may be too complex or the agent may have entered an error loop."
+                    f" Try breaking it into smaller steps."
+                ),
                 thinking=None,
                 usage=RunUsage(),
             )

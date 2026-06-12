@@ -10,6 +10,7 @@ async def create_template(
     ctx: RunContext[UwaziAgentToolsDependencies],
     name: str,
     properties: list[AgentProperty],
+    color: str = "",
     language: str = "en",
 ) -> dict | str:
     """Create a new template with the given custom properties.
@@ -41,6 +42,10 @@ async def create_template(
     Args:
         name: The unique name for the new template.
         properties: The list of custom properties to define on the template.
+        color: Optional tint color for the template in the Uwazi UI. Accepts a
+            hex string (e.g. ``"#A5915F"``) or a CSS color name (e.g.
+            ``"purple"``, ``"steelblue"``); named colors are mapped to their hex
+            equivalent. Defaults to no color (``""``).
         language: ISO 639-1 language code. Defaults to "en".
 
     Returns:
@@ -50,7 +55,7 @@ async def create_template(
     from uwazi_agent.domain.agent_template import AgentTemplate
 
     try:
-        template = AgentTemplate(name=name, properties=properties)
+        template = AgentTemplate(name=name, properties=properties, color=color)
         result = await ctx.deps.template_api.create_template(template=template, language=language)
         if isinstance(result, dict):
             refreshed = await ctx.deps.template_api.get_templates_by_names(names=[name])

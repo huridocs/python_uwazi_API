@@ -32,7 +32,12 @@ TEMPLATES_INSTRUCTIONS = (
     "(the property list you send REPLACES the existing custom properties — "
     "re-send everything you want to keep), and ``delete_template`` to remove. "
     "Never include the platform-managed common properties (title, creationDate, "
-    "editDate); they are added automatically.\n\n"
+    "editDate); they are added automatically. Both ``create_template`` and "
+    "``update_template`` accept an optional ``color`` that tints the template in "
+    'the Uwazi UI. You can pass either a hex string (e.g. ``"#A5915F"``) or a '
+    'CSS color name (e.g. ``"purple"``, ``"red"``, ``"steelblue"``); named '
+    "colors are mapped to their hex equivalent before being sent to Uwazi. On "
+    "update the existing color is preserved when ``color`` is omitted.\n\n"
     "Each template property has a ``name`` and ``type`` plus three Uwazi "
     "capability flags you should set deliberately:\n"
     "- ``use_as_filter``: show the property as a library sidebar filter and make "

@@ -83,6 +83,9 @@ class Template(BaseModel):
 
         schema = f"## Template: {self.name}\n\n## Template schema\n\n{header}\n" + "\n".join(rows)
 
+        if self.color:
+            schema += f"\n\n## Template color\n\n`{self.color}`"
+
         if thesauri:
             thesaurus_lines = [
                 "\n\n## Thesaurus Options\nUse the following strict taxonomies to populate select/multiselect fields. You can match either by the exact ID or the exact Label.\n"
