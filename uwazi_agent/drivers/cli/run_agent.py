@@ -35,6 +35,7 @@ async def main() -> None:
         entity_api=uwazi_api,
         page_api=uwazi_api,
         relationship_type_api=uwazi_api,
+        relationship_api=uwazi_api,
         settings_api=uwazi_api,
         stats_api=uwazi_api,
     )

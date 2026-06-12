@@ -12,12 +12,17 @@ async def create_pages(
     pages: list[AgentPageCreate],
     language: str = "en",
 ) -> list[AgentPageMutationResult] | str:
-    """Create one or more brand-new Settings → Pages in Uwazi.
+    """Create one or more brand-new Settings → Pages in Uwazi from **custom** content.
 
-    Use this to publish rich, standalone pages (landing pages, about pages,
-    dashboards, documentation, ...). Each page's ``content`` is its body and
-    is rendered as Markdown — and raw HTML is allowed inside it, so you can
-    produce genuinely beautiful layouts.
+    **This is the escape hatch for fully custom HTML, CSS, and JavaScript.** Use it
+    only when the page-builder block library cannot express what the user is asking
+    for (e.g. a bespoke layout, an embedded third-party widget, or custom interactive
+    code that the block types do not support). For the default case — any new page
+    composed of standard sections — prefer ``create_page_from_blocks`` instead,
+    which is safer, faster, and produces a consistent visual result.
+
+    Each page's ``content`` is its body and is rendered as Markdown — and raw
+    HTML is allowed inside it, so you can produce genuinely beautiful layouts.
 
     Authoring tips for beautiful pages:
         * Structure with Markdown headings (``#``, ``##``), lists, tables,
@@ -30,8 +35,8 @@ async def create_pages(
           if the user asks; otherwise prefer plain Markdown/HTML.
         * Keep images referenced by absolute URLs.
 
-    Do **not** pass a ``shared_id``: Uwazi mints it on creation and returns
-    it to you. The optional ``javascript`` field populates the page's
+    Do **not** pass a ``shared_id``: Uwazi mints it on creation and returns it
+    to you. The optional ``javascript`` field populates the page's
     "Javascript" tab and runs on the public page; leave it empty unless the
     user asks for interactive behavior.
 

@@ -14,7 +14,9 @@ from pydantic_ai import RunContext
 from uwazi_agent import configuration
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
+from uwazi_agent.domain.agent_relationship_create import AgentRelationshipCreate
 from uwazi_agent.ports.entity_api_port import EntityApiPort
+from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
 
@@ -28,6 +30,7 @@ _ENTITY_READ_TOOLS = {
 
 def _build_sync_crud_functions(
     entity_api: EntityApiPort,
+    relationship_api: RelationshipApiPort | None,
     default_language: str,
     loop: asyncio.AbstractEventLoop,
     tool_cache: ToolCallCache,
@@ -78,13 +81,30 @@ def _build_sync_crud_functions(
             "errors": [r for r in results if not r["success"]],
         }
 
-    return create_entities, update_entities, delete_entities, publish_entities, unpublish_entities, set_publish_status
+    def create_relationships(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
+        lang = language or default_language
+        if relationship_api is None:
+            return [{"success": False, "error": "Relationship API not configured"}]
+        rels = [AgentRelationshipCreate(**r) for r in relationships_dicts]
+        results = loop.run_until_complete(relationship_api.create_relationships(rels, lang))
+        return [r.model_dump() for r in results]
+
+    return (
+        create_entities,
+        update_entities,
+        delete_entities,
+        publish_entities,
+        unpublish_entities,
+        set_publish_status,
+        create_relationships,
+    )
 
 
 def _execute_python_code(
     code: str,
     entities: list[AgentEntity],
     entity_api: EntityApiPort,
+    relationship_api: RelationshipApiPort | None,
     language: str,
     tool_cache: ToolCallCache,
 ) -> str:
@@ -93,8 +113,8 @@ def _execute_python_code(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        create_fn, update_fn, delete_fn, publish_fn, unpublish_fn, set_publish_fn = _build_sync_crud_functions(
-            entity_api, language, loop, tool_cache
+        create_fn, update_fn, delete_fn, publish_fn, unpublish_fn, set_publish_fn, create_rel_fn = (
+            _build_sync_crud_functions(entity_api, relationship_api, language, loop, tool_cache)
         )
 
         namespace: dict[str, Any] = {
@@ -105,6 +125,7 @@ def _execute_python_code(
             "publish_entities": publish_fn,
             "unpublish_entities": unpublish_fn,
             "set_publish_status": set_publish_fn,
+            "create_relationships": create_rel_fn,
             "json": json,
             "re": re,
             "collections": collections,
@@ -154,6 +175,11 @@ async def run_python_code(
     - ``set_publish_status(shared_ids, published)``: General form of the two above;
       pass ``published=True`` to publish, ``False`` to unpublish. Returns list of
       mutation result dicts.
+    - ``create_relationships(relationships_dicts, language='en')``: Create entity-to-entity
+      relationships. Each dict must have ``from_entity_shared_id``,
+      ``to_entity_shared_id``, and ``relationship_type_name``. Optionally provide
+      ``file_id`` and ``reference_text`` for document-anchored relationships.
+      Returns list of mutation result dicts.
     - Standard libraries: json, re, collections, itertools, datetime, math.
 
     The code must set a ``result`` variable with the output string.
@@ -191,7 +217,7 @@ async def run_python_code(
     entities = ctx.deps.entity_store.entities
 
     output = await asyncio.to_thread(
-        _execute_python_code, code, entities, ctx.deps.entity_api, language, ctx.deps.tool_cache
+        _execute_python_code, code, entities, ctx.deps.entity_api, ctx.deps.relationship_api, language, ctx.deps.tool_cache
     )
     limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
     if len(output) > limit:

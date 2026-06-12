@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from loguru import logger
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -8,6 +9,7 @@ from uwazi_agent.configuration import REQUEST_LIMIT
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.page_api_port import PageApiPort
+from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.settings_api_port import SettingsApiPort
 from uwazi_agent.ports.stats_api_port import StatsApiPort
@@ -25,6 +27,9 @@ class AgentExecutionResult:
     usage: RunUsage
 
 
+_DEFAULT_PAGE_BUILDER_DIR = Path(__file__).resolve().parent.parent / "drivers" / "page_builder"
+
+
 class RunAgentUseCase:
     def __init__(
         self,
@@ -35,8 +40,10 @@ class RunAgentUseCase:
         entity_api: EntityApiPort,
         page_api: PageApiPort,
         relationship_type_api: RelationshipTypeApiPort | None = None,
+        relationship_api: RelationshipApiPort | None = None,
         settings_api: SettingsApiPort | None = None,
         stats_api: StatsApiPort | None = None,
+        page_builder_dir: Path | None = None,
     ):
         self.llm = llm
         self.thesauri_api = thesauri_api
@@ -45,8 +52,10 @@ class RunAgentUseCase:
         self.entity_api = entity_api
         self.page_api = page_api
         self.relationship_type_api = relationship_type_api
+        self.relationship_api = relationship_api
         self.settings_api = settings_api
         self.stats_api = stats_api
+        self.page_builder_dir = page_builder_dir or _DEFAULT_PAGE_BUILDER_DIR
 
     async def execute(
         self, task_description: str, context: str = "", tool_progress: list[str] | None = None
@@ -58,10 +67,12 @@ class RunAgentUseCase:
             template_api=self.template_api,
             template_mapper=self.template_mapper,
             relationship_type_api=self.relationship_type_api,
+            relationship_api=self.relationship_api,
             entity_api=self.entity_api,
             page_api=self.page_api,
             settings_api=self.settings_api,
             stats_api=self.stats_api,
+            page_builder_dir=self.page_builder_dir,
         )
         if tool_progress is not None:
             deps.tool_progress = tool_progress
