@@ -54,9 +54,22 @@ def _serialize_slots(slots: dict[str, Any]) -> dict[str, Any]:
         if "enum" in schema:
             entry["enum"] = schema["enum"]
         if "item_schema" in schema:
-            entry["item_schema"] = _serialize_slots(schema["item_schema"])
+            item_schema = schema["item_schema"]
+            if "type" in item_schema:
+                entry["item_schema"] = _serialize_single_slot(item_schema)
+            else:
+                entry["item_schema"] = _serialize_slots(item_schema)
         result[key] = entry
     return result
+
+
+def _serialize_single_slot(schema: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {"type": schema["type"], "description": schema.get("description", "")}
+    if "default" in schema:
+        entry["default"] = schema["default"]
+    if "enum" in schema:
+        entry["enum"] = schema["enum"]
+    return entry
 
 
 def _validate_value(key: str, value: Any, schema: dict[str, Any], block_name: str) -> list[str]:

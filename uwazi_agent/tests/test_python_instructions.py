@@ -1,5 +1,3 @@
-import pytest
-
 from uwazi_agent import configuration
 from uwazi_agent.use_cases.instructions import (
     ORCHESTRATOR_INSTRUCTIONS,

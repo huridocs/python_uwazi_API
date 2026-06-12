@@ -1,0 +1,25 @@
+name: event_chart_vertical
+description: Vertical event chart with a line and bubbles; use for long event lists (8+ events)
+when_to_use: Long chronological sequences; project histories; event logs; detailed timelines
+
+required_slots:
+  events:
+    type: list
+    description: Ordered list of events; the position on the line follows this order
+    item_schema:
+      date:
+        type: string
+        description: Date or time label for the event
+      title:
+        type: string
+        description: Event title
+      description:
+        type: string
+        description: Optional short description
+        default: ""
+
+optional_slots:
+  title:
+    type: string
+    description: Section title
+    default: ""

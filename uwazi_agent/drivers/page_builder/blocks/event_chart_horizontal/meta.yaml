@@ -1,0 +1,30 @@
+name: event_chart_horizontal
+description: Horizontal event chart with a line and bubbles at event positions; use for short event lists (3–7 events)
+when_to_use: Short chronological sequences shown on a single horizontal line; project milestones; process steps; release history
+
+required_slots:
+  events:
+    type: list
+    description: Ordered list of events; the position on the line follows this order
+    item_schema:
+      date:
+        type: string
+        description: Date or time label for the event
+      title:
+        type: string
+        description: Event title
+      description:
+        type: string
+        description: Optional short description
+        default: ""
+
+optional_slots:
+  title:
+    type: string
+    description: Section title
+    default: ""
+  show_descriptions:
+    type: string
+    description: Whether to render description text under each event title
+    default: "true"
+    enum: ["true", "false"]

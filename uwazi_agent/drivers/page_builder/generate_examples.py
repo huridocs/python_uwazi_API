@@ -96,6 +96,20 @@ def example_1_corporate_annual_report() -> None:
                 "slots": {},
             },
             {
+                "type": "event_chart_horizontal",
+                "slots": {
+                    "title": "Release timeline",
+                    "show_descriptions": "false",
+                    "events": [
+                        {"date": "Q1 2024", "title": "Alpha", "description": "Initial release with core features"},
+                        {"date": "Q2 2024", "title": "Beta", "description": "Public beta with feedback loop"},
+                        {"date": "Q3 2024", "title": "v1.0", "description": "First stable release"},
+                        {"date": "Q4 2024", "title": "v1.1", "description": "Performance and stability"},
+                        {"date": "Q1 2025", "title": "v2.0", "description": "Major new features"},
+                    ],
+                },
+            },
+            {
                 "type": "bar_chart",
                 "slots": {
                     "title": "Cases by violation type",
@@ -314,6 +328,59 @@ def example_3_earth_environmental_data() -> None:
             {
                 "type": "divider",
                 "slots": {},
+            },
+            {
+                "type": "event_chart_vertical",
+                "slots": {
+                    "title": "Monitoring history",
+                    "events": [
+                        {
+                            "date": "January 2024",
+                            "title": "First monitoring station deployed",
+                            "description": "Initial 3 stations installed in the Kaxinawa territory, covering 12,000 hectares.",
+                        },
+                        {
+                            "date": "March 2024",
+                            "title": "Satellite imagery integration",
+                            "description": "Connected to daily MODIS and Sentinel-2 feeds for change detection.",
+                        },
+                        {
+                            "date": "June 2024",
+                            "title": "Field network expansion",
+                            "description": "Added 8 community monitors across 4 provinces; total 24 stations.",
+                        },
+                        {
+                            "date": "September 2024",
+                            "title": "First illegal mining detection",
+                            "description": "Identified 2.3 km² of new mining activity within 48 hours of satellite alert.",
+                        },
+                        {
+                            "date": "December 2024",
+                            "title": "Annual report published",
+                            "description": "First public report; 847 field reports, 3,200 hectares of deforestation verified.",
+                        },
+                        {
+                            "date": "March 2025",
+                            "title": "Drone fleet addition",
+                            "description": "12 autonomous drones added for high-resolution verification of satellite alerts.",
+                        },
+                        {
+                            "date": "June 2025",
+                            "title": "Cross-border data sharing",
+                            "description": "MOU signed with Peruvian and Colombian monitoring networks for joint operations.",
+                        },
+                        {
+                            "date": "September 2025",
+                            "title": "AI-assisted change detection",
+                            "description": "ML models deployed; 92% reduction in false-positive alerts.",
+                        },
+                        {
+                            "date": "January 2026",
+                            "title": "Real-time public dashboard",
+                            "description": "Open data portal launched with live deforestation metrics.",
+                        },
+                    ],
+                },
             },
             {
                 "type": "timeline",

@@ -46,6 +46,12 @@ async def info():
     return sys.version
 
 
+@app.get("/test")
+async def test_logger() -> dict[str, str]:
+    logger.info("Graylog connectivity test")
+    return {"status": "ok", "message": "Test log entry sent to Graylog"}
+
+
 def _resolve_job_id(request: AIJobRequest, job_id: str | None) -> str:
     return job_id or request.job_id or str(uuid.uuid4())[:8]
 
@@ -132,6 +138,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             entity_api=uwazi_api,
             page_api=uwazi_api,
             relationship_type_api=uwazi_api,
+            relationship_api=uwazi_api,
             settings_api=uwazi_api,
             stats_api=uwazi_api,
         )

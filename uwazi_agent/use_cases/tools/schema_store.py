@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
 
-from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri
 

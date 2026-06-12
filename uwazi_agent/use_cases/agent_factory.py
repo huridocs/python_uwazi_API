@@ -17,6 +17,7 @@ from .instructions import (
 from .tools.agent_context import get_current_agent, set_current_agent
 from .tools.add_page_menu_links import add_page_menu_links
 from .tools.create_entities import create_entities
+from .tools.create_page_from_blocks import create_page_from_blocks
 from .tools.create_pages import create_pages
 from .tools.create_relationship_type import create_relationship_type
 from .tools.create_template import create_template
@@ -38,8 +39,11 @@ from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
 from .tools.get_thesauris_names import list_thesauri
 from .tools.get_languages import get_languages
+from .tools.list_page_blocks import list_page_blocks
+from .tools.list_page_vibes import list_page_vibes
 from .tools.list_pages import list_pages
 from .tools.python_code_executor import run_python_code
+from .tools.render_page_from_blocks import render_page_from_blocks
 from .tools.search_entities_by_filter import search_entities_by_filter
 from .tools.search_entities_by_text import search_entities_by_text
 from .tools.set_entities_publish_status import set_entities_publish_status
@@ -58,7 +62,13 @@ _ENTITY_READ_TOOLS = {
     "get_entities_by_shared_ids",
     "get_entities_by_template",
 }
-_PAGE_READ_TOOLS = {"list_pages", "get_pages_by_shared_ids"}
+_PAGE_READ_TOOLS = {
+    "list_pages",
+    "get_pages_by_shared_ids",
+    "list_page_blocks",
+    "list_page_vibes",
+    "render_page_from_blocks",
+}
 _LANGUAGE_READ_TOOLS = {"get_languages"}
 _STATS_READ_TOOLS = {"list_templates", "list_thesauri", "get_thesauris_by_names"}
 
@@ -95,6 +105,7 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "delete_entities_by_shared_ids": (_ENTITY_READ_TOOLS, None),
     "set_entities_publish_status": (_ENTITY_READ_TOOLS, None),
     "create_pages": (_PAGE_READ_TOOLS, None),
+    "create_page_from_blocks": (_PAGE_READ_TOOLS, None),
     "update_pages": (_PAGE_READ_TOOLS, None),
     "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
     "add_page_menu_links": (_PAGE_READ_TOOLS, None),
@@ -232,6 +243,10 @@ def build_page_tools() -> list[Tool]:
     return [
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
+        _read_tool(list_page_blocks),
+        _read_tool(list_page_vibes),
+        _read_tool(render_page_from_blocks),
+        _write_tool(create_page_from_blocks),
         _write_tool(create_pages),
         _write_tool(update_pages),
         _write_tool(delete_pages_by_shared_ids),

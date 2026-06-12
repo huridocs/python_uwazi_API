@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Optional, cast
 
 from loguru import logger
@@ -23,8 +24,11 @@ from uwazi_agent.domain.agent_relationship_type import AgentRelationshipType
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri, AgentThesauriGroup
+from uwazi_agent.domain.agent_relationship_create import AgentRelationshipCreate
+from uwazi_agent.domain.agent_relationship_mutation_result import AgentRelationshipMutationResult
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
+from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.ports.relationship_type_api_port import RelationshipTypeApiPort
 from uwazi_agent.ports.settings_api_port import SettingsApiPort
 from uwazi_agent.ports.stats_api_port import StatsApiPort
@@ -77,7 +81,14 @@ def _coerce_error_code(code: str):
 
 
 class UwaziApiAdapter(
-    ThesauriApiPort, TemplateApiPort, EntityApiPort, PageApiPort, RelationshipTypeApiPort, SettingsApiPort, StatsApiPort
+    ThesauriApiPort,
+    TemplateApiPort,
+    EntityApiPort,
+    PageApiPort,
+    RelationshipApiPort,
+    RelationshipTypeApiPort,
+    SettingsApiPort,
+    StatsApiPort,
 ):
     def __init__(
         self,
@@ -528,6 +539,85 @@ class UwaziApiAdapter(
             if target is None:
                 raise ValueError(f"Relationship type '{name}' not found")
             return self._relationship_repo.delete_relation_type(relation_type_id=target.id, language=language)
+
+        return await asyncio.to_thread(_call)
+
+    # --- RelationshipApiPort --------------------------------------------
+
+    async def create_relationships(
+        self,
+        relationships: list[AgentRelationshipCreate],
+        language: str = "en",
+    ) -> list[AgentRelationshipMutationResult]:
+        def _call() -> list[AgentRelationshipMutationResult]:
+            results: list[AgentRelationshipMutationResult] = []
+            for rel in relationships:
+                try:
+                    rel_type_id = self._relationship_repo.resolve_relation_type_id(rel.relationship_type_name)
+                    if rel_type_id is None:
+                        results.append(
+                            AgentRelationshipMutationResult(
+                                success=False,
+                                error=f"Relationship type '{rel.relationship_type_name}' not found",
+                                from_entity_shared_id=rel.from_entity_shared_id,
+                                to_entity_shared_id=rel.to_entity_shared_id,
+                                relationship_type_name=rel.relationship_type_name,
+                            )
+                        )
+                        continue
+
+                    rel_from: dict[str, object] = {
+                        "entity": rel.from_entity_shared_id,
+                        "template": None,
+                    }
+                    if rel.file_id:
+                        rel_from["file"] = rel.file_id
+                    if rel.reference_text:
+                        rel_from["reference"] = {"text": rel.reference_text, "selectionRectangles": []}
+
+                    rel_to: dict[str, object] = {
+                        "entity": rel.to_entity_shared_id,
+                        "template": rel_type_id,
+                    }
+
+                    json_data = {"delete": [], "save": [[rel_from, rel_to]]}
+
+                    response = self._relationship_repo.http.request_adapter.post(
+                        url=f"{self._relationship_repo.http.url}/api/relationships/bulk",
+                        headers=self._relationship_repo.http.headers,
+                        cookies={"locale": language},
+                        data=json.dumps(json_data),
+                    )
+                    if response.status_code != 200:
+                        results.append(
+                            AgentRelationshipMutationResult(
+                                success=False,
+                                error=f"API error ({response.status_code})",
+                                from_entity_shared_id=rel.from_entity_shared_id,
+                                to_entity_shared_id=rel.to_entity_shared_id,
+                                relationship_type_name=rel.relationship_type_name,
+                            )
+                        )
+                    else:
+                        results.append(
+                            AgentRelationshipMutationResult(
+                                success=True,
+                                from_entity_shared_id=rel.from_entity_shared_id,
+                                to_entity_shared_id=rel.to_entity_shared_id,
+                                relationship_type_name=rel.relationship_type_name,
+                            )
+                        )
+                except Exception as exc:
+                    results.append(
+                        AgentRelationshipMutationResult(
+                            success=False,
+                            error=str(exc),
+                            from_entity_shared_id=rel.from_entity_shared_id,
+                            to_entity_shared_id=rel.to_entity_shared_id,
+                            relationship_type_name=rel.relationship_type_name,
+                        )
+                    )
+            return results
 
         return await asyncio.to_thread(_call)
 
