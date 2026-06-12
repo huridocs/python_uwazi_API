@@ -1,0 +1,19 @@
+name: content
+description: Rich text content section with optional heading
+when_to_use: Body text, articles, descriptions, any prose content
+
+required_slots:
+  body_html:
+    type: string
+    description: HTML body content
+
+optional_slots:
+  heading:
+    type: string
+    description: Section heading above the content
+    default: ""
+  max_width:
+    type: string
+    description: Maximum content width; narrow or wide
+    default: narrow
+    enum: [narrow, wide]

@@ -1,0 +1,33 @@
+name: bar_chart
+description: Bar chart with labels and values, rendered as self-contained SVG
+when_to_use: Comparing values across categories; rankings; distributions
+
+required_slots:
+  data:
+    type: list
+    description: List of bar entries
+    item_schema:
+      label:
+        type: string
+        description: Bar label
+      value:
+        type: number
+        description: Bar numeric value
+      color:
+        type: string
+        description: Optional hex color override
+        default: ""
+
+optional_slots:
+  title:
+    type: string
+    description: Chart title
+    default: ""
+  unit:
+    type: string
+    description: Unit suffix for values (e.g. %, km, M)
+    default: ""
+  max_value:
+    type: number
+    description: Optional max value for the scale; auto-calculated if omitted
+    default: null

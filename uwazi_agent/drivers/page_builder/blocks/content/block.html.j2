@@ -1,0 +1,87 @@
+{% set mw = {"narrow": "640px", "wide": "880px"}[slots.max_width] %}
+<section class="content">
+  <div class="content__inner" style="max-width: {{ mw }};">
+    {% if slots.heading %}
+    <h2 class="content__heading">{{ slots.heading }}</h2>
+    {% endif %}
+    <div class="content__body">{{ slots.body_html }}</div>
+  </div>
+</section>
+
+<style>
+.content {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.content__inner {
+  margin: 0 auto;
+}
+.content__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-lg) 0;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+  max-width: 600px;
+}
+
+.content__body {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.85;
+  color: var(--color-text);
+}
+.content__body > p:first-child::first-letter {
+  font-family: var(--font-heading);
+  font-size: 3.5rem;
+  font-weight: 600;
+  float: left;
+  line-height: 0.9;
+  padding-right: 0.12em;
+  padding-top: 0.05em;
+  color: var(--color-primary);
+}
+.content__body p {
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body p:last-child {
+  margin-bottom: 0;
+}
+.content__body h3 {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: var(--spacing-lg) 0 var(--spacing-xs) 0;
+  letter-spacing: -0.01em;
+}
+.content__body ul, .content__body ol {
+  padding-left: 1.25rem;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body li {
+  margin-bottom: 0.4rem;
+}
+.content__body li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Pull quote */
+.content__body blockquote {
+  display: block;
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-primary);
+  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+  margin: var(--spacing-lg) 0;
+  font-style: normal;
+}
+.content__body blockquote p {
+  margin: 0;
+}
+</style>

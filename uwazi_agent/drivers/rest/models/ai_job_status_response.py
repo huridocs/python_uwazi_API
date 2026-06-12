@@ -7,3 +7,4 @@ class AIJobStatusResponse(BaseModel):
     job_id: str
     result: str | None = None
     status: AIJobStatus
+    transcript: str | None = None

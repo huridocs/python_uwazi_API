@@ -1,0 +1,30 @@
+name: stats_grid
+description: Grid of stat counter cards showing key metrics
+when_to_use: Dashboards, impact summaries, key figures display
+
+required_slots:
+  stats:
+    type: list
+    description: List of stat entries
+    item_schema:
+      label:
+        type: string
+        description: Stat label
+      value:
+        type: string
+        description: Stat value
+      icon:
+        type: string
+        description: Optional emoji or icon character
+        default: ""
+
+optional_slots:
+  heading:
+    type: string
+    description: Section heading
+    default: ""
+  columns:
+    type: integer
+    description: Number of columns (1, 2, 3, or 4)
+    default: 3
+    enum: [1, 2, 3, 4]

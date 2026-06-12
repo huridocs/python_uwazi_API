@@ -1,0 +1,12 @@
+name: divider
+description: Visual horizontal separator between sections
+when_to_use: Break between content sections; visual rhythm
+
+required_slots: {}
+
+optional_slots:
+  style:
+    type: string
+    description: Line style; one of solid, dashed, dotted
+    default: solid
+    enum: [solid, dashed, dotted]

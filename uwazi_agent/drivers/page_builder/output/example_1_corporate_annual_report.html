@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Uwazi Page</title>
+<style>
+  :root {
+  --font-heading: 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --color-primary: #1a365d;
+  --color-primary-light: #2b6cb0;
+  --color-secondary: #718096;
+  --color-accent: #3182ce;
+  --color-bg: #ffffff;
+  --color-surface: #f7fafc;
+  --color-surface-alt: #edf2f7;
+  --color-text: #1a202c;
+  --color-text-muted: #718096;
+  --color-border: #e2e8f0;
+  --gradient-hero: linear-gradient(135deg, #1a365d 0%, #2b6cb0 100%);
+  --gradient-cta: linear-gradient(135deg, #2b6cb0 0%, #3182ce 100%);
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 0.75rem;
+  --spacing-md: 1.25rem;
+  --spacing-lg: 2.5rem;
+  --spacing-xl: 4rem;
+  --stat-accent: #2b6cb0;
+  --card-hover-lift: translateY(-2px);
+  --divider-style: solid;
+  --divider-color: #e2e8f0;
+  --chart-1: #1a365d;
+  --chart-2: #2b6cb0;
+  --chart-3: #3182ce;
+  --chart-4: #4299e1;
+  --chart-5: #63b3ed;
+  --chart-6: #90cdf4;
+  }
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html {
+  scroll-behavior: smooth;
+}
+body {
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  font-size: 16px;
+  line-height: 1.6;
+}
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Shared utilities */
+.label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-primary);
+}
+
+</style>
+</head>
+<body>
+
+
+<section class="hero" style="--hero-height: 50vh;">
+  <div class="hero__inner">
+    
+    <span class="hero__label">Annual Report 2025</span>
+    
+    <h1 class="hero__title">Documenting impact across borders and decades.</h1>
+    
+    <p class="hero__subtitle">Our 2025 report on advancing human rights documentation, evidence preservation, and international advocacy.</p>
+    
+  </div>
+  <div class="hero__line"></div>
+</section>
+
+<style>
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--hero-height, 50vh);
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.hero__inner {
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  position: relative;
+  z-index: 2;
+}
+
+.hero__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.hero__title {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--color-text);
+  max-width: 800px;
+  text-wrap: balance;
+}
+
+.hero__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin-top: var(--spacing-sm);
+  max-width: 480px;
+  font-weight: 400;
+}
+
+.hero__line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>
+
+<section class="stats-grid">
+  <div class="stats-grid__inner">
+    
+    <div class="stats-grid__header">
+      <h2 class="stats-grid__heading">By the numbers</h2>
+    </div>
+    
+    <div class="stats-grid__grid stats-grid__grid--cols-4">
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">12,847</div>
+        <div class="stats-grid__label">Documents Processed</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">3,200+</div>
+        <div class="stats-grid__label">Partner Organizations</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">47</div>
+        <div class="stats-grid__label">Countries Reached</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">98.7%</div>
+        <div class="stats-grid__label">Data Accuracy</div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.stats-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.stats-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.stats-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.stats-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.stats-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .stats-grid__grid--cols-3,
+  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .stats-grid__grid { grid-template-columns: 1fr; }
+}
+
+.stats-grid__item {
+  padding: var(--spacing-md) var(--spacing-sm);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.stats-grid__item:last-child { border-right: none; }
+@media (max-width: 768px) {
+  .stats-grid__item:nth-child(2n) { border-right: none; }
+}
+@media (min-width: 769px) {
+  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
+  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
+  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
+    border-right: none;
+  }
+}
+
+.stats-grid__icon {
+  font-size: 1.3rem;
+  margin-bottom: var(--spacing-xs);
+  opacity: 0.7;
+}
+
+.stats-grid__value {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4vw, 3.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  margin-bottom: var(--spacing-xs);
+}
+
+.stats-grid__label {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+</style>
+
+<section class="two-column">
+  <div class="two-column__inner">
+    
+    <div class="two-column__header">
+      <h2 class="two-column__heading">Key achievements</h2>
+    </div>
+    
+    <div class="two-column__row">
+      <div class="two-column__left" style="flex: 0 0 60%;">
+        
+        
+<section class="content">
+  <div class="content__inner" style="max-width: 880px;">
+    
+    <h2 class="content__heading">Documentation and evidence</h2>
+    
+    <div class="content__body"><p>This year, our network of field researchers and legal experts documented 12,847 cases of human rights violations across 47 countries. The evidence collected has been instrumental in 213 legal proceedings before national and international courts.</p><p>We expanded our digital forensics capabilities, introducing AI-assisted chain-of-custody verification that reduced documentation errors by 76% compared to manual processes.</p><h3>Notable victories</h3><ul><li>Successfully supported prosecution of 43 cases of forced displacement</li><li>Provided critical evidence in 28 cases before the Inter-American Court</li><li>Launched 6 new country programs in Sub-Saharan Africa</li></ul></div>
+  </div>
+</section>
+
+<style>
+.content {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.content__inner {
+  margin: 0 auto;
+}
+.content__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-lg) 0;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+  max-width: 600px;
+}
+
+.content__body {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.85;
+  color: var(--color-text);
+}
+.content__body > p:first-child::first-letter {
+  font-family: var(--font-heading);
+  font-size: 3.5rem;
+  font-weight: 600;
+  float: left;
+  line-height: 0.9;
+  padding-right: 0.12em;
+  padding-top: 0.05em;
+  color: var(--color-primary);
+}
+.content__body p {
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body p:last-child {
+  margin-bottom: 0;
+}
+.content__body h3 {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: var(--spacing-lg) 0 var(--spacing-xs) 0;
+  letter-spacing: -0.01em;
+}
+.content__body ul, .content__body ol {
+  padding-left: 1.25rem;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body li {
+  margin-bottom: 0.4rem;
+}
+.content__body li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Pull quote */
+.content__body blockquote {
+  display: block;
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-primary);
+  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+  margin: var(--spacing-lg) 0;
+  font-style: normal;
+}
+.content__body blockquote p {
+  margin: 0;
+}
+</style>
+        
+      </div>
+      <div class="two-column__right" style="flex: 1;">
+        
+        
+<section class="card-grid">
+  <div class="card-grid__inner">
+    
+    <div class="card-grid__header">
+      <h2 class="card-grid__heading">Regional highlights</h2>
+    </div>
+    
+    <div class="card-grid__grid card-grid__grid--cols-1">
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Latin America</h3>
+        <p class="card-grid__description">2,300+ cases documented; 15 legal victories in environmental rights cases.</p>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Southeast Asia</h3>
+        <p class="card-grid__description">New partnership programs in Myanmar, Cambodia, and the Philippines.</p>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Sub-Saharan Africa</h3>
+        <p class="card-grid__description">6 new country programs launched with 45 local partner organizations.</p>
+        
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.card-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.card-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.card-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.card-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.card-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+}
+.card-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.card-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.card-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.card-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .card-grid__grid--cols-3,
+  .card-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .card-grid__grid { grid-template-columns: 1fr; }
+}
+
+.card-grid__card {
+  padding: var(--spacing-lg) var(--spacing-md);
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+.card-grid__card:hover {
+  background: var(--color-surface);
+}
+
+.card-grid__icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--spacing-sm);
+  opacity: 0.8;
+}
+
+.card-grid__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.card-grid__description {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-sm) 0;
+  flex: 1;
+}
+
+.card-grid__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  transition: gap 0.2s ease;
+}
+.card-grid__link:hover {
+  gap: 0.6rem;
+}
+.card-grid__arrow {
+  transition: transform 0.2s ease;
+}
+.card-grid__link:hover .card-grid__arrow {
+  transform: translateX(2px);
+}
+</style>
+        
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+.two-column {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.two-column__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.two-column__header {
+  margin-bottom: var(--spacing-lg);
+}
+.two-column__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+.two-column__row {
+  display: flex;
+  gap: var(--spacing-xl);
+  align-items: flex-start;
+}
+@media (max-width: 768px) {
+  .two-column__row {
+    flex-direction: column;
+    gap: var(--spacing-lg);
+  }
+  .two-column__left, .two-column__right {
+    flex: 1 1 auto !important;
+  }
+}
+.two-column__left, .two-column__right {
+  min-width: 0;
+}
+</style>
+<section class="divider">
+  <div class="divider__line"></div>
+</section>
+
+<style>
+.divider {
+  padding: 0 var(--spacing-md);
+  background: var(--color-bg);
+  display: flex;
+  justify-content: center;
+}
+.divider__line {
+  max-width: 1200px;
+  width: 100%;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>
+<section class="bar-chart">
+  <div class="bar-chart__inner">
+    
+    <h3 class="bar-chart__title">Cases by violation type</h3>
+    
+    <div class="bar-chart__list">
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Forced displacement</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-1); --bar-width: 0%;" data-bar-fill data-bar-value="3420"></div>
+        </div>
+        <div class="bar-chart__value">3420</div>
+      </div>
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Arbitrary detention</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-2); --bar-width: 0%;" data-bar-fill data-bar-value="2890"></div>
+        </div>
+        <div class="bar-chart__value">2890</div>
+      </div>
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Extrajudicial killings</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-3); --bar-width: 0%;" data-bar-fill data-bar-value="1567"></div>
+        </div>
+        <div class="bar-chart__value">1567</div>
+      </div>
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Torture</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-4); --bar-width: 0%;" data-bar-fill data-bar-value="1240"></div>
+        </div>
+        <div class="bar-chart__value">1240</div>
+      </div>
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Forced disappearances</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-5); --bar-width: 0%;" data-bar-fill data-bar-value="890"></div>
+        </div>
+        <div class="bar-chart__value">890</div>
+      </div>
+      
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">Sexual violence</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: var(--chart-6); --bar-width: 0%;" data-bar-fill data-bar-value="620"></div>
+        </div>
+        <div class="bar-chart__value">620</div>
+      </div>
+      
+    </div>
+  </div>
+  <script type="application/json" class="bar-chart__data" data-bar-data>
+    [{"label": "Forced displacement", "value": 3420}, {"label": "Arbitrary detention", "value": 2890}, {"label": "Extrajudicial killings", "value": 1567}, {"label": "Torture", "value": 1240}, {"label": "Forced disappearances", "value": 890}, {"label": "Sexual violence", "value": 620}]
+  </script>
+  
+</section>
+
+<script>
+(function() {
+  function animate() {
+    document.querySelectorAll('.bar-chart').forEach(function(block) {
+      var dataEl = block.querySelector('[data-bar-data]');
+      var maxEl = block.querySelector('[data-bar-max]');
+      if (!dataEl) return;
+      var data;
+      try { data = JSON.parse(dataEl.textContent); } catch(e) { return; }
+      var max = maxEl ? parseFloat(JSON.parse(maxEl.textContent)) : null;
+      if (!max) {
+        max = data.reduce(function(m, d) { return Math.max(m, parseFloat(d.value) || 0); }, 0);
+      }
+      if (!max) return;
+      var fills = block.querySelectorAll('[data-bar-fill]');
+      fills.forEach(function(fill, i) {
+        var v = parseFloat(data[i] ? data[i].value : 0) || 0;
+        var pct = (v / max) * 100;
+        // Defer to next frame for transition to apply
+        requestAnimationFrame(function() {
+          fill.style.setProperty('--bar-width', pct + '%');
+        });
+      });
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', animate);
+  } else {
+    animate();
+  }
+})();
+</script>
+
+<style>
+.bar-chart {
+  padding: var(--spacing-md) 0;
+  font-family: var(--font-body);
+}
+.bar-chart__inner {
+  max-width: 700px;
+}
+.bar-chart__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-md) 0;
+  letter-spacing: -0.01em;
+}
+.bar-chart__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.bar-chart__row {
+  display: grid;
+  grid-template-columns: 140px 1fr 70px;
+  align-items: center;
+  gap: 0.75rem;
+}
+@media (max-width: 640px) {
+  .bar-chart__row { grid-template-columns: 100px 1fr 50px; gap: 0.5rem; }
+}
+.bar-chart__label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar-chart__track {
+  height: 8px;
+  background: var(--color-surface);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.bar-chart__fill {
+  height: 100%;
+  width: var(--bar-width, 0%);
+  border-radius: 4px;
+  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bar-chart__value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<section class="timeline">
+  <div class="timeline__inner">
+    
+    <div class="timeline__header">
+      <h2 class="timeline__heading">2025 milestones</h2>
+    </div>
+    
+    <div class="timeline__list">
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">January</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">Uwazi Platform v4.0 launch</h3>
+          <p class="timeline__description">Released major platform update with real-time collaboration and enhanced evidence management capabilities.</p>
+        </div>
+      </div>
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">March</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">African Union partnership</h3>
+          <p class="timeline__description">Signed MOU with the African Commission on Human and Peoples' Rights for joint documentation initiatives.</p>
+        </div>
+      </div>
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">July</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">AI-assisted document analysis</h3>
+          <p class="timeline__description">Deployed machine learning models for automated entity extraction and cross-referencing in 12 languages.</p>
+        </div>
+      </div>
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">October</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">Global investigative journalism network</h3>
+          <p class="timeline__description">Launched collaborative platform connecting 200+ investigative journalists with our evidence database.</p>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.timeline {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.timeline__inner {
+  max-width: 800px;
+  margin: 0 auto;
+}
+.timeline__header {
+  margin-bottom: var(--spacing-lg);
+}
+.timeline__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.timeline__list {
+  border-top: 1px solid var(--color-border);
+}
+
+.timeline__entry {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-md) 0;
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+}
+.timeline__entry:hover {
+  background: var(--color-surface);
+}
+@media (max-width: 640px) {
+  .timeline__entry {
+    grid-template-columns: 1fr;
+    gap: var(--spacing-xs);
+  }
+}
+
+.timeline__date {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding-top: 0.15rem;
+}
+
+.timeline__content {
+  min-width: 0;
+}
+
+.timeline__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.timeline__description {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0;
+  max-width: 560px;
+}
+</style>
+<section class="cta">
+  <div class="cta__inner">
+    
+    <span class="cta__label">Get involved</span>
+    
+    <h2 class="cta__title">Join us in documenting justice</h2>
+    
+    <p class="cta__subtitle">Become a partner organization and access our full suite of documentation tools.</p>
+    
+    <a href="/contact/partnerships" class="cta__button">
+      <span>Partner with us</span>
+      <span class="cta__arrow">&rarr;</span>
+    </a>
+  </div>
+</section>
+
+<style>
+.cta {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+.cta__inner {
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+.cta__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+.cta__title {
+  font-family: var(--font-heading);
+  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-sm) 0;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+.cta__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-lg) 0;
+}
+.cta__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid var(--color-text);
+  padding: 0.85rem 2rem;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.cta__button:hover {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+.cta__arrow {
+  transition: transform 0.2s ease;
+}
+.cta__button:hover .cta__arrow {
+  transform: translateX(3px);
+}
+</style>
+</body>
+</html>

@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Uwazi Page</title>
+<style>
+  :root {
+  --font-heading: 'Oswald', 'Impact', sans-serif;
+  --font-body: 'Source Sans Pro', system-ui, sans-serif;
+  --color-primary: #c53030;
+  --color-primary-light: #fc8181;
+  --color-secondary: #ed8936;
+  --color-accent: #e53e3e;
+  --color-bg: #fff5f5;
+  --color-surface: #ffffff;
+  --color-surface-alt: #fed7d7;
+  --color-text: #1a202c;
+  --color-text-muted: #4a5568;
+  --color-border: #feb2b2;
+  --gradient-hero: linear-gradient(135deg, #c53030 0%, #e53e3e 50%, #ed8936 100%);
+  --gradient-cta: linear-gradient(135deg, #c53030 0%, #e53e3e 100%);
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --shadow-sm: 3px 3px 0 rgba(197,48,48,0.3);
+  --shadow-md: 4px 4px 0 rgba(197,48,48,0.4);
+  --shadow-lg: 6px 6px 0 rgba(197,48,48,0.5);
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 0.75rem;
+  --spacing-md: 1.25rem;
+  --spacing-lg: 2.5rem;
+  --spacing-xl: 4rem;
+  --stat-accent: #e53e3e;
+  --card-hover-lift: translateY(-1px) translateX(1px);
+  --divider-style: solid;
+  --divider-color: #fc8181;
+  --chart-1: #c53030;
+  --chart-2: #e53e3e;
+  --chart-3: #ed8936;
+  --chart-4: #dd6b20;
+  --chart-5: #9b2c2c;
+  --chart-6: #742a2a;
+  }
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html {
+  scroll-behavior: smooth;
+}
+body {
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  font-size: 16px;
+  line-height: 1.6;
+}
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Shared utilities */
+.label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-primary);
+}
+
+</style>
+</head>
+<body>
+
+
+<section class="hero" style="--hero-height: 50vh;">
+  <div class="hero__inner">
+    
+    <span class="hero__label">Urgent Action</span>
+    
+    <h1 class="hero__title">Mass detentions in the Coastal Region.</h1>
+    
+    <p class="hero__subtitle">Over 200 peaceful protesters detained since June 1st. Legal observers denied access. Immediate international action required.</p>
+    
+  </div>
+  <div class="hero__line"></div>
+</section>
+
+<style>
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--hero-height, 50vh);
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.hero__inner {
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  position: relative;
+  z-index: 2;
+}
+
+.hero__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.hero__title {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--color-text);
+  max-width: 800px;
+  text-wrap: balance;
+}
+
+.hero__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin-top: var(--spacing-sm);
+  max-width: 480px;
+  font-weight: 400;
+}
+
+.hero__line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>
+
+<section class="stats-grid">
+  <div class="stats-grid__inner">
+    
+    <div class="stats-grid__header">
+      <h2 class="stats-grid__heading">Situation report</h2>
+    </div>
+    
+    <div class="stats-grid__grid stats-grid__grid--cols-3">
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">213</div>
+        <div class="stats-grid__label">Confirmed Detentions</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">45</div>
+        <div class="stats-grid__label">At Risk of Torture</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">0</div>
+        <div class="stats-grid__label">Legal Access Granted</div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.stats-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.stats-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.stats-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.stats-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.stats-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .stats-grid__grid--cols-3,
+  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .stats-grid__grid { grid-template-columns: 1fr; }
+}
+
+.stats-grid__item {
+  padding: var(--spacing-md) var(--spacing-sm);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.stats-grid__item:last-child { border-right: none; }
+@media (max-width: 768px) {
+  .stats-grid__item:nth-child(2n) { border-right: none; }
+}
+@media (min-width: 769px) {
+  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
+  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
+  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
+    border-right: none;
+  }
+}
+
+.stats-grid__icon {
+  font-size: 1.3rem;
+  margin-bottom: var(--spacing-xs);
+  opacity: 0.7;
+}
+
+.stats-grid__value {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4vw, 3.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  margin-bottom: var(--spacing-xs);
+}
+
+.stats-grid__label {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+</style>
+
+<section class="content">
+  <div class="content__inner" style="max-width: ;">
+    
+    <h2 class="content__heading">What is happening</h2>
+    
+    <div class="content__body"><p>On June 1st, 2026, security forces began a coordinated crackdown on peaceful environmental protests in the Coastal Region. Demonstrators were calling for transparency in offshore drilling permits affecting indigenous territories.</p><p>Eyewitness accounts and satellite imagery confirm that at least 213 individuals have been detained in undisclosed locations. Families report that detainees are being held incommunicado, with no access to legal representation or medical care.</p><h3>Confirmed violations</h3><ul><li>Arbitrary arrest and detention without warrant</li><li>Denial of habeas corpus in 100% of documented cases</li><li>Use of excessive force against peaceful assembly</li><li>Targeted detention of human rights defenders and journalists</li></ul></div>
+  </div>
+</section>
+
+<style>
+.content {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.content__inner {
+  margin: 0 auto;
+}
+.content__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-lg) 0;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+  max-width: 600px;
+}
+
+.content__body {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.85;
+  color: var(--color-text);
+}
+.content__body > p:first-child::first-letter {
+  font-family: var(--font-heading);
+  font-size: 3.5rem;
+  font-weight: 600;
+  float: left;
+  line-height: 0.9;
+  padding-right: 0.12em;
+  padding-top: 0.05em;
+  color: var(--color-primary);
+}
+.content__body p {
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body p:last-child {
+  margin-bottom: 0;
+}
+.content__body h3 {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: var(--spacing-lg) 0 var(--spacing-xs) 0;
+  letter-spacing: -0.01em;
+}
+.content__body ul, .content__body ol {
+  padding-left: 1.25rem;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body li {
+  margin-bottom: 0.4rem;
+}
+.content__body li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Pull quote */
+.content__body blockquote {
+  display: block;
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-primary);
+  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+  margin: var(--spacing-lg) 0;
+  font-style: normal;
+}
+.content__body blockquote p {
+  margin: 0;
+}
+</style>
+
+<section class="card-grid">
+  <div class="card-grid__inner">
+    
+    <div class="card-grid__header">
+      <h2 class="card-grid__heading">Take action now</h2>
+    </div>
+    
+    <div class="card-grid__grid card-grid__grid--cols-3">
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Spread awareness</h3>
+        <p class="card-grid__description">Share verified information on social media using #CoastalRegionCrisis. Every share reaches decision makers.</p>
+        
+        <a href="/resources/social-media-kit" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Write to authorities</h3>
+        <p class="card-grid__description">Use our template to send urgent appeals to the Ministry of Interior and international bodies.</p>
+        
+        <a href="/action/write-letter" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Donate to legal fund</h3>
+        <p class="card-grid__description">Support emergency legal aid for detainees and their families. 100% goes to legal representation.</p>
+        
+        <a href="/donate/legal-fund" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.card-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.card-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.card-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.card-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.card-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+}
+.card-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.card-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.card-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.card-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .card-grid__grid--cols-3,
+  .card-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .card-grid__grid { grid-template-columns: 1fr; }
+}
+
+.card-grid__card {
+  padding: var(--spacing-lg) var(--spacing-md);
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+.card-grid__card:hover {
+  background: var(--color-surface);
+}
+
+.card-grid__icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--spacing-sm);
+  opacity: 0.8;
+}
+
+.card-grid__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.card-grid__description {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-sm) 0;
+  flex: 1;
+}
+
+.card-grid__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  transition: gap 0.2s ease;
+}
+.card-grid__link:hover {
+  gap: 0.6rem;
+}
+.card-grid__arrow {
+  transition: transform 0.2s ease;
+}
+.card-grid__link:hover .card-grid__arrow {
+  transform: translateX(2px);
+}
+</style>
+<section class="cta">
+  <div class="cta__inner">
+    
+    <span class="cta__label">Act now</span>
+    
+    <h2 class="cta__title">Time is running out</h2>
+    
+    <p class="cta__subtitle">The first 48 hours are critical. Your voice can make the difference between justice and impunity.</p>
+    
+    <a href="/action/urgent-appeal" class="cta__button">
+      <span>Send urgent appeal</span>
+      <span class="cta__arrow">&rarr;</span>
+    </a>
+  </div>
+</section>
+
+<style>
+.cta {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+.cta__inner {
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+.cta__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+.cta__title {
+  font-family: var(--font-heading);
+  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-sm) 0;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+.cta__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-lg) 0;
+}
+.cta__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid var(--color-text);
+  padding: 0.85rem 2rem;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.cta__button:hover {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+.cta__arrow {
+  transition: transform 0.2s ease;
+}
+.cta__button:hover .cta__arrow {
+  transform: translateX(3px);
+}
+</style>
+</body>
+</html>

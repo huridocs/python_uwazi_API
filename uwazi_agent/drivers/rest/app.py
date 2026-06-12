@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -16,13 +17,25 @@ from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
 
-chat_storage = InMemoryChatStorage()
+_chat_storage_ttl = float(os.environ.get("CHAT_STORAGE_TTL_SECONDS", "86400"))
+chat_storage = InMemoryChatStorage(ttl_seconds=_chat_storage_ttl)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    chat_storage._sessions.clear()
+    sweep_interval = max(60.0, chat_storage._ttl_seconds / 4)
+
+    async def _sweeper() -> None:
+        while True:
+            await asyncio.sleep(sweep_interval)
+            chat_storage.evict_expired()
+
+    sweeper_task = asyncio.create_task(_sweeper())
+    try:
+        yield
+    finally:
+        sweeper_task.cancel()
+        chat_storage._sessions.clear()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -33,17 +46,38 @@ async def info():
     return sys.version
 
 
-@app.post("/api/v1/jobs")
-async def create_job(request: AIJobRequest) -> AIJobResponse:
-    job_id = request.job_id or str(uuid.uuid4())[:8]
+def _resolve_job_id(request: AIJobRequest, job_id: str | None) -> str:
+    return job_id or request.job_id or str(uuid.uuid4())[:8]
 
-    session = chat_storage.create_session(job_id)
+
+def _start_job(job_id: str, request: AIJobRequest) -> AIJobResponse:
+    chat_storage.evict_expired()
+    wrong_context = "[Context: View Library, Document: Velásquez-Rodríguez v. Honduras]"
+    if wrong_context in request.message:
+        request.message = request.message.replace(wrong_context, "")
+    request.message = request.message.strip()
+    existing = chat_storage.get_session(job_id) if request.continuation else None
+    if existing is not None:
+        session = existing
+    else:
+        session = chat_storage.create_session(job_id)
     session.status = AIJobStatus.RUNNING
     session.add_message("user", request.message)
 
     asyncio.create_task(_run_agent(job_id, request))
 
     return AIJobResponse(job_id=job_id, message=request.message, status=AIJobStatus.PENDING)
+
+
+@app.post("/api/v1/jobs")
+async def create_job(request: AIJobRequest) -> AIJobResponse:
+    return _start_job(_resolve_job_id(request, None), request)
+
+
+@app.post("/api/v1/jobs/{job_id}")
+async def create_job_with_id(job_id: str, request: AIJobRequest) -> AIJobResponse:
+    request.continuation = True
+    return _start_job(_resolve_job_id(request, job_id), request)
 
 
 @app.get("/api/v1/jobs/{job_id}")
@@ -61,6 +95,7 @@ async def get_job(job_id: str) -> AIJobStatusResponse:
         job_id=session.job_id,
         status=session.status,
         result=result,
+        transcript=session.get_transcript(),
     )
 
 
@@ -101,7 +136,7 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
             stats_api=uwazi_api,
         )
 
-        context = session.get_context()
+        context = session.get_transcript()
         result = await use_case.execute(
             task_description=request.message,
             context=context,

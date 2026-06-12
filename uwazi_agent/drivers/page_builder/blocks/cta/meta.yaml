@@ -1,0 +1,24 @@
+name: cta
+description: Call-to-action section with heading, button, and optional subtitle
+when_to_use: End of page to drive action; between sections for emphasis
+
+required_slots:
+  title:
+    type: string
+    description: CTA heading text
+  button_text:
+    type: string
+    description: Button label
+  button_link:
+    type: string
+    description: Button target URL
+
+optional_slots:
+  subtitle:
+    type: string
+    description: Supporting text below the heading
+    default: ""
+  category_label:
+    type: string
+    description: Small uppercase label above the heading
+    default: ""

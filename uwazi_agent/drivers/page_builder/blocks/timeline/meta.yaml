@@ -1,0 +1,24 @@
+name: timeline
+description: Vertical timeline with dated entries
+when_to_use: Chronological histories, project milestones, event sequences
+
+required_slots:
+  entries:
+    type: list
+    description: Timeline entries in chronological order
+    item_schema:
+      date:
+        type: string
+        description: Date or time label
+      title:
+        type: string
+        description: Entry title
+      description:
+        type: string
+        description: Entry description text
+
+optional_slots:
+  heading:
+    type: string
+    description: Section heading
+    default: ""
