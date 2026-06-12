@@ -3,18 +3,28 @@ from string import Template
 from uwazi_agent import configuration
 
 
-def build_orchestrator_instructions(limit: int | None = None) -> str:
+def build_orchestrator_instructions(
+    python_output_limit: int | None = None,
+    request_limit: int | None = None,
+) -> str:
     """Render the orchestrator's system instructions.
 
     The character limit for the Python agent's output is injected from
     :data:`uwazi_agent.configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT`
-    so the prose always matches the runtime cap. The ``limit`` parameter is
-    exposed for tests; in production it should be left as ``None`` so the
-    config value is used.
+    and the per-run request budget is injected from
+    :data:`uwazi_agent.configuration.REQUEST_LIMIT` so the prose always
+    matches the runtime caps. Both ``python_output_limit`` and
+    ``request_limit`` parameters are exposed for tests; in production they
+    should be left as ``None`` so the config values are used.
     """
-    if limit is None:
-        limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
-    return _ORCHESTRATOR_INSTRUCTIONS_TEMPLATE.substitute(limit=limit)
+    if python_output_limit is None:
+        python_output_limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
+    if request_limit is None:
+        request_limit = configuration.REQUEST_LIMIT
+    return _ORCHESTRATOR_INSTRUCTIONS_TEMPLATE.substitute(
+        limit=python_output_limit,
+        request_limit=request_limit,
+    )
 
 
 _ORCHESTRATOR_INSTRUCTIONS_TEMPLATE = Template(
@@ -101,7 +111,15 @@ _ORCHESTRATOR_INSTRUCTIONS_TEMPLATE = Template(
     "tail is gone. Instead, either reformulate the task as a follow-up "
     "question that itself fits the $limit-char budget, or ask the user how to "
     "summarise further. Never assume the Python agent can produce an "
-    "unbounded answer."
+    "unbounded answer.\n\n"
+    "Request budget — advisory: the entire run (your turns, the sub-agents "
+    "you delegate to, and their tools) shares a single budget of "
+    "$request_limit model requests (``configuration.REQUEST_LIMIT``). Be "
+    "mindful of this budget when planning: prefer the Python agent for batch "
+    "work (one script handles many entities in a single request), avoid "
+    "redundant reads, and keep multi-step plans lean. This is advisory — "
+    "the cap is enforced by the runtime, not by you — but planning around "
+    "it reduces the chance of hitting it."
 )
 
 

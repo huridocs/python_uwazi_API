@@ -1,0 +1,27 @@
+name: two_column
+description: Side-by-side layout containing nested blocks in each column
+when_to_use: Content alongside a chart, image beside text, comparison layouts
+
+required_slots:
+  left_blocks:
+    type: list
+    description: Blocks to render in the left column
+    item_schema:
+      type: block_reference
+      description: A block definition with type and slots
+  right_blocks:
+    type: list
+    description: Blocks to render in the right column
+    item_schema:
+      type: block_reference
+      description: A block definition with type and slots
+
+optional_slots:
+  heading:
+    type: string
+    description: Section heading spanning both columns
+    default: ""
+  left_width:
+    type: string
+    description: CSS width for left column (e.g. 50%, 60%)
+    default: "50%"

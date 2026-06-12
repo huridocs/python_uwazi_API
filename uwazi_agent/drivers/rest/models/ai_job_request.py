@@ -7,3 +7,4 @@ class AIJobRequest(BaseModel):
     job_id: str | None = None
     message: str
     credentials: UwaziCredentials
+    continuation: bool = False

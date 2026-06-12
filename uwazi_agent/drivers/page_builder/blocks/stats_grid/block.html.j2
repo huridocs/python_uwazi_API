@@ -1,0 +1,102 @@
+{% set cols = slots.columns %}
+<section class="stats-grid">
+  <div class="stats-grid__inner">
+    {% if slots.heading %}
+    <div class="stats-grid__header">
+      <h2 class="stats-grid__heading">{{ slots.heading }}</h2>
+    </div>
+    {% endif %}
+    <div class="stats-grid__grid stats-grid__grid--cols-{{ cols }}">
+      {% for stat in slots.stats %}
+      <div class="stats-grid__item">
+        {% if stat.icon %}
+        <div class="stats-grid__icon">{{ stat.icon }}</div>
+        {% endif %}
+        <div class="stats-grid__value">{{ stat.value }}</div>
+        <div class="stats-grid__label">{{ stat.label }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<style>
+.stats-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.stats-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.stats-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.stats-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.stats-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .stats-grid__grid--cols-3,
+  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .stats-grid__grid { grid-template-columns: 1fr; }
+}
+
+.stats-grid__item {
+  padding: var(--spacing-md) var(--spacing-sm);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.stats-grid__item:last-child { border-right: none; }
+@media (max-width: 768px) {
+  .stats-grid__item:nth-child(2n) { border-right: none; }
+}
+@media (min-width: 769px) {
+  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
+  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
+  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
+    border-right: none;
+  }
+}
+
+.stats-grid__icon {
+  font-size: 1.3rem;
+  margin-bottom: var(--spacing-xs);
+  opacity: 0.7;
+}
+
+.stats-grid__value {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4vw, 3.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  margin-bottom: var(--spacing-xs);
+}
+
+.stats-grid__label {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+</style>

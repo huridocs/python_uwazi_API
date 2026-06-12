@@ -53,8 +53,11 @@ class StatsRepository:
         template_stats = self._build_template_stats(aggregations, rows)
         thesaurus_stats = self._build_thesaurus_stats(rows, language)
 
+        total_from_templates = sum(ts.count for ts in template_stats)
+        total_entities = max(total_rows, total_from_templates)
+
         return SearchStats(
-            total_entities=total_rows,
+            total_entities=total_entities,
             templates=template_stats,
             thesauri=thesaurus_stats,
         )

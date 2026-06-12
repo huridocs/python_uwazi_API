@@ -1,0 +1,34 @@
+name: pie_chart
+description: Donut/pie chart with legend, rendered as self-contained SVG
+when_to_use: Showing proportional breakdown of categories; part-to-whole relationships
+
+required_slots:
+  data:
+    type: list
+    description: List of data segments
+    item_schema:
+      label:
+        type: string
+        description: Segment label
+      value:
+        type: number
+        description: Segment numeric value
+      color:
+        type: string
+        description: Optional hex color override
+        default: ""
+
+optional_slots:
+  title:
+    type: string
+    description: Chart title
+    default: ""
+  chart_type:
+    type: string
+    description: Pie or donut
+    default: donut
+    enum: [pie, donut]
+  center_label:
+    type: string
+    description: Label shown in center of donut
+    default: ""

@@ -1,0 +1,98 @@
+{% set n = slots.entries|length %}
+<section class="timeline">
+  <div class="timeline__inner">
+    {% if slots.heading %}
+    <div class="timeline__header">
+      <h2 class="timeline__heading">{{ slots.heading }}</h2>
+    </div>
+    {% endif %}
+    <div class="timeline__list">
+      {% for entry in slots.entries %}
+      <div class="timeline__entry">
+        <div class="timeline__date">{{ entry.date }}</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">{{ entry.title }}</h3>
+          <p class="timeline__description">{{ entry.description }}</p>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<style>
+.timeline {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.timeline__inner {
+  max-width: 800px;
+  margin: 0 auto;
+}
+.timeline__header {
+  margin-bottom: var(--spacing-lg);
+}
+.timeline__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.timeline__list {
+  border-top: 1px solid var(--color-border);
+}
+
+.timeline__entry {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-md) 0;
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+}
+.timeline__entry:hover {
+  background: var(--color-surface);
+}
+@media (max-width: 640px) {
+  .timeline__entry {
+    grid-template-columns: 1fr;
+    gap: var(--spacing-xs);
+  }
+}
+
+.timeline__date {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding-top: 0.15rem;
+}
+
+.timeline__content {
+  min-width: 0;
+}
+
+.timeline__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.timeline__description {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0;
+  max-width: 560px;
+}
+</style>

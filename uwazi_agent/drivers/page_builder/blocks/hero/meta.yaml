@@ -1,0 +1,23 @@
+name: hero
+description: Full-width hero with title and optional subtitle
+when_to_use: Opening section of any page; first block to grab attention
+
+required_slots:
+  title:
+    type: string
+    description: Main heading text
+
+optional_slots:
+  subtitle:
+    type: string
+    description: Subheading text below the title
+    default: ""
+  height:
+    type: string
+    description: Banner height; one of small, medium, large
+    default: medium
+    enum: [small, medium, large]
+  category_label:
+    type: string
+    description: Small uppercase label above the title
+    default: ""

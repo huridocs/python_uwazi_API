@@ -1,0 +1,76 @@
+{% set h = {"small": "40vh", "medium": "50vh", "large": "65vh"}[slots.height] %}
+{% set h_px = h %}
+<section class="hero" style="--hero-height: {{ h_px }};">
+  <div class="hero__inner">
+    {% if slots.category_label %}
+    <span class="hero__label">{{ slots.category_label }}</span>
+    {% endif %}
+    <h1 class="hero__title">{{ slots.title }}</h1>
+    {% if slots.subtitle %}
+    <p class="hero__subtitle">{{ slots.subtitle }}</p>
+    {% endif %}
+  </div>
+  <div class="hero__line"></div>
+</section>
+
+<style>
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--hero-height, 50vh);
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.hero__inner {
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  position: relative;
+  z-index: 2;
+}
+
+.hero__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.hero__title {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--color-text);
+  max-width: 800px;
+  text-wrap: balance;
+}
+
+.hero__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin-top: var(--spacing-sm);
+  max-width: 480px;
+  font-weight: 400;
+}
+
+.hero__line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>

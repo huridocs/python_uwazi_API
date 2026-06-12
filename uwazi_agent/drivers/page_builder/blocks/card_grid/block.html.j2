@@ -1,0 +1,124 @@
+{% set cols = slots.columns %}
+<section class="card-grid">
+  <div class="card-grid__inner">
+    {% if slots.heading %}
+    <div class="card-grid__header">
+      <h2 class="card-grid__heading">{{ slots.heading }}</h2>
+    </div>
+    {% endif %}
+    <div class="card-grid__grid card-grid__grid--cols-{{ cols }}">
+      {% for card in slots.cards %}
+      <div class="card-grid__card">
+        {% if card.icon %}
+        <div class="card-grid__icon">{{ card.icon }}</div>
+        {% endif %}
+        <h3 class="card-grid__title">{{ card.title }}</h3>
+        <p class="card-grid__description">{{ card.description }}</p>
+        {% if card.link %}
+        <a href="{{ card.link }}" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<style>
+.card-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.card-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.card-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.card-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.card-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+}
+.card-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.card-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.card-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.card-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .card-grid__grid--cols-3,
+  .card-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .card-grid__grid { grid-template-columns: 1fr; }
+}
+
+.card-grid__card {
+  padding: var(--spacing-lg) var(--spacing-md);
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+.card-grid__card:hover {
+  background: var(--color-surface);
+}
+
+.card-grid__icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--spacing-sm);
+  opacity: 0.8;
+}
+
+.card-grid__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.card-grid__description {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-sm) 0;
+  flex: 1;
+}
+
+.card-grid__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  transition: gap 0.2s ease;
+}
+.card-grid__link:hover {
+  gap: 0.6rem;
+}
+.card-grid__arrow {
+  transition: transform 0.2s ease;
+}
+.card-grid__link:hover .card-grid__arrow {
+  transform: translateX(2px);
+}
+</style>

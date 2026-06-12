@@ -1,0 +1,61 @@
+{% set lw = slots.left_width %}
+<section class="two-column">
+  <div class="two-column__inner">
+    {% if slots.heading %}
+    <div class="two-column__header">
+      <h2 class="two-column__heading">{{ slots.heading }}</h2>
+    </div>
+    {% endif %}
+    <div class="two-column__row">
+      <div class="two-column__left" style="flex: 0 0 {{ lw }};">
+        {% for block in slots.left_blocks %}
+        {{ rendered_children[loop.index0] }}
+        {% endfor %}
+      </div>
+      <div class="two-column__right" style="flex: 1;">
+        {% for block in slots.right_blocks %}
+        {{ rendered_children[slots.left_blocks|length + loop.index0] }}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+.two-column {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.two-column__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.two-column__header {
+  margin-bottom: var(--spacing-lg);
+}
+.two-column__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+.two-column__row {
+  display: flex;
+  gap: var(--spacing-xl);
+  align-items: flex-start;
+}
+@media (max-width: 768px) {
+  .two-column__row {
+    flex-direction: column;
+    gap: var(--spacing-lg);
+  }
+  .two-column__left, .two-column__right {
+    flex: 1 1 auto !important;
+  }
+}
+.two-column__left, .two-column__right {
+  min-width: 0;
+}
+</style>

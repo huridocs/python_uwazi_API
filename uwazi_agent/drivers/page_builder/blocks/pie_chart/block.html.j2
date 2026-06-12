@@ -1,0 +1,194 @@
+<section class="pie-chart">
+  <div class="pie-chart__inner">
+    {% if slots.title %}
+    <h3 class="pie-chart__title">{{ slots.title }}</h3>
+    {% endif %}
+    <div class="pie-chart__body">
+      <div class="pie-chart__svg-wrap">
+        <svg class="pie-chart__svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" data-pie-svg>
+          <g transform="translate(100,100)"></g>
+        </svg>
+        {% if slots.chart_type == "donut" and slots.center_label %}
+        <div class="pie-chart__center">
+          <span class="pie-chart__center-label">{{ slots.center_label }}</span>
+          <span class="pie-chart__center-value" data-pie-total></span>
+        </div>
+        {% endif %}
+      </div>
+      <div class="pie-chart__legend">
+        {% for segment in slots.data %}
+        <div class="pie-chart__legend-item">
+          <span class="pie-chart__legend-swatch" style="background: {{ loop.index0 | chart_color }};"></span>
+          <span class="pie-chart__legend-label">{{ segment.label }}</span>
+          <span class="pie-chart__legend-value">{{ segment.value }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <script type="application/json" class="pie-chart__data" data-pie-data>
+    {{ slots.data | tojson }}
+  </script>
+  <script type="application/json" class="pie-chart__config" data-pie-config>
+    {"type": "{{ slots.chart_type }}"}
+  </script>
+</section>
+
+<script>
+(function() {
+  var colorVars = ['--chart-1','--chart-2','--chart-3','--chart-4','--chart-5','--chart-6'];
+  function getColor(block, i, override) {
+    if (override) return override;
+    var c = getComputedStyle(block).getPropertyValue(colorVars[i % colorVars.length]).trim();
+    return c || '#999';
+  }
+  function polar(r, a) { return [r * Math.cos(a), r * Math.sin(a)]; }
+
+  document.querySelectorAll('.pie-chart').forEach(function(block) {
+    var dataEl = block.querySelector('[data-pie-data]');
+    var configEl = block.querySelector('[data-pie-config]');
+    var svg = block.querySelector('[data-pie-svg] g');
+    if (!dataEl || !configEl || !svg) return;
+    var data, config;
+    try {
+      data = JSON.parse(dataEl.textContent);
+      config = JSON.parse(configEl.textContent);
+    } catch(e) { return; }
+    if (!data.length) return;
+
+    var total = data.reduce(function(s, d) { return s + (parseFloat(d.value) || 0); }, 0);
+    var innerRadius = config.type === 'donut' ? 0.6 : 0;
+    var r = 90, ir = r * innerRadius;
+    var startAngle = -Math.PI / 2;
+
+    data.forEach(function(d, i) {
+      var v = parseFloat(d.value) || 0;
+      if (!v) return;
+      var angle = (v / total) * Math.PI * 2;
+      var endAngle = startAngle + angle;
+      var p1 = polar(r, startAngle), p2 = polar(r, endAngle);
+      var ip1 = polar(ir, startAngle), ip2 = polar(ir, endAngle);
+      var largeArc = angle > Math.PI ? 1 : 0;
+      var dStr;
+      if (innerRadius > 0) {
+        dStr = 'M ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
+               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) +
+               ' L ' + ip2[0].toFixed(2) + ' ' + ip2[1].toFixed(2) +
+               ' A ' + ir + ' ' + ir + ' 0 ' + largeArc + ' 0 ' + ip1[0].toFixed(2) + ' ' + ip1[1].toFixed(2) + ' Z';
+      } else {
+        dStr = 'M 0 0 L ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
+               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) + ' Z';
+      }
+      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', dStr);
+      path.setAttribute('fill', getColor(block, i, d.color));
+      path.setAttribute('class', 'pie-chart__segment');
+      svg.appendChild(path);
+      startAngle = endAngle;
+    });
+
+    var totalEl = block.querySelector('[data-pie-total]');
+    if (totalEl) totalEl.textContent = total.toLocaleString();
+  });
+})();
+</script>
+
+<style>
+.pie-chart {
+  padding: var(--spacing-md) 0;
+  font-family: var(--font-body);
+}
+.pie-chart__inner {
+  max-width: 600px;
+}
+.pie-chart__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-md) 0;
+  letter-spacing: -0.01em;
+}
+.pie-chart__body {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xl);
+}
+@media (max-width: 640px) {
+  .pie-chart__body { flex-direction: column; gap: var(--spacing-lg); }
+}
+.pie-chart__svg-wrap {
+  position: relative;
+  flex-shrink: 0;
+  width: 200px;
+  height: 200px;
+}
+.pie-chart__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.pie-chart__segment {
+  transition: opacity 0.2s ease;
+  stroke: var(--color-bg);
+  stroke-width: 2;
+  cursor: default;
+}
+.pie-chart__segment:hover {
+  opacity: 0.8;
+}
+.pie-chart__center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.pie-chart__center-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--color-text-muted);
+}
+.pie-chart__center-value {
+  font-family: var(--font-heading);
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--color-text);
+  line-height: 1.1;
+  margin-top: 0.15rem;
+}
+.pie-chart__legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
+}
+.pie-chart__legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+.pie-chart__legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.pie-chart__legend-label {
+  color: var(--color-text);
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+}
+.pie-chart__legend-value {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+</style>

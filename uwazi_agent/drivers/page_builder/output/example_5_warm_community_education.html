@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Uwazi Page</title>
+<style>
+  :root {
+  --font-heading: 'Quicksand', system-ui, sans-serif;
+  --font-body: 'Quicksand', system-ui, sans-serif;
+  --color-primary: #c2410c;
+  --color-primary-light: #fb923c;
+  --color-secondary: #a16207;
+  --color-accent: #ea580c;
+  --color-bg: #fff7ed;
+  --color-surface: #ffffff;
+  --color-surface-alt: #ffedd5;
+  --color-text: #431407;
+  --color-text-muted: #9a3412;
+  --color-border: #fed7aa;
+  --gradient-hero: linear-gradient(135deg, #9a3412 0%, #c2410c 50%, #ea580c 100%);
+  --gradient-cta: linear-gradient(135deg, #c2410c 0%, #ea580c 100%);
+  --radius-sm: 12px;
+  --radius-md: 20px;
+  --radius-lg: 28px;
+  --shadow-sm: 0 2px 12px rgba(194,65,12,0.08);
+  --shadow-md: 0 4px 20px rgba(194,65,12,0.12);
+  --shadow-lg: 0 8px 32px rgba(194,65,12,0.16);
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 0.75rem;
+  --spacing-md: 1.25rem;
+  --spacing-lg: 2.5rem;
+  --spacing-xl: 4rem;
+  --stat-accent: #ea580c;
+  --card-hover-lift: translateY(-3px);
+  --divider-style: dashed;
+  --divider-color: #fdba74;
+  --chart-1: #9a3412;
+  --chart-2: #c2410c;
+  --chart-3: #ea580c;
+  --chart-4: #f97316;
+  --chart-5: #fb923c;
+  --chart-6: #fdba74;
+  }
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html {
+  scroll-behavior: smooth;
+}
+body {
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  font-size: 16px;
+  line-height: 1.6;
+}
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Shared utilities */
+.label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-primary);
+}
+
+</style>
+</head>
+<body>
+
+
+<section class="hero" style="--hero-height: 50vh;">
+  <div class="hero__inner">
+    
+    <span class="hero__label">Our Mission</span>
+    
+    <h1 class="hero__title">Building resilient communities from within.</h1>
+    
+    <p class="hero__subtitle">Empowering local leaders with the tools, knowledge, and networks to create lasting change.</p>
+    
+  </div>
+  <div class="hero__line"></div>
+</section>
+
+<style>
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--hero-height, 50vh);
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.hero__inner {
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  position: relative;
+  z-index: 2;
+}
+
+.hero__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.hero__title {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--color-text);
+  max-width: 800px;
+  text-wrap: balance;
+}
+
+.hero__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin-top: var(--spacing-sm);
+  max-width: 480px;
+  font-weight: 400;
+}
+
+.hero__line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>
+
+<section class="card-grid">
+  <div class="card-grid__inner">
+    
+    <div class="card-grid__header">
+      <h2 class="card-grid__heading">Our programs</h2>
+    </div>
+    
+    <div class="card-grid__grid card-grid__grid--cols-3">
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Community Education</h3>
+        <p class="card-grid__description">Participatory workshops on rights awareness, civic engagement, and digital literacy for 15,000+ participants annually.</p>
+        
+        <a href="/programs/education" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Mental Health Support</h3>
+        <p class="card-grid__description">Trauma-informed counseling and peer support networks for communities affected by conflict and displacement.</p>
+        
+        <a href="/programs/mental-health" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+      <div class="card-grid__card">
+        
+        <h3 class="card-grid__title">Livelihood Development</h3>
+        <p class="card-grid__description">Skills training, micro-grant programs, and cooperative formation support for sustainable community enterprise.</p>
+        
+        <a href="/programs/livelihoods" class="card-grid__link">
+          <span>Learn more</span>
+          <span class="card-grid__arrow">&rarr;</span>
+        </a>
+        
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.card-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.card-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.card-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.card-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.card-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+}
+.card-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.card-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.card-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.card-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .card-grid__grid--cols-3,
+  .card-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .card-grid__grid { grid-template-columns: 1fr; }
+}
+
+.card-grid__card {
+  padding: var(--spacing-lg) var(--spacing-md);
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+.card-grid__card:hover {
+  background: var(--color-surface);
+}
+
+.card-grid__icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--spacing-sm);
+  opacity: 0.8;
+}
+
+.card-grid__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.card-grid__description {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-sm) 0;
+  flex: 1;
+}
+
+.card-grid__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-primary);
+  transition: gap 0.2s ease;
+}
+.card-grid__link:hover {
+  gap: 0.6rem;
+}
+.card-grid__arrow {
+  transition: transform 0.2s ease;
+}
+.card-grid__link:hover .card-grid__arrow {
+  transform: translateX(2px);
+}
+</style>
+
+<section class="two-column">
+  <div class="two-column__inner">
+    
+    <div class="two-column__header">
+      <h2 class="two-column__heading">Spotlight: Women's Cooperative Network</h2>
+    </div>
+    
+    <div class="two-column__row">
+      <div class="two-column__left" style="flex: 0 0 45%;">
+        
+        
+<section class="content">
+  <div class="content__inner" style="max-width: ;">
+    
+    <div class="content__body"><p>The Women's Cooperative Network launched in 2023 with 12 founding members in the Eastern Province. Today, it encompasses 47 cooperatives across 5 provinces, directly benefiting over 2,800 women and their families.</p><p>Through shared resources, collective bargaining, and peer mentorship, cooperative members have increased their average household income by 340% while building lasting community infrastructure.</p></div>
+  </div>
+</section>
+
+<style>
+.content {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.content__inner {
+  margin: 0 auto;
+}
+.content__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-lg) 0;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+  max-width: 600px;
+}
+
+.content__body {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.85;
+  color: var(--color-text);
+}
+.content__body > p:first-child::first-letter {
+  font-family: var(--font-heading);
+  font-size: 3.5rem;
+  font-weight: 600;
+  float: left;
+  line-height: 0.9;
+  padding-right: 0.12em;
+  padding-top: 0.05em;
+  color: var(--color-primary);
+}
+.content__body p {
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body p:last-child {
+  margin-bottom: 0;
+}
+.content__body h3 {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: var(--spacing-lg) 0 var(--spacing-xs) 0;
+  letter-spacing: -0.01em;
+}
+.content__body ul, .content__body ol {
+  padding-left: 1.25rem;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+.content__body li {
+  margin-bottom: 0.4rem;
+}
+.content__body li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Pull quote */
+.content__body blockquote {
+  display: block;
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-primary);
+  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
+  margin: var(--spacing-lg) 0;
+  font-style: normal;
+}
+.content__body blockquote p {
+  margin: 0;
+}
+</style>
+        
+      </div>
+      <div class="two-column__right" style="flex: 1;">
+        
+        
+<section class="stats-grid">
+  <div class="stats-grid__inner">
+    
+    <div class="stats-grid__grid stats-grid__grid--cols-2">
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">2,800+</div>
+        <div class="stats-grid__label">Women Members</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">47</div>
+        <div class="stats-grid__label">Cooperatives</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">340%</div>
+        <div class="stats-grid__label">Income Growth</div>
+      </div>
+      
+      <div class="stats-grid__item">
+        
+        <div class="stats-grid__value">5</div>
+        <div class="stats-grid__label">Provinces</div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.stats-grid {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.stats-grid__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.stats-grid__header {
+  margin-bottom: var(--spacing-lg);
+}
+.stats-grid__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.stats-grid__grid {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
+.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
+.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 768px) {
+  .stats-grid__grid--cols-3,
+  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .stats-grid__grid { grid-template-columns: 1fr; }
+}
+
+.stats-grid__item {
+  padding: var(--spacing-md) var(--spacing-sm);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.stats-grid__item:last-child { border-right: none; }
+@media (max-width: 768px) {
+  .stats-grid__item:nth-child(2n) { border-right: none; }
+}
+@media (min-width: 769px) {
+  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
+  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
+  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
+    border-right: none;
+  }
+}
+
+.stats-grid__icon {
+  font-size: 1.3rem;
+  margin-bottom: var(--spacing-xs);
+  opacity: 0.7;
+}
+
+.stats-grid__value {
+  font-family: var(--font-heading);
+  font-size: clamp(2.4rem, 4vw, 3.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  margin-bottom: var(--spacing-xs);
+}
+
+.stats-grid__label {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+</style>
+        
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+.two-column {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.two-column__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.two-column__header {
+  margin-bottom: var(--spacing-lg);
+}
+.two-column__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+.two-column__row {
+  display: flex;
+  gap: var(--spacing-xl);
+  align-items: flex-start;
+}
+@media (max-width: 768px) {
+  .two-column__row {
+    flex-direction: column;
+    gap: var(--spacing-lg);
+  }
+  .two-column__left, .two-column__right {
+    flex: 1 1 auto !important;
+  }
+}
+.two-column__left, .two-column__right {
+  min-width: 0;
+}
+</style>
+<section class="divider">
+  <div class="divider__line"></div>
+</section>
+
+<style>
+.divider {
+  padding: 0 var(--spacing-md);
+  background: var(--color-bg);
+  display: flex;
+  justify-content: center;
+}
+.divider__line {
+  max-width: 1200px;
+  width: 100%;
+  height: 1px;
+  background: var(--color-border);
+}
+</style>
+
+<section class="timeline">
+  <div class="timeline__inner">
+    
+    <div class="timeline__header">
+      <h2 class="timeline__heading">Community voices</h2>
+    </div>
+    
+    <div class="timeline__list">
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">March 2026</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">For the first time, my children have a future.</h3>
+          <p class="timeline__description">After joining the Mpanga Cooperative, Amina secured a microloan to start a tailoring business. Her three children are now in school full-time.</p>
+        </div>
+      </div>
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">February 2026</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">Cooperative opens community health center</h3>
+          <p class="timeline__description">The Rukwa Valley Cooperative pooled resources to build a health clinic, serving 12 villages that previously had no medical access within 50 km.</p>
+        </div>
+      </div>
+      
+      <div class="timeline__entry">
+        <div class="timeline__date">December 2025</div>
+        <div class="timeline__content">
+          <h3 class="timeline__title">Collective bargaining victory</h3>
+          <p class="timeline__description">Members of the Kitale Textile Cooperative successfully negotiated a 60% price increase from wholesale buyers through unified negotiation.</p>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+<style>
+.timeline {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+}
+.timeline__inner {
+  max-width: 800px;
+  margin: 0 auto;
+}
+.timeline__header {
+  margin-bottom: var(--spacing-lg);
+}
+.timeline__heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.timeline__list {
+  border-top: 1px solid var(--color-border);
+}
+
+.timeline__entry {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-md) 0;
+  border-bottom: 1px solid var(--color-border);
+  transition: background 0.2s ease;
+}
+.timeline__entry:hover {
+  background: var(--color-surface);
+}
+@media (max-width: 640px) {
+  .timeline__entry {
+    grid-template-columns: 1fr;
+    gap: var(--spacing-xs);
+  }
+}
+
+.timeline__date {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding-top: 0.15rem;
+}
+
+.timeline__content {
+  min-width: 0;
+}
+
+.timeline__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-xs) 0;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.timeline__description {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0;
+  max-width: 560px;
+}
+</style>
+<section class="cta">
+  <div class="cta__inner">
+    
+    <span class="cta__label">Donate</span>
+    
+    <h2 class="cta__title">Support a cooperative</h2>
+    
+    <p class="cta__subtitle">Your donation provides seed funding, training materials, and mentorship for a new women's cooperative.</p>
+    
+    <a href="/donate/cooperatives" class="cta__button">
+      <span>Make a difference</span>
+      <span class="cta__arrow">&rarr;</span>
+    </a>
+  </div>
+</section>
+
+<style>
+.cta {
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+.cta__inner {
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+.cta__label {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+.cta__title {
+  font-family: var(--font-heading);
+  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-sm) 0;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+.cta__subtitle {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-lg) 0;
+}
+.cta__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid var(--color-text);
+  padding: 0.85rem 2rem;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.cta__button:hover {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+.cta__arrow {
+  transition: transform 0.2s ease;
+}
+.cta__button:hover .cta__arrow {
+  transform: translateX(3px);
+}
+</style>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<section class="bar-chart">
+  <div class="bar-chart__inner">
+    {% if slots.title %}
+    <h3 class="bar-chart__title">{{ slots.title }}</h3>
+    {% endif %}
+    <div class="bar-chart__list">
+      {% for entry in slots.data %}
+      <div class="bar-chart__row">
+        <div class="bar-chart__label">{{ entry.label }}</div>
+        <div class="bar-chart__track">
+          <div class="bar-chart__fill" style="background: {{ loop.index0 | chart_color }}; --bar-width: 0%;" data-bar-fill data-bar-value="{{ entry.value }}"></div>
+        </div>
+        <div class="bar-chart__value">{{ entry.value }}{{ slots.unit }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  <script type="application/json" class="bar-chart__data" data-bar-data>
+    {{ slots.data | tojson }}
+  </script>
+  {% if slots.max_value is defined and slots.max_value is not none %}
+  <script type="application/json" data-bar-max>{{ slots.max_value | tojson }}</script>
+  {% endif %}
+</section>
+
+<script>
+(function() {
+  function animate() {
+    document.querySelectorAll('.bar-chart').forEach(function(block) {
+      var dataEl = block.querySelector('[data-bar-data]');
+      var maxEl = block.querySelector('[data-bar-max]');
+      if (!dataEl) return;
+      var data;
+      try { data = JSON.parse(dataEl.textContent); } catch(e) { return; }
+      var max = maxEl ? parseFloat(JSON.parse(maxEl.textContent)) : null;
+      if (!max) {
+        max = data.reduce(function(m, d) { return Math.max(m, parseFloat(d.value) || 0); }, 0);
+      }
+      if (!max) return;
+      var fills = block.querySelectorAll('[data-bar-fill]');
+      fills.forEach(function(fill, i) {
+        var v = parseFloat(data[i] ? data[i].value : 0) || 0;
+        var pct = (v / max) * 100;
+        // Defer to next frame for transition to apply
+        requestAnimationFrame(function() {
+          fill.style.setProperty('--bar-width', pct + '%');
+        });
+      });
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', animate);
+  } else {
+    animate();
+  }
+})();
+</script>
+
+<style>
+.bar-chart {
+  padding: var(--spacing-md) 0;
+  font-family: var(--font-body);
+}
+.bar-chart__inner {
+  max-width: 700px;
+}
+.bar-chart__title {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--spacing-md) 0;
+  letter-spacing: -0.01em;
+}
+.bar-chart__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.bar-chart__row {
+  display: grid;
+  grid-template-columns: 140px 1fr 70px;
+  align-items: center;
+  gap: 0.75rem;
+}
+@media (max-width: 640px) {
+  .bar-chart__row { grid-template-columns: 100px 1fr 50px; gap: 0.5rem; }
+}
+.bar-chart__label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar-chart__track {
+  height: 8px;
+  background: var(--color-surface);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.bar-chart__fill {
+  height: 100%;
+  width: var(--bar-width, 0%);
+  border-radius: 4px;
+  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.bar-chart__value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+</style>

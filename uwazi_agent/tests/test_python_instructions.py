@@ -38,7 +38,7 @@ def test_python_instructions_render_uses_explicit_limit(monkeypatch):
     assert "2500" not in rendered
 
 
-def test_orchestrator_instructions_render_uses_explicit_limit(monkeypatch):
+def test_orchestrator_instructions_render_uses_explicit_python_limit(monkeypatch):
     monkeypatch.setattr(configuration, "PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT", 4321)
     rendered = ORCHESTRATOR_INSTRUCTIONS()
     assert "4321" in rendered
@@ -69,3 +69,16 @@ def test_orchestrator_instructions_mention_python_cap():
     instructions = ORCHESTRATOR_INSTRUCTIONS()
     assert "HARD-CAPPED" in instructions
     assert str(configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT) in instructions
+
+
+def test_orchestrator_instructions_mention_request_budget():
+    """The orchestrator must be told (advisory) about the shared request
+    budget so it can plan around it."""
+    instructions = ORCHESTRATOR_INSTRUCTIONS()
+    assert "Request budget" in instructions
+    assert "shares a single budget" in instructions
+    assert "advisory" in instructions
+    # the prose must point at the config knob so the value can be cross-checked
+    assert "configuration.REQUEST_LIMIT" in instructions
+    # and inject the current config value
+    assert str(configuration.REQUEST_LIMIT) in instructions
