@@ -1,4 +1,5 @@
-{% set mw = {"narrow": "640px", "wide": "880px"}[slots.max_width] %}
+{% set _mw_key = slots.max_width if slots.max_width is defined and slots.max_width else "narrow" %}
+{% set mw = {"narrow": "640px", "wide": "880px"}[_mw_key] %}
 <section class="content">
   <div class="content__inner" style="max-width: {{ mw }};">
     {% if slots.heading %}
