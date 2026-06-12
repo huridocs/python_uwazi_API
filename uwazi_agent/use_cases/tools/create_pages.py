@@ -40,6 +40,19 @@ async def create_pages(
     "Javascript" tab and runs on the public page; leave it empty unless the
     user asks for interactive behavior.
 
+    **Avoid client-side ``/api/search`` fetches.** Pages with custom
+    JavaScript run in the public visitor's browser, where the
+    ``/api/search`` endpoint is not a safe or reliable data source: the
+    ``types`` parameter requires the template's Mongo ``_id`` (not its
+    name), the standard parameter names are ``sort`` and ``order`` (not
+    ``order_direction``), and the visitor has no authenticated session
+    cookie to call it with. If a page needs to display Uwazi data
+    (timelines, catalogs, lists, dashboards, etc.), fetch the data on the
+    agent side via ``get_entities_by_template`` /
+    ``search_entities_by_text`` / ``search_entities_by_filter`` and
+    embed the rendered HTML directly into ``content``. This produces a
+    static, JS-free, instantly-loading page.
+
     Args:
         pages: The list of new pages to create. Each needs a ``title`` and a
             ``content`` body (Markdown/HTML).

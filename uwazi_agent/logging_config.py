@@ -73,6 +73,9 @@ def setup_logging(url: str = "", user: str = "") -> None:
         "<level>{message}</level>"
     )
 
+    def _has_creds(record: dict[str, Any]) -> bool:
+        return all(key in record["extra"] for key in ("uwazi_url", "uwazi_user"))
+
     if graylog_host:
         logger.add(
             _make_graylog_sink(graylog_host, graylog_port),
@@ -83,14 +86,7 @@ def setup_logging(url: str = "", user: str = "") -> None:
             sys.stderr,
             level="INFO",
             format=fmt,
-            filter=lambda record: all(key in record["extra"] for key in ("uwazi_url", "uwazi_user")),
-        )
-    else:
-        logger.add(
-            sys.stderr,
-            level="DEBUG",
-            format=fmt,
-            filter=lambda record: all(key in record["extra"] for key in ("uwazi_url", "uwazi_user")),
+            filter=_has_creds,
         )
         logger.add(
             sys.stderr,
@@ -101,7 +97,25 @@ def setup_logging(url: str = "", user: str = "") -> None:
                 "<cyan>{extra[file_name]}</cyan> | "
                 "<level>{message}</level>"
             ),
-            filter=lambda record: not all(key in record["extra"] for key in ("uwazi_url", "uwazi_user")),
+            filter=lambda record: not _has_creds(record),
+        )
+    else:
+        logger.add(
+            sys.stderr,
+            level="DEBUG",
+            format=fmt,
+            filter=_has_creds,
+        )
+        logger.add(
+            sys.stderr,
+            level="DEBUG",
+            format=(
+                "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{extra[file_name]}</cyan> | "
+                "<level>{message}</level>"
+            ),
+            filter=lambda record: not _has_creds(record),
         )
 
     logger.configure(extra={"uwazi_url": url, "uwazi_user": user})
