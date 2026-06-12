@@ -4,6 +4,6 @@ services:
     network_mode: host
     environment:
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
-      - GRAYLOG_HOST=${GRAYLOG_HOST:-}
+      - GRAYLOG_IP=${GRAYLOG_IP:-}
       - GRAYLOG_PORT=${GRAYLOG_PORT:-12201}
     restart: unless-stopped
