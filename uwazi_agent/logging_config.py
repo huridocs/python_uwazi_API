@@ -60,7 +60,7 @@ def setup_logging(url: str = "", user: str = "") -> None:
         "source": "ai-assistant",
     }
 
-    graylog_host = os.environ.get("GRAYLOG_HOST", "")
+    graylog_host = os.environ.get("GRAYLOG_IP", "")
     graylog_port = int(os.environ.get("GRAYLOG_PORT", "12201"))
 
     logger.remove()
