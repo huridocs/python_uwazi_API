@@ -21,6 +21,10 @@ from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
 
 _ENTITY_READ_TOOLS = {
+    "query_entities",
+    # Kept for back-compat with previously-saved tool cache entries
+    # written before the entity read tools were merged. Safe to drop on
+    # the next major version bump.
     "search_entities_by_text",
     "search_entities_by_filter",
     "get_entities_by_shared_ids",

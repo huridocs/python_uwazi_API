@@ -19,3 +19,8 @@ class AgentEntityMutationResult(BaseModel):
     success: bool
     error: str | None = None
     error_code: MutationErrorCode | None = None
+    # Free-form annotation used to describe non-error side effects (e.g.
+    # "already_in_target_state" when the publish-status auto-skip
+    # short-circuits an id). Not an error: ``success`` is still ``True``
+    # when ``note`` is set.
+    note: str | None = None
