@@ -116,9 +116,7 @@ class TestSchemaStorePageBuilder:
 
         store = SchemaStore()
         store.set_page_builder(_sample_blocks(), _sample_vibes(), "minimal")
-        store.add_templates(
-            [AgentTemplate(name="Books", properties=[])]
-        )
+        store.add_templates([AgentTemplate(name="Books", properties=[])])
         text = store.to_page_prompt_context()
         # Regular schema part.
         assert "Template structures" in text

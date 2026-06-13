@@ -1,6 +1,6 @@
 {% set cols = slots.columns %}
-<section class="card-grid">
-  <div class="card-grid__inner">
+<section class="card-grid uwazi-block">
+  <div class="card-grid__inner uwazi-block__inner">
     {% if slots.heading %}
     <div class="card-grid__header">
       <h2 class="card-grid__heading">{{ slots.heading }}</h2>
@@ -28,7 +28,8 @@
 
 <style>
 .card-grid {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
 }
 .card-grid__inner {

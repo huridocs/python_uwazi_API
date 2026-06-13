@@ -63,6 +63,30 @@ _CARD_GRID_BLOCK: dict = {
     },
 }
 
+_PIE_CHART_BLOCK: dict = {
+    "type": "pie_chart",
+    "slots": {
+        "title": "Distribution",
+        "chart_type": "donut",
+        "center_label": "Total",
+        "data": [
+            {"label": "A", "value": 30},
+            {"label": "B", "value": 70},
+        ],
+    },
+}
+
+_BAR_CHART_BLOCK: dict = {
+    "type": "bar_chart",
+    "slots": {
+        "title": "Values",
+        "data": [
+            {"label": "A", "value": 30},
+            {"label": "B", "value": 70},
+        ],
+    },
+}
+
 
 def test_split_html_and_css_lifts_inline_style(renderer: PageRenderer) -> None:
     """Direct unit test of the regex helper."""
@@ -87,23 +111,35 @@ def test_render_body_has_no_style_tags(renderer: PageRenderer) -> None:
     body = renderer.render_body(vibe="minimal", blocks=blocks)
     assert body, "body should be non-empty"
     assert "<style" not in body.lower(), f"render_body must not emit <style> tags; got: {body[:200]!r}"
+    # The body is wrapped in #uwazi-page-root so scoped CSS variables apply.
+    assert '<div id="uwazi-page-root">' in body
+    assert "</div>" in body
     # Sanity: every block is in the body
-    assert 'class="hero"' in body
-    assert 'class="content"' in body
-    assert 'class="timeline"' in body
-    assert 'class="card-grid"' in body
+    assert "hero" in body
+    assert "content" in body
+    assert "timeline" in body
+    assert "card-grid" in body
 
 
 def test_render_css_contains_all_block_selectors(renderer: PageRenderer) -> None:
-    blocks = [_HERO_BLOCK, _CONTENT_BLOCK, _TIMELINE_BLOCK, _CARD_GRID_BLOCK]
+    blocks = [
+        _HERO_BLOCK,
+        _CONTENT_BLOCK,
+        _TIMELINE_BLOCK,
+        _CARD_GRID_BLOCK,
+        _PIE_CHART_BLOCK,
+        _BAR_CHART_BLOCK,
+    ]
     css = renderer.render_css(vibe="minimal", blocks=blocks)
     assert css, "css should be non-empty"
-    # Design tokens live in the #uwazi-page-root scope
+    # Design tokens are emitted both at :root and inside #uwazi-page-root so
+    # they work regardless of how Uwazi wraps the content.
+    assert ":root" in css
     assert "#uwazi-page-root" in css
     assert "--font-body" in css
     assert "--color-bg" in css
     # Each block's selectors are present
-    for selector in (".hero", ".content", ".timeline", ".card-grid"):
+    for selector in (".hero", ".content", ".timeline", ".card-grid", ".pie-chart", ".bar-chart"):
         assert selector in css, f"{selector} missing from rendered CSS"
 
 
@@ -184,19 +220,39 @@ def test_no_style_tags_in_serialized_rendered_page(renderer: PageRenderer) -> No
 
     # Mimic the helper that page_script_executor injects into the namespace
     rendered = RenderedPage(
-        body=renderer.render_body(vibe="minimal", blocks=[_HERO_BLOCK, _CONTENT_BLOCK]),
-        css=renderer.render_css(vibe="minimal", blocks=[_HERO_BLOCK, _CONTENT_BLOCK]),
+        body=renderer.render_body(
+            vibe="minimal",
+            blocks=[_HERO_BLOCK, _CONTENT_BLOCK, _PIE_CHART_BLOCK, _BAR_CHART_BLOCK],
+        ),
+        css=renderer.render_css(
+            vibe="minimal",
+            blocks=[_HERO_BLOCK, _CONTENT_BLOCK, _PIE_CHART_BLOCK, _BAR_CHART_BLOCK],
+        ),
     )
     assert "<style" not in rendered.body.lower()
+    assert "<script" not in rendered.body.lower()
     assert ".hero" in rendered.css
     assert ".content" in rendered.css
+    assert ".pie-chart" in rendered.css
+    assert ".bar-chart" in rendered.css
+
+
+def test_charts_render_server_side(renderer: PageRenderer) -> None:
+    """Charts must not depend on client-side JavaScript. SVG paths and bar
+    widths must be present in the rendered body."""
+    body = renderer.render_body(vibe="minimal", blocks=[_PIE_CHART_BLOCK, _BAR_CHART_BLOCK])
+    assert "<script" not in body.lower(), "chart blocks must not emit inline scripts"
+    assert "<path" in body, "pie chart should render SVG paths"
+    assert "pie-chart__center-value" in body, "donut center value should be rendered"
+    assert "--bar-width" in body, "bar chart should set bar widths"
 
 
 @pytest.mark.parametrize(
     "block",
-    [_HERO_BLOCK, _CONTENT_BLOCK, _TIMELINE_BLOCK, _CARD_GRID_BLOCK],
-    ids=["hero", "content", "timeline", "card_grid"],
+    [_HERO_BLOCK, _CONTENT_BLOCK, _TIMELINE_BLOCK, _CARD_GRID_BLOCK, _PIE_CHART_BLOCK, _BAR_CHART_BLOCK],
+    ids=["hero", "content", "timeline", "card_grid", "pie_chart", "bar_chart"],
 )
 def test_every_block_body_is_style_free(renderer: PageRenderer, block: dict) -> None:
     body = renderer.render_body(vibe="minimal", blocks=[block])
     assert "<style" not in body.lower()
+    assert "<script" not in body.lower()

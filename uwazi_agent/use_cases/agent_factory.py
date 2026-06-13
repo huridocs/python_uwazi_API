@@ -16,41 +16,35 @@ from .instructions import (
 )
 from .tools.agent_context import get_current_agent, set_current_agent
 from .tools.create_entities import create_entities
-from .tools.create_page import create_page
-from .tools.create_pages import create_pages
 from .tools.create_relationship_type import create_relationship_type
+from .tools.delete_page_menu_links import delete_page_menu_links
 from .tools.create_template import create_template
 from .tools.create_thesauri import create_thesauri
+from ..logging_config import truncate_log_message
 from .tools.delete_entities_by_shared_ids import delete_entities_by_shared_ids
 from .tools.delete_pages_by_shared_ids import delete_pages_by_shared_ids
 from .tools.delete_relationship_type import delete_relationship_type
 from .tools.delete_template import delete_template
 from .tools.delete_thesauri import delete_thesauri
 from .tools.dependencies import UwaziAgentToolsDependencies
+from .tools.entity_store_shape import build_entity_store_shape_block
 from .tools.get_entities_by_shared_ids import get_entities_by_shared_ids
 from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
+from .tools.search_entities_by_filter import search_entities_by_filter
+from .tools.search_entities_by_text import search_entities_by_text
 from .tools.get_publish_status import get_publish_status
 from .tools.get_relationship_type_names import get_relationship_type_names
 from .tools.get_template_names import list_templates
 from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
 from .tools.get_thesauris_names import list_thesauri
-from .tools.get_entity_store_data_payload import (
-    get_entity_store_data_payload,
-    list_entity_store_data_payload_keys,
-)
 from .tools.get_languages import get_languages
-from .tools.list_page_blocks import list_page_blocks
-from .tools.list_page_vibes import list_page_vibes
 from .tools.list_pages import list_pages
 from .tools.page_script_executor import execute_page_script, prepare_page_script
 from .tools.python_code_executor import run_python_code
 from .tools.query_entities import query_entities
-from .tools.render_page_from_blocks import render_page_from_blocks
-from .tools.search_entities_by_filter import search_entities_by_filter
-from .tools.search_entities_by_text import search_entities_by_text
 from .tools.set_entities_publish_status import set_entities_publish_status
 from .tools.update_entities import update_entities
 from .tools.update_pages import update_pages
@@ -101,10 +95,9 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "update_entities": (_ENTITY_READ_TOOLS, None),
     "delete_entities_by_shared_ids": (_ENTITY_READ_TOOLS, None),
     "set_entities_publish_status": (_ENTITY_READ_TOOLS, None),
-    "create_page": (_PAGE_READ_TOOLS, None),
-    "create_pages": (_PAGE_READ_TOOLS, None),
     "update_pages": (_PAGE_READ_TOOLS, None),
     "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
+    "delete_page_menu_links": (_PAGE_READ_TOOLS, None),
 }
 
 
@@ -121,6 +114,70 @@ def _format_progress_msg(agent_name: str, tool_name: str, params: dict[str, Any]
     prefix = f"{agent_label}: " if agent_label else ""
 
     return f"{prefix}{tool_label}{quoted}{search}..."
+
+
+class _ToolParamsFormatter:
+    """Format tool-call parameters for logs without flooding the console.
+
+    Large in-line values (multi-line Python scripts, HTML, CSS, long entity
+    lists) can produce dozens or hundreds of log lines per call. This formatter
+    keeps every logged parameter value to a single line and truncates very
+    long strings so the whole tool-call log stays scannable.
+    """
+
+    _MAX_LEN = 120
+
+    @classmethod
+    def format(cls, params: dict[str, Any]) -> str:
+        if not params:
+            return ""
+        items = []
+        for key, value in params.items():
+            formatted = cls._format_value(value)
+            items.append(f"{key}={formatted}")
+        return ", ".join(items)
+
+    @classmethod
+    def _format_value(cls, value: Any) -> str:
+        if isinstance(value, str):
+            return cls._format_str(value)
+        if isinstance(value, (list, tuple)):
+            return cls._format_list(value)
+        if isinstance(value, dict):
+            return cls._format_dict(value)
+        text = str(value)
+        return cls._maybe_truncate(text)
+
+    @classmethod
+    def _format_str(cls, text: str) -> str:
+        single_line = " ".join(text.splitlines())
+        if not single_line:
+            return "''"
+        return cls._maybe_truncate(single_line)
+
+    @classmethod
+    def _format_list(cls, value: list | tuple) -> str:
+        if not value:
+            return "[]"
+        parts = [cls._format_value(item) for item in value]
+        joined = ", ".join(parts)
+        inner = cls._maybe_truncate(joined)
+        return f"[{inner}]"
+
+    @classmethod
+    def _format_dict(cls, value: dict) -> str:
+        if not value:
+            return "{}"
+        items = [f"{k}={cls._format_value(v)}" for k, v in value.items()]
+        joined = ", ".join(items)
+        inner = cls._maybe_truncate(joined)
+        return f"{{{inner}}}"
+
+    @classmethod
+    def _maybe_truncate(cls, text: str) -> str:
+        if len(text) > cls._MAX_LEN:
+            return text[: cls._MAX_LEN - 1] + "…"
+        return text
 
 
 def _extract_params(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]:
@@ -151,10 +208,11 @@ def _wrap_read_tool(func: Callable) -> Callable:
         params = _extract_params(args, kwargs, func)
         cache_params = _normalize_cache_params(func.__name__, params)
         cached = ctx.deps.tool_cache.get(func.__name__, cache_params)
+        params_str = _ToolParamsFormatter.format(params)
         if cached is not None:
-            logger.info("[{}] CACHE HIT: {}({})", agent_name, func.__name__, params)
+            logger.info("[{}] CACHE HIT: {}({})", agent_name, func.__name__, params_str)
             return cached
-        logger.info("[{}] CALLING: {}({})", agent_name, func.__name__, params)
+        logger.info("[{}] CALLING: {}({})", agent_name, func.__name__, params_str)
         ctx.deps.tool_progress.append(_format_progress_msg(agent_name, func.__name__, params))
         result = await func(ctx, *args, **kwargs)
         if not isinstance(result, str) or not result.startswith("Error"):
@@ -172,7 +230,8 @@ def _wrap_write_tool(func: Callable) -> Callable:
     async def wrapper(ctx: RunContext[UwaziAgentToolsDependencies], *args: Any, **kwargs: Any) -> Any:
         agent_name = get_current_agent()
         params = _extract_params(args, kwargs, func)
-        logger.info("[{}] CALLING: {}({})", agent_name, tool_name, params)
+        params_str = _ToolParamsFormatter.format(params)
+        logger.info("[{}] CALLING: {}({})", agent_name, tool_name, params_str)
         ctx.deps.tool_progress.append(_format_progress_msg(agent_name, tool_name, params))
         result = await func(ctx, *args, **kwargs)
         is_error = isinstance(result, str) and result.startswith("Error")
@@ -266,33 +325,25 @@ def build_entity_tools() -> list[Tool]:
 def build_page_tools() -> list[Tool]:
     """Tools for the page sub-agent.
 
-    The page-builder block library, the available vibes, the
-    ``page_script_executor`` helpers, and the ``get_entity_store_data_payload``
-    helpers are all part of the page-builder subsystem. In addition,
-    ``create_page`` is the new unified tool that handles both the
-    block-template path (via ``blocks=``) and the custom-HTML/JS path
-    (via ``content=``) and always appends a Settings → Links entry
-    after a successful create. ``create_pages``, ``prepare_page_script``,
-    and ``execute_page_script`` are kept for backward compatibility.
+    The page agent is responsible for creating, updating and deleting pages.
+    It does NOT fetch or mutate entities; entity data is supplied by the
+    orchestrator through the shared session entity store (``entities`` and
+    ``data_payload``), which page scripts can read via
+    ``prepare_page_script`` / ``execute_page_script``.
+
+    Pages are always built with the block-template system inside a Python
+    script. The only page-creation path is ``prepare_page_script`` followed
+    by ``execute_page_script``. No custom-HTML/JS or direct block tools are
+    exposed to the page agent.
     """
     return [
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
-        _read_tool(list_page_blocks),
-        _read_tool(list_page_vibes),
-        _read_tool(render_page_from_blocks),
-        _read_tool(list_entity_store_data_payload_keys),
-        _read_tool(get_entity_store_data_payload),
-        _read_tool(get_templates_by_names),
-        _read_tool(get_entities_by_template),
-        _read_tool(search_entities_by_text),
-        _read_tool(search_entities_by_filter),
         _write_tool(prepare_page_script),
         _write_tool(execute_page_script),
-        _write_tool(create_page),
-        _write_tool(create_pages),
         _write_tool(update_pages),
         _write_tool(delete_pages_by_shared_ids),
+        _write_tool(delete_page_menu_links),
     ]
 
 
@@ -351,6 +402,7 @@ def _make_delegation_tool(
     description: str,
     *,
     use_page_prompt_context: bool = False,
+    inject_entity_store_shape: bool = False,
 ) -> Tool:
     """Build a delegate-to-X tool.
 
@@ -359,12 +411,27 @@ def _make_delegation_tool(
     (via :meth:`SchemaStore.to_page_prompt_context`). Use this for the
     page sub-agent only — the entity / schema / python agents never
     see the page-block library.
+
+    When ``inject_entity_store_shape`` is True, the delegation injects a
+    pre-computed **entity-store shape block** (top-level keys, per-
+    template metadata schema, nullability per key, earliest/latest by
+    ``creation_date``) into the sub-agent's prompt via
+    :func:`build_entity_store_shape_block`. Use this for the Python
+    sub-agent only — it is the only sub-agent that iterates
+    ``entities`` directly, and the block lets it answer questions
+    about the store without a wasteful introspective
+    ``run_python_code`` call.
     """
     agent_label = name.replace("delegate_to_", "")
 
     async def delegate(ctx: RunContext[UwaziAgentToolsDependencies], task: str) -> str:
         parent_agent = get_current_agent()
-        logger.info("[{}] DELEGATING to {} (task: {}...)", parent_agent, agent_label, task[:100])
+        logger.info(
+            "[{}] DELEGATING to {} (task: {}...)",
+            parent_agent,
+            agent_label,
+            truncate_log_message(task[:100]),
+        )
         ctx.deps.tool_progress.append(f"Delegating to {agent_label} agent...")
         set_current_agent(agent_label)
         try:
@@ -379,20 +446,42 @@ def _make_delegation_tool(
                 schema_context = ctx.deps.schema_store.to_prompt_context()
             entity_context = ctx.deps.entity_store.to_context_summary()
             context_parts = [p for p in [available_context, schema_context, entity_context] if p]
+            # Pre-computed shape block for the entity store: lets the
+            # Python sub-agent answer shape-aware questions
+            # ("first/last Book", "what does the metadata look like?")
+            # in a single run_python_code call. Only emitted when
+            # ``inject_entity_store_shape`` is True (i.e. for the
+            # python_agent). The block is omitted when the store is
+            # empty — the agent has nothing to process.
+            if inject_entity_store_shape:
+                shape_block = build_entity_store_shape_block(
+                    entity_store=ctx.deps.entity_store,
+                    schema_templates=ctx.deps.schema_store.templates,
+                )
+                if shape_block:
+                    context_parts.append(shape_block)
             context_str = "\n\n".join(context_parts)
             enriched_task = f"{context_str}\n\n{task}" if context_parts else task
             result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
             logger.info("[{}] DELEGATION COMPLETE", agent_label)
             return result.output
         except UsageLimitExceeded as exc:
-            logger.error("[{}] DELEGATION BUDGET EXHAUSTED: {}", agent_label, exc)
+            logger.error(
+                "[{}] DELEGATION BUDGET EXHAUSTED: {}",
+                agent_label,
+                truncate_log_message(str(exc)),
+            )
             return (
                 f"Sub-agent budget exhausted ({exc}). "
                 f"The task was too complex or the agent entered an error loop. "
                 f"Try breaking it into smaller steps and retrying."
             )
         except Exception as exc:
-            logger.error("[{}] DELEGATION FAILED: {}", agent_label, exc)
+            logger.error(
+                "[{}] DELEGATION FAILED: {}",
+                agent_label,
+                truncate_log_message(str(exc)),
+            )
             return f"Sub-agent error ({name}): {exc}. Please rephrase the task or break it into smaller steps and retry."
         finally:
             set_current_agent(parent_agent)
@@ -442,6 +531,7 @@ def build_orchestrator(
             "The Python agent is the ONLY agent allowed to process more than 5 entities. "
             "It generates and executes Python code with CRUD capabilities "
             "on entities stored in the session entity store.",
+            inject_entity_store_shape=True,
         ),
     ]
 

@@ -1,6 +1,6 @@
 {% set n = slots.entries|length %}
-<section class="timeline">
-  <div class="timeline__inner">
+<section class="timeline uwazi-block">
+  <div class="timeline__inner uwazi-block__inner">
     {% if slots.heading %}
     <div class="timeline__header">
       <h2 class="timeline__heading">{{ slots.heading }}</h2>
@@ -22,7 +22,8 @@
 
 <style>
 .timeline {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
 }
 .timeline__inner {

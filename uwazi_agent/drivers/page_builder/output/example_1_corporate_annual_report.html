@@ -23,9 +23,9 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
-  --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
   --spacing-xs: 0.5rem;
   --spacing-sm: 0.75rem;
   --spacing-md: 1.25rem;
@@ -84,10 +84,10 @@ a {
 </style>
 </head>
 <body>
-
-
-<section class="hero" style="--hero-height: 50vh;">
-  <div class="hero__inner">
+<div id="uwazi-page-root">
+<section class="hero uwazi-block uwazi-block--full-bleed" style="--hero-height: 30vh;">
+  <div class="hero__backdrop" aria-hidden="true"></div>
+  <div class="hero__inner uwazi-block__inner">
     
     <span class="hero__label">Annual Report 2025</span>
     
@@ -96,73 +96,9 @@ a {
     <p class="hero__subtitle">Our 2025 report on advancing human rights documentation, evidence preservation, and international advocacy.</p>
     
   </div>
-  <div class="hero__line"></div>
 </section>
-
-<style>
-.hero {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: var(--hero-height, 50vh);
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-  overflow: hidden;
-}
-
-.hero__inner {
-  max-width: 1100px;
-  width: 100%;
-  margin: 0 auto;
-  position: relative;
-  z-index: 2;
-}
-
-.hero__label {
-  display: inline-block;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-primary);
-  margin-bottom: var(--spacing-sm);
-}
-
-.hero__title {
-  font-family: var(--font-heading);
-  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  color: var(--color-text);
-  max-width: 800px;
-  text-wrap: balance;
-}
-
-.hero__subtitle {
-  font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin-top: var(--spacing-sm);
-  max-width: 480px;
-  font-weight: 400;
-}
-
-.hero__line {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--color-border);
-}
-</style>
-
-<section class="stats-grid">
-  <div class="stats-grid__inner">
+<section class="stats-grid uwazi-block">
+  <div class="stats-grid__inner uwazi-block__inner">
     
     <div class="stats-grid__header">
       <h2 class="stats-grid__heading">By the numbers</h2>
@@ -197,90 +133,8 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.stats-grid {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.stats-grid__inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.stats-grid__header {
-  margin-bottom: var(--spacing-lg);
-}
-.stats-grid__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.stats-grid__grid {
-  display: grid;
-  gap: 0;
-  border-top: 1px solid var(--color-border);
-}
-.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
-.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
-.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
-.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
-@media (max-width: 768px) {
-  .stats-grid__grid--cols-3,
-  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 480px) {
-  .stats-grid__grid { grid-template-columns: 1fr; }
-}
-
-.stats-grid__item {
-  padding: var(--spacing-md) var(--spacing-sm);
-  border-bottom: 1px solid var(--color-border);
-  border-right: 1px solid var(--color-border);
-}
-.stats-grid__item:last-child { border-right: none; }
-@media (max-width: 768px) {
-  .stats-grid__item:nth-child(2n) { border-right: none; }
-}
-@media (min-width: 769px) {
-  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
-  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
-  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
-    border-right: none;
-  }
-}
-
-.stats-grid__icon {
-  font-size: 1.3rem;
-  margin-bottom: var(--spacing-xs);
-  opacity: 0.7;
-}
-
-.stats-grid__value {
-  font-family: var(--font-heading);
-  font-size: clamp(2.4rem, 4vw, 3.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  line-height: 1;
-  letter-spacing: -0.04em;
-  margin-bottom: var(--spacing-xs);
-}
-
-.stats-grid__label {
-  font-family: var(--font-body);
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--color-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-</style>
-
-<section class="two-column">
-  <div class="two-column__inner">
+<section class="two-column uwazi-block">
+  <div class="two-column__inner uwazi-block__inner">
     
     <div class="two-column__header">
       <h2 class="two-column__heading">Key achievements</h2>
@@ -291,8 +145,8 @@ a {
         
         
 
-<section class="content">
-  <div class="content__inner" style="max-width: 880px;">
+<section class="content uwazi-block">
+  <div class="content__inner uwazi-block__inner" style="max-width: 880px;">
     
     <h2 class="content__heading">Documentation and evidence</h2>
     
@@ -300,90 +154,14 @@ a {
   </div>
 </section>
 
-<style>
-.content {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.content__inner {
-  margin: 0 auto;
-}
-.content__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-lg) 0;
-  line-height: 1.25;
-  letter-spacing: -0.03em;
-  max-width: 600px;
-}
 
-.content__body {
-  font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.85;
-  color: var(--color-text);
-}
-.content__body > p:first-child::first-letter {
-  font-family: var(--font-heading);
-  font-size: 3.5rem;
-  font-weight: 600;
-  float: left;
-  line-height: 0.9;
-  padding-right: 0.12em;
-  padding-top: 0.05em;
-  color: var(--color-primary);
-}
-.content__body p {
-  margin: 0 0 var(--spacing-sm) 0;
-}
-.content__body p:last-child {
-  margin-bottom: 0;
-}
-.content__body h3 {
-  font-family: var(--font-heading);
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: var(--spacing-lg) 0 var(--spacing-xs) 0;
-  letter-spacing: -0.01em;
-}
-.content__body ul, .content__body ol {
-  padding-left: 1.25rem;
-  margin: 0 0 var(--spacing-sm) 0;
-}
-.content__body li {
-  margin-bottom: 0.4rem;
-}
-.content__body li::marker {
-  color: var(--color-text-muted);
-}
-
-/* Pull quote */
-.content__body blockquote {
-  display: block;
-  font-family: var(--font-heading);
-  font-size: 1.25rem;
-  font-weight: 500;
-  line-height: 1.5;
-  color: var(--color-text);
-  border-left: 2px solid var(--color-primary);
-  padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-md);
-  margin: var(--spacing-lg) 0;
-  font-style: normal;
-}
-.content__body blockquote p {
-  margin: 0;
-}
-</style>
         
       </div>
       <div class="two-column__right" style="flex: 1;">
         
         
-<section class="card-grid">
-  <div class="card-grid__inner">
+<section class="card-grid uwazi-block">
+  <div class="card-grid__inner uwazi-block__inner">
     
     <div class="card-grid__header">
       <h2 class="card-grid__heading">Regional highlights</h2>
@@ -416,167 +194,17 @@ a {
   </div>
 </section>
 
-<style>
-.card-grid {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.card-grid__inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.card-grid__header {
-  margin-bottom: var(--spacing-lg);
-}
-.card-grid__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
 
-.card-grid__grid {
-  display: grid;
-  gap: 0;
-  border-top: 1px solid var(--color-border);
-  border-left: 1px solid var(--color-border);
-}
-.card-grid__grid--cols-1 { grid-template-columns: 1fr; }
-.card-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
-.card-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
-.card-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
-@media (max-width: 768px) {
-  .card-grid__grid--cols-3,
-  .card-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 480px) {
-  .card-grid__grid { grid-template-columns: 1fr; }
-}
-
-.card-grid__card {
-  padding: var(--spacing-lg) var(--spacing-md);
-  border-right: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-  transition: background 0.2s ease;
-  display: flex;
-  flex-direction: column;
-}
-.card-grid__card:hover {
-  background: var(--color-surface);
-}
-
-.card-grid__icon {
-  font-size: 1.5rem;
-  margin-bottom: var(--spacing-sm);
-  opacity: 0.8;
-}
-
-.card-grid__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-xs) 0;
-  line-height: 1.35;
-  letter-spacing: -0.01em;
-}
-
-.card-grid__description {
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  line-height: 1.65;
-  color: var(--color-text-muted);
-  margin: 0 0 var(--spacing-sm) 0;
-  flex: 1;
-}
-
-.card-grid__link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-family: var(--font-body);
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--color-primary);
-  transition: gap 0.2s ease;
-}
-.card-grid__link:hover {
-  gap: 0.6rem;
-}
-.card-grid__arrow {
-  transition: transform 0.2s ease;
-}
-.card-grid__link:hover .card-grid__arrow {
-  transform: translateX(2px);
-}
-</style>
         
       </div>
     </div>
   </div>
 </section>
-
-<style>
-.two-column {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.two-column__inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.two-column__header {
-  margin-bottom: var(--spacing-lg);
-}
-.two-column__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-.two-column__row {
-  display: flex;
-  gap: var(--spacing-xl);
-  align-items: flex-start;
-}
-@media (max-width: 768px) {
-  .two-column__row {
-    flex-direction: column;
-    gap: var(--spacing-lg);
-  }
-  .two-column__left, .two-column__right {
-    flex: 1 1 auto !important;
-  }
-}
-.two-column__left, .two-column__right {
-  min-width: 0;
-}
-</style>
-<section class="divider">
-  <div class="divider__line"></div>
+<section class="divider uwazi-block">
+  <div class="divider__line uwazi-block__inner"></div>
 </section>
-
-<style>
-.divider {
-  padding: 0 var(--spacing-md);
-  background: var(--color-bg);
-  display: flex;
-  justify-content: center;
-}
-.divider__line {
-  max-width: 1200px;
-  width: 100%;
-  height: 1px;
-  background: var(--color-border);
-}
-</style>
-
-<section class="event-chart-h">
-  <div class="event-chart-h__inner">
+<section class="event-chart-h uwazi-block">
+  <div class="event-chart-h__inner uwazi-block__inner">
     
     <h3 class="event-chart-h__title">Release timeline</h3>
     
@@ -650,296 +278,78 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.event-chart-h {
-  padding: var(--spacing-lg) var(--spacing-md);
-  font-family: var(--font-body);
-}
-.event-chart-h__inner {
-  max-width: 1000px;
-  margin: 0 auto;
-}
-.event-chart-h__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-lg) 0;
-  letter-spacing: -0.01em;
-  text-align: center;
-}
-
-.event-chart-h__wrap {
-  position: relative;
-  width: 100%;
-}
-
-.event-chart-h__svg {
-  width: 100%;
-  height: 200px;
-  display: block;
-  overflow: visible;
-}
-.event-chart-h__line {
-  stroke: var(--color-border);
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
-.event-chart-h__events {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  pointer-events: none;
-}
-.event-chart-h__event {
-  flex: 1;
-  position: relative;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  pointer-events: auto;
-}
-
-.event-chart-h__bubble {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  z-index: 2;
-  flex-shrink: 0;
-}
-.event-chart-h__bubble-dot {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: var(--color-primary);
-  box-shadow: 0 0 0 4px var(--color-bg);
-}
-.event-chart-h__bubble-ring {
-  position: absolute;
-  inset: -4px;
-  border-radius: 50%;
-  border: 1px solid var(--color-primary);
-  opacity: 0.4;
-  transition: opacity 0.3s, transform 0.3s;
-}
-.event-chart-h__event:hover .event-chart-h__bubble-ring {
-  opacity: 1;
-  transform: scale(1.4);
-}
-.event-chart-h__event:hover .event-chart-h__bubble-dot {
-  background: var(--color-accent);
-}
-
-.event-chart-h__label {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  width: 140px;
-  text-align: center;
-}
-.event-chart-h__event--above .event-chart-h__label {
-  bottom: calc(50% + 24px);
-}
-.event-chart-h__event--below .event-chart-h__label {
-  top: calc(50% + 24px);
-}
-
-.event-chart-h__date {
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--color-primary);
-}
-.event-chart-h__event-title {
-  font-family: var(--font-heading);
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--color-text);
-  line-height: 1.3;
-}
-.event-chart-h__event-desc {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  line-height: 1.45;
-  margin-top: 0.15rem;
-}
-
-@media (max-width: 640px) {
-  .event-chart-h__svg { height: 240px; }
-  .event-chart-h__events { display: none; }
-}
-</style>
-<section class="bar-chart">
-  <div class="bar-chart__inner">
+<section class="bar-chart uwazi-block">
+  <div class="bar-chart__inner uwazi-block__inner">
     
     <h3 class="bar-chart__title">Cases by violation type</h3>
     
     <div class="bar-chart__list">
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Forced displacement</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-1); --bar-width: 0%;" data-bar-fill data-bar-value="3420"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-1); --bar-width: 100.0%;"></div>
         </div>
         <div class="bar-chart__value">3420</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Arbitrary detention</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-2); --bar-width: 0%;" data-bar-fill data-bar-value="2890"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-2); --bar-width: 84.50292397660819%;"></div>
         </div>
         <div class="bar-chart__value">2890</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Extrajudicial killings</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-3); --bar-width: 0%;" data-bar-fill data-bar-value="1567"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-3); --bar-width: 45.8187134502924%;"></div>
         </div>
         <div class="bar-chart__value">1567</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Torture</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-4); --bar-width: 0%;" data-bar-fill data-bar-value="1240"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-4); --bar-width: 36.25730994152047%;"></div>
         </div>
         <div class="bar-chart__value">1240</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Forced disappearances</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-5); --bar-width: 0%;" data-bar-fill data-bar-value="890"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-5); --bar-width: 26.023391812865498%;"></div>
         </div>
         <div class="bar-chart__value">890</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Sexual violence</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-6); --bar-width: 0%;" data-bar-fill data-bar-value="620"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-6); --bar-width: 18.128654970760234%;"></div>
         </div>
         <div class="bar-chart__value">620</div>
       </div>
       
     </div>
   </div>
-  <script type="application/json" class="bar-chart__data" data-bar-data>
-    [{"label": "Forced displacement", "value": 3420}, {"label": "Arbitrary detention", "value": 2890}, {"label": "Extrajudicial killings", "value": 1567}, {"label": "Torture", "value": 1240}, {"label": "Forced disappearances", "value": 890}, {"label": "Sexual violence", "value": 620}]
-  </script>
-  
 </section>
-
-<script>
-(function() {
-  function animate() {
-    document.querySelectorAll('.bar-chart').forEach(function(block) {
-      var dataEl = block.querySelector('[data-bar-data]');
-      var maxEl = block.querySelector('[data-bar-max]');
-      if (!dataEl) return;
-      var data;
-      try { data = JSON.parse(dataEl.textContent); } catch(e) { return; }
-      var max = maxEl ? parseFloat(JSON.parse(maxEl.textContent)) : null;
-      if (!max) {
-        max = data.reduce(function(m, d) { return Math.max(m, parseFloat(d.value) || 0); }, 0);
-      }
-      if (!max) return;
-      var fills = block.querySelectorAll('[data-bar-fill]');
-      fills.forEach(function(fill, i) {
-        var v = parseFloat(data[i] ? data[i].value : 0) || 0;
-        var pct = (v / max) * 100;
-        // Defer to next frame for transition to apply
-        requestAnimationFrame(function() {
-          fill.style.setProperty('--bar-width', pct + '%');
-        });
-      });
-    });
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', animate);
-  } else {
-    animate();
-  }
-})();
-</script>
-
-<style>
-.bar-chart {
-  padding: var(--spacing-lg) var(--spacing-md);
-  font-family: var(--font-body);
-}
-.bar-chart__inner {
-  max-width: 700px;
-  margin: 0 auto;
-}
-.bar-chart__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-md) 0;
-  letter-spacing: -0.01em;
-}
-.bar-chart__list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.bar-chart__row {
-  display: grid;
-  grid-template-columns: 140px 1fr 70px;
-  align-items: center;
-  gap: 0.75rem;
-}
-@media (max-width: 640px) {
-  .bar-chart__row { grid-template-columns: 100px 1fr 50px; gap: 0.5rem; }
-}
-.bar-chart__label {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bar-chart__track {
-  height: 8px;
-  background: var(--color-surface);
-  border-radius: 4px;
-  overflow: hidden;
-  position: relative;
-}
-.bar-chart__fill {
-  height: 100%;
-  width: var(--bar-width, 0%);
-  border-radius: 4px;
-  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.bar-chart__value {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-text);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-</style>
-
-<section class="timeline">
-  <div class="timeline__inner">
+<section class="timeline uwazi-block">
+  <div class="timeline__inner uwazi-block__inner">
     
     <div class="timeline__header">
       <h2 class="timeline__heading">2025 milestones</h2>
@@ -982,85 +392,8 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.timeline {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.timeline__inner {
-  max-width: 800px;
-  margin: 0 auto;
-}
-.timeline__header {
-  margin-bottom: var(--spacing-lg);
-}
-.timeline__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.timeline__list {
-  border-top: 1px solid var(--color-border);
-}
-
-.timeline__entry {
-  display: grid;
-  grid-template-columns: 140px 1fr;
-  gap: var(--spacing-lg);
-  padding: var(--spacing-md) 0;
-  border-bottom: 1px solid var(--color-border);
-  transition: background 0.2s ease;
-}
-.timeline__entry:hover {
-  background: var(--color-surface);
-}
-@media (max-width: 640px) {
-  .timeline__entry {
-    grid-template-columns: 1fr;
-    gap: var(--spacing-xs);
-  }
-}
-
-.timeline__date {
-  font-family: var(--font-body);
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  padding-top: 0.15rem;
-}
-
-.timeline__content {
-  min-width: 0;
-}
-
-.timeline__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-xs) 0;
-  line-height: 1.4;
-  letter-spacing: -0.01em;
-}
-
-.timeline__description {
-  font-family: var(--font-body);
-  font-size: 0.95rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin: 0;
-  max-width: 560px;
-}
-</style>
-<section class="cta">
-  <div class="cta__inner">
+<section class="cta uwazi-block">
+  <div class="cta__inner uwazi-block__inner">
     
     <span class="cta__label">Get involved</span>
     
@@ -1074,68 +407,6 @@ a {
     </a>
   </div>
 </section>
-
-<style>
-.cta {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-}
-.cta__inner {
-  max-width: 640px;
-  margin: 0 auto;
-  text-align: center;
-}
-.cta__label {
-  display: inline-block;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-primary);
-  margin-bottom: var(--spacing-sm);
-}
-.cta__title {
-  font-family: var(--font-heading);
-  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-sm) 0;
-  line-height: 1.2;
-  letter-spacing: -0.03em;
-}
-.cta__subtitle {
-  font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin: 0 0 var(--spacing-lg) 0;
-}
-.cta__button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--color-text);
-  background: transparent;
-  border: 1px solid var(--color-text);
-  padding: 0.85rem 2rem;
-  transition: background 0.2s ease, color 0.2s ease;
-}
-.cta__button:hover {
-  background: var(--color-text);
-  color: var(--color-bg);
-}
-.cta__arrow {
-  transition: transform 0.2s ease;
-}
-.cta__button:hover .cta__arrow {
-  transform: translateX(3px);
-}
-</style>
+</div>
 </body>
 </html>

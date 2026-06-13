@@ -1,7 +1,7 @@
-{% set h = {"small": "40vh", "medium": "50vh", "large": "65vh"}[slots.height] %}
-{% set h_px = h %}
-<section class="hero" style="--hero-height: {{ h_px }};">
-  <div class="hero__inner">
+{% set h = {"small": "22.5vh", "medium": "30vh", "large": "48.75vh"}[slots.height] %}
+<section class="hero uwazi-block uwazi-block--full-bleed" style="--hero-height: {{ h }};">
+  <div class="hero__backdrop" aria-hidden="true"></div>
+  <div class="hero__inner uwazi-block__inner">
     {% if slots.category_label %}
     <span class="hero__label">{{ slots.category_label }}</span>
     {% endif %}
@@ -10,7 +10,6 @@
     <p class="hero__subtitle">{{ slots.subtitle }}</p>
     {% endif %}
   </div>
-  <div class="hero__line"></div>
 </section>
 
 <style>
@@ -19,16 +18,20 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-  min-height: var(--hero-height, 50vh);
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
+  min-height: var(--hero-height, 30vh);
+  padding: var(--spacing-lg) 0;
+  background: var(--gradient-hero);
   overflow: hidden;
 }
 
+.hero__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.15);
+  z-index: 1;
+}
+
 .hero__inner {
-  max-width: 1100px;
-  width: 100%;
-  margin: 0 auto;
   position: relative;
   z-index: 2;
 }
@@ -36,41 +39,32 @@
 .hero__label {
   display: inline-block;
   font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-primary);
-  margin-bottom: var(--spacing-sm);
+  letter-spacing: 0.15em;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: var(--spacing-xs);
 }
 
 .hero__title {
   font-family: var(--font-heading);
-  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  color: var(--color-text);
-  max-width: 800px;
+  font-size: clamp(3.05rem, 5.75vw, 4.55rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+  max-width: 900px;
   text-wrap: balance;
 }
 
 .hero__subtitle {
   font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
+  font-size: 1.15rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.8);
   margin-top: var(--spacing-sm);
-  max-width: 480px;
+  max-width: 600px;
   font-weight: 400;
-}
-
-.hero__line {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--color-border);
 }
 </style>

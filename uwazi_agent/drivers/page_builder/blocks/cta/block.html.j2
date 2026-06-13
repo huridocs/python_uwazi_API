@@ -1,5 +1,5 @@
-<section class="cta">
-  <div class="cta__inner">
+<section class="cta uwazi-block">
+  <div class="cta__inner uwazi-block__inner">
     {% if slots.category_label %}
     <span class="cta__label">{{ slots.category_label }}</span>
     {% endif %}
@@ -16,7 +16,8 @@
 
 <style>
 .cta {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
   border-top: 1px solid var(--color-border);
   border-bottom: 1px solid var(--color-border);

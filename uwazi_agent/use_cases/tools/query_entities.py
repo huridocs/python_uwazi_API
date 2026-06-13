@@ -34,9 +34,7 @@ from uwazi_api.domain.exceptions import DomainError, PropertyNotFilterableError
 QueryMode = Literal["by_text", "by_filter", "by_template", "by_ids"]
 
 
-def _apply_overflow_hint(
-    result: AgentEntitySearchResult, deps: UwaziAgentToolsDependencies
-) -> AgentEntitySearchResult:
+def _apply_overflow_hint(result: AgentEntitySearchResult, deps: UwaziAgentToolsDependencies) -> AgentEntitySearchResult:
     """Set the standard "delegate to Python agent" hint when the count
     exceeds the per-LLM-call cap, and remember it on the store."""
     if result.summary.count > ENTITIES_LIMIT_FOR_LLM_MODEL:
@@ -126,10 +124,7 @@ async def query_entities(
         return await _by_template(api, store, ctx.deps, template_name, language, limit)
     if mode == "by_ids":
         return await _by_ids(api, store, shared_ids, language, limit)
-    return (
-        f"Error: unknown mode '{mode}'. "
-        "Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
-    )
+    return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
 
 
 async def _by_text(
@@ -224,9 +219,7 @@ async def _by_template(
     if not template_name:
         return "Error: 'by_template' mode requires `template_name`."
     try:
-        result = await api.get_entities_by_template(
-            template_name=template_name, language=language, limit=limit
-        )
+        result = await api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
     except DomainError as exc:
         logger.error(
             "query_entities(by_template) FAILED: template={} error={}",
@@ -258,9 +251,7 @@ async def _by_ids(
     fetched: list[AgentEntity] = []
     if missing:
         try:
-            fetched = await api.get_entities_by_shared_ids(
-                shared_ids=missing, language=language, limit=limit
-            )
+            fetched = await api.get_entities_by_shared_ids(shared_ids=missing, language=language, limit=limit)
         except DomainError as exc:
             logger.error(
                 "query_entities(by_ids) FAILED: shared_ids={} error={}",
@@ -302,4 +293,3 @@ async def _by_ids(
             len(shared_ids),
         )
     return result
-

@@ -1,6 +1,6 @@
 {% set lw = slots.left_width %}
-<section class="two-column">
-  <div class="two-column__inner">
+<section class="two-column uwazi-block">
+  <div class="two-column__inner uwazi-block__inner">
     {% if slots.heading %}
     <div class="two-column__header">
       <h2 class="two-column__heading">{{ slots.heading }}</h2>
@@ -23,7 +23,8 @@
 
 <style>
 .two-column {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
 }
 .two-column__inner {

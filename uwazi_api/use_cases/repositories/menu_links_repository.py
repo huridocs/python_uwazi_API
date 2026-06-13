@@ -50,6 +50,28 @@ class MenuLinksRepository:
             return [self._to_model(entry) for entry in payload]
         return [self._to_model(entry) for entry in body]
 
+    def delete_all(self) -> list[MenuLink]:
+        """Delete every navigation link by writing an empty list to Uwazi.
+
+        The Uwazi ``/api/settings/links`` endpoint is a full-replace store;
+        posting ``[]`` clears the public menu. Returns the (empty) list that
+        was written.
+        """
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/settings/links",
+            headers=self.http.headers,
+            cookies={},
+            data=json.dumps([]),
+        )
+        if response.status_code != 200:
+            message = f"Error ({response.status_code}) deleting menu links: {response.text}"
+            self.http.graylog.info(message)
+            raise UploadError(message)
+        body = response.json()
+        if not isinstance(body, list):
+            return []
+        return [self._to_model(entry) for entry in body]
+
     @staticmethod
     def _to_model(entry: dict) -> MenuLink:
         known = {"title", "type", "url"}

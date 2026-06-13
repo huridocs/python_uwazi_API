@@ -18,27 +18,27 @@ ENTITY_INSTRUCTIONS = (
     "template context), NEVER the thesaurus name. The thesaurus name (e.g. "
     "``thesaurus=Book Genres``) is metadata about the property, not the key.\n"
     "- For ``select``/``multiselect`` properties, the value is a thesaurus "
-    "LABEL (e.g. ``\"Fantasy\"``), not a UUID, not the thesaurus name, and not "
+    'LABEL (e.g. ``"Fantasy"``), not a UUID, not the thesaurus name, and not '
     "a group-prefixed label.\n\n"
     "IMPORTANT - Never retry a failed ``create_entities`` with a different "
     "metadata key without first calling ``get_templates_by_names`` to inspect "
     "the actual property names on the template.\n\n"
     "Finding entities \u2014 use the single ``query_entities`` tool. It takes a "
     "``mode`` argument that picks the discovery strategy:\n"
-    "- ``query_entities(mode=\"by_text\", search_term=...)`` \u2014 fuzzy free-text "
+    '- ``query_entities(mode="by_text", search_term=...)`` \u2014 fuzzy free-text '
     "search; the way to turn a title or description into a ``shared_id``. "
     "Optionally pass ``template_name`` to narrow the search.\n"
-    "- ``query_entities(mode=\"by_filter\", template_name=..., filters=[...])`` "
+    '- ``query_entities(mode="by_filter", template_name=..., filters=[...])`` '
     "\u2014 structured, exact-match queries on a template's filterable properties "
     "(e.g. 'Films from Japan', 'entities between two dates'). Only properties "
     "marked ``use_as_filter`` can be filtered; pass ``select``/``multiselect`` "
     "values as thesaurus LABELS and date bounds as ISO ``YYYY-MM-DD``. "
     "Multiple filters are combined with AND.\n"
-    "- ``query_entities(mode=\"by_template\", template_name=...)`` \u2014 list every "
+    '- ``query_entities(mode="by_template", template_name=...)`` \u2014 list every '
     "entity of one template. Call this at most ONCE per template with a "
     "reasonable limit (e.g. 5-30). If you need to check whether any entities "
     "exist, use limit=1 \u2014 do not call it twice with different limits.\n"
-    "- ``query_entities(mode=\"by_ids\", shared_ids=[...])`` \u2014 fetch full "
+    '- ``query_entities(mode="by_ids", shared_ids=[...])`` \u2014 fetch full '
     "details for known ids. This mode is the only one that returns a "
     "``list[AgentEntity]`` (the other three return a search result with a "
     "summary and examples). It also checks the session entity cache first, "
@@ -80,24 +80,24 @@ ENTITY_INSTRUCTIONS = (
     "Metadata value shapes (used for BOTH reading and writing). Tools always "
     "return values in these simplified shapes, and create/update require exactly "
     "these shapes on the way in. NEVER re-emit the raw Uwazi on-disk envelope "
-    "(e.g. ``[{\"value\": {\"label\": \"Valencia\", \"lat\": 39.47, \"lon\": -0.38}}]``) \u2014 "
+    '(e.g. ``[{"value": {"label": "Valencia", "lat": 39.47, "lon": -0.38}}]``) \u2014 '
     "the mapper will reject it.\n"
-    "- ``text`` / ``markdown`` / ``numeric`` / ``date``: scalar (`\"hello\"`, `42`, "
-    "`\"2024-01-15\"`).\n"
-    "- ``daterange``: `{\"from\": \"YYYY-MM-DD\", \"to\": \"YYYY-MM-DD\"}` or "
-    "`\"YYYY-MM-DD->YYYY-MM-DD\"`.\n"
-    "- ``multidate``: list of ISO dates, e.g. `[\"2024-01-15\", \"2024-02-01\"]`.\n"
+    '- ``text`` / ``markdown`` / ``numeric`` / ``date``: scalar (`"hello"`, `42`, '
+    '`"2024-01-15"`).\n'
+    '- ``daterange``: `{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}` or '
+    '`"YYYY-MM-DD->YYYY-MM-DD"`.\n'
+    '- ``multidate``: list of ISO dates, e.g. `["2024-01-15", "2024-02-01"]`.\n'
     "- ``multidaterange``: list of range objects.\n"
-    "- ``select``: a thesaurus label string (e.g. `\"Approved\"`). Never a UUID.\n"
+    '- ``select``: a thesaurus label string (e.g. `"Approved"`). Never a UUID.\n'
     "- ``multiselect``: list of label strings.\n"
-    "- ``link``: `{\"label\": \"<text>\", \"url\": \"<url>\"}` or `\"<text>|<url>\"`.\n"
-    "- ``geolocation``: ONE of `[<lat>, <lon>]`, `{\"lat\": <lat>, \"lon\": <lon>}`, "
-    "or `\"<lat>|<lon>\"`. The place name is informational on read and dropped on "
+    '- ``link``: `{"label": "<text>", "url": "<url>"}` or `"<text>|<url>"`.\n'
+    '- ``geolocation``: ONE of `[<lat>, <lon>]`, `{"lat": <lat>, "lon": <lon>}`, '
+    'or `"<lat>|<lon>"`. The place name is informational on read and dropped on '
     "write. For multiple points, wrap any of those shapes in a list.\n"
     "- ``relationship``: a list of related entities by their ``shared_id`` "
-    "(e.g. `[\"k7d2x9ab1cd\"]`). To link to an entity, first find its "
+    '(e.g. `["k7d2x9ab1cd"]`). To link to an entity, first find its '
     "``shared_id`` with a search tool, then pass it. On read you receive "
-    "`[{\"shared_id\": ..., \"title\": ...}]`; only the ``shared_id`` matters on "
+    '`[{"shared_id": ..., "title": ...}]`; only the ``shared_id`` matters on '
     "write.\n"
     "- ``image`` / ``media``: URL or file reference.\n\n"
     "Round-tripping: when you read an entity and update only some properties, "

@@ -1,64 +1,32 @@
-<section class="bar-chart">
-  <div class="bar-chart__inner">
+{% set data = slots.data %}
+{% set explicit_max = slots.max_value | default(none) %}
+{% set computed_max = data | map(attribute='value') | map('float') | max %}
+{% set max_value = explicit_max if explicit_max is not none else computed_max %}
+<section class="bar-chart uwazi-block">
+  <div class="bar-chart__inner uwazi-block__inner">
     {% if slots.title %}
     <h3 class="bar-chart__title">{{ slots.title }}</h3>
     {% endif %}
     <div class="bar-chart__list">
-      {% for entry in slots.data %}
+      {% for entry in data %}
+      {% set value = entry.value | default(0) | float %}
+      {% set pct = value | pct(max_value) %}
       <div class="bar-chart__row">
         <div class="bar-chart__label">{{ entry.label }}</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: {{ loop.index0 | chart_color }}; --bar-width: 0%;" data-bar-fill data-bar-value="{{ entry.value }}"></div>
+          <div class="bar-chart__fill" style="background: {{ loop.index0 | chart_color }}; --bar-width: {{ pct }}%;"></div>
         </div>
-        <div class="bar-chart__value">{{ entry.value }}{{ slots.unit }}</div>
+        <div class="bar-chart__value">{{ entry.value }}{{ slots.unit | default('') }}</div>
       </div>
       {% endfor %}
     </div>
   </div>
-  <script type="application/json" class="bar-chart__data" data-bar-data>
-    {{ slots.data | tojson }}
-  </script>
-  {% if slots.max_value is defined and slots.max_value is not none %}
-  <script type="application/json" data-bar-max>{{ slots.max_value | tojson }}</script>
-  {% endif %}
 </section>
-
-<script>
-(function() {
-  function animate() {
-    document.querySelectorAll('.bar-chart').forEach(function(block) {
-      var dataEl = block.querySelector('[data-bar-data]');
-      var maxEl = block.querySelector('[data-bar-max]');
-      if (!dataEl) return;
-      var data;
-      try { data = JSON.parse(dataEl.textContent); } catch(e) { return; }
-      var max = maxEl ? parseFloat(JSON.parse(maxEl.textContent)) : null;
-      if (!max) {
-        max = data.reduce(function(m, d) { return Math.max(m, parseFloat(d.value) || 0); }, 0);
-      }
-      if (!max) return;
-      var fills = block.querySelectorAll('[data-bar-fill]');
-      fills.forEach(function(fill, i) {
-        var v = parseFloat(data[i] ? data[i].value : 0) || 0;
-        var pct = (v / max) * 100;
-        // Defer to next frame for transition to apply
-        requestAnimationFrame(function() {
-          fill.style.setProperty('--bar-width', pct + '%');
-        });
-      });
-    });
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', animate);
-  } else {
-    animate();
-  }
-})();
-</script>
 
 <style>
 .bar-chart {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   font-family: var(--font-body);
 }
 .bar-chart__inner {
@@ -106,7 +74,6 @@
   height: 100%;
   width: var(--bar-width, 0%);
   border-radius: 4px;
-  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .bar-chart__value {
   font-size: 0.8rem;

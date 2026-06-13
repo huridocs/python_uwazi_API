@@ -1,5 +1,7 @@
 import asyncio
 import collections
+import contextlib
+import io
 import itertools
 import json
 import math
@@ -139,7 +141,9 @@ def _execute_python_code(
         }
 
         try:
-            exec(code, namespace)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, namespace)
         except Exception as e:
             tb = traceback.format_exc()
             return f"Error executing code: {type(e).__name__}: {e}\n\nTraceback:\n{tb}"
@@ -160,12 +164,41 @@ async def run_python_code(
     """Execute Python code that processes entities stored in the session entity store.
 
     The execution environment provides:
-    - ``entities``: list of dicts with keys shared_id, title, template_name, metadata,
-      language, published. These are the entities stored from previous search or fetch
-      operations. Note: ``published`` is a READ-ONLY mirror of Uwazi's stored flag —
-      it is NOT a publication control. Visibility in Uwazi is governed by the entity's
-      ``permissions`` array, not by this field. To publish or unpublish, use the
-      helpers below.
+    - ``entities``: list of dicts, one per entity in the session store. Every entity
+      has these top-level keys (some values may be ``None`` or empty):
+        * ``shared_id`` (str) — stable entity id, ALWAYS set.
+        * ``title`` (str) — entity title, ALWAYS set (may be empty string).
+        * ``template_name`` (str) — entity's template name, ALWAYS set.
+        * ``metadata`` (dict) — the template's properties; see 'Metadata value
+          shapes' below for the per-type value contract.
+        * ``language`` (str) — ISO 639-1 (e.g. ``"en"``), ALWAYS set.
+        * ``published`` (bool | None) — READ-ONLY mirror of Uwazi's stored flag;
+          setting it on an entity dict has NO side effect on the server. To
+          publish or unpublish, use the helpers below.
+        * ``creation_date`` (str | None) — ISO 8601 UTC timestamp (e.g.
+          ``'2024-03-15T10:22:33Z'``) or ``None`` if Uwazi did not record one.
+          Use this for 'first/last added', 'oldest', 'most recent' questions.
+        * ``edit_date`` (str | None) — same shape as ``creation_date``.
+
+      ``metadata`` is a dict whose keys match the entity's TEMPLATE properties.
+      Three rules you MUST follow when reading it:
+        1. A metadata key is PRESENT only if the template defines that property
+           AND the entity actually carries a value. The mapper drops properties
+           that are not in the template and never inserts a placeholder for
+           missing values. A 'required' template property that an entity never
+           set is ABSENT from the dict — guard every read with
+           ``e['metadata'].get('key')``, never ``e['metadata']['key']``.
+        2. 'Missing' has two flavours the agent must treat the same: the key is
+           NOT in the dict (template property was never set), or the key IS in
+           the dict with value ``None`` (entity was saved with no value).
+           Use ``e['metadata'].get('key') is None`` to test, or the
+           ``has_value(e, 'key')`` idiom further down.
+        3. The VALUE shape depends on the template property's type. The full
+           per-type table is in 'Metadata value shapes' below; a worked example
+           for the current store is in the pre-computed 'Entity store shape'
+           block the orchestrator injects at delegation time. Trust the runtime
+           value, not the schema, when they disagree (legacy entities can carry
+           keys the current template does not define).
     - ``create_entities(entities_dicts, language='en')``: Create new entities. Each dict
       must have 'title' and 'template_name'. Returns list of mutation result dicts.
     - ``update_entities(entities_dicts, language='en')``: Update existing entities. Each
@@ -188,12 +221,38 @@ async def run_python_code(
 
     The code must set a ``result`` variable with the output string.
 
+    IMPORTANT — Read the entity-store shape block before introspecting entities:
+    The orchestrator injects an 'Entity store shape' block at the top of your
+    delegation. It already lists the top-level keys, the per-template metadata
+    schema (with types, sample values, and nullability), and the earliest/latest
+    entity by ``creation_date``. Read that block FIRST; do NOT spend your first
+    ``run_python_code`` call printing ``list(e.keys())`` and
+    ``e['metadata'].keys()`` to discover what is in the store. A discovery call
+    that only inspects keys is a wasted iteration — the shape block already
+    has that information. The only case where ``entities[0]['metadata']``
+    inspection is justified is a property the shape block does not list
+    (template drift, legacy keys).
+
+    Idioms:
+        def has_value(e, key):
+            md = e.get('metadata') or {}
+            v = md.get(key)
+            if v is None: return False
+            if isinstance(v, str) and v == '': return False
+            if isinstance(v, (list, dict)) and len(v) == 0: return False
+            return True
+
+        # First entity by creation_date (entities that lack one are skipped):
+        dated = [e for e in entities if e.get('creation_date')]
+        if dated:
+            first = min(dated, key=lambda e: e['creation_date'])
+
     IMPORTANT — Output must be minimal:
     The ``result`` string MUST be as concise as possible while still being understandable.
     Return ONLY the data the user asked for, formatted compactly (e.g. comma-separated
     titles, bullet lists, or short summaries). Never dump full entity payloads, metadata,
     or debugging info. Example: for "give me all titles", set
-    ``result = '\\n'.join(e['title'] for e in entities)``.
+    ``result = '\n'.join(e['title'] for e in entities)``.
 
     IMPORTANT — Hard output cap:
     The returned string is HARD-CAPPED at
