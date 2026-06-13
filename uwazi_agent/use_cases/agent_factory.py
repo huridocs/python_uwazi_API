@@ -15,8 +15,8 @@ from .instructions import (
     TEMPLATES_INSTRUCTIONS,
 )
 from .tools.agent_context import get_current_agent, set_current_agent
-from .tools.add_page_menu_links import add_page_menu_links
 from .tools.create_entities import create_entities
+from .tools.create_page import create_page
 from .tools.create_pages import create_pages
 from .tools.create_relationship_type import create_relationship_type
 from .tools.create_template import create_template
@@ -69,9 +69,6 @@ _ENTITY_READ_TOOLS = {
 _PAGE_READ_TOOLS = {
     "list_pages",
     "get_pages_by_shared_ids",
-    "list_page_blocks",
-    "list_page_vibes",
-    "render_page_from_blocks",
 }
 _LANGUAGE_READ_TOOLS = {"get_languages"}
 _STATS_READ_TOOLS = {"list_templates", "list_thesauri", "get_thesauris_by_names"}
@@ -108,10 +105,10 @@ _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "update_entities": (_ENTITY_READ_TOOLS, None),
     "delete_entities_by_shared_ids": (_ENTITY_READ_TOOLS, None),
     "set_entities_publish_status": (_ENTITY_READ_TOOLS, None),
+    "create_page": (_PAGE_READ_TOOLS, None),
     "create_pages": (_PAGE_READ_TOOLS, None),
     "update_pages": (_PAGE_READ_TOOLS, None),
     "delete_pages_by_shared_ids": (_PAGE_READ_TOOLS, None),
-    "add_page_menu_links": (_PAGE_READ_TOOLS, None),
 }
 
 
@@ -243,6 +240,17 @@ def build_entity_tools() -> list[Tool]:
 
 
 def build_page_tools() -> list[Tool]:
+    """Tools for the page sub-agent.
+
+    The page-builder block library, the available vibes, the
+    ``page_script_executor`` helpers, and the ``get_entity_store_data_payload``
+    helpers are all part of the page-builder subsystem. In addition,
+    ``create_page`` is the new unified tool that handles both the
+    block-template path (via ``blocks=``) and the custom-HTML/JS path
+    (via ``content=``) and always appends a Settings → Links entry
+    after a successful create. ``create_pages``, ``prepare_page_script``,
+    and ``execute_page_script`` are kept for backward compatibility.
+    """
     return [
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
@@ -257,10 +265,10 @@ def build_page_tools() -> list[Tool]:
         _read_tool(search_entities_by_filter),
         _write_tool(prepare_page_script),
         _write_tool(execute_page_script),
+        _write_tool(create_page),
         _write_tool(create_pages),
         _write_tool(update_pages),
         _write_tool(delete_pages_by_shared_ids),
-        _write_tool(add_page_menu_links),
     ]
 
 
@@ -317,7 +325,17 @@ def _make_delegation_tool(
     sub_agent: Agent[UwaziAgentToolsDependencies, str],
     name: str,
     description: str,
+    *,
+    use_page_prompt_context: bool = False,
 ) -> Tool:
+    """Build a delegate-to-X tool.
+
+    When ``use_page_prompt_context`` is True, the delegation injects the
+    page-builder section of ``SchemaStore`` into the sub-agent's prompt
+    (via :meth:`SchemaStore.to_page_prompt_context`). Use this for the
+    page sub-agent only — the entity / schema / python agents never
+    see the page-block library.
+    """
     agent_label = name.replace("delegate_to_", "")
 
     async def delegate(ctx: RunContext[UwaziAgentToolsDependencies], task: str) -> str:
@@ -331,7 +349,10 @@ def _make_delegation_tool(
             # snapshot (languages, template names+counts, thesaurus names,
             # relationship type names) which is appended below.
             available_context = ctx.deps.schema_store.to_available_context()
-            schema_context = ctx.deps.schema_store.to_prompt_context()
+            if use_page_prompt_context:
+                schema_context = ctx.deps.schema_store.to_page_prompt_context()
+            else:
+                schema_context = ctx.deps.schema_store.to_prompt_context()
             entity_context = ctx.deps.entity_store.to_context_summary()
             context_parts = [p for p in [available_context, schema_context, entity_context] if p]
             context_str = "\n\n".join(context_parts)
@@ -383,10 +404,11 @@ def build_orchestrator(
         _make_delegation_tool(
             page_agent,
             "delegate_to_page_agent",
-            "Delegate page mutation tasks (create, update, delete pages) and "
-            "page menu-link tasks (register a new page in Settings → Links) to "
-            "the page sub-agent. Do NOT use this for reading pages — use the "
-            "read tools directly instead.",
+            "Delegate page mutation tasks (create, update, delete pages) to "
+            "the page sub-agent. New pages are automatically registered in "
+            "Settings → Links so they are reachable from the public navigation. "
+            "Do NOT use this for reading pages — use the read tools directly instead.",
+            use_page_prompt_context=True,
         ),
         _make_delegation_tool(
             python_agent,

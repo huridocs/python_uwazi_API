@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from uwazi_agent.domain.agent_template import AgentTemplate
@@ -26,6 +28,15 @@ class SchemaStore(BaseModel):
     thesauri: dict[str, AgentThesauri] = Field(default_factory=dict)
     languages: list[Language] = Field(default_factory=list)
     relationship_type_names: list[str] = Field(default_factory=list)
+    # Page-builder data. Populated once at boot from the BlockRegistry +
+    # VibeRegistry on disk and injected into the page agent's prompt so
+    # the LLM does not need tool calls to learn the available block
+    # library or visual themes. Intentionally NOT included in
+    # to_prompt_context() — see to_page_prompt_context() for the
+    # page-agent-specific view that combines both.
+    page_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    page_vibes: list[str] = Field(default_factory=list)
+    page_default_vibe: str = "minimal"
 
     def add_template_names(self, names: list[str]) -> None:
         for name in names:
@@ -179,6 +190,92 @@ class SchemaStore(BaseModel):
             "stats per value), use the read tools — they return the live data."
         )
         return "\n".join(lines)
+
+    def set_page_builder(
+        self,
+        blocks: list[dict[str, Any]],
+        vibes: list[str],
+        default_vibe: str = "minimal",
+    ) -> None:
+        """Populate the page-builder section (called once at boot).
+
+        ``blocks`` is the serialised output of ``BlockRegistry.list_blocks()``
+        (one dict per block: name, description, when_to_use, required_slots,
+        optional_slots). ``vibes`` is the list of vibe names from
+        ``VibeRegistry``. ``default_vibe`` is the vibe applied when the
+        caller does not specify one — keep it consistent with the
+        ``DEFAULT_VIBE`` constant in the page-builder renderer.
+        """
+        self.page_blocks = list(blocks)
+        self.page_vibes = list(vibes)
+        self.page_default_vibe = default_vibe
+
+    def to_page_prompt_context(self) -> str:
+        """Render the prompt context used by the page sub-agent.
+
+        Combines the regular schema context (templates, thesauri — useful
+        when a page pulls live data from those entities) with the
+        page-builder block library and available vibes. This is the ONLY
+        prompt context that exposes the block library; the entity /
+        schema / python agents never see it.
+        """
+        parts: list[str] = []
+        schema_text = self.to_prompt_context()
+        if schema_text:
+            parts.append(schema_text)
+        if self.page_blocks:
+            parts.append(self._format_page_blocks())
+        if self.page_vibes:
+            vibes_str = ", ".join(self.page_vibes)
+            parts.append(
+                "Available page vibes (visual themes): "
+                f"{vibes_str}. Default vibe: `{self.page_default_vibe}` — "
+                "if you don't pass a `vibe` to `create_page`, this one is used."
+            )
+        return "\n\n".join(parts)
+
+    def _format_page_blocks(self) -> str:
+        """Serialise the page-block library as a compact prompt block."""
+        lines: list[str] = ["Page block library (compose pages by ordering these blocks):"]
+        for block in self.page_blocks:
+            name = block.get("name", "?")
+            desc = block.get("description", "")
+            when = block.get("when_to_use", "")
+            lines.append(f"  - `{name}`: {desc}" if desc else f"  - `{name}`")
+            if when:
+                lines.append(f"      when_to_use: {when}")
+            required = block.get("required_slots", {}) or {}
+            optional = block.get("optional_slots", {}) or {}
+            if required:
+                lines.append(f"      required_slots: {self._format_slot_map(required)}")
+            if optional:
+                lines.append(f"      optional_slots: {self._format_slot_map(optional)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_slot_map(slots: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key, schema in slots.items():
+            if not isinstance(schema, dict):
+                parts.append(f"{key}={schema!r}")
+                continue
+            type_str = schema.get("type", "?")
+            desc = schema.get("description", "")
+            extras: list[str] = []
+            if "enum" in schema:
+                extras.append(f"enum={schema['enum']}")
+            if "default" in schema:
+                extras.append(f"default={schema['default']!r}")
+            if "item_schema" in schema:
+                extras.append(f"item_schema={schema['item_schema']}")
+            extra_str = f" [{', '.join(extras)}]" if extras else ""
+            line = f"{key} ({type_str})"
+            if desc:
+                line += f" — {desc}"
+            if extra_str:
+                line += extra_str
+            parts.append(line)
+        return "; ".join(parts)
 
     def clear_templates(self) -> None:
         self.template_names.clear()

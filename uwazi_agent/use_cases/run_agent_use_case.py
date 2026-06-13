@@ -80,6 +80,12 @@ class RunAgentUseCase:
         # Failures here are non-fatal: the prompt just omits the affected
         # section.
         await self._populate_available_context(deps)
+        # Populate the page-builder section of the schema store from the
+        # on-disk BlockRegistry / VibeRegistry. This is the only place
+        # the LLM ever needs to see the page block library and visual
+        # themes — there is no tool for it. The page sub-agent's prompt
+        # picks this up via SchemaStore.to_page_prompt_context().
+        self._populate_page_builder(deps)
         available_context = deps.schema_store.to_available_context()
         prompt = self._compose_prompt(
             task_description=task_description,
@@ -146,3 +152,43 @@ class RunAgentUseCase:
             parts.append(f"Context:\n{context}")
         parts.append(f"Task:\n{task}")
         return "\n\n".join(parts)
+
+    def _populate_page_builder(self, deps: UwaziAgentToolsDependencies) -> None:
+        """Hydrate the schema store's page-builder section from disk.
+
+        Reads the on-disk ``BlockRegistry`` and ``VibeRegistry`` and
+        stores the serialised view on ``deps.schema_store``. Called once
+        at the start of :meth:`execute`; idempotent within a session
+        (re-running it just re-reads the same files).
+
+        If the page builder is not configured (``page_builder_dir`` is
+        ``None``), this is a no-op and the page-builder section of the
+        prompt stays empty — the page agent will see no blocks/vibes
+        and any attempt to use ``create_page(blocks=...)`` will fail
+        with the standard "Page builder is not configured" error.
+        """
+        if deps.page_builder_dir is None:
+            return
+        try:
+            from uwazi_agent.drivers.page_builder.registry import (
+                BlockRegistry,
+                VibeRegistry,
+            )
+            from uwazi_agent.drivers.page_builder.renderer import DEFAULT_VIBE
+
+            blocks_dir = deps.page_builder_dir / "blocks"
+            vibes_dir = deps.page_builder_dir / "vibes"
+            block_registry = BlockRegistry(blocks_dir)
+            vibe_registry = VibeRegistry(vibes_dir)
+            deps.schema_store.set_page_builder(
+                blocks=block_registry.list_blocks(),
+                vibes=vibe_registry.list_vibes(),
+                default_vibe=DEFAULT_VIBE,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail the run on prompt hydration
+            logger.warning(
+                "Failed to populate page-builder prompt context: {}. "
+                "The page agent will not see the block library; "
+                "create_page(blocks=...) will return an error.",
+                exc,
+            )
