@@ -29,7 +29,12 @@ async def update_relationship_type(
     if ctx.deps.relationship_type_api is None:
         return "Error: Relationship type tools are not configured: `relationship_type_api` is missing on dependencies."
     try:
-        return await ctx.deps.relationship_type_api.update_relationship_type(name=name, new_name=new_name, language=language)
+        result = await ctx.deps.relationship_type_api.update_relationship_type(name=name, new_name=new_name, language=language)
+        # Re-fetch the cached relationship type names so the "Available
+        # context" block in the prompt reflects the rename.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_relationship_type_names
+        await refresh_relationship_type_names(ctx)
+        return result
     except DomainError as exc:
         logger.error("update_relationship_type FAILED: name={} new_name={} error={}", name, new_name, exc)
         return (

@@ -29,7 +29,12 @@ async def create_relationship_type(
     if ctx.deps.relationship_type_api is None:
         return "Error: Relationship type tools are not configured: `relationship_type_api` is missing on dependencies."
     try:
-        return await ctx.deps.relationship_type_api.create_relationship_type(name=name, language=language)
+        result = await ctx.deps.relationship_type_api.create_relationship_type(name=name, language=language)
+        # Re-fetch the cached relationship type names so the "Available
+        # context" block in the prompt reflects the new type.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_relationship_type_names
+        await refresh_relationship_type_names(ctx)
+        return result
     except DomainError as exc:
         logger.error("create_relationship_type FAILED: name={} error={}", name, exc)
         return (

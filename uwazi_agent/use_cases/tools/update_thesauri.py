@@ -34,7 +34,12 @@ async def update_thesauri(
         string with suggestions.
     """
     try:
-        return await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language, groups=groups)
+        result = await ctx.deps.thesauri_api.update_thesauri(name=name, values=values, language=language, groups=groups)
+        # Re-fetch the cached thesaurus names so the "Available context"
+        # block in the prompt reflects the change.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_thesauri_names
+        await refresh_thesauri_names(ctx)
+        return result
     except DomainError as exc:
         logger.error("update_thesauri FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():

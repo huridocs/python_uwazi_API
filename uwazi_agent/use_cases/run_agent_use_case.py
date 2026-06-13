@@ -60,8 +60,6 @@ class RunAgentUseCase:
     async def execute(
         self, task_description: str, context: str = "", tool_progress: list[str] | None = None
     ) -> AgentExecutionResult:
-        prompt = self._compose_prompt(task_description=task_description, context=context)
-        logger.info("PROMPT: {}", prompt)
         deps = UwaziAgentToolsDependencies(
             thesauri_api=self.thesauri_api,
             template_api=self.template_api,
@@ -76,6 +74,19 @@ class RunAgentUseCase:
         )
         if tool_progress is not None:
             deps.tool_progress = tool_progress
+        # Pre-load the four lightweight discovery data sets (languages,
+        # templates, thesauri, relationship types) into the schema store
+        # so they can be rendered into the user prompt without a tool call.
+        # Failures here are non-fatal: the prompt just omits the affected
+        # section.
+        await self._populate_available_context(deps)
+        available_context = deps.schema_store.to_available_context()
+        prompt = self._compose_prompt(
+            task_description=task_description,
+            context=context,
+            available_context=available_context,
+        )
+        logger.info("PROMPT: {}", prompt)
         agent = build_uwazi_agents(model=self.llm.get_model())
         usage_limits = UsageLimits(request_limit=REQUEST_LIMIT)
         try:
@@ -102,9 +113,36 @@ class RunAgentUseCase:
             raise
 
     @staticmethod
-    def _compose_prompt(task_description: str, context: str) -> str:
+    async def _populate_available_context(deps: UwaziAgentToolsDependencies) -> None:
+        """Pre-load the four data sets the orchestrator no longer exposes
+        as tools. Wraps the call in a try/except so a transient Uwazi
+        hiccup never aborts the run; missing sections are simply omitted
+        from the prompt and a warning is logged.
+        """
+        from uwazi_agent.use_cases.tools.tool_context import populate_all
+
+        # The populate_all helpers expect a ``RunContext``-shaped object
+        # that exposes ``.deps``; we synthesise a thin stand-in so we can
+        # call them before the agent has been built.
+        class _Ctx:
+            pass
+
+        ctx = _Ctx()
+        ctx.deps = deps
+        try:
+            await populate_all(ctx)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001 -- defensive: never let pre-load break the run
+            logger.warning("available_context pre-load FAILED: {}", exc)
+
+    @staticmethod
+    def _compose_prompt(task_description: str, context: str, available_context: str) -> str:
         context = (context or "").strip()
         task = (task_description or "").strip()
+        available_context = (available_context or "").strip()
+        parts: list[str] = []
+        if available_context:
+            parts.append(available_context)
         if context:
-            return f"Context:\n{context}\n\nTask:\n{task}"
-        return task
+            parts.append(f"Context:\n{context}")
+        parts.append(f"Task:\n{task}")
+        return "\n\n".join(parts)

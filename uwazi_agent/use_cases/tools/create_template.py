@@ -61,6 +61,10 @@ async def create_template(
             refreshed = await ctx.deps.template_api.get_templates_by_names(names=[name])
             if refreshed:
                 ctx.deps.schema_store.add_templates(refreshed)
+        # Re-fetch the template names list (and counts) so the "Available
+        # context" block in the prompt reflects the new template.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_templates
+        await refresh_templates(ctx)
         return result
     except DomainError as exc:
         logger.error("create_template FAILED: name={} error={}", name, exc)
