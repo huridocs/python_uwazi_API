@@ -61,6 +61,7 @@ async def update_template(
         # Re-fetch the cached template entry so the "Available context"
         # block in the prompt reflects the updated template.
         from uwazi_agent.use_cases.tools.tool_context import refresh_templates
+
         await refresh_templates(ctx)
         return (
             f"Template '{name}' updated successfully. "

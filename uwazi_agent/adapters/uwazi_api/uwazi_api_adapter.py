@@ -651,6 +651,7 @@ class UwaziApiAdapter(
                         title=page.title,
                         content=page.content,
                         script=page.javascript,
+                        css=page.css,
                         entity_view=page.entity_view,
                         language=page.language or language,
                     )
@@ -686,6 +687,11 @@ class UwaziApiAdapter(
                             metadata.pop("script", None)
                         else:
                             metadata["script"] = update.javascript
+                    if update.css is not None:
+                        if update.css == "":
+                            metadata.pop("css", None)
+                        else:
+                            metadata["css"] = update.css
                     existing.metadata = metadata
                     saved = self._pages_repo.update(existing)
                     results.append(

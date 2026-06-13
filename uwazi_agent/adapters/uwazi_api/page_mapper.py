@@ -28,6 +28,7 @@ class PageMapper:
             language=page.language or "en",
             content=metadata.get("content") or "",
             javascript=metadata.get("script"),
+            css=metadata.get("css"),
             entity_view=page.entity_view,
             url=self.page_url(page),
         )

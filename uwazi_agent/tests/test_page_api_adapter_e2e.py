@@ -39,9 +39,15 @@ class TestPageApiAdapterE2E:
         cls.unique_marker = f"agent_page_test_{ts}"
         cls.created_shared_ids: list[str] = []
 
-    def _create(self, title: str, content: str = "# hi", javascript: str | None = None) -> str:
+    def _create(
+        self,
+        title: str,
+        content: str = "# hi",
+        javascript: str | None = None,
+        css: str | None = None,
+    ) -> str:
         results = _run(
-            self.adapter.create_pages([AgentPageCreate(title=title, content=content, javascript=javascript)], "en")
+            self.adapter.create_pages([AgentPageCreate(title=title, content=content, javascript=javascript, css=css)], "en")
         )
         assert len(results) == 1
         assert results[0].success is True, results[0].error
@@ -119,6 +125,50 @@ class TestPageApiAdapterE2E:
             self.created_shared_ids.remove(shared_id)
         fetched = _run(self.adapter.get_pages_by_shared_ids([shared_id], "en"))
         assert fetched == []
+
+    def test_06_create_with_css_round_trip(self):
+        """Pages created/updated with ``css`` round-trip the way Uwazi's
+        own Settings → Pages UI does (metadata.css, separate from content).
+        This is the path the page agent uses for block-template pages —
+        it sends the body in ``content`` and the stylesheet in ``css`` so
+        no ``<style>`` tags end up inside the body, which is what was
+        triggering the React 18 hydration error in the public page."""
+        title = f"{self.unique_marker}_css"
+        body = '<section class="hero"><h1>Hello</h1></section>'
+        css = "#uwazi-page-root .hero { padding: 2rem; }"
+        shared_id = self._create(title=title, content=body, css=css)
+        try:
+            fetched = _run(self.adapter.get_pages_by_shared_ids([shared_id], "en"))
+            assert len(fetched) == 1
+            page = fetched[0]
+            assert page.content == body
+            assert page.css == css
+        finally:
+            self._delete(shared_id)
+
+    def test_07_update_css_partial_merge(self):
+        """``update_pages(..., css='...')`` should overwrite ``metadata.css``
+        while leaving everything else intact, mirroring how javascript is
+        handled today. An empty string clears it."""
+        title = f"{self.unique_marker}_upd_css"
+        shared_id = self._create(title=title, content="# body", css="div {}")
+        try:
+            results = _run(
+                self.adapter.update_pages([AgentPageUpdate(shared_id=shared_id, css="#new { color: red; }")], "en")
+            )
+            assert results[0].success is True, results[0].error
+            fetched = _run(self.adapter.get_pages_by_shared_ids([shared_id], "en"))
+            assert fetched[0].css == "#new { color: red; }"
+            # content was untouched
+            assert fetched[0].content == "# body"
+
+            # Clear it with an empty string
+            results = _run(self.adapter.update_pages([AgentPageUpdate(shared_id=shared_id, css="")], "en"))
+            assert results[0].success is True, results[0].error
+            fetched = _run(self.adapter.get_pages_by_shared_ids([shared_id], "en"))
+            assert fetched[0].css in (None, "")
+        finally:
+            self._delete(shared_id)
 
     @classmethod
     def teardown_class(cls):

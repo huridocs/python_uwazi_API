@@ -30,6 +30,7 @@ async def delete_template(
         # Re-fetch the template names list (and counts) so the "Available
         # context" block in the prompt reflects the deletion.
         from uwazi_agent.use_cases.tools.tool_context import refresh_templates
+
         await refresh_templates(ctx)
         return result
     except DomainError as exc:

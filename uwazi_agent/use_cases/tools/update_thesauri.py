@@ -38,6 +38,7 @@ async def update_thesauri(
         # Re-fetch the cached thesaurus names so the "Available context"
         # block in the prompt reflects the change.
         from uwazi_agent.use_cases.tools.tool_context import refresh_thesauri_names
+
         await refresh_thesauri_names(ctx)
         return result
     except DomainError as exc:

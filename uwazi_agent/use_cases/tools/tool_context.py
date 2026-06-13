@@ -81,9 +81,7 @@ async def load_templates(ctx: RunContext[UwaziAgentToolsDependencies]) -> None:
         )
         if stats is not None:
             count_by_name = {t.template_name: t.count for t in stats.templates}
-    entries = [
-        TemplateEntry(name=name, count=count_by_name.get(name, 0)) for name in names
-    ]
+    entries = [TemplateEntry(name=name, count=count_by_name.get(name, 0)) for name in names]
     # ``set_template_entries`` preserves any names already known to the store
     # (e.g. ones added by ``create_template`` between loads) so we never lose
     # a name on refresh.
