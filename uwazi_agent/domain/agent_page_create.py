@@ -9,11 +9,16 @@ class AgentPageCreate(BaseModel):
     via :class:`AgentPageMutationResult`).
 
     Provide at least a markdown/HTML ``content`` body. ``javascript`` is
-    optional and stored in the page's "Javascript" tab.
+    optional and stored in the page's "Javascript" tab. ``css`` is optional
+    and stored in ``metadata.css``; Uwazi injects it as a ``<style>`` tag in
+    the document head, which is the right home for page-scoped CSS — putting
+    ``<style>`` blocks inside ``content`` can confuse the React 18 hydration
+    walker when it parses the body.
     """
 
     title: str
     content: str = ""
     javascript: str | None = None
+    css: str | None = None
     language: str = "en"
     entity_view: bool = False

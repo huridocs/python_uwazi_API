@@ -5,7 +5,9 @@ class AgentPage(BaseModel):
     """A Settings → Pages entry in Uwazi, in agent-friendly terms.
 
     A page always carries a markdown/HTML body (``content``) and may also
-    carry custom JavaScript (``javascript``) that runs on the public page.
+    carry custom JavaScript (``javascript``) that runs on the public page
+    and an optional page-scoped ``css`` stylesheet that Uwazi injects via
+    its own ``<style>`` element in the document head.
     """
 
     shared_id: str
@@ -13,5 +15,6 @@ class AgentPage(BaseModel):
     language: str = "en"
     content: str = ""
     javascript: str | None = None
+    css: str | None = None
     entity_view: bool = False
     url: str | None = None

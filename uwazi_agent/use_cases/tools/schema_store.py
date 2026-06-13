@@ -170,9 +170,7 @@ class SchemaStore(BaseModel):
             lines.append("- Thesauri: none")
 
         if self.relationship_type_names:
-            lines.append(
-                f"- Relationship types: {', '.join(sorted(self.relationship_type_names))}"
-            )
+            lines.append(f"- Relationship types: {', '.join(sorted(self.relationship_type_names))}")
         else:
             lines.append("- Relationship types: none")
 

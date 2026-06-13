@@ -19,7 +19,7 @@ async def render_page_from_blocks(
     blocks: list[dict[str, Any]],
     vibe: str | None = None,
 ) -> str:
-    """Render a list of page blocks with a chosen vibe into a self-contained HTML string.
+    """Render a list of page blocks with a chosen vibe into a preview HTML string.
 
     This is a **preview** tool — it does NOT create a page in Uwazi. Use it to
     validate that your blocks, slot values, and vibe choice render correctly
@@ -32,8 +32,16 @@ async def render_page_from_blocks(
         2. ``list_page_vibes`` to pick a visual theme (or omit to use
            ``minimal`` by default).
         3. ``render_page_from_blocks(blocks, vibe)`` to preview the HTML.
-        4. ``create_page_from_blocks(title, blocks, vibe, language)`` to push
-           the rendered HTML into Uwazi and register the page.
+        4. Call ``prepare_page_script`` with a Python script that uses
+           ``render_blocks`` and ``create_page``, then ``execute_page_script``
+           to push the rendered HTML into Uwazi and register the page.
+
+    Note: the preview HTML combines body and CSS into a single document
+    using inline ``<style>`` tags, which is fine for opening in a browser
+    tab. When the page is *persisted* via ``execute_page_script`` the body
+    and CSS are separated and stored in Uwazi's ``metadata.content`` and
+    ``metadata.css`` respectively, which is what avoids the React 18
+    hydration error caused by ``<style>`` tags inside the body.
 
     Args:
         blocks: An ordered list of block definitions. Each block has a

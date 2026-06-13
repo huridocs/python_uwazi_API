@@ -31,6 +31,7 @@ async def delete_relationship_type(
         # Re-fetch the cached relationship type names so the "Available
         # context" block in the prompt reflects the deletion.
         from uwazi_agent.use_cases.tools.tool_context import refresh_relationship_type_names
+
         await refresh_relationship_type_names(ctx)
         return result
     except DomainError as exc:

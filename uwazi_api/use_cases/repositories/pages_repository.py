@@ -45,12 +45,15 @@ class PagesRepository:
         title: str,
         content: str = "",
         script: Optional[str] = None,
+        css: Optional[str] = None,
         entity_view: bool = False,
         language: str = "en",
     ) -> Page:
         metadata: dict[str, str] = {"content": content or ""}
         if script:
             metadata["script"] = script
+        if css:
+            metadata["css"] = css
         payload = {
             "title": title,
             "language": language,
