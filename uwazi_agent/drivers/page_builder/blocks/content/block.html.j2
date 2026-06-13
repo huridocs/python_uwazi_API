@@ -1,7 +1,7 @@
 {% set _mw_key = slots.max_width if slots.max_width is defined and slots.max_width else "narrow" %}
 {% set mw = {"narrow": "640px", "wide": "880px"}[_mw_key] %}
-<section class="content">
-  <div class="content__inner" style="max-width: {{ mw }};">
+<section class="content uwazi-block">
+  <div class="content__inner uwazi-block__inner" style="max-width: {{ mw }};">
     {% if slots.heading %}
     <h2 class="content__heading">{{ slots.heading }}</h2>
     {% endif %}
@@ -11,7 +11,8 @@
 
 <style>
 .content {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
 }
 .content__inner {

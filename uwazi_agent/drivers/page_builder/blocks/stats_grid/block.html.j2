@@ -1,6 +1,6 @@
 {% set cols = slots.columns %}
-<section class="stats-grid">
-  <div class="stats-grid__inner">
+<section class="stats-grid uwazi-block">
+  <div class="stats-grid__inner uwazi-block__inner">
     {% if slots.heading %}
     <div class="stats-grid__header">
       <h2 class="stats-grid__heading">{{ slots.heading }}</h2>
@@ -22,7 +22,8 @@
 
 <style>
 .stats-grid {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   background: var(--color-bg);
 }
 .stats-grid__inner {

@@ -1,5 +1,8 @@
+import ast
 import asyncio
 import collections
+import contextlib
+import io
 import itertools
 import json
 import math
@@ -14,13 +17,70 @@ from pydantic_ai import RunContext
 
 from uwazi_agent import configuration
 from uwazi_agent.domain.agent_page_create import AgentPageCreate
-from uwazi_agent.drivers.page_builder.renderer import PageRenderer
+from uwazi_agent.logging_config import truncate_log_message
+from uwazi_agent.drivers.page_builder.renderer import DEFAULT_VIBE, PageRenderer
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.entity_store import EntityStore
-from uwazi_agent.use_cases.tools.render_page_from_blocks import _resolve_vibe
 
 _PENDING_SCRIPT_KEY: str = "__pending_page_script__"
+
+# Names the page agent's script is NOT allowed to call. pydantic-ai only
+# validates tool calls the model makes through the structured tool API;
+# it does NOT inspect free-form Python code the LLM embeds in a string
+# argument. To stop the model from embedding removed tool names in
+# ``prepare_page_script(code)`` and producing a raw ``NameError`` at
+# exec() time, we scan the script's AST for any reference to a name on
+# this denylist and refuse to run it.
+#
+# The page agent can ONLY mutate pages. Any entity read/write goes
+# through the orchestrator. The page script's execution context exposes
+# ``entities`` and ``data_payload`` for reads; mutation helpers like
+# ``create_entities`` are intentionally denied.
+_DISALLOWED_SCRIPT_NAMES: frozenset[str] = frozenset(
+    {
+        # Entity read tools (removed from the page agent)
+        "query_entities",
+        "search_entities_by_text",
+        "search_entities_by_filter",
+        "get_entities_by_template",
+        "get_entities_by_shared_ids",
+        "list_templates",
+        "get_templates_by_names",
+        "list_thesauri",
+        "get_thesauris_by_names",
+        "get_relationship_type_names",
+        "get_languages",
+        "get_publish_status",
+        "get_entity_store_status",
+        # Data-payload inspection tools (removed from the page agent;
+        # scripts should use ``get_data_payload`` from the exec context)
+        "get_entity_store_data_payload",
+        "list_entity_store_data_payload_keys",
+        # Entity mutation tools (never available to the page agent)
+        "create_entities",
+        "update_entities",
+        "delete_entities_by_shared_ids",
+        "set_entities_publish_status",
+        "publish_entities",
+        "unpublish_entities",
+        "set_publish_status",
+        "delete_entities",
+        "create_relationships",
+        # Schema mutation tools (never available to the page agent)
+        "create_template",
+        "update_template",
+        "delete_template",
+        "create_thesauri",
+        "update_thesauri",
+        "delete_thesauri",
+        "create_relationship_type",
+        "update_relationship_type",
+        "delete_relationship_type",
+        # The Python agent's script runner (not available to the page agent)
+        "run_python_code",
+    }
+)
 
 
 class RenderedPage:
@@ -68,19 +128,17 @@ async def prepare_page_script(
 
     **Workflow:**
 
-    1. ``list_page_blocks`` to learn available block types and their
-       slot schemas.
-    2. ``list_page_vibes`` to see available visual themes (or omit ``vibe``
-       to get the ``minimal`` default).
-    3. (Optional) ``list_entity_store_data_payload_keys`` to see what
+    1. Read the block library and vibe list already present in your prompt
+       context (under "Page block library" and "Available page vibes").
+    2. (Optional) ``list_entity_store_data_payload_keys`` to see what
        prepared data is available.
-    4. (Optional) ``get_entity_store_data_payload(key)`` to inspect a
+    3. (Optional) ``get_entity_store_data_payload(key)`` to inspect a
        data payload's shape so you know exactly how to map it into
        block slots.
-    5. ``prepare_page_script(code)`` — write Python code that builds
+    4. ``prepare_page_script(code)`` — write Python code that builds
        block dicts from the entity store / data payloads, renders them,
        and creates the page.
-    6. ``execute_page_script(language)`` — run the script, which calls
+    5. ``execute_page_script(language)`` — run the script, which calls
        ``render_blocks`` and ``create_page`` internally and returns the
        mutation result.
 
@@ -98,13 +156,12 @@ async def prepare_page_script(
     - ``set_data_payload(key, value)`` — write a prepared payload into the
       session entity store (for chaining with future script runs).
     - ``render_blocks(blocks, vibe='minimal')`` — render a list of block
-      definitions (same format as the old ``create_page_from_blocks``
-      ``blocks`` argument). Returns a ``RenderedPage`` object with
-      ``.body`` (the clean HTML, no inline ``<style>``) and ``.css``
-      (the page-scoped stylesheet). Call ``.body`` and ``.css`` when
-      passing them to ``create_page`` — do NOT inline them yourself.
-      Raises ``ValueError`` on validation failure; ``try/except`` and
-      report the error.
+      definitions. Returns a ``RenderedPage`` object with ``.body``
+      (the clean HTML, no inline ``<style>``) and ``.css`` (the
+      page-scoped stylesheet). Call ``.body`` and ``.css`` when passing
+      them to ``create_page`` — do NOT inline them yourself. Raises
+      ``ValueError`` on validation failure; ``try/except`` and report
+      the error.
     - ``create_page(title, html, language='en', css=None)`` — create a
       single page in Uwazi and return ``list[dict]`` of mutation results
       (each with ``shared_id``, ``success``, ``url``, ``error``). The
@@ -150,7 +207,7 @@ async def prepare_page_script(
                 }
             ]
             try:
-                rendered = render_blocks(blocks, vibe="warm")
+                rendered = render_blocks(blocks, vibe="minimal")
                 mutation = create_page(
                     "My Timeline",
                     rendered.body,
@@ -207,6 +264,10 @@ async def prepare_page_script(
     except SyntaxError as exc:
         return f"Error: Syntax error in page script:\n{exc}"
 
+    denied = _scan_for_disallowed_names(code)
+    if denied is not None:
+        return denied
+
     ctx.deps.entity_store.set_data_payload(_PENDING_SCRIPT_KEY, code)
     return "Page script stored. Call ``execute_page_script(language=...)`` to run it and create the page in Uwazi."
 
@@ -252,6 +313,10 @@ async def execute_page_script(
             "first to write the script, then call this tool to run it."
         )
 
+    denied = _scan_for_disallowed_names(code)
+    if denied is not None:
+        return denied
+
     ctx.deps.entity_store.set_data_payload(_PENDING_SCRIPT_KEY, None)
 
     entities = ctx.deps.entity_store.entities
@@ -267,6 +332,7 @@ async def execute_page_script(
         language,
         entity_store,
         page_builder_dir,
+        ctx.deps.settings_api,
     )
     limit = configuration.PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT
     if len(output) > limit:
@@ -276,7 +342,70 @@ async def execute_page_script(
             limit,
         )
         output = output[:limit] + "\n... [output truncated]"
-    return output
+    return truncate_log_message(output, max_lines=5)
+
+
+def _scan_for_disallowed_names(code: str) -> str | None:
+    """Return an error string if the script references any disallowed name.
+
+    The page agent's script execution context exposes a small, fixed set
+    of names. Calling anything else would raise ``NameError`` at runtime;
+    we detect that statically so the failure is reported as a clear,
+    actionable error message rather than a Python traceback.
+
+    Attribute access (``x.disallowed_name``) and string literals
+    containing disallowed names are allowed — only bare-name references
+    and explicit function calls are flagged.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Let the prepare/exec step report the syntax error itself.
+        return None
+
+    offenders: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _DISALLOWED_SCRIPT_NAMES:
+            offenders.append((node.id, node.lineno))
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _DISALLOWED_SCRIPT_NAMES:
+                offenders.append((func.id, func.lineno))
+    if not offenders:
+        return None
+    seen: set[str] = set()
+    listed: list[str] = []
+    for name, lineno in offenders:
+        key = f"{name}@L{lineno}"
+        if key in seen:
+            continue
+        seen.add(key)
+        listed.append(f"  - ``{name}`` at line {lineno}")
+    names_block = "\n".join(listed)
+    available = (
+        "entities",
+        "data_payload",
+        "get_data_payload",
+        "set_data_payload",
+        "render_blocks",
+        "create_page",
+        "RenderedPage",
+        "json",
+        "re",
+        "collections",
+        "itertools",
+        "datetime",
+        "math",
+    )
+    return (
+        "Error: page script references a name the page agent is not allowed "
+        "to call. The page agent can ONLY render pages; it does not have "
+        "entity read or write tools. Read entity data from the "
+        "``entities`` variable (or ``get_data_payload(key)`` for prepared "
+        "payloads) and call ``create_page`` to publish the result.\n\n"
+        f"Disallowed references:\n{names_block}\n\n"
+        f"Names available in the script execution context: {', '.join(available)}."
+    )
 
 
 def _execute_script_in_thread(
@@ -286,18 +415,45 @@ def _execute_script_in_thread(
     language: str,
     entity_store: EntityStore,
     page_builder_dir: Path,
+    settings_api,
 ) -> str:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         renderer = PageRenderer(page_builder_dir)
 
-        def render_blocks(blocks: list[dict], vibe: str = "minimal") -> "RenderedPage":
+        def _resolve_vibe(vibe: str | None) -> str:
+            if vibe is None or not vibe.strip():
+                return DEFAULT_VIBE
+            return vibe.strip().lower()
+
+        def render_blocks(blocks: list[dict], vibe: str = DEFAULT_VIBE) -> "RenderedPage":
             resolved = _resolve_vibe(vibe)
             return RenderedPage(
                 body=renderer.render_body(vibe=resolved, blocks=blocks),
                 css=renderer.render_css(vibe=resolved, blocks=blocks),
             )
+
+        async def _append_menu_link(title: str, shared_id: str) -> tuple[bool, str | None]:
+            from uwazi_agent.use_cases.tools.page_menu_url import sanitize_menu_title
+            from uwazi_api.domain.menu_link import MenuLink
+
+            if settings_api is None:
+                return False, "Settings API is not configured; the page was created but not added to the menu."
+            try:
+                clean_title = sanitize_menu_title(title) or "Page"
+                url = f"/page/{shared_id}"
+                existing = await settings_api.get_menu_links()
+                new_entry = MenuLink(title=clean_title, type="link", url=url)
+                await settings_api.set_menu_links([*existing, new_entry])
+                return True, None
+            except Exception as exc:  # noqa: BLE001 — best-effort, log and move on
+                logger.error(
+                    "execute_page_script: menu link FAILED for shared_id={}: {}",
+                    shared_id,
+                    truncate_log_message(str(exc)),
+                )
+                return False, f"Page created but adding the menu link failed: {exc}."
 
         def create_page(
             title: str,
@@ -313,7 +469,17 @@ def _execute_script_in_thread(
                 language=lang,
             )
             results = loop.run_until_complete(page_api.create_pages([page], lang))
-            return [r.model_dump() for r in results]
+            output = [r.model_dump() for r in results]
+            for r in output:
+                if r.get("success") and r.get("shared_id"):
+                    menu_ok, menu_err = loop.run_until_complete(_append_menu_link(title, r["shared_id"]))
+                    if not menu_ok:
+                        logger.warning(
+                            "execute_page_script: page {} created but menu link step failed: {}",
+                            r["shared_id"],
+                            truncate_log_message(str(menu_err)) if menu_err else menu_err,
+                        )
+            return output
 
         _default_language = language
 
@@ -337,7 +503,9 @@ def _execute_script_in_thread(
         }
 
         try:
-            exec(code, namespace)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, namespace)
         except Exception as exc:
             tb = traceback.format_exc()
             return f"Error executing page script: {type(exc).__name__}: {exc}\n\nTraceback:\n{tb}"

@@ -1,17 +1,34 @@
-<section class="pie-chart">
-  <div class="pie-chart__inner">
+{% set chart_type = slots.chart_type | default('donut') %}
+{% set total_value = slots.data | map(attribute='value') | map('float') | sum %}
+<section class="pie-chart uwazi-block">
+  <div class="pie-chart__inner uwazi-block__inner">
     {% if slots.title %}
     <h3 class="pie-chart__title">{{ slots.title }}</h3>
     {% endif %}
     <div class="pie-chart__body">
       <div class="pie-chart__svg-wrap">
-        <svg class="pie-chart__svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" data-pie-svg>
-          <g transform="translate(100,100)"></g>
+        <svg class="pie-chart__svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <g transform="translate(100,100)"{% if chart_type == 'pie' %} class="pie-chart__segments pie-chart__segments--pie"{% else %} class="pie-chart__segments pie-chart__segments--donut"{% endif %}>
+            {% set ns = namespace(angle=0.0) %}
+            {% for segment in slots.data %}
+            {% set seg = segment | default({}) %}
+            {% set seg_value = seg.value | default(0) | float %}
+            {% if total_value > 0 and seg_value > 0 %}
+            {% if chart_type == 'pie' %}
+            {% set path_info = seg_value | svg_pie_path(total_value, ns.angle) %}
+            {% else %}
+            {% set path_info = seg_value | svg_donut_path(total_value, ns.angle) %}
+            {% endif %}
+            <path d="{{ path_info.d }}" fill="{{ loop.index0 | chart_color }}" class="pie-chart__segment" />
+            {% set ns.angle = path_info.end_angle_deg %}
+            {% endif %}
+            {% endfor %}
+          </g>
         </svg>
-        {% if slots.chart_type == "donut" and slots.center_label %}
+        {% if chart_type == "donut" and slots.center_label %}
         <div class="pie-chart__center">
           <span class="pie-chart__center-label">{{ slots.center_label }}</span>
-          <span class="pie-chart__center-value" data-pie-total></span>
+          <span class="pie-chart__center-value">{{ total_value | int }}</span>
         </div>
         {% endif %}
       </div>
@@ -26,76 +43,12 @@
       </div>
     </div>
   </div>
-  <script type="application/json" class="pie-chart__data" data-pie-data>
-    {{ slots.data | tojson }}
-  </script>
-  <script type="application/json" class="pie-chart__config" data-pie-config>
-    {"type": "{{ slots.chart_type }}"}
-  </script>
 </section>
-
-<script>
-(function() {
-  var colorVars = ['--chart-1','--chart-2','--chart-3','--chart-4','--chart-5','--chart-6'];
-  function getColor(block, i, override) {
-    if (override) return override;
-    var c = getComputedStyle(block).getPropertyValue(colorVars[i % colorVars.length]).trim();
-    return c || '#999';
-  }
-  function polar(r, a) { return [r * Math.cos(a), r * Math.sin(a)]; }
-
-  document.querySelectorAll('.pie-chart').forEach(function(block) {
-    var dataEl = block.querySelector('[data-pie-data]');
-    var configEl = block.querySelector('[data-pie-config]');
-    var svg = block.querySelector('[data-pie-svg] g');
-    if (!dataEl || !configEl || !svg) return;
-    var data, config;
-    try {
-      data = JSON.parse(dataEl.textContent);
-      config = JSON.parse(configEl.textContent);
-    } catch(e) { return; }
-    if (!data.length) return;
-
-    var total = data.reduce(function(s, d) { return s + (parseFloat(d.value) || 0); }, 0);
-    var innerRadius = config.type === 'donut' ? 0.6 : 0;
-    var r = 90, ir = r * innerRadius;
-    var startAngle = -Math.PI / 2;
-
-    data.forEach(function(d, i) {
-      var v = parseFloat(d.value) || 0;
-      if (!v) return;
-      var angle = (v / total) * Math.PI * 2;
-      var endAngle = startAngle + angle;
-      var p1 = polar(r, startAngle), p2 = polar(r, endAngle);
-      var ip1 = polar(ir, startAngle), ip2 = polar(ir, endAngle);
-      var largeArc = angle > Math.PI ? 1 : 0;
-      var dStr;
-      if (innerRadius > 0) {
-        dStr = 'M ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
-               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) +
-               ' L ' + ip2[0].toFixed(2) + ' ' + ip2[1].toFixed(2) +
-               ' A ' + ir + ' ' + ir + ' 0 ' + largeArc + ' 0 ' + ip1[0].toFixed(2) + ' ' + ip1[1].toFixed(2) + ' Z';
-      } else {
-        dStr = 'M 0 0 L ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
-               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) + ' Z';
-      }
-      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', dStr);
-      path.setAttribute('fill', getColor(block, i, d.color));
-      path.setAttribute('class', 'pie-chart__segment');
-      svg.appendChild(path);
-      startAngle = endAngle;
-    });
-
-    var totalEl = block.querySelector('[data-pie-total]');
-    if (totalEl) totalEl.textContent = total.toLocaleString();
-  });
-})();
-</script>
 
 <style>
 .pie-chart {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   font-family: var(--font-body);
 }
 .pie-chart__inner {
@@ -128,6 +81,10 @@
   width: 100%;
   height: 100%;
   display: block;
+  transform: rotate(-90deg);
+}
+.pie-chart__segments--donut .pie-chart__segment {
+  transform-origin: center;
 }
 .pie-chart__segment {
   transition: opacity 0.2s ease;

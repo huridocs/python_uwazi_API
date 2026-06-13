@@ -126,3 +126,43 @@ def bind_context(**kwargs: Any) -> None:
     global _LOG_CONTEXT
     _LOG_CONTEXT.update(kwargs)
     logger.configure(extra={**{k: v for k, v in _LOG_CONTEXT.items()}, **kwargs})
+
+
+def _count_newlines(text: str) -> int:
+    """Count newline characters in ``text`` without including a trailing one."""
+    if not text:
+        return 0
+    count = text.count("\n")
+    if text.endswith("\n"):
+        count -= 1
+    return count
+
+
+def truncate_log_message(message: str, max_lines: int = 5) -> str:
+    """Keep ``message`` compact: at most ``max_lines`` lines.
+
+    Long multi-line messages (e.g. page scripts, entity JSON dumps) blow up
+    Docker console output and make logs hard to scan. This helper collapses
+    anything that exceeds ``max_lines`` by returning the first
+    ``max_lines - 1`` lines, then a final line that states how many extra
+    lines were dropped.
+
+    Args:
+        message: The original log message.
+        max_lines: Maximum number of lines to emit. Defaults to 5.
+
+    Returns:
+        A possibly-truncated version of ``message`` with at most ``max_lines``
+        lines.
+    """
+    if not message or max_lines <= 0:
+        return message
+
+    lines = message.splitlines()
+    if len(lines) <= max_lines:
+        return message
+
+    kept = lines[: max_lines - 1]
+    dropped = len(lines) - (max_lines - 1)
+    kept.append(f"... ({dropped} more line{'s' if dropped != 1 else ''})")
+    return "\n".join(kept)

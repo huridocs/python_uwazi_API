@@ -520,10 +520,7 @@ class UwaziApiAdapter(
                     permissions = self._entity_repo._get_entity_permissions(shared_id)
                 except Exception:
                     permissions = []
-                is_public = any(
-                    p.get("refId") == "public" and p.get("type") == "public"
-                    for p in permissions
-                )
+                is_public = any(p.get("refId") == "public" and p.get("type") == "public" for p in permissions)
                 return AgentPublishStatus(
                     shared_id=shared_id,
                     published=is_public,
@@ -809,6 +806,12 @@ class UwaziApiAdapter(
     async def set_menu_links(self, links: list[MenuLink]) -> list[MenuLink]:
         def _call() -> list[MenuLink]:
             return self._menu_links_repo.replace_all(links)
+
+        return await asyncio.to_thread(_call)
+
+    async def delete_all_menu_links(self) -> list[MenuLink]:
+        def _call() -> list[MenuLink]:
+            return self._menu_links_repo.delete_all()
 
         return await asyncio.to_thread(_call)
 

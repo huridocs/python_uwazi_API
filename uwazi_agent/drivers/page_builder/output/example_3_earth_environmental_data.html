@@ -23,9 +23,9 @@
   --radius-sm: 6px;
   --radius-md: 12px;
   --radius-lg: 16px;
-  --shadow-sm: 0 2px 8px rgba(39,103,73,0.1);
-  --shadow-md: 0 4px 16px rgba(39,103,73,0.15);
-  --shadow-lg: 0 8px 32px rgba(39,103,73,0.2);
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
   --spacing-xs: 0.5rem;
   --spacing-sm: 0.75rem;
   --spacing-md: 1.25rem;
@@ -84,10 +84,10 @@ a {
 </style>
 </head>
 <body>
-
-
-<section class="hero" style="--hero-height: 50vh;">
-  <div class="hero__inner">
+<div id="uwazi-page-root">
+<section class="hero uwazi-block uwazi-block--full-bleed" style="--hero-height: 30vh;">
+  <div class="hero__backdrop" aria-hidden="true"></div>
+  <div class="hero__inner uwazi-block__inner">
     
     <span class="hero__label">Live Monitor</span>
     
@@ -96,73 +96,9 @@ a {
     <p class="hero__subtitle">Real-time data from satellite imagery, field reports, and indigenous community monitoring networks.</p>
     
   </div>
-  <div class="hero__line"></div>
 </section>
-
-<style>
-.hero {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: var(--hero-height, 50vh);
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-  overflow: hidden;
-}
-
-.hero__inner {
-  max-width: 1100px;
-  width: 100%;
-  margin: 0 auto;
-  position: relative;
-  z-index: 2;
-}
-
-.hero__label {
-  display: inline-block;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-primary);
-  margin-bottom: var(--spacing-sm);
-}
-
-.hero__title {
-  font-family: var(--font-heading);
-  font-size: clamp(2.4rem, 4.5vw, 3.8rem);
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  color: var(--color-text);
-  max-width: 800px;
-  text-wrap: balance;
-}
-
-.hero__subtitle {
-  font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin-top: var(--spacing-sm);
-  max-width: 480px;
-  font-weight: 400;
-}
-
-.hero__line {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--color-border);
-}
-</style>
-
-<section class="stats-grid">
-  <div class="stats-grid__inner">
+<section class="stats-grid uwazi-block">
+  <div class="stats-grid__inner uwazi-block__inner">
     
     <div class="stats-grid__header">
       <h2 class="stats-grid__heading">Current status</h2>
@@ -197,90 +133,8 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.stats-grid {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.stats-grid__inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.stats-grid__header {
-  margin-bottom: var(--spacing-lg);
-}
-.stats-grid__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.stats-grid__grid {
-  display: grid;
-  gap: 0;
-  border-top: 1px solid var(--color-border);
-}
-.stats-grid__grid--cols-1 { grid-template-columns: 1fr; }
-.stats-grid__grid--cols-2 { grid-template-columns: repeat(2, 1fr); }
-.stats-grid__grid--cols-3 { grid-template-columns: repeat(3, 1fr); }
-.stats-grid__grid--cols-4 { grid-template-columns: repeat(4, 1fr); }
-@media (max-width: 768px) {
-  .stats-grid__grid--cols-3,
-  .stats-grid__grid--cols-4 { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 480px) {
-  .stats-grid__grid { grid-template-columns: 1fr; }
-}
-
-.stats-grid__item {
-  padding: var(--spacing-md) var(--spacing-sm);
-  border-bottom: 1px solid var(--color-border);
-  border-right: 1px solid var(--color-border);
-}
-.stats-grid__item:last-child { border-right: none; }
-@media (max-width: 768px) {
-  .stats-grid__item:nth-child(2n) { border-right: none; }
-}
-@media (min-width: 769px) {
-  .stats-grid__grid--cols-2 .stats-grid__item:nth-child(2n),
-  .stats-grid__grid--cols-3 .stats-grid__item:nth-child(3n),
-  .stats-grid__grid--cols-4 .stats-grid__item:nth-child(4n) {
-    border-right: none;
-  }
-}
-
-.stats-grid__icon {
-  font-size: 1.3rem;
-  margin-bottom: var(--spacing-xs);
-  opacity: 0.7;
-}
-
-.stats-grid__value {
-  font-family: var(--font-heading);
-  font-size: clamp(2.4rem, 4vw, 3.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  line-height: 1;
-  letter-spacing: -0.04em;
-  margin-bottom: var(--spacing-xs);
-}
-
-.stats-grid__label {
-  font-family: var(--font-body);
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--color-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-</style>
-
-<section class="two-column">
-  <div class="two-column__inner">
+<section class="two-column uwazi-block">
+  <div class="two-column__inner uwazi-block__inner">
     
     <div class="two-column__header">
       <h2 class="two-column__heading">Deforestation by driver</h2>
@@ -289,172 +143,145 @@ a {
     <div class="two-column__row">
       <div class="two-column__left" style="flex: 0 0 55%;">
         
-        <section class="bar-chart">
-  <div class="bar-chart__inner">
+        
+
+
+
+<section class="bar-chart uwazi-block">
+  <div class="bar-chart__inner uwazi-block__inner">
     
     <h3 class="bar-chart__title">Primary causes of forest loss</h3>
     
     <div class="bar-chart__list">
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Cattle ranching</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-1); --bar-width: 0%;" data-bar-fill data-bar-value="38"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-1); --bar-width: 100.0%;"></div>
         </div>
         <div class="bar-chart__value">38%</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Soy cultivation</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-2); --bar-width: 0%;" data-bar-fill data-bar-value="24"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-2); --bar-width: 63.1578947368421%;"></div>
         </div>
         <div class="bar-chart__value">24%</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Illegal mining</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-3); --bar-width: 0%;" data-bar-fill data-bar-value="16"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-3); --bar-width: 42.10526315789473%;"></div>
         </div>
         <div class="bar-chart__value">16%</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Logging</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-4); --bar-width: 0%;" data-bar-fill data-bar-value="12"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-4); --bar-width: 31.57894736842105%;"></div>
         </div>
         <div class="bar-chart__value">12%</div>
       </div>
       
+      
+      
       <div class="bar-chart__row">
         <div class="bar-chart__label">Other</div>
         <div class="bar-chart__track">
-          <div class="bar-chart__fill" style="background: var(--chart-5); --bar-width: 0%;" data-bar-fill data-bar-value="10"></div>
+          <div class="bar-chart__fill" style="background: var(--chart-5); --bar-width: 26.31578947368421%;"></div>
         </div>
         <div class="bar-chart__value">10%</div>
       </div>
       
     </div>
   </div>
-  <script type="application/json" class="bar-chart__data" data-bar-data>
-    [{"label": "Cattle ranching", "value": 38}, {"label": "Soy cultivation", "value": 24}, {"label": "Illegal mining", "value": 16}, {"label": "Logging", "value": 12}, {"label": "Other", "value": 10}]
-  </script>
-  
 </section>
 
-<script>
-(function() {
-  function animate() {
-    document.querySelectorAll('.bar-chart').forEach(function(block) {
-      var dataEl = block.querySelector('[data-bar-data]');
-      var maxEl = block.querySelector('[data-bar-max]');
-      if (!dataEl) return;
-      var data;
-      try { data = JSON.parse(dataEl.textContent); } catch(e) { return; }
-      var max = maxEl ? parseFloat(JSON.parse(maxEl.textContent)) : null;
-      if (!max) {
-        max = data.reduce(function(m, d) { return Math.max(m, parseFloat(d.value) || 0); }, 0);
-      }
-      if (!max) return;
-      var fills = block.querySelectorAll('[data-bar-fill]');
-      fills.forEach(function(fill, i) {
-        var v = parseFloat(data[i] ? data[i].value : 0) || 0;
-        var pct = (v / max) * 100;
-        // Defer to next frame for transition to apply
-        requestAnimationFrame(function() {
-          fill.style.setProperty('--bar-width', pct + '%');
-        });
-      });
-    });
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', animate);
-  } else {
-    animate();
-  }
-})();
-</script>
 
-<style>
-.bar-chart {
-  padding: var(--spacing-lg) var(--spacing-md);
-  font-family: var(--font-body);
-}
-.bar-chart__inner {
-  max-width: 700px;
-  margin: 0 auto;
-}
-.bar-chart__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-md) 0;
-  letter-spacing: -0.01em;
-}
-.bar-chart__list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.bar-chart__row {
-  display: grid;
-  grid-template-columns: 140px 1fr 70px;
-  align-items: center;
-  gap: 0.75rem;
-}
-@media (max-width: 640px) {
-  .bar-chart__row { grid-template-columns: 100px 1fr 50px; gap: 0.5rem; }
-}
-.bar-chart__label {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bar-chart__track {
-  height: 8px;
-  background: var(--color-surface);
-  border-radius: 4px;
-  overflow: hidden;
-  position: relative;
-}
-.bar-chart__fill {
-  height: 100%;
-  width: var(--bar-width, 0%);
-  border-radius: 4px;
-  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.bar-chart__value {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--color-text);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-</style>
         
       </div>
       <div class="two-column__right" style="flex: 1;">
         
-        <section class="pie-chart">
-  <div class="pie-chart__inner">
+        
+
+<section class="pie-chart uwazi-block">
+  <div class="pie-chart__inner uwazi-block__inner">
     
     <h3 class="pie-chart__title">Geographic distribution</h3>
     
     <div class="pie-chart__body">
       <div class="pie-chart__svg-wrap">
-        <svg class="pie-chart__svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" data-pie-svg>
-          <g transform="translate(100,100)"></g>
+        <svg class="pie-chart__svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <g transform="translate(100,100)" class="pie-chart__segments pie-chart__segments--donut">
+            
+            
+            
+            
+            
+            
+            
+            
+            <path d="M 0.00 -90.00 A 90.0 90.0 0 0 1 11.28 89.29 L 6.77 53.57 A 54.0 54.0 0 0 0 0.00 -54.00 Z" fill="var(--chart-1)" class="pie-chart__segment" />
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            <path d="M 11.28 89.29 A 90.0 90.0 0 0 1 -85.60 27.81 L -51.36 16.69 A 54.0 54.0 0 0 0 6.77 53.57 Z" fill="var(--chart-2)" class="pie-chart__segment" />
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            <path d="M -85.60 27.81 A 90.0 90.0 0 0 1 -75.99 -48.22 L -45.59 -28.93 A 54.0 54.0 0 0 0 -51.36 16.69 Z" fill="var(--chart-3)" class="pie-chart__segment" />
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            <path d="M -75.99 -48.22 A 90.0 90.0 0 0 1 -33.13 -83.68 L -19.88 -50.21 A 54.0 54.0 0 0 0 -45.59 -28.93 Z" fill="var(--chart-4)" class="pie-chart__segment" />
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            <path d="M -33.13 -83.68 A 90.0 90.0 0 0 1 -0.00 -90.00 L -0.00 -54.00 A 54.0 54.0 0 0 0 -19.88 -50.21 Z" fill="var(--chart-5)" class="pie-chart__segment" />
+            
+            
+            
+          </g>
         </svg>
         
         <div class="pie-chart__center">
           <span class="pie-chart__center-label">Total</span>
-          <span class="pie-chart__center-value" data-pie-total></span>
+          <span class="pie-chart__center-value">100</span>
         </div>
         
       </div>
@@ -493,237 +320,19 @@ a {
       </div>
     </div>
   </div>
-  <script type="application/json" class="pie-chart__data" data-pie-data>
-    [{"label": "Brazil", "value": 48}, {"label": "Peru", "value": 22}, {"label": "Bolivia", "value": 14}, {"label": "Colombia", "value": 10}, {"label": "Ecuador", "value": 6}]
-  </script>
-  <script type="application/json" class="pie-chart__config" data-pie-config>
-    {"type": "donut"}
-  </script>
 </section>
 
-<script>
-(function() {
-  var colorVars = ['--chart-1','--chart-2','--chart-3','--chart-4','--chart-5','--chart-6'];
-  function getColor(block, i, override) {
-    if (override) return override;
-    var c = getComputedStyle(block).getPropertyValue(colorVars[i % colorVars.length]).trim();
-    return c || '#999';
-  }
-  function polar(r, a) { return [r * Math.cos(a), r * Math.sin(a)]; }
 
-  document.querySelectorAll('.pie-chart').forEach(function(block) {
-    var dataEl = block.querySelector('[data-pie-data]');
-    var configEl = block.querySelector('[data-pie-config]');
-    var svg = block.querySelector('[data-pie-svg] g');
-    if (!dataEl || !configEl || !svg) return;
-    var data, config;
-    try {
-      data = JSON.parse(dataEl.textContent);
-      config = JSON.parse(configEl.textContent);
-    } catch(e) { return; }
-    if (!data.length) return;
-
-    var total = data.reduce(function(s, d) { return s + (parseFloat(d.value) || 0); }, 0);
-    var innerRadius = config.type === 'donut' ? 0.6 : 0;
-    var r = 90, ir = r * innerRadius;
-    var startAngle = -Math.PI / 2;
-
-    data.forEach(function(d, i) {
-      var v = parseFloat(d.value) || 0;
-      if (!v) return;
-      var angle = (v / total) * Math.PI * 2;
-      var endAngle = startAngle + angle;
-      var p1 = polar(r, startAngle), p2 = polar(r, endAngle);
-      var ip1 = polar(ir, startAngle), ip2 = polar(ir, endAngle);
-      var largeArc = angle > Math.PI ? 1 : 0;
-      var dStr;
-      if (innerRadius > 0) {
-        dStr = 'M ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
-               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) +
-               ' L ' + ip2[0].toFixed(2) + ' ' + ip2[1].toFixed(2) +
-               ' A ' + ir + ' ' + ir + ' 0 ' + largeArc + ' 0 ' + ip1[0].toFixed(2) + ' ' + ip1[1].toFixed(2) + ' Z';
-      } else {
-        dStr = 'M 0 0 L ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2) +
-               ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + p2[0].toFixed(2) + ' ' + p2[1].toFixed(2) + ' Z';
-      }
-      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', dStr);
-      path.setAttribute('fill', getColor(block, i, d.color));
-      path.setAttribute('class', 'pie-chart__segment');
-      svg.appendChild(path);
-      startAngle = endAngle;
-    });
-
-    var totalEl = block.querySelector('[data-pie-total]');
-    if (totalEl) totalEl.textContent = total.toLocaleString();
-  });
-})();
-</script>
-
-<style>
-.pie-chart {
-  padding: var(--spacing-lg) var(--spacing-md);
-  font-family: var(--font-body);
-}
-.pie-chart__inner {
-  max-width: 600px;
-  margin: 0 auto;
-}
-.pie-chart__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-md) 0;
-  letter-spacing: -0.01em;
-}
-.pie-chart__body {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-xl);
-}
-@media (max-width: 640px) {
-  .pie-chart__body { flex-direction: column; gap: var(--spacing-lg); }
-}
-.pie-chart__svg-wrap {
-  position: relative;
-  flex-shrink: 0;
-  width: 200px;
-  height: 200px;
-}
-.pie-chart__svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-.pie-chart__segment {
-  transition: opacity 0.2s ease;
-  stroke: var(--color-bg);
-  stroke-width: 2;
-  cursor: default;
-}
-.pie-chart__segment:hover {
-  opacity: 0.8;
-}
-.pie-chart__center {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.pie-chart__center-label {
-  font-size: 0.65rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--color-text-muted);
-}
-.pie-chart__center-value {
-  font-family: var(--font-heading);
-  font-size: 1.6rem;
-  font-weight: 700;
-  color: var(--color-text);
-  line-height: 1.1;
-  margin-top: 0.15rem;
-}
-.pie-chart__legend {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  flex: 1;
-  min-width: 0;
-}
-.pie-chart__legend-item {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.85rem;
-}
-.pie-chart__legend-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  flex-shrink: 0;
-}
-.pie-chart__legend-label {
-  color: var(--color-text);
-  font-weight: 500;
-  flex: 1;
-  min-width: 0;
-}
-.pie-chart__legend-value {
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-  font-weight: 500;
-}
-</style>
         
       </div>
     </div>
   </div>
 </section>
-
-<style>
-.two-column {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.two-column__inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.two-column__header {
-  margin-bottom: var(--spacing-lg);
-}
-.two-column__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-.two-column__row {
-  display: flex;
-  gap: var(--spacing-xl);
-  align-items: flex-start;
-}
-@media (max-width: 768px) {
-  .two-column__row {
-    flex-direction: column;
-    gap: var(--spacing-lg);
-  }
-  .two-column__left, .two-column__right {
-    flex: 1 1 auto !important;
-  }
-}
-.two-column__left, .two-column__right {
-  min-width: 0;
-}
-</style>
-<section class="divider">
-  <div class="divider__line"></div>
+<section class="divider uwazi-block">
+  <div class="divider__line uwazi-block__inner"></div>
 </section>
-
-<style>
-.divider {
-  padding: 0 var(--spacing-md);
-  background: var(--color-bg);
-  display: flex;
-  justify-content: center;
-}
-.divider__line {
-  max-width: 1200px;
-  width: 100%;
-  height: 1px;
-  background: var(--color-border);
-}
-</style>
-<section class="event-chart-v">
-  <div class="event-chart-v__inner">
+<section class="event-chart-v uwazi-block">
+  <div class="event-chart-v__inner uwazi-block__inner">
     
     <h3 class="event-chart-v__title">Monitoring history</h3>
     
@@ -861,141 +470,8 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.event-chart-v {
-  padding: var(--spacing-lg) var(--spacing-md);
-  font-family: var(--font-body);
-}
-.event-chart-v__inner {
-  max-width: 800px;
-  margin: 0 auto;
-}
-.event-chart-v__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-lg) 0;
-  letter-spacing: -0.01em;
-  text-align: center;
-}
-
-.event-chart-v__track {
-  position: relative;
-  padding: 0;
-}
-.event-chart-v__line {
-  position: absolute;
-  left: 9px;
-  top: 8px;
-  bottom: 8px;
-  width: 2px;
-  background: var(--color-border);
-  border-radius: 1px;
-}
-@media (min-width: 768px) {
-  .event-chart-v__line {
-    left: 19px;
-  }
-}
-
-.event-chart-v__events {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-}
-
-.event-chart-v__event {
-  position: relative;
-  display: grid;
-  grid-template-columns: 40px 1fr;
-  gap: var(--spacing-sm);
-  align-items: flex-start;
-}
-@media (min-width: 768px) {
-  .event-chart-v__event {
-    grid-template-columns: 60px 1fr;
-    gap: var(--spacing-md);
-  }
-}
-
-.event-chart-v__bubble {
-  position: relative;
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2;
-  flex-shrink: 0;
-}
-@media (min-width: 768px) {
-  .event-chart-v__bubble {
-    width: 40px;
-    height: 20px;
-  }
-}
-.event-chart-v__bubble-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  box-shadow: 0 0 0 4px var(--color-bg);
-  transition: transform 0.3s, background 0.3s;
-}
-.event-chart-v__bubble-ring {
-  position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 1px solid var(--color-primary);
-  opacity: 0;
-  transition: opacity 0.3s, transform 0.3s;
-}
-.event-chart-v__event:hover .event-chart-v__bubble-dot {
-  transform: scale(1.25);
-  background: var(--color-accent);
-}
-.event-chart-v__event:hover .event-chart-v__bubble-ring {
-  opacity: 0.5;
-  transform: scale(1.3);
-}
-
-.event-chart-v__card {
-  min-width: 0;
-}
-.event-chart-v__date {
-  display: inline-block;
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--color-primary);
-  margin-bottom: 0.2rem;
-}
-.event-chart-v__event-title {
-  font-family: var(--font-heading);
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 0.2rem 0;
-  line-height: 1.35;
-  letter-spacing: -0.01em;
-}
-.event-chart-v__event-desc {
-  font-family: var(--font-body);
-  font-size: 0.85rem;
-  line-height: 1.6;
-  color: var(--color-text-muted);
-  margin: 0;
-}
-</style>
-
-<section class="timeline">
-  <div class="timeline__inner">
+<section class="timeline uwazi-block">
+  <div class="timeline__inner uwazi-block__inner">
     
     <div class="timeline__header">
       <h2 class="timeline__heading">Recent field reports</h2>
@@ -1030,85 +506,8 @@ a {
     </div>
   </div>
 </section>
-
-<style>
-.timeline {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-}
-.timeline__inner {
-  max-width: 800px;
-  margin: 0 auto;
-}
-.timeline__header {
-  margin-bottom: var(--spacing-lg);
-}
-.timeline__heading {
-  font-family: var(--font-heading);
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-}
-
-.timeline__list {
-  border-top: 1px solid var(--color-border);
-}
-
-.timeline__entry {
-  display: grid;
-  grid-template-columns: 140px 1fr;
-  gap: var(--spacing-lg);
-  padding: var(--spacing-md) 0;
-  border-bottom: 1px solid var(--color-border);
-  transition: background 0.2s ease;
-}
-.timeline__entry:hover {
-  background: var(--color-surface);
-}
-@media (max-width: 640px) {
-  .timeline__entry {
-    grid-template-columns: 1fr;
-    gap: var(--spacing-xs);
-  }
-}
-
-.timeline__date {
-  font-family: var(--font-body);
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--color-primary);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  padding-top: 0.15rem;
-}
-
-.timeline__content {
-  min-width: 0;
-}
-
-.timeline__title {
-  font-family: var(--font-heading);
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-xs) 0;
-  line-height: 1.4;
-  letter-spacing: -0.01em;
-}
-
-.timeline__description {
-  font-family: var(--font-body);
-  font-size: 0.95rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin: 0;
-  max-width: 560px;
-}
-</style>
-<section class="cta">
-  <div class="cta__inner">
+<section class="cta uwazi-block">
+  <div class="cta__inner uwazi-block__inner">
     
     <span class="cta__label">Support</span>
     
@@ -1122,68 +521,6 @@ a {
     </a>
   </div>
 </section>
-
-<style>
-.cta {
-  padding: var(--spacing-lg) var(--spacing-md);
-  background: var(--color-bg);
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-}
-.cta__inner {
-  max-width: 640px;
-  margin: 0 auto;
-  text-align: center;
-}
-.cta__label {
-  display: inline-block;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--color-primary);
-  margin-bottom: var(--spacing-sm);
-}
-.cta__title {
-  font-family: var(--font-heading);
-  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0 0 var(--spacing-sm) 0;
-  line-height: 1.2;
-  letter-spacing: -0.03em;
-}
-.cta__subtitle {
-  font-family: var(--font-body);
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: var(--color-text-muted);
-  margin: 0 0 var(--spacing-lg) 0;
-}
-.cta__button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--color-text);
-  background: transparent;
-  border: 1px solid var(--color-text);
-  padding: 0.85rem 2rem;
-  transition: background 0.2s ease, color 0.2s ease;
-}
-.cta__button:hover {
-  background: var(--color-text);
-  color: var(--color-bg);
-}
-.cta__arrow {
-  transition: transform 0.2s ease;
-}
-.cta__button:hover .cta__arrow {
-  transform: translateX(3px);
-}
-</style>
+</div>
 </body>
 </html>

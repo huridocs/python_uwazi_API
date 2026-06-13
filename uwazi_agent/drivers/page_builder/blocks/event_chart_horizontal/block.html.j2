@@ -1,6 +1,6 @@
 {% set n = slots.events|length %}
-<section class="event-chart-h">
-  <div class="event-chart-h__inner">
+<section class="event-chart-h uwazi-block">
+  <div class="event-chart-h__inner uwazi-block__inner">
     {% if slots.title %}
     <h3 class="event-chart-h__title">{{ slots.title }}</h3>
     {% endif %}
@@ -31,7 +31,8 @@
 
 <style>
 .event-chart-h {
-  padding: var(--spacing-lg) var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
   font-family: var(--font-body);
 }
 .event-chart-h__inner {

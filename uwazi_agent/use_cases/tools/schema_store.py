@@ -36,7 +36,7 @@ class SchemaStore(BaseModel):
     # page-agent-specific view that combines both.
     page_blocks: list[dict[str, Any]] = Field(default_factory=list)
     page_vibes: list[str] = Field(default_factory=list)
-    page_default_vibe: str = "minimal"
+    page_default_vibe: str = "warm"
 
     def add_template_names(self, names: list[str]) -> None:
         for name in names:
@@ -195,7 +195,7 @@ class SchemaStore(BaseModel):
         self,
         blocks: list[dict[str, Any]],
         vibes: list[str],
-        default_vibe: str = "minimal",
+        default_vibe: str = "warm",
     ) -> None:
         """Populate the page-builder section (called once at boot).
 

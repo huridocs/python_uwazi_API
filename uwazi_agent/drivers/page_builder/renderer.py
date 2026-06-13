@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -11,6 +12,66 @@ def _chart_color(index: int) -> str:
     """Return a CSS var() string cycling through --chart-1..--chart-6."""
     slot = (index % 6) + 1
     return f"var(--chart-{slot})"
+
+
+def _svg_pie_path(value: float, total: float, start_angle_deg: float, radius: float = 90.0) -> dict[str, str]:
+    """Return an SVG sector path descriptor and its end angle in degrees.
+
+    Used by the pie_chart block template so the chart is rendered
+    server-side and needs no client-side JavaScript to hydrate.
+    """
+    if total <= 0 or value <= 0:
+        return {"d": "", "end_angle_deg": start_angle_deg}
+    angle = (value / total) * 360.0
+    end_angle_deg = start_angle_deg + angle
+    start_rad = math.radians(start_angle_deg - 90)
+    end_rad = math.radians(end_angle_deg - 90)
+    x1 = radius * math.cos(start_rad)
+    y1 = radius * math.sin(start_rad)
+    x2 = radius * math.cos(end_rad)
+    y2 = radius * math.sin(end_rad)
+    large_arc = 1 if angle > 180 else 0
+    d = f"M 0 0 L {x1:.2f} {y1:.2f} A {radius} {radius} 0 {large_arc} 1 {x2:.2f} {y2:.2f} Z"
+    return {"d": d, "end_angle_deg": end_angle_deg}
+
+
+def _svg_donut_path(
+    value: float,
+    total: float,
+    start_angle_deg: float,
+    outer_radius: float = 90.0,
+    inner_radius: float = 54.0,
+) -> dict[str, str]:
+    """Return an SVG donut-sector path descriptor and end angle in degrees."""
+    if total <= 0 or value <= 0:
+        return {"d": "", "end_angle_deg": start_angle_deg}
+    angle = (value / total) * 360.0
+    end_angle_deg = start_angle_deg + angle
+    large_arc = 1 if angle > 180 else 0
+
+    def _pt(r: float, deg: float) -> tuple[float, float]:
+        rad = math.radians(deg - 90)
+        return r * math.cos(rad), r * math.sin(rad)
+
+    op1 = _pt(outer_radius, start_angle_deg)
+    op2 = _pt(outer_radius, end_angle_deg)
+    ip1 = _pt(inner_radius, start_angle_deg)
+    ip2 = _pt(inner_radius, end_angle_deg)
+    d = (
+        f"M {op1[0]:.2f} {op1[1]:.2f}"
+        f" A {outer_radius} {outer_radius} 0 {large_arc} 1 {op2[0]:.2f} {op2[1]:.2f}"
+        f" L {ip2[0]:.2f} {ip2[1]:.2f}"
+        f" A {inner_radius} {inner_radius} 0 {large_arc} 0 {ip1[0]:.2f} {ip1[1]:.2f} Z"
+    )
+    return {"d": d, "end_angle_deg": end_angle_deg}
+
+
+def _pct(value: float, max_value: float) -> float:
+    """Return a percentage clamped to [0, 100]."""
+    if max_value <= 0:
+        return 0.0
+    pct = (value / max_value) * 100.0
+    return max(0.0, min(100.0, pct))
 
 
 # Strip <style>...</style> blocks from a rendered block fragment.
@@ -89,6 +150,35 @@ SHARED_CSS_SCOPED: str = """
   color: inherit;
   text-decoration: none;
 }
+
+/* Page-level layout: the root wrapper is full-width, while each block
+   keeps its readable inner column. This lets full-bleed blocks (e.g. hero)
+   span the entire viewport without breaking out of a narrow parent. */
+#uwazi-page-root {
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  margin: 0;
+}
+
+.uwazi-block {
+  padding-left: var(--spacing-md);
+  padding-right: var(--spacing-md);
+}
+
+.uwazi-block__inner {
+  width: 100%;
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* A full-bleed block ignores side padding and spans edge-to-edge.
+   Its own inner container still centers the content. */
+.uwazi-block--full-bleed {
+  padding-left: 0;
+  padding-right: 0;
+}
 """
 
 
@@ -111,6 +201,9 @@ class PageRenderer:
             autoescape=False,
         )
         self._jinja_env.filters["chart_color"] = _chart_color
+        self._jinja_env.filters["svg_pie_path"] = _svg_pie_path
+        self._jinja_env.filters["svg_donut_path"] = _svg_donut_path
+        self._jinja_env.filters["pct"] = _pct
 
     def render_body(
         self,
@@ -125,6 +218,9 @@ class PageRenderer:
         rendered body is what should go into the Uwazi page's
         ``metadata.content`` field. Emitting plain HTML (no inline styles)
         is the form Uwazi's React front-end is designed to hydrate.
+
+        The blocks are wrapped in ``#uwazi-page-root`` so that the scoped
+        design tokens in :meth:`render_css` actually apply to the content.
         """
         rendered_blocks: list[str] = []
         for block_def in blocks:
@@ -133,7 +229,7 @@ class PageRenderer:
             html = self._render_block_html(block_type, slots)
             body, _css = _split_html_and_css(html)
             rendered_blocks.append(body)
-        return "\n".join(rendered_blocks)
+        return '<div id="uwazi-page-root">\n' + "\n".join(rendered_blocks) + "\n</div>"
 
     def render_css(
         self,
@@ -156,7 +252,12 @@ class PageRenderer:
         triggered by ``<style>`` tags inside the body.
         """
         tokens_css = self.vibe_registry.get_vibe_tokens(vibe, vibe_overrides)
-        css_parts: list[str] = [f"#uwazi-page-root {{\n{tokens_css}\n}}\n{SHARED_CSS_SCOPED}".rstrip()]
+        # Uwazi injects metadata.css via PageStyleConnected. The content may
+        # be wrapped or scoped depending on the Uwazi viewer, so we emit the
+        # design tokens at both :root and #uwazi-page-root to be safe.
+        css_parts: list[str] = [
+            f":root {{\n{tokens_css}\n}}\n\n#uwazi-page-root {{\n{tokens_css}\n}}\n{SHARED_CSS_SCOPED}".rstrip()
+        ]
         for block_def in blocks:
             block_type: str = block_def["type"]
             slots: dict[str, Any] = block_def.get("slots", {})
@@ -213,15 +314,7 @@ class PageRenderer:
 </body>
 </html>"""
         else:
-            return f"""<style>
-  #uwazi-page-root {{
-{tokens_css}
-  }}
-{SHARED_CSS_SCOPED}
-</style>
-<div id="uwazi-page-root">
-{body_html}
-</div>"""
+            return f"""{body_html}"""
 
     def _render_block_html(self, block_type: str, slots: dict[str, Any]) -> str:
         """Render a single block to its raw HTML (body + inline <style>)."""

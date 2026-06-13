@@ -32,7 +32,22 @@ async def delete_pages_by_shared_ids(
     if ctx.deps.page_api is None:
         return "Error: Page tools are not configured: `page_api` is missing on dependencies."
     try:
-        return await ctx.deps.page_api.delete_pages_by_shared_ids(shared_ids=shared_ids, language=language)
+        results = await ctx.deps.page_api.delete_pages_by_shared_ids(shared_ids=shared_ids, language=language)
     except DomainError as exc:
         logger.error("delete_pages_by_shared_ids FAILED: shared_ids={} error={}", shared_ids, exc)
         return f"Error deleting pages: {exc}. Please verify the shared_ids and retry."
+
+    deleted_ids = [r.shared_id for r in results if r.success and r.shared_id]
+    if deleted_ids and ctx.deps.settings_api is not None:
+        try:
+            from uwazi_agent.use_cases.tools.delete_page_menu_links import delete_page_menu_links
+
+            await delete_page_menu_links(ctx, shared_ids=deleted_ids)
+        except Exception as menu_exc:  # noqa: BLE001 — best-effort cleanup, never fail the delete
+            logger.warning(
+                "delete_pages_by_shared_ids: menu-link cleanup failed for shared_ids={}: {}",
+                deleted_ids,
+                menu_exc,
+            )
+
+    return results

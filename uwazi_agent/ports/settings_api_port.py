@@ -13,3 +13,6 @@ class SettingsApiPort(ABC):
 
     @abstractmethod
     async def set_menu_links(self, links: list[MenuLink]) -> list[MenuLink]: ...
+
+    @abstractmethod
+    async def delete_all_menu_links(self) -> list[MenuLink]: ...

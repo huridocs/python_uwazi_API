@@ -56,9 +56,7 @@ async def set_entities_publish_status(
     skipped_results: dict[str, AgentEntityMutationResult] = {}
     if auto_skip_already_in_target_state and ids_to_call:
         try:
-            current = await ctx.deps.entity_api.get_publish_status(
-                shared_ids=ids_to_call, language="en"
-            )
+            current = await ctx.deps.entity_api.get_publish_status(shared_ids=ids_to_call, language="en")
         except DomainError as exc:
             logger.warning(
                 "set_entities_publish_status auto-skip preflight failed; falling back to issuing the call for all ids: {}",
@@ -88,9 +86,7 @@ async def set_entities_publish_status(
         return [skipped_results[sid] for sid in shared_ids if sid in skipped_results]
 
     try:
-        results = await ctx.deps.entity_api.set_entities_publish_status(
-            shared_ids=ids_to_call, published=published
-        )
+        results = await ctx.deps.entity_api.set_entities_publish_status(shared_ids=ids_to_call, published=published)
     except DomainError as exc:
         logger.error(
             "set_entities_publish_status FAILED: shared_ids={} published={} error={}",
