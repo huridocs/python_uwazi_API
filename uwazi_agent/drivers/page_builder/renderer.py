@@ -92,6 +92,13 @@ SHARED_CSS_SCOPED: str = """
 """
 
 
+# Default vibe applied when the caller does not specify one. Lives in
+# the renderer module (where the visual themes actually live on disk) so
+# the page-builder tool, the agent's schema-store prompt, and any
+# other consumer all share the same source of truth.
+DEFAULT_VIBE: str = "minimal"
+
+
 class PageRenderer:
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
