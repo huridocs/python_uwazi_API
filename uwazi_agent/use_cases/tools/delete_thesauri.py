@@ -25,7 +25,12 @@ async def delete_thesauri(
         string with suggestions.
     """
     try:
-        return await ctx.deps.thesauri_api.delete_thesauri(name=name, language=language)
+        result = await ctx.deps.thesauri_api.delete_thesauri(name=name, language=language)
+        # Re-fetch the cached thesaurus names so the "Available context"
+        # block in the prompt reflects the deletion.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_thesauri_names
+        await refresh_thesauri_names(ctx)
+        return result
     except DomainError as exc:
         logger.error("delete_thesauri FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():

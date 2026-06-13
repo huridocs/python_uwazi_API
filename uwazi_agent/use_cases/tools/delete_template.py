@@ -26,7 +26,12 @@ async def delete_template(
         string with suggestions.
     """
     try:
-        return await ctx.deps.template_api.delete_template(name=name, language=language)
+        result = await ctx.deps.template_api.delete_template(name=name, language=language)
+        # Re-fetch the template names list (and counts) so the "Available
+        # context" block in the prompt reflects the deletion.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_templates
+        await refresh_templates(ctx)
+        return result
     except DomainError as exc:
         logger.error("delete_template FAILED: name={} error={}", name, exc)
         if "not found" in str(exc).lower():

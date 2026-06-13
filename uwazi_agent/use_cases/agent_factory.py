@@ -33,12 +33,8 @@ from .tools.get_entities_by_template import get_entities_by_template
 from .tools.get_entity_store_status import get_entity_store_status
 from .tools.get_pages_by_shared_ids import get_pages_by_shared_ids
 from .tools.get_publish_status import get_publish_status
-from .tools.get_relationship_type_names import get_relationship_type_names
-from .tools.get_template_names import list_templates
 from .tools.get_templates_by_names import get_templates_by_names
 from .tools.get_thesauris_by_names import get_thesauris_by_names
-from .tools.get_thesauris_names import list_thesauri
-from .tools.get_languages import get_languages
 from .tools.list_page_blocks import list_page_blocks
 from .tools.list_page_vibes import list_page_vibes
 from .tools.list_pages import list_pages
@@ -53,9 +49,16 @@ from .tools.update_relationship_type import update_relationship_type
 from .tools.update_template import update_template
 from .tools.update_thesauri import update_thesauri
 
-_TEMPLATE_READ_TOOLS = {"list_templates", "get_templates_by_names"}
-_THESAURI_READ_TOOLS = {"list_thesauri", "get_thesauris_by_names"}
-_RELATIONSHIP_READ_TOOLS = {"get_relationship_type_names"}
+# The four "lightweight discovery" tools that used to be exposed to the
+# agents (``get_languages``, ``list_templates``, ``list_thesauri``,
+# ``get_relationship_type_names``) have been replaced by a pre-loaded
+# "Available context" block in the prompt, kept fresh by
+# :mod:`uwazi_agent.use_cases.tools.tool_context`. The heavier read tools
+# (``get_templates_by_names``, ``get_thesauris_by_names``) remain because
+# their payloads are too large to pre-load.
+
+_TEMPLATES_READ_TOOLS = {"get_templates_by_names"}
+_THESAURI_READ_TOOLS = {"get_thesauris_by_names"}
 _ENTITY_READ_TOOLS = {
     "search_entities_by_text",
     "search_entities_by_filter",
@@ -69,37 +72,32 @@ _PAGE_READ_TOOLS = {
     "list_page_vibes",
     "render_page_from_blocks",
 }
-_LANGUAGE_READ_TOOLS = {"get_languages"}
-_STATS_READ_TOOLS = {"list_templates", "list_thesauri", "get_thesauris_by_names"}
 
 _WRITE_INVALIDATION_MAP: dict[str, tuple[set[str], Callable | None]] = {
     "create_template": (
-        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
+        _TEMPLATES_READ_TOOLS,
         None,
     ),
     "update_template": (
-        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
+        _TEMPLATES_READ_TOOLS,
         lambda deps: deps.schema_store.clear_templates(),
     ),
     "delete_template": (
-        _TEMPLATE_READ_TOOLS | _STATS_READ_TOOLS,
+        _TEMPLATES_READ_TOOLS,
         lambda deps: deps.schema_store.clear_templates(),
     ),
     "create_thesauri": (
-        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
+        _THESAURI_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
     "update_thesauri": (
-        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
+        _THESAURI_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
     "delete_thesauri": (
-        _THESAURI_READ_TOOLS | _STATS_READ_TOOLS,
+        _THESAURI_READ_TOOLS,
         lambda deps: deps.schema_store.clear_thesauri(),
     ),
-    "create_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
-    "update_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
-    "delete_relationship_type": (_RELATIONSHIP_READ_TOOLS, None),
     "create_entities": (_ENTITY_READ_TOOLS, None),
     "update_entities": (_ENTITY_READ_TOOLS, None),
     "delete_entities_by_shared_ids": (_ENTITY_READ_TOOLS, None),
@@ -206,18 +204,14 @@ def _write_tool(func: Callable) -> Tool:
 
 def build_templates_tools() -> list[Tool]:
     return [
-        _read_tool(get_languages),
         _read_tool(get_thesauris_by_names),
-        _read_tool(list_thesauri),
         _write_tool(create_thesauri),
         _write_tool(update_thesauri),
         _write_tool(delete_thesauri),
-        _read_tool(get_relationship_type_names),
         _write_tool(create_relationship_type),
         _write_tool(update_relationship_type),
         _write_tool(delete_relationship_type),
         _read_tool(get_templates_by_names),
-        _read_tool(list_templates),
         _write_tool(create_template),
         _write_tool(update_template),
         _write_tool(delete_template),
@@ -226,7 +220,6 @@ def build_templates_tools() -> list[Tool]:
 
 def build_entity_tools() -> list[Tool]:
     return [
-        _read_tool(get_languages),
         _read_tool(search_entities_by_text),
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),
@@ -320,9 +313,14 @@ def _make_delegation_tool(
         ctx.deps.tool_progress.append(f"Delegating to {agent_label} agent...")
         set_current_agent(agent_label)
         try:
+            # Inject the schema + entity context the sub-agent needs. The
+            # schema store also carries the pre-loaded "Available context"
+            # snapshot (languages, template names+counts, thesaurus names,
+            # relationship type names) which is appended below.
+            available_context = ctx.deps.schema_store.to_available_context()
             schema_context = ctx.deps.schema_store.to_prompt_context()
             entity_context = ctx.deps.entity_store.to_context_summary()
-            context_parts = [p for p in [schema_context, entity_context] if p]
+            context_parts = [p for p in [available_context, schema_context, entity_context] if p]
             context_str = "\n\n".join(context_parts)
             enriched_task = f"{context_str}\n\n{task}" if context_parts else task
             result = await sub_agent.run(enriched_task, deps=ctx.deps, usage=ctx.usage)
@@ -359,8 +357,11 @@ def build_orchestrator(
             schema_agent,
             "delegate_to_schema_agent",
             "Delegate schema mutation tasks (create, update, delete thesauri, templates, "
-            "relationship types) to the schema sub-agent. Do NOT use this for reading schema "
-            "data — use the read tools directly instead.",
+            "relationship types) to the schema sub-agent. The four lightweight discovery "
+            "tools (languages, template names, thesaurus names, relationship type names) "
+            "are NOT exposed here because their data is pre-loaded into the orchestrator's "
+            "prompt context; use that context for lookups and the schema sub-agent's read "
+            "tools for live details.",
         ),
         _make_delegation_tool(
             entity_agent,
@@ -388,13 +389,13 @@ def build_orchestrator(
         ),
     ]
 
+    # The orchestrator's read surface. Note: the four lightweight discovery
+    # tools (languages, template names, thesaurus names, relationship type
+    # names) are intentionally NOT here -- they have been folded into the
+    # pre-loaded "Available context" block on every prompt.
     read_tools = [
-        _read_tool(list_templates),
         _read_tool(get_templates_by_names),
-        _read_tool(list_thesauri),
         _read_tool(get_thesauris_by_names),
-        _read_tool(get_relationship_type_names),
-        _read_tool(get_languages),
         _read_tool(search_entities_by_text),
         _read_tool(search_entities_by_filter),
         _read_tool(get_entities_by_shared_ids),

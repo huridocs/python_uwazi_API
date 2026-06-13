@@ -58,6 +58,10 @@ async def update_template(
         template = AgentTemplate(name=name, properties=properties, color=resolved_color)
         await ctx.deps.template_api.update_template(template=template, language=language)
         property_names = [p.name for p in properties]
+        # Re-fetch the cached template entry so the "Available context"
+        # block in the prompt reflects the updated template.
+        from uwazi_agent.use_cases.tools.tool_context import refresh_templates
+        await refresh_templates(ctx)
         return (
             f"Template '{name}' updated successfully. "
             f"It now has {len(properties)} custom properties: {', '.join(property_names)}."
