@@ -47,6 +47,7 @@ from .tools.list_page_vibes import list_page_vibes
 from .tools.list_pages import list_pages
 from .tools.page_script_executor import execute_page_script, prepare_page_script
 from .tools.python_code_executor import run_python_code
+from .tools.query_entities import query_entities
 from .tools.render_page_from_blocks import render_page_from_blocks
 from .tools.search_entities_by_filter import search_entities_by_filter
 from .tools.search_entities_by_text import search_entities_by_text
@@ -60,12 +61,7 @@ from .tools.update_thesauri import update_thesauri
 _TEMPLATE_READ_TOOLS = {"list_templates", "get_templates_by_names"}
 _THESAURI_READ_TOOLS = {"list_thesauri", "get_thesauris_by_names"}
 _RELATIONSHIP_READ_TOOLS = {"get_relationship_type_names"}
-_ENTITY_READ_TOOLS = {
-    "search_entities_by_text",
-    "search_entities_by_filter",
-    "get_entities_by_shared_ids",
-    "get_entities_by_template",
-}
+_ENTITY_READ_TOOLS = {"query_entities"}
 _PAGE_READ_TOOLS = {
     "list_pages",
     "get_pages_by_shared_ids",
@@ -143,7 +139,7 @@ def _extract_params(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]
 def _normalize_cache_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """Normalize params for cache-key purposes so that semantically-equivalent
     calls share the same cache entry."""
-    if tool_name == "get_entities_by_template" and "limit" in params:
+    if tool_name == "query_entities" and params.get("mode") == "by_template" and "limit" in params:
         params = {**params, "limit": 10000}
     return params
 
@@ -191,9 +187,40 @@ def _wrap_write_tool(func: Callable) -> Callable:
                 )
             if schema_invalidator is not None:
                 schema_invalidator(ctx.deps)
+            # Evict any entities touched by this mutation from the session
+            # entity store's trim cache, so the next ``query_entities(by_ids)``
+            # call re-fetches them from Uwazi instead of serving stale data.
+            if tool_name in {"update_entities", "delete_entities_by_shared_ids", "set_entities_publish_status"}:
+                _evict_entity_store_ids(ctx.deps, params, result)
+            elif tool_name == "create_entities":
+                _evict_entity_store_ids(ctx.deps, params, result)
         return result
 
     return wrapper
+
+
+def _evict_entity_store_ids(deps, params: dict[str, Any], result: Any) -> None:
+    """Drop trim-cache and entity-store entries for ids touched by a mutation.
+
+    Looks for ``shared_ids`` (publish, delete) and ``updates`` (update) in
+    the call args, and for ``shared_id`` fields in the result list
+    (covers both successful and failed create results).
+    """
+    ids: set[str] = set()
+    shared_ids = params.get("shared_ids") or []
+    ids.update(sid for sid in shared_ids if isinstance(sid, str))
+    updates = params.get("updates") or []
+    for upd in updates:
+        sid = getattr(upd, "shared_id", None)
+        if isinstance(sid, str) and sid:
+            ids.add(sid)
+    if isinstance(result, list):
+        for item in result:
+            sid = getattr(item, "shared_id", None)
+            if isinstance(sid, str) and sid:
+                ids.add(sid)
+    if ids:
+        deps.entity_store.invalidate_ids(sorted(ids))
 
 
 def _read_tool(func: Callable) -> Tool:
@@ -227,10 +254,7 @@ def build_templates_tools() -> list[Tool]:
 def build_entity_tools() -> list[Tool]:
     return [
         _read_tool(get_languages),
-        _read_tool(search_entities_by_text),
-        _read_tool(search_entities_by_filter),
-        _read_tool(get_entities_by_shared_ids),
-        _read_tool(get_entities_by_template),
+        _read_tool(query_entities),
         _read_tool(get_publish_status),
         _write_tool(create_entities),
         _write_tool(update_entities),
@@ -428,10 +452,7 @@ def build_orchestrator(
         _read_tool(get_thesauris_by_names),
         _read_tool(get_relationship_type_names),
         _read_tool(get_languages),
-        _read_tool(search_entities_by_text),
-        _read_tool(search_entities_by_filter),
-        _read_tool(get_entities_by_shared_ids),
-        _read_tool(get_entities_by_template),
+        _read_tool(query_entities),
         _read_tool(get_publish_status),
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
