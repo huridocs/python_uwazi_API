@@ -17,9 +17,11 @@ async def update_entities(
 
     This is a *partial merge*: only the metadata fields you provide are
     changed; everything else (including metadata fields you omit) is
-    preserved on Uwazi's side. To clear a metadata field, first look up
-    the entity with ``get_entities_by_shared_ids`` and decide explicitly;
-    there is no implicit "set to null" semantics.
+    preserved on Uwazi's side. To clear a metadata field — especially a
+    ``relationship`` property — pass it explicitly with an empty value
+    (``[]`` for relationship / multiselect / multidate / multidaterange,
+    ``None`` or ``""`` for scalar fields). Omitting the key leaves the
+    existing value untouched.
 
     Identification and shape:
         * Each update must include a ``shared_id``. Look it up first with
@@ -55,7 +57,7 @@ async def update_entities(
           (e.g. ``["k7d2x9ab1cd"]``). Search for the target entities first to
           obtain their ids. On read you receive
           ``[{"shared_id": ..., "title": ...}]``; only ``shared_id`` is used on
-          write.
+          write. Pass ``[]`` to remove all related entities for that property.
 
     Round-tripping: entities returned by ``get_entities_by_shared_ids``,
     ``search_entities_by_text``, and ``get_entities_by_template`` are
