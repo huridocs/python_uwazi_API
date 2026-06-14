@@ -54,7 +54,10 @@ ENTITY_INSTRUCTIONS = (
     "- ``create_entities`` \u2014 provide ``title`` and ``template_name``; never a "
     "``shared_id`` (Uwazi mints it and returns it).\n"
     "- ``update_entities`` \u2014 partial merge by ``shared_id``: only fields you "
-    "send change. Identify entities by ``shared_id``, never by title.\n"
+    "send change. Identify entities by ``shared_id``, never by title. To clear a "
+    "``relationship`` property (or any multi-valued property), send it as an empty "
+    "list ``[]``; omitted metadata keys are preserved, so you must explicitly pass "
+    "the property with ``[]`` to remove all related entities.\n"
     "- ``set_entities_publish_status`` \u2014 publish (make public) or unpublish "
     "(make private) entities by ``shared_id``. Pass "
     "``auto_skip_already_in_target_state=True`` (the default) to have the "
@@ -98,7 +101,8 @@ ENTITY_INSTRUCTIONS = (
     '(e.g. `["k7d2x9ab1cd"]`). To link to an entity, first find its '
     "``shared_id`` with a search tool, then pass it. On read you receive "
     '`[{"shared_id": ..., "title": ...}]`; only the ``shared_id`` matters on '
-    "write.\n"
+    "write. Pass an empty list ``[]`` to remove every relationship for that "
+    "property.\n"
     "- ``image`` / ``media``: URL or file reference.\n\n"
     "Round-tripping: when you read an entity and update only some properties, "
     "copy each value back verbatim in the shape you received it (e.g. send "
