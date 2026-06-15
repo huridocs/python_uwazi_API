@@ -6,4 +6,5 @@ services:
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - GRAYLOG_IP=${GRAYLOG_IP:-}
       - GRAYLOG_PORT=${GRAYLOG_PORT:-12201}
+    command: ["uvicorn", "uwazi_agent.drivers.rest.app:app", "--host", "0.0.0.0", "--port", "5054"]
     restart: unless-stopped
