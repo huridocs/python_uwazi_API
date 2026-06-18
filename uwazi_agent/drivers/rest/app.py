@@ -16,6 +16,7 @@ from uwazi_agent.drivers.rest.models.ai_job_status_response import AIJobStatusRe
 from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
+from uwazi_agent.drivers.rest.models.uwazi_credentials import UwaziCredentials
 
 _chat_storage_ttl = float(os.environ.get("CHAT_STORAGE_TTL_SECONDS", "86400"))
 chat_storage = InMemoryChatStorage(ttl_seconds=_chat_storage_ttl)
@@ -117,6 +118,22 @@ async def delete_job(job_id: str) -> dict:
     return {"job_id": job_id, "status": "deleted"}
 
 
+def create_uwazi_api_adapter(credentials: UwaziCredentials) -> UwaziApiAdapter:
+    try:
+        return UwaziApiAdapter(
+            user=credentials.username,
+            password=credentials.password,
+            url=credentials.url,
+        )
+    except:
+        credentials.clean_url()
+        return UwaziApiAdapter(
+            user=credentials.username,
+            password=credentials.password,
+            url=credentials.url,
+        )
+
+
 async def _run_agent(job_id: str, request: AIJobRequest) -> None:
     session = chat_storage.get_session(job_id)
     if session is None:
@@ -125,11 +142,8 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
     setup_logging(url=request.credentials.url, user=request.credentials.username)
 
     try:
-        uwazi_api = UwaziApiAdapter(
-            user=request.credentials.username,
-            password=request.credentials.password,
-            url=request.credentials.url,
-        )
+        uwazi_api = create_uwazi_api_adapter(request.credentials)
+
         llm = OllamaAdapter()
 
         use_case = RunAgentUseCase(
