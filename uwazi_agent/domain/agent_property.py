@@ -2,8 +2,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from uwazi_agent.domain.agent_property_style import AgentPropertyStyle
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
-from uwazi_api.domain.property_schema import PropertyStyle
 
 
 class AgentProperty(BaseModel):
@@ -66,14 +66,17 @@ class AgentProperty(BaseModel):
             "with create_relationship_type if needed."
         ),
     )
-    style: Optional[PropertyStyle] = Field(
+    style: Optional[AgentPropertyStyle] = Field(
         default=None,
         description=(
             "Only for ``image`` and ``preview`` properties. How the property is "
             "rendered in the entity view: ``'cover'`` (cover image, the default), "
-            "``'fill'`` (fills the container), or ``'fit'`` (fits inside without "
-            "cropping). Omit to use ``'cover'``. On an update, omitting it "
-            "preserves the property's existing style."
+            "``'fill'`` (fills the container, may crop), or ``'fit'`` (fits "
+            "inside without cropping). These values match the labels shown in "
+            "the Uwazi template editor; the mapper rewrites ``fill`` to "
+            "``cover`` and ``fit`` to ``contain`` on the wire. Omit to use "
+            "``'cover'``. On an update, omitting it preserves the property's "
+            "existing style."
         ),
     )
     full_width: Optional[bool] = Field(
