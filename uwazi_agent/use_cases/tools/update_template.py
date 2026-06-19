@@ -44,7 +44,9 @@ async def update_template(
     ``multidaterange``, ``select``, ``multiselect``, ``link``, ``image``,
     ``media``, ``geolocation``, ``relationship``, ``generatedid``, ``preview``
     (the last renders the entity's primary document as an image; no
-    entity-side value).
+    entity-side value), and ``nested`` (a template-only parent group that
+    gathers a repeatable sub-set of other properties under one parent key;
+    the parent itself carries no entity-side value).
 
     Args:
         name: The template name to update.

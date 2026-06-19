@@ -19,6 +19,7 @@ _AGENT_TO_API_TYPE: dict[AgentPropertyType, PropertyType] = {
     AgentPropertyType.GEO_LOCATION: PropertyType.GEO_LOCATION,
     AgentPropertyType.RELATIONSHIP: PropertyType.RELATIONSHIP,
     AgentPropertyType.PREVIEW: PropertyType.PREVIEW,
+    AgentPropertyType.NESTED: PropertyType.NESTED,
 }
 
 

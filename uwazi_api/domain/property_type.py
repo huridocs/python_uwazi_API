@@ -18,3 +18,4 @@ class PropertyType(str, Enum):
     GEO_LOCATION = "geolocation"
     RELATIONSHIP = "relationship"
     PREVIEW = "preview"
+    NESTED = "nested"

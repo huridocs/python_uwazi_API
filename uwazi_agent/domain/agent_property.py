@@ -13,13 +13,16 @@ class AgentProperty(BaseModel):
             "One of: ``text``, ``markdown``, ``numeric``, ``date``, ``daterange``, "
             "``multidate``, ``multidaterange``, ``select``, ``multiselect``, "
             "``link``, ``image``, ``media``, ``geolocation``, ``relationship``, "
-            "``generatedid``, ``preview``. The full list of supported values is "
-            "documented in the templates-agent system prompt under 'Supported "
-            "property types'; the per-type value shape on entity read/write is "
-            "documented in ``AGENT_PROPERTY_TYPE_FORMATS``. Notable entry: "
-            "``preview`` is a TEMPLATE-ONLY type that renders the entity's "
-            "primary document as an image — there is no per-entity value to "
-            "read or write."
+            "``generatedid``, ``preview``, ``nested``. The full list of "
+            "supported values is documented in the templates-agent system "
+            "prompt under 'Supported property types'; the per-type value shape "
+            "on entity read/write is documented in ``AGENT_PROPERTY_TYPE_FORMATS``. "
+            "Notable entries: ``preview`` is a TEMPLATE-ONLY type that renders "
+            "the entity's primary document as an image — there is no per-entity "
+            "value to read or write. ``nested`` is a TEMPLATE-ONLY parent group "
+            "that gathers a repeatable sub-set of other properties under one "
+            "parent key — there is no per-entity value for the parent; only its "
+            "child properties carry entity-side values."
         ),
     )
     thesaurus_name: Optional[str] = None

@@ -67,4 +67,21 @@ AGENT_PROPERTY_TYPE_FORMATS: dict[AgentPropertyType, str] = {
         "``full_width`` (bool; full-width layout when true). "
         "Do NOT include a ``preview`` property in any entity payload."
     ),
+    AgentPropertyType.NESTED: (
+        "a TEMPLATE-ONLY group container that lets a template gather a "
+        "repeatable sub-set of OTHER properties under one parent key "
+        "(Uwazi 'nested'). The parent property itself carries no direct "
+        "value — its child properties do. Nested properties NEVER appear "
+        "as their own key in entity metadata: only their child keys do "
+        "(e.g. a ``birth`` nested parent with children ``date`` and "
+        "``place`` surfaces on the entity as ``date`` / ``place`` keys, "
+        "never ``birth``). When creating or updating a template, you may "
+        "add a ``nested`` property, but you do NOT need to populate any "
+        "value for it on entity CRUD payloads — there is no per-entity "
+        "value to read or write for the parent. Treat a ``nested`` property "
+        "as a structural grouping for the schema agent; the user will "
+        "configure which child properties belong to it through Uwazi's "
+        "template editor. Do NOT include a ``nested`` parent in any entity "
+        "CRUD payload."
+    ),
 }

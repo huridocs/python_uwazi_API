@@ -34,9 +34,11 @@ async def create_template(
     under "Supported property types" and exposed in this tool's JSON schema
     via the ``AgentPropertyType`` enum. Notable entries: ``text``,
     ``markdown``, ``select``, ``multiselect``, ``relationship``, ``image``,
-    and the ``preview``-as-rendered-primary-document type (no entity-side
+    the ``preview``-as-rendered-primary-document type (no entity-side
     value; Uwazi renders the entity's primary document as an image when
-    this type is on the template).
+    this type is on the template), and the ``nested`` parent-group type
+    (also template-only; the parent itself carries no entity-side value,
+    only its child properties do).
 
     Linking properties to other data:
         * For ``select``/``multiselect``: set ``thesaurus_name`` to the
