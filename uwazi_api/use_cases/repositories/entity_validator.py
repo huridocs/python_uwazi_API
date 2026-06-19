@@ -199,7 +199,7 @@ class EntityValidator:
         for prop in all_props:
             if (
                 prop.required
-                and prop.type != "preview"
+                and prop.type not in ("preview", "nested")
                 and prop.name not in (entity.metadata.keys() if entity.metadata else [])
             ):
                 raise SearchError(f"Required property '{prop.name}' is missing in entity metadata")
@@ -263,4 +263,8 @@ class EntityValidator:
                 raise SearchError(f"Metadata property '{key}' (relationship) must have string or object values")
         elif prop_type in ("preview",):
             # preview is template-only; entities never carry a value for it.
+            pass
+        elif prop_type in ("nested",):
+            # nested is a template-only parent group; entities never carry a
+            # value for the parent itself (only its child properties do).
             pass

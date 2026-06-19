@@ -458,9 +458,11 @@ By default, templates include three common properties:
 
 ### Property Types
 
-Available property types: `text`, `date`, `select`, `numeric`, `daterange`, `multidate`, `link`, `image`, `multidaterange`, `markdown`, `media`, `generatedid`, `multiselect`, `geolocation`, `relationship`, `preview`
+Available property types: `text`, `date`, `select`, `numeric`, `daterange`, `multidate`, `link`, `image`, `multidaterange`, `markdown`, `media`, `generatedid`, `multiselect`, `geolocation`, `relationship`, `preview`, `nested`
 
 Note: `preview` is a template-only property that tells Uwazi to render the entity's primary document (the file the entity is about) as an image at the top of the entity view — Uwazi auto-generates it from the file itself. It never carries an entity-side value.
+
+Note: `nested` is a template-only parent group that gathers a repeatable sub-set of other properties under one parent key. The parent itself never carries an entity-side value — only its child properties do.
 
 ### Thesauri
 

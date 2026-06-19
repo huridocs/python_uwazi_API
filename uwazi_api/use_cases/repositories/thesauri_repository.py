@@ -1,10 +1,12 @@
 import json
+from typing import Optional
+
 from uwazi_api.domain.thesauri import Thesauri
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class ThesauriRepository:
-    def __init__(self, http_client: HttpClientAdapter):
+    def __init__(self, http_client: Optional[HttpClientAdapter] = None):
         self.http = http_client
         self._cache = {}
 

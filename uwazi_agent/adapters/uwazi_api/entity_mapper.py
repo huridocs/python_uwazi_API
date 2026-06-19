@@ -38,8 +38,8 @@ class EntityMapper:
 
     def __init__(
         self,
-        template_repo: TemplateRepository,
-        thesauri_repo: ThesauriRepository,
+        template_repo: Optional[TemplateRepository] = None,
+        thesauri_repo: Optional[ThesauriRepository] = None,
     ):
         self._template_repo = template_repo
         self._thesauri_repo = thesauri_repo
@@ -168,6 +168,8 @@ class EntityMapper:
                 continue
             if prop.type == PropertyType.PREVIEW:
                 continue
+            if prop.type == PropertyType.NESTED:
+                continue
             result[real_key] = self._extract_value(value, prop, language)
         return result
 
@@ -263,6 +265,9 @@ class EntityMapper:
                 continue
             if prop.type == PropertyType.PREVIEW:
                 logger.info("Skipping preview property '{}' (type preview)", raw_key)
+                continue
+            if prop.type == PropertyType.NESTED:
+                logger.info("Skipping nested property '{}' (type nested)", raw_key)
                 continue
             result[key] = self._coerce_value(raw_value, prop, language)
         return result

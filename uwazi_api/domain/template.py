@@ -63,6 +63,7 @@ class Template(BaseModel):
             PropertyType.GEO_LOCATION: "`[lat, lon]`, e.g. `[-13.9626, 33.7741]`",
             PropertyType.RELATIONSHIP: "id of a related entity",
             PropertyType.PREVIEW: "no entity value (template-only; decorates the entity view)",
+            PropertyType.NESTED: "no entity value (template-only parent group for child properties)",
         }
 
         def _sanitize_column(name: str) -> str:
