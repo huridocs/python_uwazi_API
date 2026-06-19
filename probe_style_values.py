@@ -16,9 +16,11 @@ UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
 
 
-# Probe values to round-trip through the real API. The first three are the
-# documented options; the rest are guesses to see whether Uwazi silently
-# accepts/rejects/coerces them.
+# Probe values to round-trip through the real API. ``fill`` / ``fit``
+# are what the Uwazi UI calls the styles in the template editor; the
+# server actually persists ``cover`` / ``contain`` on disk, so we send
+# the agent-side labels and read back the wire-side value. The rest are
+# guesses to see whether Uwazi silently accepts/rejects/coerces them.
 CANDIDATE_STYLES = [
     "cover",
     "fill",

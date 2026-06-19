@@ -6,8 +6,13 @@ Uwazi UI lets the user add it to a template to render an image carousel
 in the entity view, but the user never edits a ``preview`` value on
 individual entities.
 
-The ``style`` field (``fill`` / ``fit``) is shared between ``image`` and
-``preview`` properties. Other property types ignore it.
+The ``style`` field (``cover`` / ``fill`` / ``fit``) is shared between
+``image`` and ``preview`` properties. The values the LLM sees match
+the Uwazi UI labels (``fill`` = container-filling, ``fit`` =
+containment without cropping), while the values Uwazi persists on disk
+are ``cover`` / ``contain``. The mapper translates between the two:
+``fill`` ↔ ``cover``, ``fit`` ↔ ``contain``. Other property types
+ignore ``style``.
 
 These tests cover the round-trip pieces that have to work for the type
 to be wired in end-to-end:
@@ -16,13 +21,15 @@ to be wired in end-to-end:
    map to each other via the property-type mapper.
 2. ``TemplateMapperAdapter.to_agent`` / ``to_api`` round-trip preview
    properties (and image properties) and their UI flags (``style``,
-   ``fullWidth``).
+   ``fullWidth``), translating the agent-side ``fill``/``fit`` to the
+   wire-side ``cover``/``contain`` and back.
 3. ``Template.get_schema`` renders the preview type with a "no entity
    value" note (so the LLM does not look for one in entity metadata).
 4. ``AGENT_PROPERTY_TYPE_FORMATS`` carries a preview entry so the LLM
    gets told preview is template-only.
-5. ``PropertyStyle`` enum accepts only ``fill`` / ``fit`` and rejects
-   unknown values (typo protection at the boundary).
+5. ``PropertyStyle`` (wire) and ``AgentPropertyStyle`` (LLM-facing)
+   enums each accept only their documented values and reject unknown
+   ones (typo protection at the boundary).
 """
 
 from pydantic import ValidationError
@@ -33,6 +40,7 @@ from uwazi_agent.adapters.property_type_mapper import (
 )
 from uwazi_agent.adapters.template_mapper import TemplateMapperAdapter
 from uwazi_agent.domain.agent_property import AgentProperty
+from uwazi_agent.domain.agent_property_style import AgentPropertyStyle
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_agent.domain.agent_property_type_formats import AGENT_PROPERTY_TYPE_FORMATS
 from uwazi_agent.domain.agent_template import AgentTemplate
@@ -213,32 +221,67 @@ def test_agent_property_type_field_has_schema_description_with_preview():
         )
 
 
-def test_property_style_enum_includes_cover_fill_fit():
-    """``style`` is shared by ``image`` and ``preview``; valid values
-    are ``cover`` (default), ``fill``, and ``fit``."""
+def test_property_style_enum_includes_cover_and_contain():
+    """Wire-side enum: Uwazi persists only ``cover`` (default) and
+    ``contain`` on disk (see ``AbstractImageProperty`` in the Uwazi
+    server code). The LLM-facing ``AgentPropertyStyle`` adds the
+    UI labels ``fill`` / ``fit`` on top of these."""
     members = {m.value for m in PropertyStyle if m is not PropertyStyle.EMPTY}
+    assert members == {"cover", "contain"}
+
+
+def test_agent_property_style_enum_includes_cover_fill_fit():
+    """LLM-facing enum: ``cover`` / ``fill`` / ``fit`` mirror the
+    labels shown in the Uwazi template editor."""
+    members = {m.value for m in AgentPropertyStyle}
     assert members == {"cover", "fill", "fit"}
 
 
 def test_property_style_cover_is_default_member():
-    """``COVER`` is the documented default for the ``style`` field."""
+    """``COVER`` is the documented default for the wire-side ``style`` field."""
     assert PropertyStyle.COVER.value == "cover"
 
 
+def test_agent_property_style_cover_is_default_member():
+    """``COVER`` is the documented default for the LLM-facing ``style`` field."""
+    assert AgentPropertyStyle.COVER.value == "cover"
+
+
 def test_property_schema_rejects_unknown_style_value():
-    """A typo on the wire (e.g. ``'Fill'``, ``'Fill-'``) is rejected
-    with a clear validation error."""
+    """A typo on the wire (e.g. ``'Coverr'``, ``'fill'``) is rejected
+    with a clear validation error — ``fill`` is the UI label, not a
+    wire value."""
     with __import__("pytest").raises(ValidationError):
-        PropertySchema(type=PropertyType.IMAGE, style="Fill")
+        PropertySchema(type=PropertyType.IMAGE, style="fill")
 
 
-def test_property_schema_accepts_cover_fill_and_fit():
+def test_agent_property_rejects_unknown_style_value():
+    """A typo on the LLM-facing surface (e.g. ``'Coverr'``, ``'Fill-'``)
+    is rejected with a clear validation error."""
+    with __import__("pytest").raises(ValidationError):
+        AgentProperty(
+            name="cover_image",
+            type=AgentPropertyType.IMAGE,
+            style="Fill-",  # type: ignore[arg-type]
+        )
+
+
+def test_property_schema_accepts_cover_and_contain():
     cover = PropertySchema(type=PropertyType.IMAGE, style="cover")
-    fill = PropertySchema(type=PropertyType.IMAGE, style="fill")
-    fit = PropertySchema(type=PropertyType.PREVIEW, style="fit")
+    contain = PropertySchema(type=PropertyType.PREVIEW, style="contain")
+
     assert cover.style is PropertyStyle.COVER
-    assert fill.style is PropertyStyle.FILL
-    assert fit.style is PropertyStyle.FIT
+    assert contain.style is PropertyStyle.CONTAIN
+
+
+def test_agent_property_accepts_cover_fill_and_fit():
+    cover = AgentProperty(name="cover_image", type=AgentPropertyType.IMAGE, style=AgentPropertyStyle.COVER)
+    fill = AgentProperty(name="cover_image", type=AgentPropertyType.IMAGE, style=AgentPropertyStyle.FILL)
+    fit = AgentProperty(name="cover_image", type=AgentPropertyType.IMAGE, style=AgentPropertyStyle.FIT)
+
+    assert cover.style is AgentPropertyStyle.COVER
+    assert fill.style is AgentPropertyStyle.FILL
+    assert fit.style is AgentPropertyStyle.FIT
 
 
 def test_property_schema_normalises_empty_style_to_cover():
@@ -256,6 +299,7 @@ def test_property_schema_default_style_is_cover():
 
 
 def test_preview_round_trips_through_template_mapper_to_agent():
+    """Wire ``contain`` must surface to the LLM as ``fit`` (the UI label)."""
     api_template = Template(
         name="Books",
         properties=[
@@ -267,7 +311,7 @@ def test_preview_round_trips_through_template_mapper_to_agent():
                 noLabel=True,
                 required=True,
                 showInCard=True,
-                style=PropertyStyle.FIT,
+                style=PropertyStyle.CONTAIN,
                 fullWidth=True,
             ),
         ],
@@ -282,18 +326,19 @@ def test_preview_round_trips_through_template_mapper_to_agent():
     assert prop.type == AgentPropertyType.PREVIEW
     assert prop.required is True
     assert prop.show_in_card is True
-    assert prop.style is PropertyStyle.FIT
+    assert prop.style is AgentPropertyStyle.FIT
     assert prop.full_width is True
 
 
 def test_preview_round_trips_through_template_mapper_to_api():
+    """Agent ``fit`` must serialise on the wire as ``contain``."""
     agent_template = AgentTemplate(
         name="Books",
         properties=[
             AgentProperty(
                 name="preview_field",
                 type=AgentPropertyType.PREVIEW,
-                style=PropertyStyle.FIT,
+                style=AgentPropertyStyle.FIT,
                 full_width=True,
                 show_in_card=True,
                 required=False,
@@ -309,14 +354,16 @@ def test_preview_round_trips_through_template_mapper_to_api():
     assert prop.name == "preview_field"
     assert prop.label == "preview_field"  # label defaults to name when no existing prop
     assert prop.type == PropertyType.PREVIEW
-    assert prop.style is PropertyStyle.FIT
+    assert prop.style is PropertyStyle.CONTAIN
     assert prop.fullWidth is True
     assert prop.showInCard is True
     assert prop.required is False
 
 
 def test_image_property_round_trips_style():
-    """``image`` properties also carry a ``style`` flag."""
+    """``image`` properties carry a ``style`` flag; round-trip the
+    translation between the agent-side ``fill``/``fit`` labels and the
+    wire-side ``cover``/``contain`` values."""
     api_template = Template(
         name="Books",
         properties=[
@@ -324,7 +371,7 @@ def test_image_property_round_trips_style():
                 name="cover",
                 label="Cover",
                 type=PropertyType.IMAGE,
-                style=PropertyStyle.FILL,
+                style=PropertyStyle.CONTAIN,
             ),
         ],
     )
@@ -332,7 +379,7 @@ def test_image_property_round_trips_style():
     mapper = TemplateMapperAdapter()
     agent = mapper.to_agent(api_template)
 
-    assert agent.properties[0].style is PropertyStyle.FILL
+    assert agent.properties[0].style is AgentPropertyStyle.FIT
 
     agent_template = AgentTemplate(
         name="Books",
@@ -340,12 +387,12 @@ def test_image_property_round_trips_style():
             AgentProperty(
                 name="cover",
                 type=AgentPropertyType.IMAGE,
-                style=PropertyStyle.FIT,
+                style=AgentPropertyStyle.FILL,
             ),
         ],
     )
     api_template = mapper.to_api(agent_template)
-    assert api_template.properties[0].style is PropertyStyle.FIT
+    assert api_template.properties[0].style is PropertyStyle.COVER
 
 
 def test_image_property_round_trips_cover_default():
@@ -366,7 +413,7 @@ def test_image_property_round_trips_cover_default():
     mapper = TemplateMapperAdapter()
     agent = mapper.to_agent(api_template)
 
-    assert agent.properties[0].style is PropertyStyle.COVER
+    assert agent.properties[0].style is AgentPropertyStyle.COVER
 
 
 def test_image_property_does_not_carry_full_width():
@@ -378,7 +425,7 @@ def test_image_property_does_not_carry_full_width():
                 name="cover",
                 label="Cover",
                 type=PropertyType.IMAGE,
-                style=PropertyStyle.FILL,
+                style=PropertyStyle.CONTAIN,
                 fullWidth=True,
             ),
         ],
@@ -388,7 +435,7 @@ def test_image_property_does_not_carry_full_width():
     agent = mapper.to_agent(api_template)
 
     prop = agent.properties[0]
-    assert prop.style is PropertyStyle.FILL
+    assert prop.style is AgentPropertyStyle.FIT
     assert prop.full_width is None
 
 
@@ -403,7 +450,7 @@ def test_preview_to_api_preserves_existing_style_and_full_width_when_omitted():
                 name="preview_field",
                 label="Preview",
                 type=PropertyType.PREVIEW,
-                style=PropertyStyle.FILL,
+                style=PropertyStyle.CONTAIN,
                 fullWidth=True,
             ),
         ],
@@ -424,7 +471,7 @@ def test_preview_to_api_preserves_existing_style_and_full_width_when_omitted():
 
     assert len(api_template.properties) == 1
     prop = api_template.properties[0]
-    assert prop.style is PropertyStyle.FILL
+    assert prop.style is PropertyStyle.CONTAIN
     assert prop.fullWidth is True
 
 
@@ -438,7 +485,7 @@ def test_preview_to_api_uses_agent_style_when_provided():
                 name="preview_field",
                 label="Preview",
                 type=PropertyType.PREVIEW,
-                style=PropertyStyle.FILL,
+                style=PropertyStyle.CONTAIN,
                 fullWidth=True,
             ),
         ],
@@ -450,7 +497,7 @@ def test_preview_to_api_uses_agent_style_when_provided():
                 name="preview_field",
                 label="Preview",
                 type=AgentPropertyType.PREVIEW,
-                style=PropertyStyle.FIT,
+                style=AgentPropertyStyle.FILL,
                 full_width=False,
             ),
         ],
@@ -460,7 +507,7 @@ def test_preview_to_api_uses_agent_style_when_provided():
     api_template = mapper.to_api(agent_template, existing=existing)
 
     prop = api_template.properties[0]
-    assert prop.style is PropertyStyle.FIT
+    assert prop.style is PropertyStyle.COVER
     assert prop.fullWidth is False
 
 
@@ -503,3 +550,115 @@ def test_template_get_schema_renders_preview_row():
     assert "| Preview |" in schema_md
     assert "| preview |" in schema_md
     assert "no entity value" in schema_md
+
+
+# ---------------------------------------------------------------------------
+# Style-value translation tests — the mapper's only job where ``style`` is
+# concerned is to translate between the agent-side UI labels
+# (``cover`` / ``fill`` / ``fit``) and the wire-side Uwazi values
+# (``cover`` / ``contain``). These tests pin that translation so a future
+# edit to the mapper cannot silently regress it.
+# ---------------------------------------------------------------------------
+
+
+def test_mapper_translates_fill_to_cover_on_the_wire():
+    """The LLM picks the UI label ``fill``; the mapper must rewrite it
+    to the on-disk value ``cover`` before sending to Uwazi."""
+    agent_template = AgentTemplate(
+        name="Books",
+        properties=[
+            AgentProperty(
+                name="cover",
+                type=AgentPropertyType.IMAGE,
+                style=AgentPropertyStyle.FILL,
+            ),
+        ],
+    )
+
+    mapper = TemplateMapperAdapter()
+    api_template = mapper.to_api(agent_template)
+
+    assert api_template.properties[0].style is PropertyStyle.COVER
+
+
+def test_mapper_translates_fit_to_contain_on_the_wire():
+    """The LLM picks the UI label ``fit``; the mapper must rewrite it
+    to the on-disk value ``contain`` before sending to Uwazi."""
+    agent_template = AgentTemplate(
+        name="Books",
+        properties=[
+            AgentProperty(
+                name="preview_field",
+                type=AgentPropertyType.PREVIEW,
+                style=AgentPropertyStyle.FIT,
+            ),
+        ],
+    )
+
+    mapper = TemplateMapperAdapter()
+    api_template = mapper.to_api(agent_template)
+
+    assert api_template.properties[0].style is PropertyStyle.CONTAIN
+
+
+def test_mapper_translates_contain_to_fit_on_read():
+    """When Uwazi returns ``contain``, the mapper must surface the UI
+    label ``fit`` to the LLM (and ``cover`` stays ``cover``)."""
+    api_template = Template(
+        name="Books",
+        properties=[
+            PropertySchema(
+                name="preview_field",
+                label="Preview",
+                type=PropertyType.PREVIEW,
+                style=PropertyStyle.CONTAIN,
+            ),
+        ],
+    )
+
+    mapper = TemplateMapperAdapter()
+    agent = mapper.to_agent(api_template)
+
+    assert agent.properties[0].style is AgentPropertyStyle.FIT
+
+
+def test_mapper_translates_cover_to_cover_on_read():
+    """``cover`` is its own translation on either side."""
+    api_template = Template(
+        name="Books",
+        properties=[
+            PropertySchema(
+                name="cover",
+                label="Cover",
+                type=PropertyType.IMAGE,
+                style=PropertyStyle.COVER,
+            ),
+        ],
+    )
+
+    mapper = TemplateMapperAdapter()
+    agent = mapper.to_agent(api_template)
+
+    assert agent.properties[0].style is AgentPropertyStyle.COVER
+
+
+def test_mapper_surfaces_legacy_empty_style_as_cover():
+    """Legacy templates may carry ``style=""``. The api validator
+    normalises that to ``COVER`` before the mapper sees it, so the
+    LLM always sees a concrete agent-side ``COVER``."""
+    api_template = Template(
+        name="Books",
+        properties=[
+            PropertySchema(
+                name="cover",
+                label="Cover",
+                type=PropertyType.IMAGE,
+                style="",
+            ),
+        ],
+    )
+
+    mapper = TemplateMapperAdapter()
+    agent = mapper.to_agent(api_template)
+
+    assert agent.properties[0].style is AgentPropertyStyle.COVER

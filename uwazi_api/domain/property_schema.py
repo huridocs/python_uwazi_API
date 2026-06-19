@@ -24,8 +24,7 @@ class PropertyStyle(str, Enum):
     """
 
     COVER = "cover"
-    FILL = "fill"
-    FIT = "fit"
+    CONTAIN = "contain"
     EMPTY = ""
 
 

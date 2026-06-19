@@ -2,6 +2,7 @@ from typing import Optional, Protocol
 
 from uwazi_agent.adapters.property_type_mapper import agent_to_api_property_type, api_to_agent_property_type
 from uwazi_agent.domain.agent_property import AgentProperty
+from uwazi_agent.domain.agent_property_style import AgentPropertyStyle
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_agent.domain.agent_property_type_formats import AGENT_PROPERTY_TYPE_FORMATS
 from uwazi_agent.domain.agent_template import AgentTemplate
@@ -29,9 +30,46 @@ class RelationTypeGateway(Protocol):
 _THESAURUS_TYPES: set[AgentPropertyType] = {AgentPropertyType.SELECT, AgentPropertyType.MULTI_SELECT}
 _API_THESAURUS_TYPES: set[PropertyType] = {PropertyType.SELECT, PropertyType.MULTI_SELECT}
 
-# Property types that carry a ``style`` UI flag (``fill`` / ``fit``).
+# Property types that carry a ``style`` UI flag (``cover`` / ``fill`` / ``fit``).
 _STYLE_TYPES: set[AgentPropertyType] = {AgentPropertyType.IMAGE, AgentPropertyType.PREVIEW}
 _API_STYLE_TYPES: set[PropertyType] = {PropertyType.IMAGE, PropertyType.PREVIEW}
+
+
+def _api_style_to_agent(style: Optional[PropertyStyle]) -> Optional[AgentPropertyStyle]:
+    """Translate a wire-side ``PropertyStyle`` (cover / contain) to the
+    agent-side ``AgentPropertyStyle`` (cover / fill / fit) shown in the
+    Uwazi UI.
+
+    Uwazi persists only two style values — ``cover`` and ``contain`` —
+    but the UI exposes three labels to the template editor:
+    ``cover``, ``fill`` and ``fit``. ``fill`` is just the UI label for
+    ``cover``; ``fit`` is the UI label for ``contain``. On read, we map
+    ``contain`` back to ``fit`` so the LLM sees the UI label it can ask
+    the user about.
+    """
+    if style is PropertyStyle.COVER:
+        return AgentPropertyStyle.COVER
+    if style is PropertyStyle.CONTAIN:
+        return AgentPropertyStyle.FIT
+    return None
+
+
+def _agent_style_to_api(style: Optional[AgentPropertyStyle]) -> Optional[PropertyStyle]:
+    """Translate an agent-side ``AgentPropertyStyle`` (cover / fill / fit)
+    to the wire-side ``PropertyStyle`` (cover / contain) that Uwazi
+    actually accepts on the wire.
+
+    ``fill`` (UI label) → ``cover`` (wire value).
+    ``fit`` (UI label) → ``contain`` (wire value).
+    """
+    if style is None:
+        return None
+    if style is AgentPropertyStyle.COVER or style is AgentPropertyStyle.FILL:
+        return PropertyStyle.COVER
+    if style is AgentPropertyStyle.FIT:
+        return PropertyStyle.CONTAIN
+    return None
+
 
 # Property types that carry a ``fullWidth`` UI flag.
 _FULL_WIDTH_TYPES: set[AgentPropertyType] = {AgentPropertyType.PREVIEW}
@@ -249,7 +287,7 @@ class TemplateMapperAdapter(TemplateMapperPort):
                     required=p.required,
                     related_template_name=related_template_name,
                     relationship_type_name=relationship_type_name,
-                    style=(p.style if p.type in _API_STYLE_TYPES else None),
+                    style=(_api_style_to_agent(p.style) if p.type in _API_STYLE_TYPES else None),
                     full_width=(p.fullWidth if p.type in _API_FULL_WIDTH_TYPES else None),
                 )
             )
@@ -275,7 +313,7 @@ class TemplateMapperAdapter(TemplateMapperPort):
             full_width_value: bool = False
             if p.type in _STYLE_TYPES:
                 if p.style is not None:
-                    style_value = p.style
+                    style_value = _agent_style_to_api(p.style)
                 elif existing_prop is not None:
                     style_value = existing_prop.style
             if p.type in _FULL_WIDTH_TYPES:
