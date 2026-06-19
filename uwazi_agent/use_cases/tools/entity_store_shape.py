@@ -89,6 +89,7 @@ _PROPERTY_TYPE_LABEL: dict[AgentPropertyType, str] = {
     AgentPropertyType.MEDIA: "media (str URL or None)",
     AgentPropertyType.GENERATED_ID: "generatedid (str)",
     AgentPropertyType.RELATIONSHIP: "relationship (list of {shared_id, title})",
+    AgentPropertyType.PREVIEW: "preview (template-only; auto-rendered primary document)",
 }
 
 # Per-type, the canonical Python shape the mapper emits. Used in the
@@ -110,6 +111,7 @@ _PROPERTY_VALUE_SHAPE: dict[AgentPropertyType, str] = {
     AgentPropertyType.MEDIA: "str | None",
     AgentPropertyType.GENERATED_ID: "str",
     AgentPropertyType.RELATIONSHIP: "list[{shared_id: str, title: str}]",
+    AgentPropertyType.PREVIEW: "None (template-only; never present in entity metadata)",
 }
 
 # A conservative cap on the size of the rendered shape block. The

@@ -17,3 +17,4 @@ class PropertyType(str, Enum):
     MULTI_SELECT = "multiselect"
     GEO_LOCATION = "geolocation"
     RELATIONSHIP = "relationship"
+    PREVIEW = "preview"

@@ -166,6 +166,8 @@ class EntityMapper:
             prop = prop_map.get(real_key)
             if not prop:
                 continue
+            if prop.type == PropertyType.PREVIEW:
+                continue
             result[real_key] = self._extract_value(value, prop, language)
         return result
 
@@ -258,6 +260,9 @@ class EntityMapper:
                 raise SearchError(f"Metadata property '{raw_key}' is not defined in template '{template.name}'.")
             if prop.type in (PropertyType.IMAGE, PropertyType.MEDIA):
                 logger.info("Skipping image/media property '{}' (type {})", raw_key, prop.type)
+                continue
+            if prop.type == PropertyType.PREVIEW:
+                logger.info("Skipping preview property '{}' (type preview)", raw_key)
                 continue
             result[key] = self._coerce_value(raw_value, prop, language)
         return result
