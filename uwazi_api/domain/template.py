@@ -62,6 +62,7 @@ class Template(BaseModel):
             PropertyType.GENERATED_ID: "auto-generated identifier (leave empty to generate)",
             PropertyType.GEO_LOCATION: "`[lat, lon]`, e.g. `[-13.9626, 33.7741]`",
             PropertyType.RELATIONSHIP: "id of a related entity",
+            PropertyType.PREVIEW: "no entity value (template-only; decorates the entity view)",
         }
 
         def _sanitize_column(name: str) -> str:

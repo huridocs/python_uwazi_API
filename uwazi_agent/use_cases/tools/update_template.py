@@ -33,6 +33,18 @@ async def update_template(
           to link to.
         * ``relationship_type_name`` (and optional ``related_template_name``)
           — for ``relationship`` properties. The mapper resolves names to ids.
+        * ``style`` / ``full_width`` — for ``preview`` and (for ``style``
+          only) ``image`` properties. See the templates-agent system prompt
+          under "Supported property types" for the accepted values.
+
+    Valid ``type`` values are listed in the templates-agent system prompt
+    under "Supported property types" and exposed in this tool's JSON schema
+    via the ``AgentPropertyType`` enum. The list matches ``create_template``:
+    ``text``, ``markdown``, ``numeric``, ``date``, ``daterange``, ``multidate``,
+    ``multidaterange``, ``select``, ``multiselect``, ``link``, ``image``,
+    ``media``, ``geolocation``, ``relationship``, ``generatedid``, ``preview``
+    (the last renders the entity's primary document as an image; no
+    entity-side value).
 
     Args:
         name: The template name to update.

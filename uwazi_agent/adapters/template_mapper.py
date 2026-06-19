@@ -6,7 +6,7 @@ from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_agent.domain.agent_property_type_formats import AGENT_PROPERTY_TYPE_FORMATS
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
-from uwazi_api.domain.property_schema import PropertySchema
+from uwazi_api.domain.property_schema import PropertySchema, PropertyStyle
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.template import Template, _default_common_properties
 
@@ -28,6 +28,14 @@ class RelationTypeGateway(Protocol):
 
 _THESAURUS_TYPES: set[AgentPropertyType] = {AgentPropertyType.SELECT, AgentPropertyType.MULTI_SELECT}
 _API_THESAURUS_TYPES: set[PropertyType] = {PropertyType.SELECT, PropertyType.MULTI_SELECT}
+
+# Property types that carry a ``style`` UI flag (``fill`` / ``fit``).
+_STYLE_TYPES: set[AgentPropertyType] = {AgentPropertyType.IMAGE, AgentPropertyType.PREVIEW}
+_API_STYLE_TYPES: set[PropertyType] = {PropertyType.IMAGE, PropertyType.PREVIEW}
+
+# Property types that carry a ``fullWidth`` UI flag.
+_FULL_WIDTH_TYPES: set[AgentPropertyType] = {AgentPropertyType.PREVIEW}
+_API_FULL_WIDTH_TYPES: set[PropertyType] = {PropertyType.PREVIEW}
 
 _CSS_NAMED_COLORS: dict[str, str] = {
     "aliceblue": "#F0F8FF",
@@ -241,6 +249,8 @@ class TemplateMapperAdapter(TemplateMapperPort):
                     required=p.required,
                     related_template_name=related_template_name,
                     relationship_type_name=relationship_type_name,
+                    style=(p.style if p.type in _API_STYLE_TYPES else None),
+                    full_width=(p.fullWidth if p.type in _API_FULL_WIDTH_TYPES else None),
                 )
             )
         return AgentTemplate(name=api_template.name, properties=agent_props, color=api_template.color)
@@ -261,6 +271,18 @@ class TemplateMapperAdapter(TemplateMapperPort):
                 content, relation_type_id = self._resolve_relationship(p)
 
             existing_prop = _find_existing_property(existing, p.name) if existing is not None else None
+            style_value: Optional[PropertyStyle] = None
+            full_width_value: bool = False
+            if p.type in _STYLE_TYPES:
+                if p.style is not None:
+                    style_value = p.style
+                elif existing_prop is not None:
+                    style_value = existing_prop.style
+            if p.type in _FULL_WIDTH_TYPES:
+                if p.full_width is not None:
+                    full_width_value = p.full_width
+                elif existing_prop is not None:
+                    full_width_value = existing_prop.fullWidth
             api_props.append(
                 PropertySchema(
                     _id=existing_prop.id if existing_prop is not None else None,
@@ -272,6 +294,8 @@ class TemplateMapperAdapter(TemplateMapperPort):
                     filter=p.use_as_filter,
                     showInCard=p.show_in_card,
                     required=p.required,
+                    style=style_value,
+                    fullWidth=full_width_value,
                 )
             )
 

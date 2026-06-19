@@ -30,6 +30,14 @@ async def create_template(
         * ``required`` — forbid saving an entity unless the property has a
           value.
 
+    Valid ``type`` values are listed in the templates-agent system prompt
+    under "Supported property types" and exposed in this tool's JSON schema
+    via the ``AgentPropertyType`` enum. Notable entries: ``text``,
+    ``markdown``, ``select``, ``multiselect``, ``relationship``, ``image``,
+    and the ``preview``-as-rendered-primary-document type (no entity-side
+    value; Uwazi renders the entity's primary document as an image when
+    this type is on the template).
+
     Linking properties to other data:
         * For ``select``/``multiselect``: set ``thesaurus_name`` to the
           thesaurus to draw values from (created with ``create_thesauri``).

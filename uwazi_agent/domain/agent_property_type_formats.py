@@ -55,4 +55,16 @@ AGENT_PROPERTY_TYPE_FORMATS: dict[AgentPropertyType, str] = {
         "first with the entity search tools. On read you receive "
         '`[{"shared_id": ..., "title": ...}]` for each linked entity.'
     ),
+    AgentPropertyType.PREVIEW: (
+        "a TEMPLATE-ONLY property that tells Uwazi to render the entity's "
+        "PRIMARY document (the file the entity is about) as an image at the "
+        "top of the entity view. Uwazi auto-generates the image from the file "
+        "itself — the user never uploads or picks a preview image. "
+        "``preview`` properties NEVER appear in entity metadata — there is "
+        "no per-entity value to read or write. When creating or updating a "
+        "template, you may set ``style`` (``'cover'`` (default), ``'fill'``, "
+        "or ``'fit'``; same values as for ``image`` properties) and "
+        "``full_width`` (bool; full-width layout when true). "
+        "Do NOT include a ``preview`` property in any entity payload."
+    ),
 }
