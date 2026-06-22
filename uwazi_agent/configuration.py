@@ -1,8 +1,12 @@
+from pathlib import Path
+
 MODEL = "deepseek-v4-flash:cloud"
 ENTITIES_LIMIT_FOR_LLM_MODEL = 5
 PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT = 2500
 REQUEST_LIMIT = 20
 OLLAMA_BASE_URL = "https://ollama.com/v1"
+
+UWAZI_REPOSITORY_PATH = Path("...")
 
 PUBLISH_CHUNK_SIZE = 50
 PUBLISH_RETRY_ON_429 = True
