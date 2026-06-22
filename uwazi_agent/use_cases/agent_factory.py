@@ -42,6 +42,7 @@ from .tools.get_thesauris_by_names import get_thesauris_by_names
 from .tools.get_thesauris_names import list_thesauri
 from .tools.get_languages import get_languages
 from .tools.list_pages import list_pages
+from .tools.opencode_query import opencode_query
 from .tools.page_script_executor import execute_page_script, prepare_page_script
 from .tools.python_code_executor import run_python_code
 from .tools.query_entities import query_entities
@@ -546,6 +547,7 @@ def build_orchestrator(
         _read_tool(get_publish_status),
         _read_tool(list_pages),
         _read_tool(get_pages_by_shared_ids),
+        _read_tool(opencode_query),
         Tool(get_entity_store_status, takes_ctx=True),
     ]
 

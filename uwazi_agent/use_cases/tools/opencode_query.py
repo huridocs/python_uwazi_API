@@ -26,7 +26,7 @@ async def opencode_query(
         The trimmed stdout produced by ``opencode``, or an error message.
     """
     repository_path = configuration.UWAZI_REPOSITORY_PATH
-    model = configuration.MODEL
+    model = configuration.MODEL.replace(":cloud", "")
 
     logger.info(
         "opencode_query: repo={} model={} question={!r}",
