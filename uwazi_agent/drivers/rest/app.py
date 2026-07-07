@@ -74,7 +74,6 @@ def _start_job(job_id: str, request: AIJobRequest) -> AIJobResponse:
     session.add_message("user", request.message)
 
     asyncio.create_task(_run_agent(job_id, request))
-
     return AIJobResponse(job_id=job_id, message=request.message, status=AIJobStatus.PENDING)
 
 
@@ -119,14 +118,16 @@ async def delete_job(job_id: str) -> dict:
 
 
 def create_uwazi_api_adapter(credentials: UwaziCredentials) -> UwaziApiAdapter:
+    secure_credentials = credentials.model_copy()
+    secure_credentials.make_url_secure()
+
     try:
         return UwaziApiAdapter(
-            user=credentials.username,
-            password=credentials.password,
-            url=credentials.url,
+            user=secure_credentials.username,
+            password=secure_credentials.password,
+            url=secure_credentials.url,
         )
     except:
-        credentials.clean_url()
         return UwaziApiAdapter(
             user=credentials.username,
             password=credentials.password,
