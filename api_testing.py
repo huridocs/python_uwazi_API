@@ -216,7 +216,9 @@ if __name__ == "__main__":
     # client.entities.create_or_update_entities_from_dataframe()
     # df = client.search.search_by_filter_to_dataframe(language="en", batch_size=2, filters=SearchFilters())
     # print(df.to_string())
-    stats = client.stats.get_stats()
-    print(stats.total_entities)
-    print(stats.templates)
-    print(stats.thesauri)
+    # stats = client.stats.get_stats()
+    # print(stats.total_entities)
+    # print(stats.templates)
+    # print(stats.thesauri)
+
+    client.exports.to_dataframe(template_name="[REMOVE]Demolition")

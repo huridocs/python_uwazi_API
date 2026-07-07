@@ -6,7 +6,7 @@ class UwaziCredentials(BaseModel):
     username: str
     password: str
 
-    def clean_url(self):
+    def make_url_secure(self):
         if "https://" in self.url:
             return
 
