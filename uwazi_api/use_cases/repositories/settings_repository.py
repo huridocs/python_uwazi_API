@@ -15,7 +15,7 @@ class SettingsRepository:
             headers=self.http.headers,
             cookies={},
         )
-        data = json.loads(response.text)
+        data = json.loads(response.content)
         return Settings.model_validate(data)
 
     def get_languages(self) -> list[Language]:

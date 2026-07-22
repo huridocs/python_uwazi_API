@@ -20,7 +20,7 @@ class RelationshipRepository:
             headers=self.http.headers,
             cookies={},
         )
-        data = json.loads(response.text)
+        data = json.loads(response.content)
         if isinstance(data, list):
             self._cache = [RelationshipType.model_validate(rt) for rt in data]
         else:
@@ -40,10 +40,10 @@ class RelationshipRepository:
             json=json_data,
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) creating relation type '{name}': {response.text}"
+            message = f"Error ({response.status_code}) creating relation type '{name}': {response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.error(message)
             raise UploadError(message)
-        return json.loads(response.text)
+        return json.loads(response.content)
 
     def update_relation_type(self, relation_type_id: str, name: str, language: str = "en") -> dict:
         self.clear_cache()
@@ -55,10 +55,10 @@ class RelationshipRepository:
             json=json_data,
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) updating relation type '{name}': {response.text}"
+            message = f"Error ({response.status_code}) updating relation type '{name}': {response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.error(message)
             raise UploadError(message)
-        return json.loads(response.text)
+        return json.loads(response.content)
 
     def delete_relation_type(self, relation_type_id: str, language: str = "en") -> dict:
         self.clear_cache()
@@ -69,10 +69,10 @@ class RelationshipRepository:
             params={"_id": relation_type_id},
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) deleting relation type {relation_type_id}: {response.text}"
+            message = f"Error ({response.status_code}) deleting relation type {relation_type_id}: {response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.error(message)
             raise UploadError(message)
-        return json.loads(response.text)
+        return json.loads(response.content)
 
     def get_relation_type_by_name(self, name: str) -> Optional[RelationshipType]:
         relation_types = self.get_relation_types()
@@ -125,8 +125,10 @@ class RelationshipRepository:
             data=json.dumps(json_data),
         )
         if response.status_code != 200:
-            message = f"Error setting relationships {response.status_code} {response.text}"
+            message = (
+                f"Error setting relationships {response.status_code} {response.content.decode('utf-8', errors='replace')}"
+            )
             self.http.graylog.error(message)
             raise UploadError(message)
         self.http.graylog.info("Relationships set successfully")
-        return json.loads(response.text)
+        return json.loads(response.content)

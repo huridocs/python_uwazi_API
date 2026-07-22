@@ -17,7 +17,9 @@ class PropertyStyle(str, Enum):
     is the legacy sentinel stored in older Uwazi templates when the
     user did not pick a style; the validator below normalises it to
     ``COVER`` (the default) on read so the LLM never has to deal
-    with it.
+    with it. ``FILL`` is a legacy value persisted by older Uwazi
+    instances; it is equivalent to ``COVER`` and normalised to it
+    on read.
 
     ``COVER`` is the default: omitting ``style`` (or sending the
     legacy empty string) is treated as a cover-style render.
@@ -34,17 +36,18 @@ def _coerce_property_style(value: Any) -> Any:
 
     Accepts a string (the raw Uwazi payload), ``None`` (legacy unset /
     explicit "no preference"), or an already-coerced ``PropertyStyle``.
-    The empty string and ``None`` (legacy "unset" sentinels) are both
-    mapped to ``PropertyStyle.COVER`` — the documented default — so
-    callers always see a concrete style value.
+    The empty string, ``None`` (legacy "unset" sentinels), and ``FILL``
+    (legacy equivalent of ``COVER``) are all mapped to
+    ``PropertyStyle.COVER`` — the documented default — so callers
+    always see a concrete, canonical style value.
     """
-
+    _NORMALISE_TO_COVER = {PropertyStyle.EMPTY, PropertyStyle.FILL}
     if value is None:
         return PropertyStyle.COVER
     if isinstance(value, PropertyStyle):
-        return PropertyStyle.COVER if value is PropertyStyle.EMPTY else value
+        return PropertyStyle.COVER if value in _NORMALISE_TO_COVER else value
     if isinstance(value, str):
-        if value == "":
+        if value == "" or value == "fill":
             return PropertyStyle.COVER
         return PropertyStyle(value)
     return value

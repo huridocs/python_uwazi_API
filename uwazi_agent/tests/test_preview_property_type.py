@@ -221,13 +221,13 @@ def test_agent_property_type_field_has_schema_description_with_preview():
         )
 
 
-def test_property_style_enum_includes_cover_and_contain():
-    """Wire-side enum: Uwazi persists only ``cover`` (default) and
-    ``contain`` on disk (see ``AbstractImageProperty`` in the Uwazi
-    server code). The LLM-facing ``AgentPropertyStyle`` adds the
-    UI labels ``fill`` / ``fit`` on top of these."""
+def test_property_style_enum_includes_cover_contain_and_fill():
+    """Wire-side enum: Uwazi persists ``cover`` (default), ``contain``,
+    and the legacy ``fill`` on disk. ``fill`` is normalised to ``cover``
+    on read (see ``_coerce_property_style``). ``EMPTY`` is the legacy
+    unset sentinel, also normalised to ``cover``."""
     members = {m.value for m in PropertyStyle if m is not PropertyStyle.EMPTY}
-    assert members == {"cover", "contain"}
+    assert members == {"cover", "contain", "fill"}
 
 
 def test_agent_property_style_enum_includes_cover_fill_fit():
@@ -248,11 +248,18 @@ def test_agent_property_style_cover_is_default_member():
 
 
 def test_property_schema_rejects_unknown_style_value():
-    """A typo on the wire (e.g. ``'Coverr'``, ``'fill'``) is rejected
-    with a clear validation error — ``fill`` is the UI label, not a
-    wire value."""
+    """A typo on the wire (e.g. ``'Coverr'``) is rejected with a clear
+    validation error."""
     with __import__("pytest").raises(ValidationError):
-        PropertySchema(type=PropertyType.IMAGE, style="fill")
+        PropertySchema(type=PropertyType.IMAGE, style="Coverr")
+
+
+def test_property_schema_normalises_fill_to_cover():
+    """Legacy Uwazi templates may carry ``style="fill"``; it is
+    normalised to ``COVER`` on read so callers always see the
+    canonical value."""
+    schema = PropertySchema.model_validate({"type": "image", "style": "fill"})
+    assert schema.style is PropertyStyle.COVER
 
 
 def test_agent_property_rejects_unknown_style_value():

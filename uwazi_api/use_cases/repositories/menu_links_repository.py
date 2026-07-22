@@ -28,7 +28,7 @@ class MenuLinksRepository:
             message = f"Error ({response.status_code}) getting menu links"
             self.http.graylog.info(message)
             raise UploadError(message)
-        data = response.json()
+        data = json.loads(response.content)
         if not isinstance(data, list):
             return []
         return [self._to_model(entry) for entry in data]
@@ -42,10 +42,12 @@ class MenuLinksRepository:
             data=json.dumps(payload),
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) replacing menu links: {response.text}"
+            message = (
+                f"Error ({response.status_code}) replacing menu links: {response.content.decode('utf-8', errors='replace')}"
+            )
             self.http.graylog.info(message)
             raise UploadError(message)
-        body = response.json()
+        body = json.loads(response.content)
         if not isinstance(body, list):
             return [self._to_model(entry) for entry in payload]
         return [self._to_model(entry) for entry in body]
@@ -64,10 +66,12 @@ class MenuLinksRepository:
             data=json.dumps([]),
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) deleting menu links: {response.text}"
+            message = (
+                f"Error ({response.status_code}) deleting menu links: {response.content.decode('utf-8', errors='replace')}"
+            )
             self.http.graylog.info(message)
             raise UploadError(message)
-        body = response.json()
+        body = json.loads(response.content)
         if not isinstance(body, list):
             return []
         return [self._to_model(entry) for entry in body]

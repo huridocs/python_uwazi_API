@@ -21,7 +21,7 @@ class TemplateRepository:
             headers=self.http.headers,
             cookies={},
         )
-        data = json.loads(response.text)
+        data = json.loads(response.content)
         self._cache = [Template.model_validate(t) for t in data.get("rows", [])]
         return self._cache
 
@@ -36,7 +36,7 @@ class TemplateRepository:
             cookies={"locale": language},
             data=json.dumps(template.model_dump(by_alias=True, exclude_none=True)),
         )
-        return json.loads(response.text)
+        return json.loads(response.content)
 
     def delete_empty_template(self, template_id: str) -> dict:
         self.clear_cache()
@@ -46,7 +46,7 @@ class TemplateRepository:
             headers=self.http.headers,
             cookies={},
         )
-        return json.loads(response.text)
+        return json.loads(response.content)
 
     def get_by_name(self, template_name: str) -> Optional[Template]:
         templates = self.get()

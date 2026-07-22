@@ -221,4 +221,5 @@ if __name__ == "__main__":
     # print(stats.templates)
     # print(stats.thesauri)
 
-    client.exports.to_dataframe(template_name="[REMOVE]Demolition")
+    df = pd.DataFrame({"sharedId": ["ii33m3w4ixj"], "geolocation_geolocation": ["39.34343|-0.34343"]})
+    client.entities.create_or_update_entities_from_dataframe(df, template="test_1", language="en")
