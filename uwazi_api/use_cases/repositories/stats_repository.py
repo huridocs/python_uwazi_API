@@ -44,7 +44,7 @@ class StatsRepository:
         if response.status_code != 200:
             raise SearchError(f"Error fetching search stats: {response.status_code}")
 
-        data = json.loads(response.text)
+        data = json.loads(response.content)
 
         total_rows = data.get("totalRows", 0)
         aggregations = data.get("aggregations", {})

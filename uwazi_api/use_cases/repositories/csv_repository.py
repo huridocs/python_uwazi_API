@@ -19,6 +19,8 @@ class CSVRepository:
         )
         if response.status_code != 200:
             self.http.graylog.info(f"Error uploading CSV {response.status_code}")
-            raise UploadError(f"Error uploading CSV {response.status_code} {response.text}")
+            raise UploadError(
+                f"Error uploading CSV {response.status_code} {response.content.decode('utf-8', errors='replace')}"
+            )
         self.http.graylog.info(f"CSV uploaded with status {response.status_code}")
-        return {"status_code": response.status_code, "text": response.text}
+        return {"status_code": response.status_code, "text": response.content.decode("utf-8", errors="replace")}

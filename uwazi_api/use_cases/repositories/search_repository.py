@@ -42,7 +42,7 @@ class SearchRepository:
         )
         if response.status_code != 200:
             raise SearchError("Error getting entities shared ids")
-        rows = json.loads(response.text).get("rows", [])
+        rows = json.loads(response.content).get("rows", [])
         return [row["sharedId"] for row in rows]
 
     def get(
@@ -73,7 +73,7 @@ class SearchRepository:
         )
         if response.status_code != 200:
             raise SearchError("Error getting entities")
-        rows = json.loads(response.text).get("rows", [])
+        rows = json.loads(response.content).get("rows", [])
         return [Entity.model_validate(row) for row in rows]
 
     def search_by_text(
@@ -223,7 +223,7 @@ class SearchRepository:
         )
         if response.status_code != 200:
             raise SearchError(f"Error searching entities by filter: {response.status_code}")
-        rows = json.loads(response.text).get("rows", [])
+        rows = json.loads(response.content).get("rows", [])
         return [Entity.model_validate(row) for row in rows]
 
     def search_by_filter_to_dataframe(

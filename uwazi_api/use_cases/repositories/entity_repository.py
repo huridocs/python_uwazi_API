@@ -41,7 +41,7 @@ class EntityRepository:
         )
         if response.status_code != 200:
             raise EntityNotFoundError(f"Error getting entity {shared_id} {language}: {response.status_code}")
-        data = json.loads(response.text)
+        data = json.loads(response.content)
         rows = data.get("rows", [])
         if len(rows) == 0:
             raise EntityNotFoundError(f"Entity not found {shared_id} {language}")
@@ -62,7 +62,7 @@ class EntityRepository:
         )
         if response.status_code != 200:
             return None
-        rows = json.loads(response.text).get("rows", [])
+        rows = json.loads(response.content).get("rows", [])
         if len(rows) == 0:
             return None
         return Entity.model_validate(rows[0])
@@ -83,12 +83,12 @@ class EntityRepository:
             data=json.dumps(payload),
         )
         if upload_response.status_code != 200:
-            message = f"Error uploading entity {upload_response.status_code} {upload_response.text}"
+            message = f"Error uploading entity {upload_response.status_code} {upload_response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.error(message)
             raise UploadError(message)
         if entity.id:
             self.http.graylog.info(f"Entity uploaded {entity.id}")
-        data = json.loads(upload_response.text)
+        data = json.loads(upload_response.content)
         shared_id = data["sharedId"]
         self._wait_for_entity_indexed(shared_id)
         return shared_id
@@ -152,7 +152,7 @@ class EntityRepository:
         )
         if response.status_code != 200:
             return []
-        rows = json.loads(response.text).get("rows", [])
+        rows = json.loads(response.content).get("rows", [])
         if not rows:
             return []
         return rows[0].get("permissions", [])

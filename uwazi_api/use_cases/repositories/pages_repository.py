@@ -20,7 +20,7 @@ class PagesRepository:
             message = f"Error ({response.status_code}) getting pages"
             self.http.graylog.info(message)
             raise PageNotFoundError(message)
-        return [Page.model_validate(p) for p in response.json()]
+        return [Page.model_validate(p) for p in json.loads(response.content)]
 
     def get_by_shared_id(self, shared_id: str, language: str = "en") -> Page:
         response = self.http.request_adapter.get(
@@ -33,7 +33,7 @@ class PagesRepository:
             message = f"Error ({response.status_code}) getting page {shared_id}"
             self.http.graylog.info(message)
             raise PageNotFoundError(message)
-        data = response.json()
+        data = json.loads(response.content)
         if isinstance(data, list):
             if not data:
                 raise PageNotFoundError(f"Page {shared_id} not found")
@@ -67,10 +67,10 @@ class PagesRepository:
             data=json.dumps(payload),
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) creating page '{title}': {response.text}"
+            message = f"Error ({response.status_code}) creating page '{title}': {response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.info(message)
             raise UploadError(message)
-        return Page.model_validate(response.json())
+        return Page.model_validate(json.loads(response.content))
 
     def update(self, page: Page) -> Page:
         if not page.id or not page.shared_id:
@@ -93,10 +93,10 @@ class PagesRepository:
             data=json.dumps(payload),
         )
         if response.status_code != 200:
-            message = f"Error ({response.status_code}) updating page {page.shared_id}: {response.text}"
+            message = f"Error ({response.status_code}) updating page {page.shared_id}: {response.content.decode('utf-8', errors='replace')}"
             self.http.graylog.info(message)
             raise UploadError(message)
-        return Page.model_validate(response.json())
+        return Page.model_validate(json.loads(response.content))
 
     def delete(self, shared_id: str, language: str = "en") -> None:
         response = self.http.request_adapter.delete(
