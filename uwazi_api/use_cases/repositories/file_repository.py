@@ -24,11 +24,14 @@ def _build_multipart_body(entity_id: str, title: str, file_bytes: bytes, content
     boundary = f"----UwaziAPIBoundary{uuid.uuid4().hex}"
     title_utf8 = title.encode("utf-8")
 
-    # Encode the header filename as Latin-1 when possible so the legacy
-    # header-based path also decodes correctly; characters outside Latin-1
-    # fall back to UTF-8, but those are overridden by the originalname field.
+    # The Content-Disposition filename is a quoted-string, so a title
+    # containing '"' or '\' prematurely closes it and Uwazi rejects the
+    # file part with "Input not instance of InputFile". The originalname
+    # body field (UTF-8) already carries the true title, so the header
+    # filename only needs to be a well-formed quoted-string value.
+    header_filename = title.replace("\\", "").replace('"', "")
     try:
-        header_filename_bytes = title.encode("latin-1")
+        header_filename_bytes = header_filename.encode("latin-1")
     except UnicodeEncodeError:
         header_filename_bytes = title_utf8
 
