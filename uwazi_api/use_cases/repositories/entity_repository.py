@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 
 from uwazi_api.domain.entity import Entity
+from uwazi_api.domain.entity_file_upload import EntityFileUpload
 from uwazi_api.domain.entity_response import EntityResponse
 from uwazi_api.domain.exceptions import (
     EntityNotFoundError,
@@ -22,7 +23,7 @@ from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 def _build_entity_multipart(
     payload: dict,
-    files: list[dict],
+    files: list[EntityFileUpload],
 ) -> list[tuple]:
     """Build the ``files`` parameter for a multipart/form-data entity upload.
 
@@ -30,21 +31,10 @@ def _build_entity_multipart(
     suitable for ``requests.post(files=...)``. The first element is always the
     ``entity`` field carrying the serialised JSON payload, followed by
     one entry per file.
-
-    Each file entry in ``files`` must have:
-
-    - ``content`` (bytes) – **required**
-    - ``fieldname`` (str, default ``"file"``)
-    - ``filename`` (str, default ``""``)
-    - ``content_type`` (str, default ``"application/octet-stream"``)
     """
     request_files: list[tuple] = [("entity", ("", json.dumps(payload), "application/json"))]
     for f in files:
-        fieldname = f.get("fieldname", "file")
-        filename = f.get("filename", "")
-        content = f["content"]
-        content_type = f.get("content_type", "application/octet-stream")
-        request_files.append((fieldname, (filename, content, content_type)))
+        request_files.append((f.fieldname, (f.filename, f.content, f.content_type)))
     return request_files
 
 
@@ -103,7 +93,7 @@ class EntityRepository:
         self,
         entity: Entity,
         language: str,
-        files: Optional[list[dict]] = None,
+        files: Optional[list[EntityFileUpload]] = None,
     ) -> str:
         if entity.shared_id and not entity.id:
             existing = self.get_one(entity.shared_id, language)
@@ -146,7 +136,7 @@ class EntityRepository:
         self,
         entity: Entity,
         language: str,
-        files: Optional[list[dict]] = None,
+        files: Optional[list[EntityFileUpload]] = None,
     ) -> str:
         if not entity.shared_id:
             raise UploadError("shared_id is required for partial update")

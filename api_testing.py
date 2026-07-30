@@ -7,6 +7,9 @@ import numpy as np
 
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
+from uwazi_api.domain.entity_file_upload import EntityFileUpload
+from uwazi_api.domain.file_fieldname import FileFieldname
+from uwazi_api.domain.FileType import FileType
 from uwazi_api.domain.entity_response import EntityResponse
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
@@ -173,6 +176,37 @@ def upload_entity():
     return client.entities.upload(entity=entity, language="en")
 
 
+def upload_entity_with_primary_and_supporting_pdf(template: str):
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+
+    with open("data/test_document.pdf", "rb") as f:
+        pdf_bytes = f.read()
+
+    entity = Entity(
+        title="Entity with primary document and supporting file",
+        template=template,
+        language="en",
+        metadata={"text": "test_1"},
+    )
+
+    files = [
+        EntityFileUpload(
+            fieldname=FileFieldname.FILE,
+            filename="test_document.pdf",
+            content=pdf_bytes,
+            content_type=FileType.PDF,
+        ),
+        EntityFileUpload(
+            fieldname=FileFieldname.ATTACHMENT,
+            filename="test_document.pdf",
+            content=pdf_bytes,
+            content_type=FileType.PDF,
+        ),
+    ]
+
+    return client.entities.upload(entity=entity, language="en", files=files)
+
+
 def update_partially():
     shared_id = "dun73bzdlnj"
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
@@ -204,7 +238,8 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
-    upload_csv("PARAGRAPH")
+    # upload_csv("PARAGRAPH")
+    upload_entity_with_primary_and_supporting_pdf("PARAGRAPH")
     # df = loop_entities()
     # print(df.to_string())
     #
