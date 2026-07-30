@@ -9,7 +9,7 @@ from uwazi_api.adapters.request_retry import requests_retry_session
 
 
 class HttpClientAdapter(HttpClientPort):
-    def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None):
+    def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None):
         if not url:
             raise ValueError("URL is required and cannot be None or empty")
         url = url.rstrip("/")
@@ -19,6 +19,7 @@ class HttpClientAdapter(HttpClientPort):
         self.url = url
         self.user = user
         self.password = password
+        self.token = token
         self.request_adapter = requests_retry_session()
         self.headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -31,7 +32,7 @@ class HttpClientAdapter(HttpClientPort):
         response = self.request_adapter.post(
             f"{self.url}/api/login",
             headers=self.headers,
-            json={"username": self.user, "password": self.password},
+            json={"username": self.user, "password": self.password, **({"token": self.token} if self.token else {})},
         )
         if response.status_code != 200:
             raise AuthenticationError(f"Login failed: {response.status_code}")
