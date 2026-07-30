@@ -20,8 +20,14 @@ from uwazi_api.use_cases.thesauri_from_dataframe_use_case import ThesauriFromDat
 
 
 class UwaziClient:
-    def __init__(self, user: Optional[str] = None, password: Optional[str] = None, url: Optional[str] = None):
-        self.http = HttpClientAdapter(url, user, password)
+    def __init__(
+        self,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        url: Optional[str] = None,
+        token: Optional[str] = None,
+    ):
+        self.http = HttpClientAdapter(url, user, password, token=token)
 
         # Drivers / Repositories
         self._template_repo = TemplateRepository(self.http)

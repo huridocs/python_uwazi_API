@@ -117,11 +117,12 @@ class UwaziApiAdapter(
         user: Optional[str] = None,
         password: Optional[str] = None,
         url: Optional[str] = None,
+        token: Optional[str] = None,
         template_mapper: Optional[TemplateMapperAdapter] = None,
         entity_mapper: Optional[EntityMapper] = None,
         page_mapper: Optional[PageMapper] = None,
     ):
-        self.client = UwaziClient(user=user, password=password, url=url)
+        self.client = UwaziClient(user=user, password=password, url=url, token=token)
         self._thesauri_repo = self.client.thesauris
         self._template_repo = self.client.templates
         self._entity_repo = self.client.entities

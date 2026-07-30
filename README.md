@@ -36,6 +36,15 @@ client = UwaziClient(
     url='http://localhost:3000'
 )
 
+# Authenticated client with two-factor authentication (TOTP)
+# Generate a fresh TOTP code before constructing the client.
+client = UwaziClient(
+    user='admin',
+    password='admin',
+    url='http://localhost:3000',
+    token='123456'
+)
+
 # Public client (read-only, no credentials needed)
 client = UwaziClient.public('https://public.uwazi.org')
 
