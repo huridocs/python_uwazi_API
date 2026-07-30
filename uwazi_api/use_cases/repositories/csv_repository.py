@@ -11,7 +11,7 @@ class CSVRepository:
 
     def upload(self, template_id: str, csv_bytes: bytes, filename: str = "import.csv") -> Optional[dict]:
         response = self.http.request_adapter.post(
-            url=f"{self.http.url}/api/import",
+            url=f"{self.http.url}/api/csvImportEntities",
             data={"template": template_id},
             files={"file": (filename, BytesIO(csv_bytes), "application/csv")},
             cookies={},

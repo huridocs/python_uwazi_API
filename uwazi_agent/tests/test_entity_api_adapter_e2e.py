@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.entity import Entity
+from uwazi_api.domain.template import Template
+from uwazi_api.domain.property_schema import PropertySchema
+from uwazi_api.domain.property_type import PropertyType
 
 
 load_dotenv()
@@ -40,6 +43,9 @@ class TestEntityApiAdapterE2E:
     a live Uwazi instance is required, and the full adapter path
     (entity mapper included) is exercised against real data.
 
+    A dedicated template is created for the test run so the tests are
+    independent of the instance's existing templates.
+
     Coverage of the four agent-facing operations:
         * get_entities_by_shared_ids
         * search_entities_by_text
@@ -53,16 +59,27 @@ class TestEntityApiAdapterE2E:
         cls.client = cls.adapter.client
         cls.template_repo = cls.client.templates
         cls.entity_repo = cls.client.entities
-        cls.thesauri_repo = cls.client.thesauris
-
-        templates = cls.template_repo.get()
-        assert templates, "Need at least one template in the Uwazi instance"
-        cls.test_template = templates[0]
-        cls.test_template_id = cls.test_template.id
-        cls.test_template_name = cls.test_template.name
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.unique_marker = f"agent_entity_test_{ts}"
+
+        # Create a dedicated test template with no required properties
+        # so tests can pass metadata={} without triggering validation errors.
+        template = Template(
+            name=f"{cls.unique_marker}_template",
+            properties=[
+                PropertySchema(
+                    name="test_field",
+                    label="Test Field",
+                    type=PropertyType.TEXT,
+                ),
+            ],
+        )
+        response = cls.template_repo.set("en", template)
+        cls.test_template = Template.model_validate(response)
+        cls.test_template_id = cls.test_template.id
+        cls.test_template_name = cls.test_template.name
+
         cls.created_shared_ids: list[str] = []
 
     def test_01_get_entities_by_shared_ids_round_trip(self):
@@ -199,10 +216,18 @@ class TestEntityApiAdapterE2E:
 
     @classmethod
     def teardown_class(cls):
+        # Delete any remaining created entities.
         for shared_id in list(cls.created_shared_ids):
             try:
                 time.sleep(2)
                 cls.entity_repo.delete(shared_id)
+            except Exception:
+                pass
+
+        # Delete the dedicated test template (safe once all entities are gone).
+        if hasattr(cls, "test_template_id"):
+            try:
+                cls.template_repo.delete_empty_template(cls.test_template_id)
             except Exception:
                 pass
 

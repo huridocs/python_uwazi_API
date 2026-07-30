@@ -4,6 +4,7 @@ import traceback
 from typing import Optional
 
 import pandas as pd
+import requests
 
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.entity_response import EntityResponse
@@ -17,6 +18,34 @@ from uwazi_api.use_cases.repositories.template_repository import TemplateReposit
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
+
+
+def _build_entity_multipart(
+    payload: dict,
+    files: list[dict],
+) -> list[tuple]:
+    """Build the ``files`` parameter for a multipart/form-data entity upload.
+
+    Returns a list of ``(fieldname, (filename, content, content_type))`` tuples
+    suitable for ``requests.post(files=...)``. The first element is always the
+    ``entity`` field carrying the serialised JSON payload, followed by
+    one entry per file.
+
+    Each file entry in ``files`` must have:
+
+    - ``content`` (bytes) – **required**
+    - ``fieldname`` (str, default ``"file"``)
+    - ``filename`` (str, default ``""``)
+    - ``content_type`` (str, default ``"application/octet-stream"``)
+    """
+    request_files: list[tuple] = [("entity", ("", json.dumps(payload), "application/json"))]
+    for f in files:
+        fieldname = f.get("fieldname", "file")
+        filename = f.get("filename", "")
+        content = f["content"]
+        content_type = f.get("content_type", "application/octet-stream")
+        request_files.append((fieldname, (filename, content, content_type)))
+    return request_files
 
 
 class EntityRepository:
@@ -54,12 +83,15 @@ class EntityRepository:
         return entity.id
 
     def get_by_id(self, entity_id: str) -> Optional[Entity]:
-        response = self.http.request_adapter.get(
-            url=f"{self.http.url}/api/entities",
-            headers=self.http.headers,
-            cookies={},
-            params={"_id": entity_id, "omitRelationships": "true"},
-        )
+        try:
+            response = self.http.request_adapter.get(
+                url=f"{self.http.url}/api/entities",
+                headers=self.http.headers,
+                cookies={},
+                params={"_id": entity_id, "omitRelationships": "true"},
+            )
+        except requests.RequestException:
+            return None
         if response.status_code != 200:
             return None
         rows = json.loads(response.content).get("rows", [])
@@ -67,7 +99,12 @@ class EntityRepository:
             return None
         return Entity.model_validate(rows[0])
 
-    def upload(self, entity: Entity, language: str) -> str:
+    def upload(
+        self,
+        entity: Entity,
+        language: str,
+        files: Optional[list[dict]] = None,
+    ) -> str:
         if entity.shared_id and not entity.id:
             existing = self.get_one(entity.shared_id, language)
             entity.id = existing.id
@@ -76,24 +113,41 @@ class EntityRepository:
             entity.template = self._resolve_template_id(entity.template)
 
         payload = self._validator.validate_and_prepare_for_upload(entity, language)
-        upload_response = self.http.request_adapter.post(
-            url=f"{self.http.url}/api/entities",
-            headers=self.http.headers,
-            cookies={"locale": language},
-            data=json.dumps(payload),
-        )
+
+        if files:
+            request_files = _build_entity_multipart(payload, files)
+            upload_response = self.http.post_multipart(
+                url=f"{self.http.url}/api/entities",
+                files=request_files,
+                cookies={"locale": language},
+            )
+        else:
+            upload_response = self.http.post_json(
+                url=f"{self.http.url}/api/entities",
+                json=payload,
+                cookies={"locale": language},
+            )
         if upload_response.status_code != 200:
-            message = f"Error uploading entity {upload_response.status_code} {upload_response.content.decode('utf-8', errors='replace')}"
+            message = (
+                f"Error uploading entity {upload_response.status_code} "
+                f"{upload_response.content.decode('utf-8', errors='replace')}"
+            )
             self.http.graylog.error(message)
             raise UploadError(message)
         if entity.id:
             self.http.graylog.info(f"Entity uploaded {entity.id}")
         data = json.loads(upload_response.content)
-        shared_id = data["sharedId"]
+        entity_data = data.get("entity", data)
+        shared_id = entity_data["sharedId"]
         self._wait_for_entity_indexed(shared_id)
         return shared_id
 
-    def update_partially(self, entity: Entity, language: str) -> str:
+    def update_partially(
+        self,
+        entity: Entity,
+        language: str,
+        files: Optional[list[dict]] = None,
+    ) -> str:
         if not entity.shared_id:
             raise UploadError("shared_id is required for partial update")
 
@@ -117,7 +171,7 @@ class EntityRepository:
             metadata=merged_metadata,
         )
 
-        return self.upload(merged_entity, language)
+        return self.upload(merged_entity, language, files=files)
 
     def _wait_for_entity_indexed(self, shared_id: str, timeout: float = 3.0, interval: float = 0.5) -> None:
         deadline = time.time() + timeout
@@ -132,7 +186,7 @@ class EntityRepository:
     def delete(self, shared_id: str) -> None:
         self._wait_for_entity_indexed(shared_id)
         response = self.http.request_adapter.delete(
-            f"{self.http.url}/api/documents",
+            f"{self.http.url}/api/entities",
             headers=self.http.headers,
             params={"sharedId": shared_id},
             cookies={},

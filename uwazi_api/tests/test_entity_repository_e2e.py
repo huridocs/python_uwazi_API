@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError, UploadError
+from uwazi_api.domain.template import Template
+from uwazi_api.domain.property_schema import PropertySchema
+from uwazi_api.domain.property_type import PropertyType
 
 
 load_dotenv()
@@ -27,14 +30,25 @@ class TestEntityRepositoryE2E:
         cls.entity_repo = cls.client.entities
         cls.template_repo = cls.client.templates
 
-        # Get an existing template to use for entity creation
-        templates = cls.template_repo.get()
-        assert len(templates) > 0, "No templates found in Uwazi instance"
-        cls.test_template = templates[0]
+        # Create a dedicated test template with no required properties
+        # so tests can create entities without metadata validation errors.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        template = Template(
+            name=f"e2e_test_template_{timestamp}",
+            properties=[
+                PropertySchema(
+                    name="test_field",
+                    label="Test Field",
+                    type=PropertyType.TEXT,
+                ),
+            ],
+        )
+        response = cls.template_repo.set("en", template)
+        cls.test_template = Template.model_validate(response)
         cls.test_template_id = cls.test_template.id
+        cls.test_template_name = cls.test_template.name
 
         # Create unique test entity names
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.test_entity_title = f"test_entity_{timestamp}"
         cls.bulk_entity_1_title = f"bulk_test_1_{timestamp}"
         cls.bulk_entity_2_title = f"bulk_test_2_{timestamp}"
@@ -180,7 +194,7 @@ class TestEntityRepositoryE2E:
 
     @classmethod
     def teardown_class(cls):
-        """Clean up any remaining test entities."""
+        """Clean up any remaining test entities and the test template."""
         # Delete main test entity if it still exists
         if cls.test_shared_id:
             try:
@@ -199,6 +213,13 @@ class TestEntityRepositoryE2E:
             try:
                 cls.entity_repo.delete(cls.bulk_entity_2_shared_id)
             except (EntityNotFoundError, UploadError):
+                pass
+
+        # Delete the test template
+        if cls.test_template_id:
+            try:
+                cls.template_repo.delete_empty_template(cls.test_template_id)
+            except Exception:
                 pass
 
 

@@ -196,13 +196,10 @@ class EntityValidator:
         for key in entity.metadata or {}:
             if key not in prop_map and key not in name_map:
                 raise SearchError(f"Metadata property '{key}' not found in template '{template.name}'")
-        for prop in all_props:
-            if (
-                prop.required
-                and prop.type not in ("preview", "nested")
-                and prop.name not in (entity.metadata.keys() if entity.metadata else [])
-            ):
-                raise SearchError(f"Required property '{prop.name}' is missing in entity metadata")
+        if entity.metadata:
+            for prop in all_props:
+                if prop.required and prop.type not in ("preview", "nested") and prop.name not in entity.metadata:
+                    raise SearchError(f"Required property '{prop.name}' is missing in entity metadata")
         for key, values in (entity.metadata or {}).items():
             prop = prop_map.get(key)
             if not prop:
