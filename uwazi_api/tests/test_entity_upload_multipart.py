@@ -1,5 +1,8 @@
 import json
 
+from uwazi_api.domain.entity_file_upload import EntityFileUpload
+from uwazi_api.domain.file_fieldname import FileFieldname
+from uwazi_api.domain.FileType import FileType
 from uwazi_api.use_cases.repositories.entity_repository import (
     _build_entity_multipart,
 )
@@ -37,12 +40,12 @@ class TestBuildEntityMultipart:
         """A single document file is included alongside the entity."""
         payload = {"title": "test"}
         files = [
-            {
-                "fieldname": "document",
-                "filename": "report.pdf",
-                "content": b"%PDF-1.4 binary content",
-                "content_type": "application/pdf",
-            }
+            EntityFileUpload(
+                fieldname=FileFieldname.DOCUMENT,
+                filename="report.pdf",
+                content=b"%PDF-1.4 binary content",
+                content_type=FileType.PDF,
+            ),
         ]
         result = _build_entity_multipart(payload, files)
 
@@ -60,18 +63,18 @@ class TestBuildEntityMultipart:
         """Multiple files with different fieldnames are all included."""
         payload = {"title": "multi-file test"}
         files = [
-            {
-                "fieldname": "document",
-                "filename": "doc.pdf",
-                "content": b"%PDF-1.4",
-                "content_type": "application/pdf",
-            },
-            {
-                "fieldname": "attachment",
-                "filename": "image.png",
-                "content": b"\x89PNG\r\n\x1a\n",
-                "content_type": "image/png",
-            },
+            EntityFileUpload(
+                fieldname=FileFieldname.DOCUMENT,
+                filename="doc.pdf",
+                content=b"%PDF-1.4",
+                content_type=FileType.PDF,
+            ),
+            EntityFileUpload(
+                fieldname=FileFieldname.ATTACHMENT,
+                filename="image.png",
+                content=b"\x89PNG\r\n\x1a\n",
+                content_type=FileType.PNG,
+            ),
         ]
         result = _build_entity_multipart(payload, files)
 
@@ -87,10 +90,10 @@ class TestBuildEntityMultipart:
         """When fieldname is omitted, it defaults to 'file'."""
         payload = {"title": "test"}
         files = [
-            {
-                "filename": "data.txt",
-                "content": b"hello",
-            }
+            EntityFileUpload(
+                filename="data.txt",
+                content=b"hello",
+            ),
         ]
         result = _build_entity_multipart(payload, files)
         assert result[1][0] == "file"
@@ -99,9 +102,9 @@ class TestBuildEntityMultipart:
         """When content_type is omitted, defaults to application/octet-stream."""
         payload = {"title": "test"}
         files = [
-            {
-                "content": b"binary data",
-            }
+            EntityFileUpload(
+                content=b"binary data",
+            ),
         ]
         result = _build_entity_multipart(payload, files)
         _, (_, _, content_type) = result[1]
@@ -111,9 +114,9 @@ class TestBuildEntityMultipart:
         """When filename is omitted, defaults to empty string."""
         payload = {"title": "test"}
         files = [
-            {
-                "content": b"data",
-            }
+            EntityFileUpload(
+                content=b"data",
+            ),
         ]
         result = _build_entity_multipart(payload, files)
         _, (filename, _, _) = result[1]
@@ -129,7 +132,7 @@ class TestBuildEntityMultipart:
         assert len(result_no_files) >= 1
         assert result_no_files[0][0] == "entity"
 
-        result_with_files = _build_entity_multipart({"title": "t"}, [{"content": b"x"}])
+        result_with_files = _build_entity_multipart({"title": "t"}, [EntityFileUpload(content=b"x")])
         assert len(result_with_files) == 2
         assert result_with_files[0][0] == "entity"
         assert result_with_files[1][0] == "file"
