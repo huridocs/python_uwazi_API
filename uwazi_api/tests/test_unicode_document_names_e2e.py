@@ -21,6 +21,9 @@ from dotenv import load_dotenv
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.FileType import FileType
+from uwazi_api.domain.template import Template
+from uwazi_api.domain.property_schema import PropertySchema
+from uwazi_api.domain.property_type import PropertyType
 
 load_dotenv()
 
@@ -56,9 +59,21 @@ class TestUnicodeDocumentNamesE2E:
         cls.file_service = cls.client.files
         cls.template_repo = cls.client.templates
 
-        templates = cls.template_repo.get()
-        assert len(templates) > 0, "No templates found in Uwazi instance"
-        cls.test_template = templates[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cls.test_template_name = f"e2e_test_unicode_template_{timestamp}"
+
+        template = Template(
+            name=cls.test_template_name,
+            properties=[
+                PropertySchema(
+                    name="test_field",
+                    label="Test Field",
+                    type=PropertyType.TEXT,
+                ),
+            ],
+        )
+        response = cls.template_repo.set("en", template)
+        cls.test_template = Template.model_validate(response)
         cls.test_template_id = cls.test_template.id
 
         cls.test_entity = Entity(
@@ -133,10 +148,15 @@ class TestUnicodeDocumentNamesE2E:
 
     @classmethod
     def teardown_class(cls):
-        """Clean up test entity."""
+        """Clean up test entity and template."""
         if cls.test_shared_id:
             try:
                 cls.entity_repo.delete(cls.test_shared_id)
+            except Exception:
+                pass
+        if cls.test_template_id:
+            try:
+                cls.template_repo.delete_empty_template(cls.test_template_id)
             except Exception:
                 pass
 

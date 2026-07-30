@@ -185,6 +185,15 @@ def update_partially():
     return client.entities.update_partially(entity=entity, language="en")
 
 
+def upload_csv(template_name: str):
+    """Test CSV upload via the /api/csvImportEntities endpoint."""
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    df = pd.DataFrame()
+    df["title"] = ["CSV test entry"]
+    df["date"] = ["2026-07-30"]
+    return client.csv.upload_dataframe(df=df, template_name=template_name)
+
+
 def create_entities_from_dataframe():
     client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
     data_frame = loop_entities()
@@ -195,6 +204,7 @@ def create_entities_from_dataframe():
 
 
 if __name__ == "__main__":
+    upload_csv("PARAGRAPH")
     # df = loop_entities()
     # print(df.to_string())
     #
@@ -203,23 +213,23 @@ if __name__ == "__main__":
     # df["select"] = ["aa"]
     # df["multi-select-1 space"] = [""]
     # print(df.to_string())
-    # response = upload_dataframe(df, "test 2")
+    # response = upload_dataframe(df, "DOCUMENT")
     # response = create_thesaury(df, "test 2")
     # print(response)
 
     # client = UwaziClient(url="https://upr-info-database.uwazi.io/")
     # df = client.exports.to_dataframe(template_name="State", batch_size=5)
     #
-    client = UwaziClient(url=UWAZI_URL, user=UWAZI_USER, password=UWAZI_PASSWORD)
+    # client = UwaziClient(url=UWAZI_URL, user=UWAZI_USER, password=UWAZI_PASSWORD)
     # df = client.exports.to_dataframe(template_name="test_3", batch_size=5)
 
     # client.entities.create_or_update_entities_from_dataframe()
     # df = client.search.search_by_filter_to_dataframe(language="en", batch_size=2, filters=SearchFilters())
     # print(df.to_string())
-    stats = client.stats.get_stats()
-    print(stats.total_entities)
-    print(stats.templates)
-    print(stats.thesauri)
+    # stats = client.stats.get_stats()
+    # print(stats.total_entities)
+    # print(stats.templates)
+    # print(stats.thesauri)
 
     # df = pd.DataFrame({"sharedId": ["ii33m3w4ixj"], "geolocation_geolocation": ["39.34343|-0.34343"]})
     # client.entities.create_or_update_entities_from_dataframe(df, template="test_1", language="en")

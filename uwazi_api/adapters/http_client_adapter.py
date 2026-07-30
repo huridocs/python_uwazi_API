@@ -28,6 +28,44 @@ class HttpClientAdapter(HttpClientPort):
         self.graylog = logging.getLogger("graylog")
         self.connect_sid = self._get_connect_sid() if user and password else None
 
+    def post_multipart(
+        self,
+        url: str,
+        data: Optional[dict] = None,
+        files: Optional[list] = None,
+        cookies: Optional[dict] = None,
+    ):
+        """Send a multipart/form-data POST request.
+
+        Strips ``Content-Type`` from the default headers so ``requests``
+        can set the correct ``multipart/form-data; boundary=...`` header.
+        """
+        headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        return self.request_adapter.post(
+            url,
+            headers=headers,
+            data=data,
+            files=files,
+            cookies=cookies,
+        )
+
+    def post_json(
+        self,
+        url: str,
+        json: dict,
+        cookies: Optional[dict] = None,
+    ):
+        """Send a JSON POST request.
+
+        Sends the payload as ``application/json`` using the default headers.
+        """
+        return self.request_adapter.post(
+            url,
+            headers=self.headers,
+            json=json,
+            cookies=cookies,
+        )
+
     def _get_connect_sid(self) -> str:
         response = self.request_adapter.post(
             f"{self.url}/api/login",
