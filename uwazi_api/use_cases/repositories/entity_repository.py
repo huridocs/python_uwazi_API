@@ -24,18 +24,33 @@ from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 def _build_entity_multipart(
     payload: dict,
     files: list[EntityFileUpload],
-) -> list[tuple]:
-    """Build the ``files`` parameter for a multipart/form-data entity upload.
+) -> tuple[list[tuple], dict[str, str]]:
+    """Build the multipart body for an entity upload with files.
 
-    Returns a list of ``(fieldname, (filename, content, content_type))`` tuples
-    suitable for ``requests.post(files=...)``. The first element is always the
-    ``entity`` field carrying the serialised JSON payload, followed by
-    one entry per file.
+    Returns ``(request_files, originalname_fields)``:
+
+    * ``request_files`` — list of ``(fieldname, (filename, content, content_type))``
+      tuples for ``requests.post(files=...)``. The first element is always the
+      ``entity`` field carrying the serialised JSON payload, followed by one
+      entry per file.
+    * ``originalname_fields`` — body fields ``{field}_originalname[{index}]``
+      that carry the human-readable filename.
+
+    Uwazi's multipart parser (busboy) applies ``path.basename`` to the
+    ``Content-Disposition`` filename, so a name like ``Report No. 111/17.pdf``
+    would be stored as ``17.pdf``. The ``field[index]`` fieldname convention
+    makes ``UploadMiddleware.multiple`` pick up the matching originalname body
+    field instead (``file[0]``/``attachment[1]`` →
+    ``file_originalname[0]``/``attachment_originalname[1]``), preserving the
+    full filename.
     """
     request_files: list[tuple] = [("entity", ("", json.dumps(payload), "application/json"))]
-    for f in files:
-        request_files.append((f.fieldname, (f.filename, f.content, f.content_type)))
-    return request_files
+    originalname_fields: dict[str, str] = {}
+    for index, f in enumerate(files):
+        fieldname = f"{f.fieldname}[{index}]"
+        request_files.append((fieldname, (f.filename, f.content, f.content_type)))
+        originalname_fields[f"{f.fieldname}_originalname[{index}]"] = f.filename
+    return request_files, originalname_fields
 
 
 class EntityRepository:
@@ -105,10 +120,11 @@ class EntityRepository:
         payload = self._validator.validate_and_prepare_for_upload(entity, language)
 
         if files:
-            request_files = _build_entity_multipart(payload, files)
+            request_files, originalname_fields = _build_entity_multipart(payload, files)
             upload_response = self.http.post_multipart(
                 url=f"{self.http.url}/api/entities",
                 files=request_files,
+                data=originalname_fields,
                 cookies={"locale": language},
             )
         else:

@@ -13,9 +13,10 @@ class EntityFileUpload(BaseModel):
     * ``FileFieldname.ATTACHMENT`` → **supporting file** (attachment)
 
     The ``filename`` is sent in the multipart ``Content-Disposition`` header
-    and becomes the original filename stored by Uwazi.  For non-ASCII names,
-    prefer to also send an ``originalname`` body field (not yet supported
-    by this model).
+    and becomes the original filename stored by Uwazi. Because Uwazi's parser
+    basenames the header filename (``Report No. 111/17.pdf`` → ``17.pdf``),
+    the entity upload also sends the filename as an ``originalname`` body
+    field via the ``field[index]`` convention, so the full name is preserved.
 
     .. code-block:: python
 
