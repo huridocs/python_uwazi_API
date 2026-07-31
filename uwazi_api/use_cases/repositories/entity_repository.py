@@ -180,17 +180,24 @@ class EntityRepository:
         return self.upload(merged_entity, language, files=files)
 
     def _wait_for_entity_indexed(self, shared_id: str, timeout: float = 3.0, interval: float = 0.5) -> None:
+        """Poll until the entity is searchable.
+
+        Only needed after upload, because ``GET /api/entities`` is backed by the
+        search index and lags the write. Returns as soon as the entity is found
+        — the previous flat 2s sleep on the success path added a per-entity tax
+        even when the entity was indexed instantly.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 self.get_one(shared_id, "en")
-                time.sleep(2)
                 return
             except EntityNotFoundError:
                 time.sleep(interval)
 
     def delete(self, shared_id: str) -> None:
-        self._wait_for_entity_indexed(shared_id)
+        # No index wait needed: delete resolves sharedId directly against the
+        # collection, not the search index.
         response = self.http.request_adapter.delete(
             f"{self.http.url}/api/entities",
             headers=self.http.headers,
@@ -265,8 +272,9 @@ class EntityRepository:
         return results
 
     def delete_entities(self, shared_ids: list[str]) -> None:
-        for shared_id in shared_ids:
-            self._wait_for_entity_indexed(shared_id)
+        # No per-entity index waits: bulkdelete resolves sharedIds directly
+        # against the collection, not the search index. Waiting here cost ~2s
+        # per entity (O(N) blocking loop) for zero correctness benefit.
         payload = {"sharedIds": shared_ids}
         response = self.http.request_adapter.post(
             url=f"{self.http.url}/api/entities/bulkdelete",
