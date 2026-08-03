@@ -128,6 +128,41 @@ entities = client.entities.search_by_filter(
 shared_id = client.entities.upload(entity=entity, language='en')
 shared_id = client.entities.update_partially(entity=entity, language='en')
 
+# Upload entity with files
+# Build a list of files to attach. The `fieldname` decides how Uwazi classifies each file:
+#   - FileFieldname.FILE       → primary document (what the entity is about)
+#   - FileFieldname.DOCUMENT   → primary document (alternative name)
+#   - FileFieldname.ATTACHMENT → supporting file (attachment)
+# `content` is raw bytes, `content_type` any FileType MIME constant (FileType.PDF, .ODT, ...).
+# `filename` is preserved intact (the `field[index]`/`originalname` convention keeps full names).
+from uwazi_api.domain.entity_file_upload import EntityFileUpload
+from uwazi_api.domain.file_fieldname import FileFieldname
+from uwazi_api.domain.FileType import FileType
+
+with open('document.pdf', 'rb') as f:
+    pdf_bytes = f.read()
+
+files = [
+    EntityFileUpload(
+        fieldname=FileFieldname.FILE,        # → primary document
+        filename='document.pdf',
+        content=pdf_bytes,
+        content_type=FileType.PDF,
+    ),
+    EntityFileUpload(
+        fieldname=FileFieldname.ATTACHMENT,  # → supporting file
+        filename='supporting.pdf',
+        content=pdf_bytes,
+        content_type=FileType.PDF,
+    ),
+]
+
+# Create an entity and attach a primary document + supporting file in one request
+shared_id = client.entities.upload(entity=entity, language='en', files=files)
+
+# `update_partially` accepts files too:
+shared_id = client.entities.update_partially(entity=entity, language='en', files=files)
+
 # Bulk operations
 responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en', template='template_name')
 client.entities.publish_entities(shared_ids=['id1', 'id2'])
