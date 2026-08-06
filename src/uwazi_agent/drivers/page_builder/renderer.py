@@ -85,7 +85,7 @@ _STYLE_TAG_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DO
 def _split_html_and_css(rendered: str) -> tuple[str, str]:
     """Pull every <style> block out of ``rendered`` and return (body, css)."""
     css_parts: list[str] = []
-    body = _STYLE_TAG_RE.sub(lambda m: (css_parts.append(m.group(1).strip()) or ""), rendered)
+    body = _STYLE_TAG_RE.sub(lambda m: css_parts.append(m.group(1).strip()) or "", rendered)
     return body.strip(), "\n".join(p for p in css_parts if p)
 
 

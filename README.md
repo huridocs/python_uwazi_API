@@ -17,10 +17,10 @@ pip install git+https://github.com/huridocs/python_uwazi_API@2026.7.31.2
 ```bash
 git clone https://github.com/huridocs/python_uwazi_API.git
 cd python_uwazi_API
-pip install -e ".[dev]"
+uv sync
 ```
 
-**Requirements:** Python >= 3.8
+**Requirements:** Python >= 3.12
 
 ---
 
@@ -30,39 +30,25 @@ pip install -e ".[dev]"
 from uwazi_api.client import UwaziClient
 
 # Authenticated client (full access)
-client = UwaziClient(
-    user='admin',
-    password='admin',
-    url='http://localhost:3000'
-)
+client = UwaziClient(user="admin", password="admin", url="http://localhost:3000")
 
 # Authenticated client with two-factor authentication (TOTP)
 # Generate a fresh TOTP code before constructing the client.
-client = UwaziClient(
-    user='admin',
-    password='admin',
-    url='http://localhost:3000',
-    token='123456'
-)
+client = UwaziClient(user="admin", password="admin", url="http://localhost:3000", token="123456")
 
 # Public client (read-only, no credentials needed)
-client = UwaziClient.public('https://public.uwazi.org')
+client = UwaziClient.public("https://public.uwazi.org")
 
 # Search entities by text
-results = client.search.search_by_text(search_term='Malawi')
+results = client.search.search_by_text(search_term="Malawi")
 
 # Get an entity
-entity = client.entities.get_one(shared_id='shared_id', language='en')
+entity = client.entities.get_one(shared_id="shared_id", language="en")
 
 # Export to DataFrame
 import pandas as pd
-df = client.exports.to_dataframe(
-    start_from=0,
-    batch_size=100,
-    template_name='template_name',
-    language='en',
-    published=False
-)
+
+df = client.exports.to_dataframe(start_from=0, batch_size=100, template_name="template_name", language="en", published=False)
 ```
 
 ---
@@ -94,18 +80,14 @@ The `UwaziClient` provides access to these services:
 from uwazi_api.domain.entity import Entity
 
 # Get entities
-entity = client.entities.get_one(shared_id='id', language='en')
-entity = client.entities.get_by_id(entity_id='internal_id')
-entities = client.entities.get(start_from=0, batch_size=100, template_name='tpl', language='en', published=False)
-entities = client.entities.get_shared_ids(template='tpl', batch_size=100, unpublished=True)
+entity = client.entities.get_one(shared_id="id", language="en")
+entity = client.entities.get_by_id(entity_id="internal_id")
+entities = client.entities.get(start_from=0, batch_size=100, template_name="tpl", language="en", published=False)
+entities = client.entities.get_shared_ids(template="tpl", batch_size=100, unpublished=True)
 
 # Search
 entities = client.entities.search_by_text(
-    search_term='query',
-    template_name='tpl',
-    start_from=0,
-    batch_size=100,
-    language='en'
+    search_term="query", template_name="tpl", start_from=0, batch_size=100, language="en"
 )
 
 # Search with filters
@@ -116,17 +98,12 @@ filters.add("date_property", DateRange(from_=date(2026, 1, 1), to=None))
 filters.add("select_property", SelectFilter(values=["value1", "value2"]))
 
 entities = client.entities.search_by_filter(
-    filters=filters,
-    template_name='tpl',
-    start_from=0,
-    batch_size=100,
-    language='en',
-    published=False
+    filters=filters, template_name="tpl", start_from=0, batch_size=100, language="en", published=False
 )
 
 # Create/Update
-shared_id = client.entities.upload(entity=entity, language='en')
-shared_id = client.entities.update_partially(entity=entity, language='en')
+shared_id = client.entities.upload(entity=entity, language="en")
+shared_id = client.entities.update_partially(entity=entity, language="en")
 
 # Upload entity with files
 # Build a list of files to attach. The `fieldname` decides how Uwazi classifies each file:
@@ -139,92 +116,68 @@ from uwazi_api.domain.entity_file_upload import EntityFileUpload
 from uwazi_api.domain.file_fieldname import FileFieldname
 from uwazi_api.domain.FileType import FileType
 
-with open('document.pdf', 'rb') as f:
+with open("document.pdf", "rb") as f:
     pdf_bytes = f.read()
 
 files = [
     EntityFileUpload(
-        fieldname=FileFieldname.FILE,        # → primary document
-        filename='document.pdf',
+        fieldname=FileFieldname.FILE,  # → primary document
+        filename="document.pdf",
         content=pdf_bytes,
         content_type=FileType.PDF,
     ),
     EntityFileUpload(
         fieldname=FileFieldname.ATTACHMENT,  # → supporting file
-        filename='supporting.pdf',
+        filename="supporting.pdf",
         content=pdf_bytes,
         content_type=FileType.PDF,
     ),
 ]
 
 # Create an entity and attach a primary document + supporting file in one request
-shared_id = client.entities.upload(entity=entity, language='en', files=files)
+shared_id = client.entities.upload(entity=entity, language="en", files=files)
 
 # `update_partially` accepts files too:
-shared_id = client.entities.update_partially(entity=entity, language='en', files=files)
+shared_id = client.entities.update_partially(entity=entity, language="en", files=files)
 
 # Bulk operations
-responses = client.entities.create_or_update_entities_from_dataframe(df=df, language='en', template='template_name')
-client.entities.publish_entities(shared_ids=['id1', 'id2'])
-client.entities.delete_entities(shared_ids=['id1', 'id2'])
-client.entities.delete_empty_template(shared_id='id')
+responses = client.entities.create_or_update_entities_from_dataframe(df=df, language="en", template="template_name")
+client.entities.publish_entities(shared_ids=["id1", "id2"])
+client.entities.delete_entities(shared_ids=["id1", "id2"])
+client.entities.delete_empty_template(shared_id="id")
 
 # DataFrame export
-df = client.entities.search_by_filter_to_dataframe(
-    filters=filters,
-    template_name='tpl',
-    language='en',
-    batch_size=100
-)
+df = client.entities.search_by_filter_to_dataframe(filters=filters, template_name="tpl", language="en", batch_size=100)
 ```
 
 ### Files
 
 ```python
 # Download
-pdf_bytes = client.files.get_document(shared_id='id', language='en')
-pdf_bytes = client.files.get_document_by_file_name(file_name='doc.pdf')
-client.files.save_document_to_path(shared_id='id', languages=['en'], path='/path/to/save')
+pdf_bytes = client.files.get_document(shared_id="id", language="en")
+pdf_bytes = client.files.get_document_by_file_name(file_name="doc.pdf")
+client.files.save_document_to_path(shared_id="id", languages=["en"], path="/path/to/save")
 
 # Upload
-client.files.upload_file(
-    pdf_file_path='/path/to/file.pdf',
-    share_id='entity_id',
-    language='en',
-    title='Document Title'
-)
+client.files.upload_file(pdf_file_path="/path/to/file.pdf", share_id="entity_id", language="en", title="Document Title")
 
 # Upload from bytes
 from uwazi_api.domain.FileType import FileType
 
-with open('document.pdf', 'rb') as f:
-    client.files.upload_document_from_bytes(
-        file_bytes=f.read(),
-        shared_id='entity_id',
-        language='en',
-        title='document.pdf'
-    )
+with open("document.pdf", "rb") as f:
+    client.files.upload_document_from_bytes(file_bytes=f.read(), shared_id="entity_id", language="en", title="document.pdf")
 
 # Upload other file types
-with open('document.odt', 'rb') as f:
+with open("document.odt", "rb") as f:
     client.files.upload_file_from_bytes(
-        file_bytes=f.read(),
-        shared_id='entity_id',
-        language='en',
-        title='document.odt',
-        file_type=FileType.ODT
+        file_bytes=f.read(), shared_id="entity_id", language="en", title="document.odt", file_type=FileType.ODT
     )
 
 # Images
-client.files.upload_image(
-    image_binary=image_bytes,
-    title='image.jpg',
-    entity_shared_id='entity_id',
-    language='en'
-)
+client.files.upload_image(image_binary=image_bytes, title="image.jpg", entity_shared_id="entity_id", language="en")
 
 # Delete
-client.files.delete_file(file_id='file_id')
+client.files.delete_file(file_id="file_id")
 ```
 
 ### Templates
@@ -232,20 +185,20 @@ client.files.delete_file(file_id='file_id')
 ```python
 # Get templates
 templates = client.templates.get()
-template = client.templates.get_by_name(template_name='Template Name')
-template = client.templates.get_by_id(template_id='id')
+template = client.templates.get_by_name(template_name="Template Name")
+template = client.templates.get_by_id(template_id="id")
 
 # Resolve template (accepts name or ID)
-template_id = client.templates.resolve_template_id('Template Name or ID')
+template_id = client.templates.resolve_template_id("Template Name or ID")
 
 # Find property in template (pass template name or ID)
-prop = client.templates.find_property(template_name_or_id='template_name_or_id', prop_name='property_name')
+prop = client.templates.find_property(template_name_or_id="template_name_or_id", prop_name="property_name")
 
 # Create/Update
-client.templates.set(language='en', template=template)
+client.templates.set(language="en", template=template)
 
 # Delete template
-client.templates.delete_empty_template(template_id='template_id')
+client.templates.delete_empty_template(template_id="template_id")
 
 # Clear cache
 client.templates.clear_cache()
@@ -322,16 +275,13 @@ ids = client.search.get_shared_ids(...)
 ```python
 import pandas as pd
 
-df = pd.DataFrame({
-    'title': ['Entity 1', 'Entity 2'],
-    'property1': ['value1', 'value2']
-})
+df = pd.DataFrame({"title": ["Entity 1", "Entity 2"], "property1": ["value1", "value2"]})
 
 # Upload DataFrame
-client.csv.upload_dataframe(df=df, template_name='template_name')
+client.csv.upload_dataframe(df=df, template_name="template_name")
 
 # Upload and get shared ID
-shared_id = client.csv.upload_dataframe_and_get_shared_id(df=df, template_name='template_name')
+shared_id = client.csv.upload_dataframe_and_get_shared_id(df=df, template_name="template_name")
 ```
 
 ### Relationships
@@ -342,18 +292,16 @@ from uwazi_api.domain.selection_rectangle import SelectionRectangle
 
 reference = Reference(
     text="Reference text",
-    selection_rectangles=[
-        SelectionRectangle(top=172.94, left=335.66, width=155.34, height=17.62, page="1")
-    ]
+    selection_rectangles=[SelectionRectangle(top=172.94, left=335.66, width=155.34, height=17.62, page="1")],
 )
 
 client.relationships.create(
-    file_entity_shared_id='source_entity_id',
-    file_id='file_id',
+    file_entity_shared_id="source_entity_id",
+    file_id="file_id",
     reference=reference,
-    to_entity_shared_id='target_entity_id',
-    relationship_type_id='relationship_type_id',
-    language='en'
+    to_entity_shared_id="target_entity_id",
+    relationship_type_id="relationship_type_id",
+    language="en",
 )
 ```
 
@@ -361,13 +309,7 @@ client.relationships.create(
 
 ```python
 # Export entities to DataFrame
-df = client.exports.to_dataframe(
-    start_from=0,
-    batch_size=100,
-    template_name='template_name',
-    language='en',
-    published=False
-)
+df = client.exports.to_dataframe(start_from=0, batch_size=100, template_name="template_name", language="en", published=False)
 ```
 
 ### Relationship Properties in DataFrames
@@ -386,7 +328,7 @@ Relationship properties are exported with both the entity name and sharedId:
 # "Entity 1 (id:abc123)|Entity 2 (id:def456)"
 
 # Example DataFrame output:
-df = client.exports.to_dataframe(template_name='template_name')
+df = client.exports.to_dataframe(template_name="template_name")
 # | title        | related_entities                          |
 # |--------------|-------------------------------------------|
 # | My Entity    | Target Entity (id:abc123)|Other (id:xyz) |
@@ -399,26 +341,24 @@ When uploading a DataFrame, relationship properties can be provided in multiple 
 ```python
 import pandas as pd
 
-df = pd.DataFrame({
-    'title': ['Entity with Relationship'],
-    # Format 1: Using "name (id:sharedId)" format
-    'related_entities': ['Target Entity (id:abc123)'],
-
-    # Multiple relationships with new format
-    'related_entities': ['Entity A (id:abc123)|Entity B (id:def456)'],
-
-    # Format 2: Using just sharedId (works both ways)
-    'related_entities': ['abc123'],
-
-    # Multiple with just sharedIds
-    'related_entities': ['abc123|def456'],
-
-    # Format 3: Mixed (some with name, some without)
-    'related_entities': ['Target Entity (id:abc123)|def456'],
-})
+df = pd.DataFrame(
+    {
+        "title": ["Entity with Relationship"],
+        # Format 1: Using "name (id:sharedId)" format
+        "related_entities": ["Target Entity (id:abc123)"],
+        # Multiple relationships with new format
+        "related_entities": ["Entity A (id:abc123)|Entity B (id:def456)"],
+        # Format 2: Using just sharedId (works both ways)
+        "related_entities": ["abc123"],
+        # Multiple with just sharedIds
+        "related_entities": ["abc123|def456"],
+        # Format 3: Mixed (some with name, some without)
+        "related_entities": ["Target Entity (id:abc123)|def456"],
+    }
+)
 
 # Upload
-responses = client.entities.create_or_update_entities_from_dataframe(df, language='en', template='template_name')
+responses = client.entities.create_or_update_entities_from_dataframe(df, language="en", template="template_name")
 ```
 
 The upload parser automatically extracts:
@@ -434,26 +374,32 @@ The `create_or_update_entities_from_dataframe` method automatically determines w
 import pandas as pd
 
 # CREATE: sharedId column is NOT present or is empty
-df_create = pd.DataFrame({
-    'title': ['New Entity 1', 'New Entity 2'],
-    'template': ['template_name', 'template_name'],
-})
-responses = client.entities.create_or_update_entities_from_dataframe(df_create, language='en', template='template_name')
+df_create = pd.DataFrame(
+    {
+        "title": ["New Entity 1", "New Entity 2"],
+        "template": ["template_name", "template_name"],
+    }
+)
+responses = client.entities.create_or_update_entities_from_dataframe(df_create, language="en", template="template_name")
 
 # UPDATE: sharedId column IS present with values
-df_update = pd.DataFrame({
-    'sharedId': ['existing_id_1', 'existing_id_2'],
-    'title': ['Updated Title 1', 'Updated Title 2'],
-})
-responses = client.entities.create_or_update_entities_from_dataframe(df_update, language='en', template='template_name')
+df_update = pd.DataFrame(
+    {
+        "sharedId": ["existing_id_1", "existing_id_2"],
+        "title": ["Updated Title 1", "Updated Title 2"],
+    }
+)
+responses = client.entities.create_or_update_entities_from_dataframe(df_update, language="en", template="template_name")
 
 # MIXED: Some rows have sharedId (update), some don't (create)
-df_mixed = pd.DataFrame({
-    'sharedId': ['existing_id', None, None],
-    'title': ['Updated', 'New Entity 1', 'New Entity 2'],
-    'template': [None, 'template_name', 'template_name'],
-})
-responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, language='en', template='template_name')
+df_mixed = pd.DataFrame(
+    {
+        "sharedId": ["existing_id", None, None],
+        "title": ["Updated", "New Entity 1", "New Entity 2"],
+        "template": [None, "template_name", "template_name"],
+    }
+)
+responses = client.entities.create_or_update_entities_from_dataframe(df_mixed, language="en", template="template_name")
 ```
 
 **Logic:**
@@ -472,8 +418,8 @@ All responses use Pydantic models for type safety and validation.
 
 ```python
 class Entity(BaseModel):
-    id: str | None              # Internal ID
-    shared_id: str | None       # Shared ID across translations
+    id: str | None  # Internal ID
+    shared_id: str | None  # Shared ID across translations
     title: str | None
     template: str | None
     language: str | None
@@ -515,6 +461,7 @@ class Thesauri(BaseModel):
     id: str
     name: str
     values: list[ThesauriValue]
+
 
 class ThesauriValue(BaseModel):
     label: str
@@ -570,14 +517,14 @@ The library follows Clean Architecture:
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Create the venv and install the project + dev group
+uv sync
 
 # Run tests
-pytest
+uv run pytest
 
 # Format code
-black .
+ruff format
 
 # Lint
 ruff check .
