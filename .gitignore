@@ -5,6 +5,22 @@
 .vscode
 *.log
 nohup.out
+
+# environments
+.venv/
 /venv/
+
+# build artifacts
+build/
+dist/
+*.egg-info/
+_version.py
+
+# caches
 *.cache
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# local
 .env
