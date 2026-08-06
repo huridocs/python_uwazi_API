@@ -11,7 +11,6 @@ data/
 api_testing.py
 justfile
 docker-compose.yml
-dev-requirements.txt
 uwazi_csv_conventions.md
 README.md
 Dockerfile

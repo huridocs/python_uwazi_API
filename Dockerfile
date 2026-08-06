@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 ENV UWAZI_REPOSITORY_PATH=/home/app/uwazi \
     UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1
+    UV_COMPILE_BYTECODE=1 \
+    PYTHONPATH=/app/src
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates \
@@ -21,11 +22,9 @@ RUN useradd --create-home --uid 1000 app \
     && git clone --depth 1 https://github.com/huridocs/uwazi.git "$UWAZI_REPOSITORY_PATH" \
     && chown -R app:app "$UWAZI_REPOSITORY_PATH"
 
-# Install dependencies first (cached layer). --no-dev skips the test/lint group.
-COPY --chown=app:app pyproject.toml .
-RUN uv sync --no-dev --no-install-project
+COPY --chown=app:app pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=app:app . .
-RUN uv sync --no-dev
 
 USER app
