@@ -1,6 +1,6 @@
 from pathlib import Path
 
-MODEL = "deepseek-v4-flash:cloud"
+MODEL = "deepseek-v4-flash:0731-cloud"
 ENTITIES_LIMIT_FOR_LLM_MODEL = 5
 PYTHON_SCRIPT_OUTPUT_CHARACTERS_LIMIT = 2500
 REQUEST_LIMIT = 20
