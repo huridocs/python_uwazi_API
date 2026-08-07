@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from uwazi_agent.drivers.page_builder.renderer import PageRenderer, _split_html_and_css
 import uwazi_agent.drivers.page_builder as _pb
+from uwazi_agent.drivers.page_builder.renderer import PageRenderer, _split_html_and_css
 
 
 @pytest.fixture

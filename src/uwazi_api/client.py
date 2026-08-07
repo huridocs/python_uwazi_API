@@ -1,21 +1,21 @@
 from typing import Optional
 
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
-from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
-from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
-from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
-from uwazi_api.use_cases.repositories.file_repository import FileRepository
-from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
-from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.use_cases.repositories.relationship_repository import RelationshipRepository
-from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
-from uwazi_api.use_cases.repositories.search_repository import SearchRepository
-from uwazi_api.use_cases.repositories.stats_repository import StatsRepository
-from uwazi_api.use_cases.repositories.menu_links_repository import MenuLinksRepository
-from uwazi_api.use_cases.repositories.pages_repository import PagesRepository
-from uwazi_api.use_cases.file_service import FileService
 from uwazi_api.use_cases.csv_use_case import CSVUseCase
 from uwazi_api.use_cases.entity_export import EntityExportUseCase
+from uwazi_api.use_cases.file_service import FileService
+from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
+from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
+from uwazi_api.use_cases.repositories.file_repository import FileRepository
+from uwazi_api.use_cases.repositories.menu_links_repository import MenuLinksRepository
+from uwazi_api.use_cases.repositories.pages_repository import PagesRepository
+from uwazi_api.use_cases.repositories.relationship_repository import RelationshipRepository
+from uwazi_api.use_cases.repositories.search_repository import SearchRepository
+from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
+from uwazi_api.use_cases.repositories.stats_repository import StatsRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
+from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 from uwazi_api.use_cases.thesauri_from_dataframe_use_case import ThesauriFromDataframeUseCase
 
 

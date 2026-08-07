@@ -1,8 +1,8 @@
 import json
 
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.domain.language import Language
 from uwazi_api.domain.settings import Settings
-from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class SettingsRepository:

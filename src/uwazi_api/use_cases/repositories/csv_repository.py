@@ -1,8 +1,8 @@
 from io import BytesIO
 from typing import Optional
 
-from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.exceptions import UploadError
 
 
 class CSVRepository:

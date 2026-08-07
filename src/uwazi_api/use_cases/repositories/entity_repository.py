@@ -6,6 +6,8 @@ from typing import Optional
 import pandas as pd
 import requests
 
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.dataframe_entity_mapper import DataFrameEntityMapper
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.entity_file_upload import EntityFileUpload
 from uwazi_api.domain.entity_response import EntityResponse
@@ -13,12 +15,10 @@ from uwazi_api.domain.exceptions import (
     EntityNotFoundError,
     UploadError,
 )
-from uwazi_api.domain.dataframe_entity_mapper import DataFrameEntityMapper
-from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.use_cases.repositories.entity_validator import EntityValidator
-from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 
 def _build_entity_multipart(

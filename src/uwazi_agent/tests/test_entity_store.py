@@ -5,8 +5,6 @@ share prepared data between agents (e.g. timeline entries produced by the
 Python agent and consumed by the page agent).
 """
 
-import pytest
-
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.use_cases.tools.entity_store import EntityStore
 

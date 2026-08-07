@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.entity import Entity
-from uwazi_api.domain.template import Template
 from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.property_type import PropertyType
-
+from uwazi_api.domain.template import Template
 
 load_dotenv()
 

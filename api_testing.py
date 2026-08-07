@@ -1,23 +1,18 @@
 import os
-import numpy
-import load_dotenv
 from datetime import date
 
+import load_dotenv
 import numpy as np
+import pandas as pd
 
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.entity_file_upload import EntityFileUpload
 from uwazi_api.domain.file_fieldname import FileFieldname
 from uwazi_api.domain.FileType import FileType
-from uwazi_api.domain.entity_response import EntityResponse
 from uwazi_api.domain.reference import Reference
-from uwazi_api.domain.search_filters import SearchFilters, DateRange, SelectFilter
+from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
-import pandas as pd
-
-from uwazi_api.domain.FileType import FileType
-from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 
 load_dotenv.load_dotenv()
 

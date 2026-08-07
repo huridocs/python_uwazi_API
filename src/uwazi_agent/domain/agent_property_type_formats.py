@@ -1,6 +1,5 @@
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
 
-
 # Format instructions surfaced to the LLM (and rendered as the
 # ``format_instructions`` field on every ``AgentProperty`` returned by
 # ``get_templates_by_names``). These are the *only* shapes accepted on the

@@ -1,10 +1,9 @@
 import pandas as pd
 
 from uwazi_api.domain.exceptions import TemplateNotFoundError
-
 from uwazi_api.use_cases.repositories.csv_repository import CSVRepository
-from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 
 
 class CSVUseCase:

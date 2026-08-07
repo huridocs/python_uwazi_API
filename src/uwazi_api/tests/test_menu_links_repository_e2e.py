@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.menu_link import MenuLink
 
-
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")

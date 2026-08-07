@@ -2,11 +2,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from uwazi_api.domain.FileType import FileType
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
-
-from uwazi_api.use_cases.repositories.file_repository import FileRepository
+from uwazi_api.domain.FileType import FileType
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
+from uwazi_api.use_cases.repositories.file_repository import FileRepository
 
 
 class FileService:

@@ -2,10 +2,10 @@ import logging
 from typing import Optional
 from urllib.parse import urlparse
 
+from uwazi_api.adapters.request_retry import requests_retry_session
 from uwazi_api.domain.exceptions import AuthenticationError
 from uwazi_api.iso_639_choices import iso_639_choices
 from uwazi_api.ports.http_port import HttpClientPort
-from uwazi_api.adapters.request_retry import requests_retry_session
 
 
 class HttpClientAdapter(HttpClientPort):

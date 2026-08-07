@@ -1,12 +1,12 @@
 import json
 from typing import Optional
 
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.stats import SearchStats, TemplateStat, ThesaurusValueStat
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class StatsRepository:

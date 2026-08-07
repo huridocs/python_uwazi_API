@@ -1,7 +1,6 @@
 from uwazi_agent.domain.agent_property_type import AgentPropertyType
 from uwazi_api.domain.property_type import PropertyType
 
-
 _AGENT_TO_API_TYPE: dict[AgentPropertyType, PropertyType] = {
     AgentPropertyType.TEXT: PropertyType.TEXT,
     AgentPropertyType.DATE: PropertyType.DATE,

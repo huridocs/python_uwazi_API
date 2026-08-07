@@ -17,8 +17,8 @@ from pydantic_ai import RunContext
 
 from uwazi_agent import configuration
 from uwazi_agent.domain.agent_page_create import AgentPageCreate
-from uwazi_agent.logging_config import truncate_log_message
 from uwazi_agent.drivers.page_builder.renderer import DEFAULT_VIBE, PageRenderer
+from uwazi_agent.logging_config import truncate_log_message
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.entity_store import EntityStore

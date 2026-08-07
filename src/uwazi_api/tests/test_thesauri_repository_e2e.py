@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
+
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.thesauri import Thesauri
 

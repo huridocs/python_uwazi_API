@@ -1,8 +1,8 @@
 import json
 from typing import Optional
 
-from uwazi_api.domain.thesauri import Thesauri
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.thesauri import Thesauri
 
 
 class ThesauriRepository:

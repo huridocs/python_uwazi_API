@@ -1,10 +1,10 @@
 import json
 from typing import Optional
 
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.exceptions import UploadError
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.relationship_type import RelationshipType
-from uwazi_api.domain.exceptions import UploadError
-from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 
 
 class RelationshipRepository:

@@ -46,7 +46,6 @@ from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.template import Template
 
-
 # ---------------------------------------------------------------------------
 # 1. Enum + mapper — the literal fix for the bug report's Pydantic error.
 # ---------------------------------------------------------------------------
@@ -308,10 +307,10 @@ def test_update_template_docstring_enumerates_nested():
 
 
 def _make_mapper():
+    from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
     from uwazi_api.use_cases.repositories.thesauri_repository import (
         ThesauriRepository,
     )
-    from uwazi_agent.adapters.uwazi_api.entity_mapper import EntityMapper
 
     return EntityMapper(template_repo=None, thesauri_repo=ThesauriRepository())
 

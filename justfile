@@ -1,6 +1,9 @@
 formatter:
     uv run ruff format --line-length 125 .
 
+lint:
+    uv run ruff check . --fix
+
 tag:
 	#!/bin/bash
 	CURRENT_DATE=$(date +%Y.%-m.%-d)

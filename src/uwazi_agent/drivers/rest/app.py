@@ -13,10 +13,10 @@ from uwazi_agent.drivers.rest.models.ai_job_request import AIJobRequest
 from uwazi_agent.drivers.rest.models.ai_job_response import AIJobResponse
 from uwazi_agent.drivers.rest.models.ai_job_status import AIJobStatus
 from uwazi_agent.drivers.rest.models.ai_job_status_response import AIJobStatusResponse
+from uwazi_agent.drivers.rest.models.uwazi_credentials import UwaziCredentials
 from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
-from uwazi_agent.drivers.rest.models.uwazi_credentials import UwaziCredentials
 
 _chat_storage_ttl = float(os.environ.get("CHAT_STORAGE_TTL_SECONDS", "86400"))
 chat_storage = InMemoryChatStorage(ttl_seconds=_chat_storage_ttl)
