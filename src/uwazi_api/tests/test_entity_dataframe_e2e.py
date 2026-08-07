@@ -1,18 +1,18 @@
 import os
 import time
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
+
 import pandas as pd
 import pytest
 from dotenv import load_dotenv
 
 from uwazi_api.client import UwaziClient
-from uwazi_api.domain.template import Template
-from uwazi_api.domain.property_schema import PropertySchema
-from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import EntityNotFoundError
-
+from uwazi_api.domain.property_schema import PropertySchema
+from uwazi_api.domain.property_type import PropertyType
+from uwazi_api.domain.template import Template
 
 load_dotenv()
 
@@ -397,7 +397,7 @@ class TestEntityDataFrameE2E:
 
         assert len(roundtrip_responses) == 1
         assert roundtrip_responses[0].success is True, f"Roundtrip failed: {roundtrip_responses[0].error}"
-        print(f"Roundtrip successful!")
+        print("Roundtrip successful!")
 
     def test_10_dataframe_roundtrip_consistency(self):
         """Test that getting entities as dataframe and uploading back works correctly."""

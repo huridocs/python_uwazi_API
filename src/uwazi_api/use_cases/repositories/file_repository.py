@@ -1,9 +1,10 @@
 import json
 import uuid
+
 from requests.exceptions import RequestException, RetryError
 
-from uwazi_api.domain.FileType import FileType
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.FileType import FileType
 
 
 def _build_multipart_body(entity_id: str, title: str, file_bytes: bytes, content_type: str) -> tuple[bytes, str]:

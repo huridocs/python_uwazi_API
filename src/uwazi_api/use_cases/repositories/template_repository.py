@@ -1,11 +1,11 @@
 import json
 from typing import Optional
 
-from uwazi_api.domain.exceptions import SearchError
-from uwazi_api.domain.template import Template
-from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
+from uwazi_api.domain.exceptions import SearchError
+from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
+from uwazi_api.domain.template import Template
 
 
 class TemplateRepository:

@@ -7,7 +7,6 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from uwazi_agent.configuration import MODEL
 from uwazi_agent.ports.llm_port import LlmPort
 
-
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 

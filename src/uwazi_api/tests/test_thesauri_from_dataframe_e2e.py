@@ -1,17 +1,16 @@
 import os
-import time
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional
+
 import pandas as pd
 import pytest
 from dotenv import load_dotenv
 
 from uwazi_api.client import UwaziClient
-from uwazi_api.domain.template import Template
+from uwazi_api.domain.exceptions import EntityNotFoundError
 from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.property_type import PropertyType
-from uwazi_api.domain.exceptions import EntityNotFoundError
-
+from uwazi_api.domain.template import Template
 
 load_dotenv()
 

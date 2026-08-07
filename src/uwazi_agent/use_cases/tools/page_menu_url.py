@@ -3,7 +3,6 @@ import unicodedata
 
 from uwazi_agent.domain.agent_page_menu_link import AgentPageMenuLink
 
-
 _SLUG_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
 _DASH_RUN_RE = re.compile(r"-{2,}")
 

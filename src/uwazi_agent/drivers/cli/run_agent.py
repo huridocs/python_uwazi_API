@@ -10,7 +10,6 @@ from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env")
 

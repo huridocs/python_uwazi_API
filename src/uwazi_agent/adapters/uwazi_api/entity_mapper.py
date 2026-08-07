@@ -1,20 +1,17 @@
-from datetime import date, datetime
-from datetime import timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from loguru import logger
 
+from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
+from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.template import Template
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
-
-from uwazi_agent.domain.agent_entity import AgentEntity
-from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
-
 
 _SIMPLE_PROPS: set[PropertyType] = {
     PropertyType.TEXT,

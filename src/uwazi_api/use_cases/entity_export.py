@@ -2,10 +2,10 @@ from typing import Optional
 
 import pandas as pd
 
+from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
 from uwazi_api.use_cases.repositories.search_repository import SearchRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
-from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 
 
 class EntityExportUseCase:

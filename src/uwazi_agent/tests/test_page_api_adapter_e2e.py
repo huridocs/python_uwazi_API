@@ -12,7 +12,6 @@ from uwazi_agent.domain.agent_page_create import AgentPageCreate
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
 
-
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")

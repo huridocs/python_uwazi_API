@@ -20,12 +20,12 @@ from uwazi_agent.domain.agent_page_mutation_result import AgentPageMutationResul
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
 from uwazi_agent.domain.agent_publish_status import AgentPublishStatus
+from uwazi_agent.domain.agent_relationship_create import AgentRelationshipCreate
+from uwazi_agent.domain.agent_relationship_mutation_result import AgentRelationshipMutationResult
 from uwazi_agent.domain.agent_relationship_type import AgentRelationshipType
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.domain.agent_thesauri import AgentThesauri, AgentThesauriGroup
-from uwazi_agent.domain.agent_relationship_create import AgentRelationshipCreate
-from uwazi_agent.domain.agent_relationship_mutation_result import AgentRelationshipMutationResult
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.page_api_port import PageApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
@@ -43,10 +43,10 @@ from uwazi_api.domain.exceptions import (
     SearchError,
     UploadError,
 )
-from uwazi_api.domain.stats import SearchStats
 from uwazi_api.domain.language import Language
 from uwazi_api.domain.menu_link import MenuLink
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
+from uwazi_api.domain.stats import SearchStats
 
 
 def _categorize_publish_error(exc: Exception) -> str:
