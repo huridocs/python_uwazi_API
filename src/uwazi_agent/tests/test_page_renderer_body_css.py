@@ -16,11 +16,12 @@ from pathlib import Path
 import pytest
 
 from uwazi_agent.drivers.page_builder.renderer import PageRenderer, _split_html_and_css
+import uwazi_agent.drivers.page_builder as _pb
 
 
 @pytest.fixture
 def renderer() -> PageRenderer:
-    return PageRenderer(Path("uwazi_agent/drivers/page_builder"))
+    return PageRenderer(Path(_pb.__file__).resolve().parent)
 
 
 _HERO_BLOCK: dict = {
