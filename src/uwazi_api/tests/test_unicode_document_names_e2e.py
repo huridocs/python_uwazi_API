@@ -31,7 +31,7 @@ UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
 
-TEST_DOCUMENT_PATH = Path(__file__).parent.parent.parent / "data" / "test_document.pdf"
+TEST_DOCUMENT_PATH = Path(__file__).parent.parent.parent.parent / "data" / "test_document.pdf"
 
 # The real-world title from the bug report — contains "ã" (U+00E3) which
 # in UTF-8 is the bytes C3 A3.  When mis-decoded as Latin-1 those two bytes

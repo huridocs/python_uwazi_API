@@ -24,3 +24,5 @@ _version.py
 
 # local
 .env
+
+.notes

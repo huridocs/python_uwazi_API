@@ -20,7 +20,7 @@ UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
 
-TEST_DOCUMENT_PATH = Path(__file__).parent.parent.parent / "data" / "test_document.pdf"
+TEST_DOCUMENT_PATH = Path(__file__).parent.parent.parent.parent / "data" / "test_document.pdf"
 
 
 class TestFileRepositoryE2E:
