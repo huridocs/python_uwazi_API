@@ -45,7 +45,7 @@ source = "vcs"
 raw-options = { version_scheme = "post-release", local_scheme = "no-local-version" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/uwazi_api", "src/uwazi_agent"]
+packages = ["src/uwazi_api", "src/uwazi_agent", "src/uwazi_admin_agent"]
 
 [tool.ruff]
 line-length = 125

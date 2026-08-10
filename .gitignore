@@ -5,6 +5,7 @@
 .vscode
 *.log
 nohup.out
+__pycache__
 
 # environments
 .venv/
