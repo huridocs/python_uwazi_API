@@ -2,62 +2,58 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.plan import MigrationPlan
+from uwazi_admin_agent.domain.snapshot import EntityIdentity
 
 
 class RunStatus(str, Enum):
-    """Lifecycle of a migration run."""
+    """Lifecycle of a migration run (§5.2)."""
 
-    planned = "planned"
-    snapshotted = "snapshotted"
-    executed = "executed"
-    verified = "verified"
-    reverted = "reverted"
-    failed = "failed"
-
-
-class EntityIdentity(BaseModel):
-    """Identifies one entity row in a manifest
-
-    ``internal_id`` is Uwazi's unique per-row id (used to load snapshots and to
-    delete created entities); ``shared_id`` groups language variants and is for
-    readability only.
-    """
-
-    internal_id: str
-    shared_id: str
-    language: str | None = None
+    PLANNED = "planned"
+    SNAPSHOTTED = "snapshotted"
+    EXECUTED = "executed"
+    VERIFIED = "verified"
+    REVERTED = "reverted"
+    FAILED = "failed"
 
 
 class RewiredRelationship(BaseModel):
-    """A relationship that was repointed during a run, with its before-state.
+    """A relationship that was rewired during a run, with its before-state.
 
-    Revert restores this relationship to ``before`` (raw, §2.5).
+    Revert restores the relationship on ``entity`` to ``before``. Recorded per
+    §2.3 so revert is exact.
     """
 
-    entity: EntityIdentity
-    relationship_type: str
-    before: Any = Field(description="Raw before-state of this relationship, as Uwazi returned it.")
+    model_config = ConfigDict(frozen=True)
+
+    entity: EntityIdentity = Field(description="The entity whose relationship was rewired.")
+    property_name: str = Field(description="The relationship field/property that changed.")
+    before: Any = Field(description="The raw before-state of that relationship field.")
 
 
 class MigrationManifest(BaseModel):
     """The per-run record enabling exact revert (§2.3).
 
-    Revert = restore modified entities + restore rewired relationships + delete
-    created entities, in that category order (§2.6).
+    No ``created``/``deleted`` category - no current op creates or deletes
+    entities; that lands in Phase 9 if a create-op ever arrives. Kept mutable
+    because run status updates over the lifecycle.
     """
 
-    run_id: str
-    created_at: datetime
-    plan: MigrationPlan
+    run_id: str = Field(description="Unique run identifier.")
+    created_at: datetime = Field(description="When the run was created.")
+    plan: MigrationPlan = Field(description="The originating migration plan.")
     modified: list[EntityIdentity] = Field(
-        default_factory=list, description="Existed pre-run, modified -> restore on revert."
+        default_factory=list,
+        description="Entities that existed pre-run and were modified.",
     )
-    created: list[EntityIdentity] = Field(default_factory=list, description="Created by the run -> delete on revert.")
     rewired: list[RewiredRelationship] = Field(
-        default_factory=list, description="Repointed relationships + before-state -> restore on revert."
+        default_factory=list,
+        description="Rewired relationships with their before-state.",
     )
-    status: RunStatus = RunStatus.planned
-    snapshots_location: str = Field(description="Where this run's snapshots live (for revert to find them).")
+    status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
+    snapshot_dir: str | None = Field(
+        default=None,
+        description="Where this run's snapshots live, if persisted (§5.2).",
+    )
