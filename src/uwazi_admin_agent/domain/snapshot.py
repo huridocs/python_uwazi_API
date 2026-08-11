@@ -1,18 +1,36 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class EntityIdentity(BaseModel):
+    """Lightweight identity on an entity, used in manifest entries.
+
+    ``shared_id`` is required - Uwazi always assigns a ``sharedId``; a missing
+    one is a loud error, not a slient ``None`` (§8 changelog).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    shared_id: str = Field(description="The Uwazi sharedId; required.")
+    internal_id: str | None = Field(default=None, description="The Uwazi _id, when known.")
+    language: str | None = Field(default=None, description="The row locale, when known.")
 
 
 class EntitySnapshot(BaseModel):
-    """The exact raw entity JSON Uwazi returned for one entity, plus identity.
+    """The exact raw entity JSON for one entity, captured at backup time.
 
-    ``raw`` is the unmodified dict Uwazi returned; revert restores it verbatim
-    (§2.5 raw fidelity - never round-trip through a validated model).
+    ``raw`` is the unmodified dict Uwazi returned - never a validated model -
+    so round-tripping drops no fields (§2.5). Identity fields are carried
+    directly (not via an embedded ``EntityIdentity``) so a snapshot is
+    self-contained for restore.
     """
 
-    internal_id: str
-    shared_id: str
-    language: str | None = None
-    captured_at: datetime
-    raw: dict[str, Any] = Field(description="Exact raw entity JSON as Uwazi returned it; unmodified.")
+    model_config = ConfigDict(frozen=True)
+
+    shared_id: str = Field(description="The Uwazi sharedId; required (§8 changelog).")
+    internal_id: str | None = Field(default=None, description="The Uwazi _id, when known.")
+    language: str | None = Field(default=None, description="The row locale, when known.")
+    raw: dict[str, Any] = Field(description="The exact raw entity JSON Uwazi returned.")
+    captured_at: datetime = Field(description="When the snapshot was captured.")

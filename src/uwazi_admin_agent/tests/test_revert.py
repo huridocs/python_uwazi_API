@@ -1,145 +1,154 @@
-from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any
+
+import pytest
 
 from uwazi_admin_agent.domain.filter import EntityFilter
-from uwazi_admin_agent.domain.manifest import (
-    EntityIdentity,
-    MigrationManifest,
-    RewiredRelationship,
-    RunStatus,
-)
+from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.ops import SetPropertyOp
 from uwazi_admin_agent.domain.plan import MigrationPlan
 from uwazi_admin_agent.domain.revert import (
-    DeleteCreatedEntityAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
 )
-from uwazi_admin_agent.domain.snapshot import EntitySnapshot
+from uwazi_admin_agent.domain.snapshot import EntityIdentity, EntitySnapshot
+
+
+def _identity(shared_id: str, language: str | None = None) -> EntityIdentity:
+    return EntityIdentity(shared_id=shared_id, language=language)
+
+
+def _snapshot(shared_id: str, raw: dict[str, Any]) -> EntitySnapshot:
+    return EntitySnapshot(
+        shared_id=shared_id,
+        raw=raw,
+        captured_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+class _SnapshotStore:
+    """A tiny real in-memory snapshot loader (not a mock)."""
+
+    def __init__(self, snapshots: dict[str, EntitySnapshot]) -> None:
+        self._snapshots = snapshots
+        self.requested: list[str] = []
+
+    def __call__(self, shared_id: str) -> EntitySnapshot:
+        self.requested.append(shared_id)
+        return self._snapshots[shared_id]
 
 
 def _plan() -> MigrationPlan:
     return MigrationPlan(
         description="d",
-        ops=[SetPropertyOp(filter=EntityFilter(template="Court"), property_name="x", value=1)],
+        ops=[SetPropertyOp(filter=EntityFilter(template="Court"), property_name="title", value="X")],
     )
 
 
-def _manifest(
-    *,
-    modified: list[EntityIdentity] | None = None,
-    created: list[EntityIdentity] | None = None,
-    rewired: list[RewiredRelationship] | None = None,
-) -> MigrationManifest:
+def _manifest(modified: list[EntityIdentity], rewired: list[RewiredRelationship]) -> MigrationManifest:
     return MigrationManifest(
-        run_id="r1",
-        created_at=datetime(2026, 1, 1),
+        run_id="run-1",
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         plan=_plan(),
-        modified=modified or [],
-        created=created or [],
-        rewired=rewired or [],
-        status=RunStatus.executed,
-        snapshots_location="/tmp/runs/r1",
+        modified=modified,
+        rewired=rewired,
+        status=RunStatus.EXECUTED,
     )
 
 
-def _snap(internal_id: str) -> EntitySnapshot:
-    return EntitySnapshot(
-        internal_id=internal_id,
-        shared_id=f"s_{internal_id}",
-        language="en",
-        captured_at=datetime(2026, 1, 1),
-        raw={"_id": internal_id, "sharedId": f"s_{internal_id}", "title": "t"},
+# --- only modified entities --------------------------------------------------
+
+
+def test_only_modified_yields_entity_restores_in_order() -> None:
+    store = _SnapshotStore(
+        {
+            "A": _snapshot("A", {"_id": "a1", "title": "old A"}),
+            "B": _snapshot("B", {"_id": "b1", "title": "old B"}),
+        }
     )
+    manifest = _manifest(modified=[_identity("A"), _identity("B")], rewired=[])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert len(actions) == 2
+    assert all(isinstance(a, RestoreEntityAction) for a in actions)
+    assert [a.snapshot.shared_id for a in actions if isinstance(a, RestoreEntityAction)] == ["A", "B"]
+    assert [a.snapshot.raw["title"] for a in actions if isinstance(a, RestoreEntityAction)] == ["old A", "old B"]
+    assert store.requested == ["A", "B"]
 
 
-def _store_loader(snapshots: dict[str, EntitySnapshot]) -> Callable[[str], EntitySnapshot]:
-    def load(internal_id: str) -> EntitySnapshot:
-        return snapshots[internal_id]
-
-    return load
+# --- only rewired relationships ----------------------------------------------
 
 
-def test_only_modified_yields_restore_entity_actions() -> None:
-    manifest = _manifest(modified=[EntityIdentity(internal_id="i1", shared_id="s1", language="en")])
-    actions = build_revert_actions(manifest, _store_loader({"i1": _snap("i1")}))
-    assert len(actions) == 1
-    assert isinstance(actions[0], RestoreEntityAction)
-    assert actions[0].internal_id == "i1"
-    assert actions[0].raw == {"_id": "i1", "sharedId": "s_i1", "title": "t"}
-
-
-def test_created_yields_delete_actions() -> None:
-    manifest = _manifest(created=[EntityIdentity(internal_id="i9", shared_id="s9")])
-    actions = build_revert_actions(manifest, _store_loader({}))
-    assert len(actions) == 1
-    assert isinstance(actions[0], DeleteCreatedEntityAction)
-    assert actions[0].internal_id == "i9"
-
-
-def test_rewired_yields_relationship_restore_action() -> None:
-    manifest = _manifest(
-        rewired=[
-            RewiredRelationship(
-                entity=EntityIdentity(internal_id="i2", shared_id="s2"),
-                relationship_type="relates_to",
-                before=[{"entity": "i_old"}],
-            )
-        ]
+def test_only_rewired_yields_relationship_restores() -> None:
+    before_state: list[dict[str, Any]] = [{"_id": "r1", "label": "X"}]
+    rewired = RewiredRelationship(
+        entity=_identity("C", language="en"),
+        property_name="relations",
+        before=before_state,
     )
-    actions = build_revert_actions(manifest, _store_loader({}))
+    manifest = _manifest(modified=[], rewired=[rewired])
+
+    actions = build_revert_actions(manifest, _SnapshotStore({}))
+
     assert len(actions) == 1
+    action = actions[0]
+    assert isinstance(action, RestoreRelationshipAction)
+    assert action.entity.shared_id == "C"
+    assert action.property_name == "relations"
+    assert action.before == before_state
+
+
+# --- ordering: relationships before entity restores (§2.6) -------------------
+
+
+def test_relationships_before_entity_restores() -> None:
+    store = _SnapshotStore({"A": _snapshot("A", {"_id": "a1"})})
+    rewired = [RewiredRelationship(entity=_identity("C"), property_name="relations", before=[])]
+    modified = [_identity("A")]
+    manifest = _manifest(modified=modified, rewired=rewired)
+
+    actions = build_revert_actions(manifest, store)
+
+    assert len(actions) == 2
     assert isinstance(actions[0], RestoreRelationshipAction)
-    assert actions[0].entity_internal_id == "i2"
-    assert actions[0].relationship_type == "relates_to"
-    assert actions[0].before == [{"entity": "i_old"}]
+    assert isinstance(actions[1], RestoreEntityAction)
 
 
-def test_ordering_relationships_then_restores_then_deletions() -> None:
-    manifest = _manifest(
-        modified=[EntityIdentity(internal_id="i1", shared_id="s1", language="en")],
-        created=[EntityIdentity(internal_id="i9", shared_id="s9")],
-        rewired=[
-            RewiredRelationship(
-                entity=EntityIdentity(internal_id="i2", shared_id="s2"),
-                relationship_type="relates_to",
-                before=[{"entity": "i_old"}],
-            )
-        ],
-    )
-    actions = build_revert_actions(manifest, _store_loader({"i1": _snap("i1")}))
-    assert [type(a).__name__ for a in actions] == [
-        "RestoreRelationshipAction",
-        "RestoreEntityAction",
-        "DeleteCreatedEntityAction",
+def test_multiple_relationships_then_multiple_entities_preserve_manifest_order() -> None:
+    store = _SnapshotStore({"A": _snapshot("A", {"_id": "a1"}), "B": _snapshot("B", {"_id": "b1"})})
+    rewired = [
+        RewiredRelationship(entity=_identity("R1"), property_name="rel1", before=[1]),
+        RewiredRelationship(entity=_identity("R2"), property_name="rel2", before=[2]),
     ]
+    modified = [_identity("A"), _identity("B")]
+    manifest = _manifest(modified=modified, rewired=rewired)
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [
+        RestoreRelationshipAction,
+        RestoreRelationshipAction,
+        RestoreEntityAction,
+        RestoreEntityAction,
+    ]
+    assert [a.entity.shared_id for a in actions[:2] if isinstance(a, RestoreRelationshipAction)] == ["R1", "R2"]
+    assert [a.snapshot.shared_id for a in actions[2:] if isinstance(a, RestoreEntityAction)] == ["A", "B"]
 
 
-def test_loader_called_only_for_modified_entities() -> None:
-    loaded: list[str] = []
-
-    def load(internal_id: str) -> EntitySnapshot:
-        loaded.append(internal_id)
-        return _snap(internal_id)
-
-    manifest = _manifest(
-        modified=[EntityIdentity(internal_id="i1", shared_id="s1")],
-        created=[EntityIdentity(internal_id="i9", shared_id="s9")],
-        rewired=[
-            RewiredRelationship(
-                entity=EntityIdentity(internal_id="i2", shared_id="s2"),
-                relationship_type="relates_to",
-                before=[],
-            )
-        ],
-    )
-    build_revert_actions(manifest, load)
-    # Only the modified entity needs a snapshot; relationships carry their
-    # before-state in the manifest, and created entities are deleted, not restored.
-    assert loaded == ["i1"]
+# --- empty manifest ----------------------------------------------------------
 
 
 def test_empty_manifest_yields_no_actions() -> None:
-    actions = build_revert_actions(_manifest(), _store_loader({}))
-    assert actions == []
+    manifest = _manifest(modified=[], rewired=[])
+    assert build_revert_actions(manifest, _SnapshotStore({})) == []
+
+
+# --- missing snapshot propagates (no silent skip) ---------------------------
+
+
+def test_missing_snapshot_propagates() -> None:
+    manifest = _manifest(modified=[_identity("missing")], rewired=[])
+    with pytest.raises(KeyError):
+        build_revert_actions(manifest, _SnapshotStore({}))

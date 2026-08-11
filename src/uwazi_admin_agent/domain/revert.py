@@ -1,75 +1,63 @@
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest
-from uwazi_admin_agent.domain.snapshot import EntitySnapshot
+from uwazi_admin_agent.domain.snapshot import EntityIdentity, EntitySnapshot
 
 
 class RestoreRelationshipAction(BaseModel):
-    """Restore a repointed relationship to its recorded before-state."""
+    """Restore a rewired relationship on an entity to its recorded before-state."""
 
-    action: Literal["restore_relationship"] = "restore_relationship"
-    entity_internal_id: str
-    relationship_type: str
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["restore_relationship"] = "restore_relationship"
+    entity: EntityIdentity
+    property_name: str
     before: Any
 
 
 class RestoreEntityAction(BaseModel):
-    """Restore a modified entity by saving its captured raw dict back (§2.5)."""
+    """Restore a modified entity from its raw snapshot."""
 
-    action: Literal["restore_entity"] = "restore_entity"
-    internal_id: str
-    raw: dict[str, Any]
+    model_config = ConfigDict(frozen=True)
 
-
-class DeleteCreatedEntityAction(BaseModel):
-    """Delete an entity created by the migration (delete by internal id)."""
-
-    action: Literal["delete_created_entity"] = "delete_created_entity"
-    internal_id: str
+    kind: Literal["restore_entity"] = "restore_entity"
+    snapshot: EntitySnapshot
 
 
-RevertAction: TypeAlias = Annotated[
-    RestoreRelationshipAction | RestoreEntityAction | DeleteCreatedEntityAction,
-    Field(discriminator="action"),
-]
+# Forward-compatible union: Phase 9 may add a DeleteEntityAction for create-ops.
+RevertAction: TypeAlias = Annotated[RestoreRelationshipAction | RestoreEntityAction, Field(discriminator="kind")]
 
 
 def build_revert_actions(
     manifest: MigrationManifest,
     load_snapshot: Callable[[str], EntitySnapshot],
 ) -> list[RevertAction]:
-    """Build the ordered revert actions for a run (pure; §2.6).
+    """Build the ordered revert actions for a run (§2.6).
 
-    Ordering is: relationships first, then entity restores, then created-entity
-    deletions - so references are restored before any created entity is removed,
-    avoiding transient dangling pointers.
+    Ordering: restore relationships first, then restore modified entities — so
+    references are restored before any entity content is touched. No
+    delete-created step (no current op creates entities; Phase 9 if that lands).
 
-    The only "I/O" is the injected ``load_snapshot`` callable (keyed by
-    ``internal_id``); this function touches no filesystem or network itself.
+    Pure: touches no filesystem or network. ``load_snapshot`` is the injected
+    seam that supplies a snapshot by shared id. If a snapshot for a modified
+    entity cannot be loaded, the error propagates - no silent skip.
     """
-
     actions: list[RevertAction] = []
 
-    # 1. Restore relationships first
     for rewired in manifest.rewired:
         actions.append(
             RestoreRelationshipAction(
-                entity_internal_id=rewired.entity.internal_id,
-                relationship_type=rewired.relationship_type,
+                entity=rewired.entity,
+                property_name=rewired.property_name,
                 before=rewired.before,
             )
         )
 
-    # 2. Restore modified entities from their snapshot
-    for entity in manifest.modified:
-        snapshot = load_snapshot(entity.internal_id)
-        actions.append(RestoreEntityAction(internal_id=entity.internal_id, raw=snapshot.raw))
-
-    # 3. Delete created entities last
-    for created in manifest.created:
-        actions.append(DeleteCreatedEntityAction(internal_id=created.internal_id))
+    for modified in manifest.modified:
+        snapshot: EntitySnapshot = load_snapshot(modified.shared_id)
+        actions.append(RestoreEntityAction(snapshot=snapshot))
 
     return actions
