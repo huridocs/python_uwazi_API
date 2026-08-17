@@ -46,6 +46,8 @@ from typing import Any
 
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
+from uwazi_agent.ports.entity_api_port import EntityApiPort
+from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_functions
 
 # stdlib subset the system prompt promises the script (see system_prompt.py).
@@ -330,6 +332,94 @@ def build_exec_namespace(
     namespace: dict[str, Any] = {
         "query_entities": _sync_query_entities_factory(dummy_entities, scope),
         **_scoped_write_helpers(crud, scope),
+        **_STDLIB,
+        "__builtins__": SAFE_BUILTINS,
+    }
+    return namespace
+
+
+def _real_sync_query_entities_factory(
+    entity_api: EntityApiPort,
+    loop: asyncio.AbstractEventLoop,
+) -> Any:
+    """Build the sync, real-scoped ``query_entities`` that actually calls EntityApiPort.
+
+    Mirrors the dummy wrapper's return shapes exactly (``list[dict]`` for
+    ``by_ids``, ``SimpleNamespace(summary, examples)`` for search modes) so the
+    identical script runs in both validation and execution. Calls the
+    ``EntityApiPort`` async methods via ``loop.run_until_complete``.
+    """
+
+    def query_entities(
+        mode: str,
+        language: str = "en",
+        limit: int = 10000,
+        search_term: str | None = None,
+        template_name: str | None = None,
+        filters: list | None = None,
+        published: bool | None = None,
+        shared_ids: list[str] | None = None,
+    ) -> Any:
+        if mode == "by_ids":
+            if not shared_ids:
+                return "Error: 'by_ids' mode requires `shared_ids` (a non-empty list)."
+            entities = loop.run_until_complete(
+                entity_api.get_entities_by_shared_ids(shared_ids=shared_ids, language=language, limit=limit)
+            )
+            return [e.model_dump() for e in entities]
+        if mode == "by_text":
+            if not search_term:
+                return "Error: 'by_text' mode requires `search_term`."
+            result = loop.run_until_complete(
+                entity_api.search_entities_by_text(
+                    search_term=search_term, template_name=template_name, language=language, limit=limit
+                )
+            )
+            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+        if mode == "by_filter":
+            if not template_name:
+                return "Error: 'by_filter' mode requires `template_name`."
+            result = loop.run_until_complete(
+                entity_api.search_entities_by_filter(
+                    template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
+                )
+            )
+            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+        if mode == "by_template":
+            if not template_name:
+                return "Error: 'by_template' mode requires `template_name`."
+            result = loop.run_until_complete(
+                entity_api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
+            )
+            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+        return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
+
+    return query_entities
+
+
+def build_real_exec_namespace(
+    entity_api: EntityApiPort,
+    relationship_api: RelationshipApiPort | None,
+    loop: asyncio.AbstractEventLoop,
+    intercept: Any,
+    tool_cache: Any,
+    default_language: str,
+) -> dict[str, Any]:
+    """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
+
+    Same shape as the dummy namespace (target-agnostic, no ``entities`` list,
+    same stdlib subset + ``SAFE_BUILTINS``) but:
+    - ``query_entities`` actually calls :class:`EntityApiPort` (async, via the
+      loop) and returns the same dict/``SimpleNamespace`` shapes.
+    - Write helpers come from ``intercept.decorate(crud)`` — backup-intercepted
+      (not scope-restricted). The ``intercept`` is a :class:`BackupIntercept`
+      but typed ``Any`` here to keep the namespace builder decoupled from the
+      intercept module.
+    """
+    crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
+    namespace: dict[str, Any] = {
+        "query_entities": _real_sync_query_entities_factory(entity_api, loop),
+        **intercept.decorate(crud),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
