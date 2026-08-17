@@ -32,6 +32,9 @@ Homepage = "https://github.com/huridocs/python_uwazi_API"
 Documentation = "https://github.com/huridocs/python_uwazi_API"
 Repository = "https://github.com/huridocs/python_uwazi_API"
 
+[project.scripts]
+uwazi-admin-agent = "uwazi_admin_agent.drivers.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.4",

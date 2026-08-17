@@ -14,10 +14,9 @@ RUNS_FILE: Path = DATA_DIR / "active_run.yaml"
 PROMPTS_PATH: Path = DATA_DIR / "prompts"
 RUNS_PATH: Path = DATA_DIR / "runs"
 
-# Default on-disk backup-store root, under the operator's working directory.
-# (Phase 4 will decide whether to align this onto ``RUNS_PATH`` so one run = one
-# folder holding prompt snapshot + script + manifest + snapshots.)
-DEFAULT_STORE_DIR: Path = (Path(".uwazi_admin_agent") / "runs").resolve()
+# The backup store (``FilesystemBackupStore``) is rooted at ``RUNS_PATH`` so one
+# run = one folder holding prompt snapshot + script + manifest + snapshots
+# (resolved in Phase 5; the Phase-1 ``DEFAULT_STORE_DIR`` placeholder is removed).
 
 # Hard cap on LLM requests per script-generation run (passed to pydantic-ai's
 # ``UsageLimits``). Mirrors ``browser_agent``'s ``MAX_LLM_CALLS``; generous because

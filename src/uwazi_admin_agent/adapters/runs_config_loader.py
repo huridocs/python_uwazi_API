@@ -54,6 +54,10 @@ class RunsConfigLoader:
         name = self._load_active_name()
         return self._load_run_config(name)
 
+    def load_active_name(self) -> str:
+        """Return the active run name only (does not require the prompt YAML to exist)."""
+        return self._load_active_name()
+
     def load_active_path(self) -> Path:
         """Create the active run's folder and copy the prompt snapshot into it.
 
