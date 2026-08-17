@@ -24,6 +24,18 @@ DEFAULT_STORE_DIR: Path = (Path(".uwazi_admin_agent") / "runs").resolve()
 # discovery (``query_entities``) + script writing both consume requests.
 MAX_LLM_CALLS: int = 70
 
+# Hard cap on ``run_validation_script`` calls per generation turn. The system
+# prompt asks the LLM to validate sparingly, but LLMs ignore prose limits and
+# loop; this counter (mirrors ``browser_agent``'s ``MAX_VALIDATION_ATTEMPTS``)
+# is the backstop that forces the agent to emit a final script instead of
+# retrying validation until the ``MAX_LLM_CALLS`` budget is exhausted.
+MAX_VALIDATION_ATTEMPTS: int = 5
+
+# Row locale used when the dummy harness creates/snapshots/reverts dummies. The
+# generated script is target-agnostic; the harness fixes the locale for its own
+# create/read/revert so the before/after/post-revert raws are comparable.
+DUMMY_LANGUAGE: str = "en"
+
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 1000
 
