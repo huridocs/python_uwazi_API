@@ -106,6 +106,46 @@ def test_restore_mismatch_fails_and_records_mismatch() -> None:
     assert m.actual == post_revert["S1"]
 
 
+# --- platform-managed fields (editDate) are excluded from restore-equality ----
+
+
+def test_edit_date_only_difference_does_not_fail_restore() -> None:
+    # Uwazi bumps editDate on every save, including the revert save, so an
+    # editDate-only difference must NOT count as a restore mismatch.
+    before = {"S1": _raw("A", editDate=1786964800475)}
+    after = {"S1": _raw("A-edited", editDate=1786964800500)}
+    post_revert = {"S1": _raw("A", editDate=1786964800531)}  # data restored, editDate advanced
+
+    result = build_validation_outcome("done", None, before, after, post_revert)
+
+    assert result.passed is True
+    assert result.restore_equal is True
+    assert result.restore_mismatches == []
+
+
+def test_real_data_mismatch_plus_edit_date_difference_is_caught() -> None:
+    before = {"S1": _raw("A", editDate=1786964800475)}
+    after = {"S1": _raw("A-edited", editDate=1786964800500)}
+    # title NOT restored (still A-edited) AND editDate advanced: real mismatch must surface.
+    post_revert = {"S1": _raw("A-edited", editDate=1786964800531)}
+
+    result = build_validation_outcome("done", None, before, after, post_revert)
+
+    assert result.passed is False
+    assert result.restore_equal is False
+    assert len(result.restore_mismatches) == 1
+    # The recorded mismatch carries the FULL raws (incl. editDate) for diagnostics.
+    m = result.restore_mismatches[0]
+    assert m.expected == before["S1"]
+    assert m.actual == post_revert["S1"]
+
+
+def test_platform_managed_fields_constant_is_edit_date_only() -> None:
+    from uwazi_admin_agent.domain.validation_result import PLATFORM_MANAGED_FIELDS
+
+    assert PLATFORM_MANAGED_FIELDS == frozenset({"editDate"})
+
+
 def test_revert_failed_to_restore_entity_records_none_actual() -> None:
     before = {"S1": _raw("A")}
     after = {"S1": None}  # script deleted it
