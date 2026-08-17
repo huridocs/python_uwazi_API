@@ -26,4 +26,6 @@ _version.py
 # local
 .env
 
+src/uwazi_admin_agent/data/
+
 .notes
