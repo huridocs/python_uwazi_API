@@ -19,6 +19,11 @@ RUNS_PATH: Path = DATA_DIR / "runs"
 # folder holding prompt snapshot + script + manifest + snapshots.)
 DEFAULT_STORE_DIR: Path = (Path(".uwazi_admin_agent") / "runs").resolve()
 
+# Hard cap on LLM requests per script-generation run (passed to pydantic-ai's
+# ``UsageLimits``). Mirrors ``browser_agent``'s ``MAX_LLM_CALLS``; generous because
+# discovery (``query_entities``) + script writing both consume requests.
+MAX_LLM_CALLS: int = 70
+
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 1000
 
