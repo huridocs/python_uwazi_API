@@ -19,7 +19,12 @@ class RestoreRelationshipAction(BaseModel):
 
 
 class RestoreEntityAction(BaseModel):
-    """Restore a modified entity from its raw snapshot."""
+    """Restore a modified or deleted entity from its raw snapshot.
+
+    For a modified entity, ``save_raw(snapshot.raw)`` overwrites the current
+    state. For a deleted entity, the same ``save_raw`` re-creates it (POST
+    /api/entities upserts by sharedId+locale). One action covers both.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -27,8 +32,19 @@ class RestoreEntityAction(BaseModel):
     snapshot: EntitySnapshot
 
 
-# Forward-compatible union: Phase 9 may add a DeleteEntityAction for create-ops.
-RevertAction: TypeAlias = Annotated[RestoreRelationshipAction | RestoreEntityAction, Field(discriminator="kind")]
+class DeleteEntityAction(BaseModel):
+    """Delete an entity the script created (revert of a create)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["delete_entity"] = "delete_entity"
+    shared_id: str
+
+
+RevertAction: TypeAlias = Annotated[
+    RestoreRelationshipAction | RestoreEntityAction | DeleteEntityAction,
+    Field(discriminator="kind"),
+]
 
 
 def build_revert_actions(
@@ -37,13 +53,18 @@ def build_revert_actions(
 ) -> list[RevertAction]:
     """Build the ordered revert actions for a run (§2.6).
 
-    Ordering: restore relationships first, then restore modified entities — so
-    references are restored before any entity content is touched. No
-    delete-created step (no current op creates entities; Phase 9 if that lands).
+    Ordering:
+    1. Restore rewired relationships — so references are in place before
+       entity content is touched.
+    2. Restore modified entities from their snapshots.
+    3. Restore deleted entities from their snapshots (same ``save_raw`` as
+       modified — POST upserts, re-creating the row).
+    4. Delete created entities — **last**, so references held by restored
+       entities are valid until every created entity is removed.
 
     Pure: touches no filesystem or network. ``load_snapshot`` is the injected
     seam that supplies a snapshot by shared id. If a snapshot for a modified
-    entity cannot be loaded, the error propagates - no silent skip.
+    or deleted entity cannot be loaded, the error propagates — no silent skip.
     """
     actions: list[RevertAction] = []
 
@@ -59,5 +80,12 @@ def build_revert_actions(
     for modified in manifest.modified:
         snapshot: EntitySnapshot = load_snapshot(modified.shared_id)
         actions.append(RestoreEntityAction(snapshot=snapshot))
+
+    for deleted in manifest.deleted:
+        snapshot = load_snapshot(deleted.shared_id)
+        actions.append(RestoreEntityAction(snapshot=snapshot))
+
+    for created in manifest.created:
+        actions.append(DeleteEntityAction(shared_id=created.shared_id))
 
     return actions

@@ -37,10 +37,9 @@ class MigrationManifest(BaseModel):
 
     Carries the originating ``prompt`` and the generated ``script`` (v2: the
     LLM generates a script, not a declarative plan), plus the entities
-    ``modified`` and relationships ``rewired``. Kept mutable because run status
-    updates over the lifecycle. ``created``/``deleted`` categories are added in
-    Phase 4 when the revert use case handles scripts that create or delete
-    entities (scripts can create/delete, unlike v1's ops).
+    ``modified`` and relationships ``rewired``, plus entities ``created`` and
+    ``deleted`` by the script (Phase 4 — scripts can create/delete, unlike v1's
+    ops). Kept mutable because run status updates over the lifecycle.
     """
 
     run_id: str = Field(description="Unique run identifier.")
@@ -49,11 +48,19 @@ class MigrationManifest(BaseModel):
     script: str = Field(description="The generated Python script that was executed.")
     modified: list[EntityIdentity] = Field(
         default_factory=list,
-        description="Entities that existed pre-run and were modified.",
+        description="Entities that existed pre-run and were modified (or relationship-touched).",
     )
     rewired: list[RewiredRelationship] = Field(
         default_factory=list,
         description="Rewired relationships with their before-state.",
+    )
+    created: list[EntityIdentity] = Field(
+        default_factory=list,
+        description="Entities created by the script (revert = delete by shared_id).",
+    )
+    deleted: list[EntityIdentity] = Field(
+        default_factory=list,
+        description="Entities that existed pre-run and were deleted by the script (revert = restore from snapshot).",
     )
     status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
     snapshot_dir: str | None = Field(

@@ -5,6 +5,7 @@ import pytest
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.revert import (
+    DeleteEntityAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
@@ -36,14 +37,21 @@ class _SnapshotStore:
         return self._snapshots[shared_id]
 
 
-def _manifest(modified: list[EntityIdentity], rewired: list[RewiredRelationship]) -> MigrationManifest:
+def _manifest(
+    modified: list[EntityIdentity] | None = None,
+    rewired: list[RewiredRelationship] | None = None,
+    created: list[EntityIdentity] | None = None,
+    deleted: list[EntityIdentity] | None = None,
+) -> MigrationManifest:
     return MigrationManifest(
         run_id="run-1",
         created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         prompt="d",
         script="x = 1",
-        modified=modified,
-        rewired=rewired,
+        modified=modified or [],
+        rewired=rewired or [],
+        created=created or [],
+        deleted=deleted or [],
         status=RunStatus.EXECUTED,
     )
 
@@ -143,3 +151,116 @@ def test_missing_snapshot_propagates() -> None:
     manifest = _manifest(modified=[_identity("missing")], rewired=[])
     with pytest.raises(KeyError):
         build_revert_actions(manifest, _SnapshotStore({}))
+
+
+# --- deleted entities: restore from snapshot (same as modified) -------------
+
+
+def test_deleted_restored_from_snapshot() -> None:
+    store = _SnapshotStore({"X": _snapshot("X", {"_id": "x1", "title": "old X"})})
+    manifest = _manifest(deleted=[_identity("X")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert len(actions) == 1
+    assert isinstance(actions[0], RestoreEntityAction)
+    assert actions[0].snapshot.shared_id == "X"
+    assert actions[0].snapshot.raw["title"] == "old X"
+
+
+def test_missing_snapshot_for_deleted_propagates() -> None:
+    manifest = _manifest(deleted=[_identity("gone")])
+    with pytest.raises(KeyError):
+        build_revert_actions(manifest, _SnapshotStore({}))
+
+
+# --- created entities: delete action, last in order (§2.6) ------------------
+
+
+def test_created_yields_delete_action() -> None:
+    manifest = _manifest(created=[_identity("NEW1"), _identity("NEW2")])
+
+    actions = build_revert_actions(manifest, _SnapshotStore({}))
+
+    assert len(actions) == 2
+    assert all(isinstance(a, DeleteEntityAction) for a in actions)
+    assert [a.shared_id for a in actions] == ["NEW1", "NEW2"]
+
+
+# --- full ordering: relationships → modified → deleted → created (§2.6) ----
+
+
+def test_full_order_relationships_modified_deleted_created() -> None:
+    store = _SnapshotStore(
+        {
+            "M": _snapshot("M", {"_id": "m1"}),
+            "D": _snapshot("D", {"_id": "d1"}),
+        }
+    )
+    rewired = [RewiredRelationship(entity=_identity("R"), property_name="relations", before=[])]
+    manifest = _manifest(
+        modified=[_identity("M")],
+        rewired=rewired,
+        created=[_identity("C")],
+        deleted=[_identity("D")],
+    )
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [
+        RestoreRelationshipAction,
+        RestoreEntityAction,
+        RestoreEntityAction,
+        DeleteEntityAction,
+    ]
+    assert actions[0].entity.shared_id == "R"
+    assert actions[1].snapshot.shared_id == "M"
+    assert actions[2].snapshot.shared_id == "D"
+    assert actions[3].shared_id == "C"
+
+
+def test_created_deletions_after_deleted_restores() -> None:
+    store = _SnapshotStore({"D": _snapshot("D", {"_id": "d1"})})
+    manifest = _manifest(deleted=[_identity("D")], created=[_identity("C")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert isinstance(actions[0], RestoreEntityAction)
+    assert actions[0].snapshot.shared_id == "D"
+    assert isinstance(actions[1], DeleteEntityAction)
+    assert actions[1].shared_id == "C"
+
+
+def test_only_created_yields_only_deletions() -> None:
+    manifest = _manifest(created=[_identity("A"), _identity("B")])
+    actions = build_revert_actions(manifest, _SnapshotStore({}))
+    assert len(actions) == 2
+    assert all(isinstance(a, DeleteEntityAction) for a in actions)
+
+
+def test_modified_and_deleted_same_ordering_preserves_manifest_order() -> None:
+    store = _SnapshotStore(
+        {
+            "M1": _snapshot("M1", {}),
+            "M2": _snapshot("M2", {}),
+            "D1": _snapshot("D1", {}),
+            "D2": _snapshot("D2", {}),
+        }
+    )
+    manifest = _manifest(
+        modified=[_identity("M1"), _identity("M2")],
+        deleted=[_identity("D1"), _identity("D2")],
+        created=[_identity("C1")],
+    )
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [
+        RestoreEntityAction,
+        RestoreEntityAction,
+        RestoreEntityAction,
+        RestoreEntityAction,
+        DeleteEntityAction,
+    ]
+    assert [a.snapshot.shared_id for a in actions[:4]] == ["M1", "M2", "D1", "D2"]
+    assert actions[4].shared_id == "C1"
