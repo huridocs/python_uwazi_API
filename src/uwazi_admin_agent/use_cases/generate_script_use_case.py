@@ -28,34 +28,39 @@ from pydantic_ai.models import Model
 
 from uwazi_admin_agent.configuration import MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
+from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_agent.ports.llm_port import LlmPort
-from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 from uwazi_agent.use_cases.tools.query_entities import query_entities
 
 
 class GenerateScriptUseCase:
     """Build the script-generation agent, run it once, return a :class:`GeneratedScript`."""
 
-    def __init__(self, llm: LlmPort, deps: UwaziAgentToolsDependencies) -> None:
+    def __init__(self, llm: LlmPort, deps: AdminAgentDeps, entity_repository: EntityRepositoryPort) -> None:
         self._llm: LlmPort = llm
-        self._deps: UwaziAgentToolsDependencies = deps
+        self._deps: AdminAgentDeps = deps
+        self._entity_repository: EntityRepositoryPort = entity_repository
         self._last_messages: list[Any] = []
+        # Wire the raw repository onto the deps so the validation tool can snapshot/revert.
+        deps.entity_repository = entity_repository
 
     @staticmethod
-    def _build_agent(model: Model) -> Agent[UwaziAgentToolsDependencies, GeneratedScript]:
+    def _build_agent(model: Model) -> Agent[AdminAgentDeps, GeneratedScript]:
         """Construct the pydantic-ai agent (no deps/llm instance needed)."""
         return Agent(
             model,
             system_prompt=SYSTEM_PROMPT,
-            deps_type=UwaziAgentToolsDependencies,
+            deps_type=AdminAgentDeps,
             output_type=GeneratedScript,
             tools=[query_entities, run_validation_script],
         )
 
     async def execute(self, prompt: str) -> GeneratedScript:
         """Run the agent once on ``prompt`` and return the generated script."""
+        self._deps.validation_attempts = 0  # fresh budget per generation turn
         agent = self._build_agent(self._llm.get_model())
         run = await agent.run(
             prompt,
@@ -74,6 +79,8 @@ class GenerateScriptUseCase:
         the agent can fix the script without re-exploring. Driven by the CLI's
         repair loop (Phase 5).
         """
+        # Note: repair does NOT reset the validation counter — the limit spans the
+        # whole generation+repair turn, mirroring ``browser_agent``.
         agent = self._build_agent(self._llm.get_model())
         run = await agent.run(
             feedback,

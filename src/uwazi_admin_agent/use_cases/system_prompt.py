@@ -92,10 +92,26 @@ WORKFLOW
 - Then emit the final `GeneratedScript`.
 
 VALIDATION
-- The `run_validation_script` tool is a STUB in this build (the dummy-entity
-  validation harness lands later). It will tell you it is unavailable. Do NOT
-  loop on it. After exploring with `query_entities`, emit your best
-  `GeneratedScript` directly.
+- The `run_validation_script` tool runs your candidate script against THROWAWAY
+  DUMMY entities in the real instance and decides pass/fail with exact-restore
+  evidence. Use it to prove your script before emitting the final
+  `GeneratedScript`.
+- You MUST pass a `dummy_spec`: a list of throwaway entities to create, matching
+  the template/shape your script targets (representative `title` + `template_name`
+  + `metadata`). The harness creates them, runs your script against them (your
+  script can ONLY see/touch these dummies — `query_entities` returns only the
+  dummies, and the write helpers refuse anything else), reverts them to their
+  exact original raw state, and always deletes them afterwards.
+- PASS = your script ran without raising AND every dummy's post-revert raw
+  equals its original raw (your changes are exactly reversible). The report also
+  shows the per-dummy before/after diff and your `result` string so you can judge
+  *semantic* correctness.
+- On FAIL: read the report (script error / restore mismatch / diff), FIX the
+  script, and re-validate. Only emit the final `GeneratedScript` once validation
+  PASSES (or you run out of attempts).
+- You have a HARD limit of `validation_limit` attempts per turn. When it is
+  reached the tool refuses — emit your best script from the exploration you did.
+  Do NOT loop on validation.
 
 OUTPUT
 Return a `GeneratedScript`:
