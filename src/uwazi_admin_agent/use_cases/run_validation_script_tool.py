@@ -118,7 +118,11 @@ def _format_result(result: object, attempt: int, limit: int) -> str:
     parts.append("## Per-dummy diff (changed only)\n" + ("\n".join(diff_lines) if diff_lines else "  (no changes)"))
 
     if result.restore_equal:
-        parts.append("## Restore check\n  OK — every original dummy restored to its exact original raw state.")
+        parts.append(
+            "## Restore check\n  OK — every original dummy restored to its exact original raw state\n"
+            "  (platform-managed fields like `editDate` are excluded; Uwazi bumps them on\n"
+            "  every save, including the revert save, so they can never match)."
+        )
     else:
         parts.append("## Restore check\n  MISMATCH — revert did NOT restore exact original state:")
         for m in result.restore_mismatches:

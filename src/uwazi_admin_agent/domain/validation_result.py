@@ -26,6 +26,22 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Fields Uwazi bumps server-side on every save (confirmed by live probe: a no-op
+# save of an identical raw advances ``editDate`` by a few milliseconds, ignoring
+# the posted value). These can NEVER be restored to their before-value by re-posting
+# the raw — the save itself bumps them — so the restore-equality check excludes
+# them. Backup/restore still preserves them in the snapshot (raw fidelity, §2.5);
+# only the *comparison* ignores this set. Add a field here only when a live probe
+# proves Uwazi mutates it on save.
+PLATFORM_MANAGED_FIELDS: frozenset[str] = frozenset({"editDate"})
+
+
+def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return ``raw`` without :data:`PLATFORM_MANAGED_FIELDS` (``None`` passes through)."""
+    if raw is None:
+        return None
+    return {k: v for k, v in raw.items() if k not in PLATFORM_MANAGED_FIELDS}
+
 
 class EntityDiff(BaseModel):
     """Per-dummy before/after comparison of the raw entity JSON.
@@ -113,7 +129,12 @@ def build_validation_outcome(
     mismatches: list[RestoreMismatch] = []
     for sid, expected in before.items():
         actual = post_revert.get(sid)
-        if actual != expected:
+        # Compare data fields only: platform-managed fields (editDate) advance on
+        # every save, including the revert save, so they can never match. The
+        # recorded mismatch still carries the FULL expected/actual raws so the
+        # diagnostic output shows the real values (incl. editDate) when a real
+        # data field does differ.
+        if _strip_platform_managed(actual) != _strip_platform_managed(expected):
             mismatches.append(RestoreMismatch(shared_id=sid, expected=expected, actual=actual))
 
     restore_equal = not mismatches
