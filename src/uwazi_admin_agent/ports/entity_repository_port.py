@@ -1,17 +1,18 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from uwazi_admin_agent.domain.filter import EntityFilter
-from uwazi_admin_agent.domain.snapshot import EntityIdentity
-
 
 class EntityRepositoryPort(ABC):
-    """Raw, high-fidelity access to Uwazi entities (§2.5, §5.3).
+    """Raw, high-fidelity access to Uwazi entities for backup/restore (§2.5).
 
     Implementations fetch and save **raw dicts** - never validated models - so
     round-tripping drops no fields. ``get_raw_by_*`` return the **full** raw
-    entity, including its relationships (the adapter fetches without
-    ``omitRelationships``); a separate relationships fetch is not needed.
+    entity, including its ``relations`` (fetched without ``omitRelationships``).
+
+    In v2 the touch set is emergent (CRUD-intercepted backup, §2.4), so this port
+    no longer resolves filters to a touch set. Entity discovery for script
+    generation uses ``uwazi_agent``'s ``query_entities``; this port only backs up
+    and restores raw entities.
     """
 
     @abstractmethod
@@ -32,12 +33,4 @@ class EntityRepositoryPort(ABC):
     @abstractmethod
     async def delete_by_shared_id(self, shared_id: str) -> None:
         """Delete all language rows of a sharedId (DELETE /api/entities?sharedId=...)."""
-        ...
-
-    @abstractmethod
-    async def find_touch_set(self, entity_filter: EntityFilter) -> list[EntityIdentity]:
-        """Resolve a filter to the entities it selects (the touch set, pre-mutation).
-
-        Uses /api/search in the adapter (§8: GET /api/entities needs sharedId/_id).
-        """
         ...

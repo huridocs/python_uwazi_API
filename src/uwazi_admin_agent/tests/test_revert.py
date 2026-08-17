@@ -3,10 +3,7 @@ from typing import Any
 
 import pytest
 
-from uwazi_admin_agent.domain.filter import EntityFilter
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
-from uwazi_admin_agent.domain.ops import SetPropertyOp
-from uwazi_admin_agent.domain.plan import MigrationPlan
 from uwazi_admin_agent.domain.revert import (
     RestoreEntityAction,
     RestoreRelationshipAction,
@@ -39,18 +36,12 @@ class _SnapshotStore:
         return self._snapshots[shared_id]
 
 
-def _plan() -> MigrationPlan:
-    return MigrationPlan(
-        description="d",
-        ops=[SetPropertyOp(filter=EntityFilter(template="Court"), property_name="title", value="X")],
-    )
-
-
 def _manifest(modified: list[EntityIdentity], rewired: list[RewiredRelationship]) -> MigrationManifest:
     return MigrationManifest(
         run_id="run-1",
         created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        plan=_plan(),
+        prompt="d",
+        script="x = 1",
         modified=modified,
         rewired=rewired,
         status=RunStatus.EXECUTED,

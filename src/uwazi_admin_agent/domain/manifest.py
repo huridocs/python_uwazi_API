@@ -4,7 +4,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from uwazi_admin_agent.domain.plan import MigrationPlan
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 
 
@@ -36,14 +35,18 @@ class RewiredRelationship(BaseModel):
 class MigrationManifest(BaseModel):
     """The per-run record enabling exact revert (§2.3).
 
-    No ``created``/``deleted`` category - no current op creates or deletes
-    entities; that lands in Phase 9 if a create-op ever arrives. Kept mutable
-    because run status updates over the lifecycle.
+    Carries the originating ``prompt`` and the generated ``script`` (v2: the
+    LLM generates a script, not a declarative plan), plus the entities
+    ``modified`` and relationships ``rewired``. Kept mutable because run status
+    updates over the lifecycle. ``created``/``deleted`` categories are added in
+    Phase 4 when the revert use case handles scripts that create or delete
+    entities (scripts can create/delete, unlike v1's ops).
     """
 
     run_id: str = Field(description="Unique run identifier.")
     created_at: datetime = Field(description="When the run was created.")
-    plan: MigrationPlan = Field(description="The originating migration plan.")
+    prompt: str = Field(description="The operator's natural-language request that originated the run.")
+    script: str = Field(description="The generated Python script that was executed.")
     modified: list[EntityIdentity] = Field(
         default_factory=list,
         description="Entities that existed pre-run and were modified.",

@@ -2,22 +2,26 @@
 
 Operating model:
 
-- The LLM **plans**, deterministic code **executes**. The LLM's only job is to turn
-  a natural-language prompt into a declarative ``MigrationPlan`` (structured ops
-  from a fixed schema). It returns data, never code, and cannot run arbitrary
-  code or call Uwazi directly.
-- A migration run proceeds: plan -> touch-set computation -> dry-run ->
-  snapshot -> execute -> verify -> (revert on demand).
-- Backup & revert are **data**, not generated code: a ``Snapshot`` is the exact
-  raw entity JSON Uwazi returned; a ``Manifest`` records per run what was
-  modified, created, and rewired. Revert restores snapshots, deletes created
-  entities, and restores rewired relationships to their before-state.
+- The LLM **generates a Python script** that performs the bulk change, using the
+  CRUD helpers reused from ``uwazi_agent`` (create/update/delete/publish
+  entities, create_relationships, query_entities). It does not run free-form
+  network or DB code — only the bound helpers.
+- A run proceeds: prompt (active_run.yaml) -> generate script -> simulate
+  against dummy entities in the real instance -> backup the real touch set ->
+  execute against real entities -> (revert on demand).
+- **Dummy-entity gate**: a script must pass against dummies (correct outcome
+  AND revert restores exact original raw state) before real data is touched.
+- **Backup is CRUD-intercepted**: the real-execution CRUD helpers snapshot the
+  raw before-state of every entity they modify/delete before applying, so the
+  snapshot set covers the touch set by construction.
+- Backup & revert are **data**, not generated code: a snapshot is the exact raw
+  entity JSON Uwazi returned; a manifest records per run the prompt, the script,
+  what was modified, and what was rewired. Revert restores snapshots and rewired
+  relationships to their before-state.
 - **Raw fidelity**: backup/restore use raw entity dicts, not validated models,
   so round-tripping drops no fields.
-- The executor backs up the **complete touch set** (direct targets plus every
-  entity whose relationships get rewired) and refuses to execute if the
-  snapshot set does not cover it.
 
-This package depends on ``uwazi_api`` for raw access and does **not** depend on
-``uwazi_agent`` (different concern, lifecycle, and safety contract).
+This package reuses ``uwazi_agent``'s tools/ports/adapters (imported, not
+copied) and depends on ``uwazi_api`` for raw access. It does not modify
+``uwazi_api``.
 """

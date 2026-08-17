@@ -3,10 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
-from uwazi_admin_agent.domain.filter import EntityFilter
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
-from uwazi_admin_agent.domain.ops import SetPropertyOp
-from uwazi_admin_agent.domain.plan import MigrationPlan
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
 
 
@@ -22,10 +19,8 @@ def _manifest(run_id: str) -> MigrationManifest:
     return MigrationManifest(
         run_id=run_id,
         created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        plan=MigrationPlan(
-            description="d",
-            ops=[SetPropertyOp(filter=EntityFilter(template="T"), property_name="title", value="x")],
-        ),
+        prompt="d",
+        script="x = 1",
     )
 
 
