@@ -93,13 +93,14 @@ class RevertRunUseCase:
         if self._audit_log is None:
             return
         self._audit_log.append(
+            run_id,
             make_audit_record(
                 run_id=run_id,
                 step=AuditStep.REVERT,
                 op_kind=op_kind,
                 shared_ids=shared_ids,
                 outcome=AuditOutcome.SUCCESS,
-            )
+            ),
         )
 
     def _emit_run(self, outcome: AuditOutcome, run_id: str) -> None:
@@ -107,11 +108,12 @@ class RevertRunUseCase:
         if self._audit_log is None:
             return
         self._audit_log.append(
+            run_id,
             make_audit_record(
                 run_id=run_id,
                 step=AuditStep.REVERT,
                 op_kind="revert",
                 shared_ids=[],
                 outcome=outcome,
-            )
+            ),
         )

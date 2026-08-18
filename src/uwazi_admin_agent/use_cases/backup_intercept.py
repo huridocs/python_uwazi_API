@@ -203,6 +203,7 @@ class BackupIntercept:
         if self._audit_log is None:
             return
         self._audit_log.append(
+            self._run_id,
             make_audit_record(
                 run_id=self._run_id,
                 step=AuditStep.EXECUTE,
@@ -210,7 +211,7 @@ class BackupIntercept:
                 shared_ids=shared_ids,
                 outcome=outcome,
                 detail=detail,
-            )
+            ),
         )
 
     def _fetch_raws(self, shared_ids: list[str], language: str) -> dict[str, dict[str, Any]]:
