@@ -39,6 +39,17 @@ class BackupStorePort(ABC):
         ...
 
     @abstractmethod
+    def clear_run(self, run_id: str) -> None:
+        """Wipe a run's persisted snapshots (the manifest is preserved).
+
+        Called on re-execute so stale snapshots from a previous execution are
+        removed before the intercept writes fresh ones. The manifest file is
+        kept — it still carries ``prompt``/``script``/``created_at``; the touch-
+        set lists are cleared separately via :meth:`MigrationManifest.reset_touch_set`.
+        """
+        ...
+
+    @abstractmethod
     def list_runs(self) -> list[str]:
         """List the run ids known to the store."""
         ...

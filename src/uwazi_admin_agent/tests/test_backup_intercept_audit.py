@@ -60,6 +60,9 @@ class InMemoryBackupStore(BackupStorePort):
     def update_status(self, run_id: str, status: RunStatus) -> None: ...
 
     @override
+    def clear_run(self, run_id: str) -> None: ...
+
+    @override
     def list_runs(self) -> list[str]: ...
 
 

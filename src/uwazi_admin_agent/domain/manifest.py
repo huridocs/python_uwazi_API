@@ -67,3 +67,16 @@ class MigrationManifest(BaseModel):
         default=None,
         description="Where this run's snapshots live, if persisted (§5.2).",
     )
+
+    def reset_touch_set(self) -> None:
+        """Clear the touch-set lists in place (re-execute entry point).
+
+        The manifest carries one execution's touch set, not a cumulative
+        history. On re-execute (e.g. after revert) the lists are cleared so the
+        intercept repopulates them from scratch; ``prompt``/``script``/
+        ``created_at``/``run_id`` are preserved.
+        """
+        self.modified = []
+        self.rewired = []
+        self.created = []
+        self.deleted = []

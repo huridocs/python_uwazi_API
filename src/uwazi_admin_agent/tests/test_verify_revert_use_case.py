@@ -84,6 +84,10 @@ class InMemoryBackupStore(BackupStorePort):
         self._manifests[run_id].status = status
 
     @override
+    def clear_run(self, run_id: str) -> None:
+        self._snapshots.pop(run_id, None)
+
+    @override
     def list_runs(self) -> list[str]:
         return sorted(self._manifests.keys())
 
