@@ -84,6 +84,19 @@ class FilesystemBackupStore(BackupStorePort):
         runs = [child.name for child in self._root.iterdir() if (child / "manifest.json").exists()]
         return sorted(runs)
 
+    # --- reset ----------------------------------------------------------------
+
+    @override
+    def clear_run(self, run_id: str) -> None:
+        """Remove a run's ``snapshots/`` directory; keep ``manifest.json``."""
+        snapshots_dir = self._run_dir(run_id) / "snapshots"
+        if not snapshots_dir.exists():
+            return
+        for path in snapshots_dir.iterdir():
+            path.unlink()
+        snapshots_dir.rmdir()
+        logger.debug("snapshots cleared run={}", run_id)
+
     # --- helpers -------------------------------------------------------------
 
     def _run_dir(self, run_id: str) -> Path:

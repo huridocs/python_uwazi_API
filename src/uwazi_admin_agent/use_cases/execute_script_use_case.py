@@ -28,6 +28,7 @@ import asyncio
 from loguru import logger
 
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
+from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError, decide_execute_gate
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy, should_auto_revert
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
@@ -82,6 +83,15 @@ class ExecuteScriptUseCase:
         """
         if on_error_policy == OnErrorPolicy.STOP_AND_REVERT and self._revert_use_case is None:
             raise ValueError("on_error_policy=stop-and-revert requires a revert_use_case to be injected.")
+
+        gate = decide_execute_gate(manifest.status, self._has_touch_set(manifest))
+        if gate.action == "refuse":
+            assert gate.reason is not None  # refused decisions always carry a reason
+            raise ExecuteRefusedError(gate.reason)
+        if gate.needs_reset:
+            manifest.reset_touch_set()
+            self._backup_store.clear_run(run_id)
+            logger.info("execute: reset touch set before re-execute run={}", run_id)
 
         intercept = BackupIntercept(
             entity_repository=self._entity_repository,
@@ -155,3 +165,8 @@ class ExecuteScriptUseCase:
                 detail=detail,
             ),
         )
+
+    @staticmethod
+    def _has_touch_set(manifest: MigrationManifest) -> bool:
+        """True if the manifest already carries any touch-set entries."""
+        return any((manifest.modified, manifest.deleted, manifest.created, manifest.rewired))

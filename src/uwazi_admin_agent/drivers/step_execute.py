@@ -24,6 +24,7 @@ from loguru import logger
 from uwazi_admin_agent.adapters.script_emitter import SCRIPT_FILENAME
 from uwazi_admin_agent.configuration import DEFAULT_ON_ERROR_POLICY, DUMMY_LANGUAGE, MAX_ENTITIES_PER_RUN, RUNS_PATH
 from uwazi_admin_agent.domain.cap_enforcement import CapExceededError
+from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.drivers.runtime import build_runtime
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
@@ -58,6 +59,9 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
     logger.info("execute: run={} on_error={}", run_name, policy.value)
     try:
         result = await use_case.execute(script, manifest, run_id=run_name, language=DUMMY_LANGUAGE, on_error_policy=policy)
+    except ExecuteRefusedError as exc:
+        print(f"execute: run={run_name} refused: {exc}", flush=True)
+        return 1
     except CapExceededError as exc:
         print(f"execute: run={run_name} status=failed (cap exceeded): {exc}", flush=True)
         return 1
