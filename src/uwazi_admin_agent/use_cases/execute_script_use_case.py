@@ -145,6 +145,7 @@ class ExecuteScriptUseCase:
         if self._audit_log is None:
             return
         self._audit_log.append(
+            run_id,
             make_audit_record(
                 run_id=run_id,
                 step=AuditStep.EXECUTE,
@@ -152,5 +153,5 @@ class ExecuteScriptUseCase:
                 shared_ids=[],
                 outcome=outcome,
                 detail=detail,
-            )
+            ),
         )
