@@ -21,14 +21,17 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.backup_decision import (
     BackupDecision,
     build_rewired_relationships,
     decide_backup,
     populate_manifest,
 )
+from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
+from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 
@@ -50,6 +53,8 @@ class BackupIntercept:
         run_id: str,
         language: str,
         loop: asyncio.AbstractEventLoop | None,
+        audit_log: AuditLogPort | None = None,
+        cap: int = 1000,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -58,6 +63,8 @@ class BackupIntercept:
         self._language: str = language
         self._loop: asyncio.AbstractEventLoop = loop
         self._backed_up: set[str] = set()
+        self._audit_log: AuditLogPort | None = audit_log
+        self._cap: int = cap
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -80,34 +87,48 @@ class BackupIntercept:
 
         def create_entities_intercepted(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
             results = create_entities(entities_dicts, language)
+            created_ids = [sid for r in results if isinstance(r, dict) if r.get("success") if (sid := r.get("shared_id"))]
             self._record_created(results)
+            self._emit("create", created_ids)
             return results
 
         def update_entities_intercepted(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
             ids = [sid for e in entities_dicts if (sid := e.get("shared_id"))]
             self._backup_before_modify(ids, language or self._language)
-            return update_entities(entities_dicts, language)
+            result = update_entities(entities_dicts, language)
+            self._emit("update", ids)
+            return result
 
         def delete_entities_intercepted(shared_ids: list[str]) -> list[dict]:
             self._backup_before_delete(shared_ids)
-            return delete_entities(shared_ids)
+            result = delete_entities(shared_ids)
+            self._emit("delete", shared_ids)
+            return result
 
         def set_publish_status_intercepted(shared_ids: list[str], published: bool) -> list[dict]:
             self._backup_before_modify(shared_ids, self._language)
-            return set_publish_status(shared_ids, published)
+            result = set_publish_status(shared_ids, published)
+            self._emit("set_publish_status", shared_ids)
+            return result
 
         def publish_entities_intercepted(shared_ids: list[str]) -> dict:
             self._backup_before_modify(shared_ids, self._language)
-            return publish_entities(shared_ids)
+            result = publish_entities(shared_ids)
+            self._emit("publish", shared_ids)
+            return result
 
         def unpublish_entities_intercepted(shared_ids: list[str]) -> dict:
             self._backup_before_modify(shared_ids, self._language)
-            return unpublish_entities(shared_ids)
+            result = unpublish_entities(shared_ids)
+            self._emit("unpublish", shared_ids)
+            return result
 
         def create_relationships_intercepted(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
             from_ids = [sid for r in relationships_dicts if (sid := r.get("from_entity_shared_id"))]
             self._backup_before_rewire(from_ids, language or self._language)
-            return create_relationships(relationships_dicts, language)
+            result = create_relationships(relationships_dicts, language)
+            self._emit("create_relationships", from_ids)
+            return result
 
         return {
             "create_entities": create_entities_intercepted,
@@ -137,6 +158,7 @@ class BackupIntercept:
         rewired = build_rewired_relationships(decision.snapshot_ids, raws, language)
         _ = populate_manifest(self._manifest, decision, snapshots)
         self._manifest.rewired.extend(rewired)
+        self._enforce_cap()
         logger.debug("backup rewire: snapshotted {} from-entities, recorded {} rewired", len(snapshots), len(rewired))
 
     def _apply_snapshot_decision(self, decision: BackupDecision, language: str) -> None:
@@ -144,6 +166,7 @@ class BackupIntercept:
         raws = self._fetch_raws(decision.snapshot_ids, language)
         snapshots = self._save_snapshots(decision.snapshot_ids, raws)
         _ = populate_manifest(self._manifest, decision, snapshots)
+        self._enforce_cap()
         logger.debug("backup decision: snapshotted {} entities", len(snapshots))
 
     def _record_created(self, results: list[dict]) -> None:
@@ -153,7 +176,42 @@ class BackupIntercept:
             return
         decision = BackupDecision(add_created=new_ids)
         _ = populate_manifest(self._manifest, decision, snapshots={})
+        self._enforce_cap()
         logger.debug("backup intercept: recorded {} created entities", len(new_ids))
+
+    def _enforce_cap(self) -> None:
+        """Raise :class:`CapExceededError` if the touch set exceeds the cap.
+
+        Emits a ``cap_exceeded`` audit record (outcome=FAILURE) before raising
+        so the audit log shows why the run halted. The raised error propagates
+        as a script error and triggers the on-error policy.
+        """
+        try:
+            enforce_cap(self._manifest, self._cap)
+        except Exception as exc:
+            self._emit("cap_exceeded", [], outcome=AuditOutcome.FAILURE, detail=str(exc))
+            raise
+
+    def _emit(
+        self,
+        op_kind: str,
+        shared_ids: list[str],
+        outcome: AuditOutcome = AuditOutcome.SUCCESS,
+        detail: str | None = None,
+    ) -> None:
+        """Append one audit record for an intercepted op (no-op if no audit log)."""
+        if self._audit_log is None:
+            return
+        self._audit_log.append(
+            make_audit_record(
+                run_id=self._run_id,
+                step=AuditStep.EXECUTE,
+                op_kind=op_kind,
+                shared_ids=shared_ids,
+                outcome=outcome,
+                detail=detail,
+            )
+        )
 
     def _fetch_raws(self, shared_ids: list[str], language: str) -> dict[str, dict[str, Any]]:
         """Fetch the full raw (with relations) for each id via the entity repository."""

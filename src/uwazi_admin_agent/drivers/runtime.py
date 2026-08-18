@@ -6,8 +6,14 @@ step drivers share: a :class:`UwaziApiAdapter` (which is simultaneously the
 multi-inherits all the ports), the admin agent's raw
 :class:`UwaziEntityRepository` over the same client, a
 :class:`FilesystemBackupStore` rooted at ``RUNS_PATH`` (one run = one folder,
-per the Phase-5 alignment of ``configuration.py``), an :class:`OllamaAdapter`
+per the Phase-5 alignment of ``configuration.py``), a :class:`JsonlAuditLog`
+over the same root (Phase 6 — every write is audited), an :class:`OllamaAdapter`
 LLM, and the :class:`AdminAgentDeps` the generation agent runs against.
+
+Phase 6 also pre-builds a :class:`RevertRunUseCase` (wired with the audit log so
+auto-revert records too) and a :class:`VerifyRevertUseCase` (post-revert
+verification), both held on the :class:`Runtime` so the step drivers can wire
+them into execute/revert/verify without re-constructing.
 
 Live wiring reads ``UWAZI_URL``/``UWAZI_USER``/``UWAZI_PASSWORD`` from the
 environment (mirrors ``uwazi_agent``'s ``run_agent`` driver). It is **not**
@@ -25,12 +31,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.configuration import PACKAGE_DIR, RUNS_PATH
+from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
+from uwazi_admin_agent.use_cases.verify_revert_use_case import VerifyRevertUseCase
 from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -51,20 +61,31 @@ class Runtime:
         relationship_api: RelationshipApiPort | None,
         entity_repository: EntityRepositoryPort,
         backup_store: BackupStorePort,
+        audit_log: AuditLogPort,
         llm: LlmPort,
         deps: AdminAgentDeps,
+        revert_use_case: RevertRunUseCase,
+        verify_use_case: VerifyRevertUseCase,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
         self.entity_repository: EntityRepositoryPort = entity_repository
         self.backup_store: BackupStorePort = backup_store
+        self.audit_log: AuditLogPort = audit_log
         self.llm: LlmPort = llm
         self.deps: AdminAgentDeps = deps
+        self.revert_use_case: RevertRunUseCase = revert_use_case
+        self.verify_use_case: VerifyRevertUseCase = verify_use_case
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
     """Return a :class:`FilesystemBackupStore` rooted at ``RUNS_PATH`` (or ``root``)."""
     return FilesystemBackupStore(Path(root) if root is not None else RUNS_PATH)
+
+
+def build_audit_log(root: Path | None = None) -> AuditLogPort:
+    """Return a :class:`JsonlAuditLog` rooted at ``RUNS_PATH`` (or ``root``)."""
+    return JsonlAuditLog(Path(root) if root is not None else RUNS_PATH)
 
 
 def build_runtime() -> Runtime:
@@ -76,6 +97,7 @@ def build_runtime() -> Runtime:
     api = UwaziApiAdapter(user=user, password=password, url=url)
     entity_repository = UwaziEntityRepository(api.client)
     backup_store = build_backup_store()
+    audit_log = build_audit_log()
     llm = OllamaAdapter()
 
     deps = AdminAgentDeps(
@@ -86,11 +108,24 @@ def build_runtime() -> Runtime:
         relationship_api=api,
     )
 
+    revert_use_case = RevertRunUseCase(
+        entity_repository=entity_repository,
+        backup_store=backup_store,
+        audit_log=audit_log,
+    )
+    verify_use_case = VerifyRevertUseCase(
+        entity_repository=entity_repository,
+        backup_store=backup_store,
+    )
+
     return Runtime(
         entity_api=api,
         relationship_api=api,
         entity_repository=entity_repository,
         backup_store=backup_store,
+        audit_log=audit_log,
         llm=llm,
         deps=deps,
+        revert_use_case=revert_use_case,
+        verify_use_case=verify_use_case,
     )

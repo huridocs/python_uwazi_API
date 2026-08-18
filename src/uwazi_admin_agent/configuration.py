@@ -40,3 +40,9 @@ MAX_ENTITIES_PER_RUN: int = 1000
 
 # Number of entities to apply per batch during execute. Consumed in Phase 5.
 EXECUTE_BATCH_SIZE: int = 50
+
+# Default on-error policy for the execute step (Phase 6). Parsed into
+# ``OnErrorPolicy`` by the CLI. "stop" leaves the partial run for the operator
+# to revert explicitly; "stop-and-revert" auto-reverts whatever was backed up
+# before the error. Kept as a string so ``configuration.py`` stays stdlib-only.
+DEFAULT_ON_ERROR_POLICY: str = "stop"
