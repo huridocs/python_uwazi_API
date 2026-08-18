@@ -7,6 +7,15 @@ raw before-state into :class:`FilesystemBackupStore` + :class:`MigrationManifest
 *before* applying (§2.4). The manifest is persisted after execution so the
 revert use case can restore exactly.
 
+Phase 6 productionizes safety on top of the Phase-4 flow:
+- the **max-entities cap** is enforced mid-script (the intercept raises
+  :class:`CapExceededError` after each op that grows the touch set);
+- an **on-error policy** (``stop`` vs ``stop-and-revert``) decides what happens
+  when the script raises — leave the partial manifest, or auto-revert it;
+- every intercepted op is recorded in the run's **audit log** (via the
+  :class:`AuditLogPort` injected into the intercept); a run-level
+  ``execute`` audit record captures the overall outcome.
+
 Mirrors :class:`DummyEntityHarness._run_script`'s worker-thread pattern (a
 dedicated event loop for the sync CRUD helpers' ``run_until_complete`` calls).
 Not unit-tested (needs ports); validated via the simulation run.
@@ -18,10 +27,14 @@ import asyncio
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
+from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy, should_auto_revert
+from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
+from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_real_exec_namespace, run_script_sync
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
@@ -37,11 +50,17 @@ class ExecuteScriptUseCase:
         relationship_api: RelationshipApiPort | None,
         entity_repository: EntityRepositoryPort,
         backup_store: BackupStorePort,
+        audit_log: AuditLogPort | None = None,
+        cap: int = 1000,
+        revert_use_case: RevertRunUseCase | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._relationship_api: RelationshipApiPort | None = relationship_api
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
+        self._audit_log: AuditLogPort | None = audit_log
+        self._cap: int = cap
+        self._revert_use_case: RevertRunUseCase | None = revert_use_case
 
     async def execute(
         self,
@@ -49,14 +68,21 @@ class ExecuteScriptUseCase:
         manifest: MigrationManifest,
         run_id: str,
         language: str = "en",
+        on_error_policy: OnErrorPolicy = OnErrorPolicy.STOP,
     ) -> MigrationManifest:
         """Run ``script`` against real entities; return the populated manifest.
 
         The manifest is populated by the intercept as the script runs, then
-        persisted. On script error the manifest (with whatever was backed up
-        before the error) is still persisted so a partial revert is possible,
-        and the status is set to ``FAILED``.
+        persisted. On script error (incl. :class:`CapExceededError`) the manifest
+        (with whatever was backed up before the error) is still persisted so a
+        partial revert is possible, and the status is set to ``FAILED``. The
+        ``on_error_policy`` then decides whether to leave the partial run (the
+        operator reverts later) or auto-revert it now via :class:`RevertRunUseCase`.
+        ``STOP_AND_REVERT`` requires a ``revert_use_case`` to have been injected.
         """
+        if on_error_policy == OnErrorPolicy.STOP_AND_REVERT and self._revert_use_case is None:
+            raise ValueError("on_error_policy=stop-and-revert requires a revert_use_case to be injected.")
+
         intercept = BackupIntercept(
             entity_repository=self._entity_repository,
             backup_store=self._backup_store,
@@ -64,6 +90,8 @@ class ExecuteScriptUseCase:
             run_id=run_id,
             language=language,
             loop=None,  # set inside the worker thread via intercept.set_loop()
+            audit_log=self._audit_log,
+            cap=self._cap,
         )
 
         _result, error = await asyncio.to_thread(self._exec, script, intercept, language)
@@ -72,11 +100,18 @@ class ExecuteScriptUseCase:
         if error:
             manifest.status = RunStatus.FAILED
             self._backup_store.save_manifest(run_id, manifest)
+            self._emit_run(AuditOutcome.FAILURE, run_id, detail=error.splitlines()[0] if error else error)
             logger.error("execute script failed run={} error={}", run_id, error.splitlines()[0] if error else error)
+            if should_auto_revert(on_error_policy, manifest):
+                logger.info("on-error=stop-and-revert: auto-reverting run={}", run_id)
+                assert self._revert_use_case is not None  # guarded above
+                await self._revert_use_case.revert(run_id)
+                return self._backup_store.load_manifest(run_id)
             raise RuntimeError(f"Script execution failed: {error}")
 
         manifest.status = RunStatus.EXECUTED
         self._backup_store.save_manifest(run_id, manifest)
+        self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
             "execute script done run={} modified={} deleted={} created={} rewired={}",
             run_id,
@@ -104,3 +139,18 @@ class ExecuteScriptUseCase:
             return run_script_sync(script, namespace)
         finally:
             loop.close()
+
+    def _emit_run(self, outcome: AuditOutcome, run_id: str, detail: str | None = None) -> None:
+        """Append a run-level ``execute`` audit record (no-op if no audit log)."""
+        if self._audit_log is None:
+            return
+        self._audit_log.append(
+            make_audit_record(
+                run_id=run_id,
+                step=AuditStep.EXECUTE,
+                op_kind="execute",
+                shared_ids=[],
+                outcome=outcome,
+                detail=detail,
+            )
+        )

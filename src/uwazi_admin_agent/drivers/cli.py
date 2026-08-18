@@ -29,6 +29,7 @@ from uwazi_admin_agent.drivers.step_inspect_run import run_inspect_run
 from uwazi_admin_agent.drivers.step_list_runs import run_list_runs
 from uwazi_admin_agent.drivers.step_revert import run_revert
 from uwazi_admin_agent.drivers.step_simulate import run_simulate
+from uwazi_admin_agent.drivers.step_verify import run_verify
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Admin agent: turn a natural-language prompt into a safe, revertable Uwazi migration.",
     )
     sub = parser.add_subparsers(
-        dest="command", required=True, metavar="{generate,simulate,execute,revert,list-runs,inspect-run}"
+        dest="command", required=True, metavar="{generate,simulate,execute,revert,verify,list-runs,inspect-run}"
     )
 
     sub.add_parser(
@@ -57,12 +58,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute the validated script against real entities with backup-intercepted CRUD.",
     )
     p_execute.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
+    p_execute.add_argument(
+        "--on-error",
+        choices=("stop", "stop-and-revert"),
+        default=None,
+        help="What to do if the script raises mid-run (default: stop).",
+    )
 
     p_revert = sub.add_parser(
         "revert",
-        help="Revert a run by restoring backed-up entities and deleting created ones.",
+        help="Revert a run by restoring backed-up entities and deleting created ones, then verify the restore.",
     )
     p_revert.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="Verify a reverted run: fetch current raws and confirm they match the snapshots.",
+    )
+    p_verify.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
 
     sub.add_parser("list-runs", help="List run ids known to the backup store (one per line).")
 
@@ -90,9 +103,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "simulate":
         return run_simulate(run_name=_resolve_run_name(args.run))
     if command == "execute":
-        return run_execute(run_name=_resolve_run_name(args.run))
+        return run_execute(run_name=_resolve_run_name(args.run), on_error=args.on_error)
     if command == "revert":
         return run_revert(run_name=_resolve_run_name(args.run))
+    if command == "verify":
+        return run_verify(run_name=_resolve_run_name(args.run))
     if command == "list-runs":
         return run_list_runs()
     if command == "inspect-run":

@@ -4,16 +4,21 @@ Covers the behavioral DoD:
 - ``uwazi-admin-agent --help`` lists the subcommands.
 - ``list-runs`` runs against an empty runs root without error.
 
-The live-wired steps (generate/simulate/execute/revert) need an LLM + a real
-Uwazi instance and are not unit-tested here (validated via the simulation run,
-matching Phases 2-4). The read-only steps' pure rendering + the backup-store
+The live-wired steps (generate/simulate/execute/revert/verify) need an LLM + a
+real Uwazi instance and are not unit-tested here (validated via the simulation
+run, matching Phases 2-4). The read-only steps' pure rendering + the backup-store
 wiring primitives are tested with literal inputs and a tmp runs root.
+
+Phase 6 adds parser-shape tests for the new ``verify`` subcommand and the
+``execute --on-error`` flag.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.drivers.cli import build_parser, main
@@ -27,7 +32,15 @@ from uwazi_admin_agent.drivers.step_list_runs import run_list_runs
 def test_build_parser_help_lists_all_subcommands() -> None:
     help_text = build_parser().format_help()
 
-    for subcommand in ("generate", "simulate", "execute", "revert", "list-runs", "inspect-run"):
+    for subcommand in (
+        "generate",
+        "simulate",
+        "execute",
+        "revert",
+        "verify",
+        "list-runs",
+        "inspect-run",
+    ):
         assert subcommand in help_text, f"subcommand {subcommand!r} missing from --help"
 
 
@@ -38,17 +51,42 @@ def test_build_parser_dispatches_list_runs_command() -> None:
 
 
 def test_build_parser_accepts_run_override_for_per_run_steps() -> None:
-    for command in ("simulate", "execute", "revert", "inspect-run"):
+    for command in ("simulate", "execute", "revert", "verify", "inspect-run"):
         args = build_parser().parse_args([command, "--run", "my-run"])
         assert args.command == command
         assert args.run == "my-run"
 
 
 def test_build_parser_rejects_unknown_subcommand() -> None:
-    import pytest
-
     with pytest.raises(SystemExit):
         build_parser().parse_args(["bogus"])
+
+
+# --- execute --on-error flag (Phase 6) -------------------------------------
+
+
+def test_build_parser_execute_defaults_on_error_to_none() -> None:
+    # None means the driver falls back to DEFAULT_ON_ERROR_POLICY.
+    args = build_parser().parse_args(["execute"])
+    assert args.command == "execute"
+    assert args.on_error is None
+
+
+def test_build_parser_execute_accepts_on_error_choices() -> None:
+    for value in ("stop", "stop-and-revert"):
+        args = build_parser().parse_args(["execute", "--on-error", value])
+        assert args.on_error == value
+
+
+def test_build_parser_execute_rejects_invalid_on_error() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["execute", "--on-error", "nuke"])
+
+
+def test_build_parser_verify_subcommand_parses() -> None:
+    args = build_parser().parse_args(["verify", "--run", "r"])
+    assert args.command == "verify"
+    assert args.run == "r"
 
 
 # --- list-runs DoD -----------------------------------------------------------
