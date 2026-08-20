@@ -88,7 +88,7 @@ class DummyEntityHarness:
             after = await self._snapshot_raws_optional(scope)
 
             if script_error is None:
-                await self._revert_originals(before)
+                await self._revert_originals(before, after, scope)
                 post_revert = await self._snapshot_raws_optional(list(before.keys()))
         except Exception as exc:  # noqa: BLE001 — harness-level error must not escape without cleanup
             script_error = script_error or f"Harness error: {type(exc).__name__}: {exc}"
@@ -191,10 +191,27 @@ class DummyEntityHarness:
             logger.warning("validation script raised: {}", error.splitlines()[0] if error else error)
         return result, error, created_ids
 
-    async def _revert_originals(self, before: dict[str, dict[str, Any]]) -> None:
-        """Restore each original dummy to its exact before raw (full raw, incl. relations)."""
+    async def _revert_originals(
+        self,
+        before: dict[str, dict[str, Any]],
+        after: dict[str, dict[str, Any] | None],
+        scope: set[str],
+    ) -> None:
+        """Restore each original dummy to its exact before raw (full raw, incl. relations).
+
+        An original the script **deleted** (``after`` is None) cannot be restored
+        via the update branch (its row is gone, so save_raw 422s); it is
+        re-created via the create branch, minting a new sharedId. The new id is
+        added to ``scope`` so the §2.7 cleanup (``_delete_all(list(scope))``) still
+        deletes the re-created dummy — otherwise it would escape cleanup.
+        """
         for sid, raw in before.items():
-            await self._entity_repository.save_raw(raw)
+            if after.get(sid) is None:
+                new_shared_id = await self._entity_repository.create_raw(raw)
+                scope.add(new_shared_id)
+                logger.info("re-created deleted dummy (old={} new={})", sid, new_shared_id)
+            else:
+                await self._entity_repository.save_raw(raw)
         logger.info("reverted {} original dummies to before-state", len(before))
 
     async def _delete_all(self, shared_ids: list[str]) -> None:

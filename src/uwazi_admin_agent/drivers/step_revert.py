@@ -20,6 +20,7 @@ import asyncio
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.drivers.runtime import build_runtime
 
 
@@ -33,7 +34,11 @@ async def _run_revert_async(run_name: str) -> int:
     use_case = runtime.revert_use_case  # already wired with the audit log
 
     logger.info("revert: run={}", run_name)
-    await use_case.revert(run_name)
+    try:
+        await use_case.revert(run_name)
+    except RevertRefusedError as exc:
+        print(f"revert: run={run_name} refused: {exc}", flush=True)
+        return 1
 
     manifest = runtime.backup_store.load_manifest(run_name)
     print(f"revert: run={run_name} status={manifest.status.value}")

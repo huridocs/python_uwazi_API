@@ -79,6 +79,10 @@ class InMemoryEntityRepository(EntityRepositoryPort):
     async def save_raw(self, raw: dict[str, Any]) -> None: ...
 
     @override
+    async def create_raw(self, raw: dict[str, Any]) -> str:
+        raise NotImplementedError("not used by backup-intercept audit tests")
+
+    @override
     async def delete_by_shared_id(self, shared_id: str) -> None: ...
 
 

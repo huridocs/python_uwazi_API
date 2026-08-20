@@ -16,6 +16,15 @@ class EntityIdentity(BaseModel):
     shared_id: str = Field(description="The Uwazi sharedId; required.")
     internal_id: str | None = Field(default=None, description="The Uwazi _id, when known.")
     language: str | None = Field(default=None, description="The row locale, when known.")
+    restored_shared_id: str | None = Field(
+        default=None,
+        description=(
+            "For a deleted entity, the NEW sharedId Uwazi minted when revert "
+            "re-created it via the create branch. Set by RevertRunUseCase after "
+            "re-create so post-revert verification can fetch the re-created row; "
+            "None for modified/created entries and for not-yet-reverted runs."
+        ),
+    )
 
 
 class EntitySnapshot(BaseModel):

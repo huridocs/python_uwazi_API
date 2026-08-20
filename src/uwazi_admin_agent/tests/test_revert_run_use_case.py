@@ -4,6 +4,7 @@ from typing import Any, override
 import pytest
 
 from uwazi_admin_agent.domain.manifest import EntityIdentity, MigrationManifest, RewiredRelationship, RunStatus
+from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -16,10 +17,16 @@ pytestmark = pytest.mark.anyio
 
 
 class InMemoryEntityRepository(EntityRepositoryPort):
-    """Stores raw entity dicts keyed by sharedId (the raw Uwazi JSON key)."""
+    """Stores raw entity dicts keyed by sharedId (the raw Uwazi JSON key).
+
+    ``create_raw`` models the Uwazi create branch: it mints a fresh sharedId and
+    stores a copy of the payload (without identity) under that new key, returning
+    it so the caller can record/track the re-created entity.
+    """
 
     def __init__(self, entities: dict[str, dict[str, Any]] | None = None) -> None:
         self._entities: dict[str, dict[str, Any]] = dict(entities or {})
+        self._next_id = 0
 
     @override
     async def get_raw_by_shared_id(self, shared_id: str, language: str | None = None) -> dict[str, Any]:
@@ -40,6 +47,17 @@ class InMemoryEntityRepository(EntityRepositoryPort):
         if sid is None:
             raise RuntimeError("raw missing sharedId")
         self._entities[sid] = dict(raw)
+
+    @override
+    async def create_raw(self, raw: dict[str, Any]) -> str:
+        # Mirror Uwazi create: drop identity, mint a fresh sharedId, store a copy
+        # under the new id (data fields preserved).
+        self._next_id += 1
+        new_sid = f"new-{self._next_id}"
+        stored = {k: v for k, v in raw.items() if k not in {"_id", "sharedId"}}
+        stored["sharedId"] = new_sid
+        self._entities[new_sid] = stored
+        return new_sid
 
     @override
     async def delete_by_shared_id(self, shared_id: str) -> None:
@@ -155,20 +173,29 @@ async def test_revert_modified_restores_from_snapshot() -> None:
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
 
 
-# --- revert deleted entities (re-create from snapshot) ---------------------
+# --- revert deleted entities (re-create from snapshot with a NEW sharedId) ------
 
 
 async def test_revert_deleted_recreates_from_snapshot() -> None:
     repo = InMemoryEntityRepository(entities={})  # entity was deleted
     store = InMemoryBackupStore()
-    store.save_snapshot("run-1", _snapshot("X", {"sharedId": "X", "_id": "x1", "title": "old X", "language": "en"}))
+    store.save_snapshot(
+        "run-1",
+        _snapshot("X", {"sharedId": "X", "_id": "x1", "title": "old X", "language": "en"}),
+    )
     store.save_manifest("run-1", _manifest(deleted=[_identity("X")]))
 
     use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
     await use_case.revert("run-1")
 
-    assert repo.has("X")
-    assert repo.get("X")["title"] == "old X"
+    # Re-created under a NEW sharedId (the old id is gone), data preserved.
+    assert not repo.has("X")
+    new_ids = [sid for sid in ("new-1",) if repo.has(sid)]
+    assert new_ids, "re-created entity should be present under a new sharedId"
+    assert repo.get("new-1")["title"] == "old X"
+    # The manifest records the restored (new) sharedId for verification + audit.
+    deleted_entry = store.load_manifest("run-1").deleted[0]
+    assert deleted_entry.restored_shared_id == "new-1"
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
 
 
@@ -265,9 +292,11 @@ async def test_full_revert_ordering() -> None:
     # M restored to old state (including relations)
     assert repo.get("M")["title"] == "old M"
     assert repo.get("M")["relations"] == before_relations
-    # D re-created from snapshot
-    assert repo.has("D")
-    assert repo.get("D")["title"] == "old D"
+    # D re-created from snapshot under a NEW sharedId (old id is gone)
+    assert not repo.has("D")
+    assert repo.has("new-1")
+    assert repo.get("new-1")["title"] == "old D"
+    assert store.load_manifest("run-1").deleted[0].restored_shared_id == "new-1"
     # C deleted
     assert not repo.has("C")
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
@@ -285,3 +314,17 @@ async def test_revert_empty_manifest_updates_status() -> None:
     await use_case.revert("run-1")
 
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+# --- revert gate: refuse an already-REVERTED run ----------------------------
+
+
+async def test_revert_refuses_already_reverted_run() -> None:
+    repo = InMemoryEntityRepository(entities={})
+    store = InMemoryBackupStore()
+    store.save_manifest("run-1", _manifest())  # status defaults to EXECUTED here
+    store.update_status("run-1", RunStatus.REVERTED)
+
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
+    with pytest.raises(RevertRefusedError):
+        await use_case.revert("run-1")

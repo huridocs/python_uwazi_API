@@ -58,11 +58,26 @@ class VerifyRevertUseCase:
         return result
 
     async def _fetch_current_raws(self, manifest: Any) -> dict[str, dict[str, Any] | None]:
-        """Fetch the current raw for every checked entity (``None`` if absent)."""
-        checked_ids: set[str] = {e.shared_id for e in (*manifest.modified, *manifest.deleted, *manifest.created)}
+        """Fetch the current raw for every checked entity (``None`` if absent).
+
+        Modified/created entries are fetched by their manifest ``shared_id``. A
+        **deleted** entry is fetched by its recorded ``restored_shared_id`` (the
+        new id Uwazi minted on re-create), falling back to the old ``shared_id``
+        when no re-create happened yet (e.g. an older manifest or pre-revert); the
+        result is still keyed by the manifest ``shared_id`` so :func:`verify_revert`
+        can look it up uniformly.
+        """
+        fetch_keys: list[tuple[str, str]] = []
+        for entry in manifest.modified:
+            fetch_keys.append((entry.shared_id, entry.shared_id))
+        for entry in manifest.deleted:
+            target = entry.restored_shared_id or entry.shared_id
+            fetch_keys.append((entry.shared_id, target))
+        for entry in manifest.created:
+            fetch_keys.append((entry.shared_id, entry.shared_id))
         current_raws: dict[str, dict[str, Any] | None] = {}
-        for sid in checked_ids:
-            current_raws[sid] = await self._fetch_optional(sid)
+        for key, target in fetch_keys:
+            current_raws[key] = await self._fetch_optional(target)
         return current_raws
 
     async def _fetch_optional(self, shared_id: str) -> dict[str, Any] | None:

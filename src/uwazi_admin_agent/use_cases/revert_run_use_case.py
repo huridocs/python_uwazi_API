@@ -26,10 +26,12 @@ from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_
 from uwazi_admin_agent.domain.manifest import RunStatus
 from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
+    RecreateEntityAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
 )
+from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -49,13 +51,25 @@ class RevertRunUseCase:
         self._audit_log: AuditLogPort | None = audit_log
 
     async def revert(self, run_id: str) -> None:
-        """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones."""
+        """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones.
+
+        Refuses an already-``REVERTED`` run (re-reverting a delete-run would
+        re-create its deleted entities a second time, minting new sharedIds and
+        leaking orphans — see :mod:`domain.revert_gate`).
+        """
         manifest = self._backup_store.load_manifest(run_id)
+        gate = decide_revert_gate(manifest.status)
+        if gate.action == "refuse":
+            raise RevertRefusedError(gate.reason or "revert refused")
+
         actions = build_revert_actions(manifest, lambda sid: self._backup_store.load_snapshot(run_id, sid))
 
         for action in actions:
-            await self._execute_action(action, run_id)
+            await self._execute_action(action, run_id, manifest)
 
+        # Persist any restored_shared_id mappings recorded during re-creates so
+        # post-revert verification can fetch the re-created rows by their new ids.
+        self._backup_store.save_manifest(run_id, manifest)
         self._backup_store.update_status(run_id, RunStatus.REVERTED)
         self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
@@ -67,18 +81,41 @@ class RevertRunUseCase:
             len(manifest.created),
         )
 
-    async def _execute_action(self, action: Any, run_id: str) -> None:
-        """Dispatch one revert action to the entity repository (+ audit)."""
+    async def _execute_action(self, action: Any, run_id: str, manifest: Any) -> None:
+        """Dispatch one revert action to the entity repository (+ audit + manifest record)."""
         if isinstance(action, RestoreRelationshipAction):
             await self._restore_relationship(action, run_id)
         elif isinstance(action, RestoreEntityAction):
             await self._entity_repository.save_raw(action.snapshot.raw)
             self._emit(run_id, "restore_entity", [action.snapshot.shared_id])
             logger.debug("revert: restored entity sharedId={}", action.snapshot.shared_id)
+        elif isinstance(action, RecreateEntityAction):
+            new_shared_id = await self._entity_repository.create_raw(action.snapshot.raw)
+            self._record_restored_shared_id(manifest, action.snapshot.shared_id, new_shared_id)
+            self._emit(run_id, "recreate_entity", [new_shared_id])
+            logger.info(
+                "revert: re-created entity (old sharedId={} -> new sharedId={})",
+                action.snapshot.shared_id,
+                new_shared_id,
+            )
         elif isinstance(action, DeleteEntityAction):
             await self._entity_repository.delete_by_shared_id(action.shared_id)
             self._emit(run_id, "delete_created", [action.shared_id])
             logger.debug("revert: deleted created entity sharedId={}", action.shared_id)
+
+    @staticmethod
+    def _record_restored_shared_id(manifest: Any, old_shared_id: str, new_shared_id: str) -> None:
+        """Record the new sharedId on the matching deleted manifest entry.
+
+        :class:`EntityIdentity` is frozen, so the entry is replaced in place with
+        a copy carrying the new ``restored_shared_id`` (matched by its old
+        ``shared_id``). Stored for post-revert verification + audit.
+        """
+        for idx, entry in enumerate(manifest.deleted):
+            if entry.shared_id == old_shared_id:
+                manifest.deleted[idx] = entry.model_copy(update={"restored_shared_id": new_shared_id})
+                return
+        logger.warning("revert: no manifest.deleted entry for old sharedId={}", old_shared_id)
 
     async def _restore_relationship(self, action: RestoreRelationshipAction, run_id: str) -> None:
         """Fetch the entity's current raw, patch the relationship field, save."""

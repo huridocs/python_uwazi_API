@@ -50,6 +50,10 @@ class InMemoryEntityRepository(EntityRepositoryPort):
         self._entities[sid] = dict(raw)
 
     @override
+    async def create_raw(self, raw: dict[str, Any]) -> str:
+        raise NotImplementedError("not used by VerifyRevertUseCase")
+
+    @override
     async def delete_by_shared_id(self, shared_id: str) -> None:
         self._entities.pop(shared_id, None)
 
@@ -236,3 +240,70 @@ async def test_verify_editdate_only_difference_is_ok() -> None:
 
     assert result.ok is True
     assert result.mismatches == []
+
+
+# --- deleted entity re-created with a NEW sharedId (identity excluded) -------
+
+
+async def test_verify_deleted_recreated_under_new_id_is_ok() -> None:
+    # The script deleted entity D (old sharedId). Revert re-created it via the
+    # create branch, minting a new sharedId NEWD; the manifest records it.
+    repo = InMemoryEntityRepository(
+        entities={
+            "NEWD": {
+                "sharedId": "NEWD",
+                "_id": "new1",
+                "title": "old D",
+                "metadata": {"caption": [{"value": "c"}]},
+                "editDate": 2005,
+                "language": "en",
+            }
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "D",
+            {
+                "sharedId": "D",
+                "_id": "d1",
+                "title": "old D",
+                "metadata": {"caption": [{"value": "c"}]},
+                "editDate": 1000,
+                "language": "en",
+            },
+        ),
+    )
+    store.save_manifest(
+        "run-1",
+        _manifest(deleted=[EntityIdentity(shared_id="D", restored_shared_id="NEWD")]),
+    )
+
+    use_case = VerifyRevertUseCase(entity_repository=repo, backup_store=store)
+    result = await use_case.verify("run-1")
+
+    # Data fields match; identity (_id/sharedId) differs by design and is excluded.
+    assert result.ok is True
+    assert result.mismatches == []
+    assert result.checked == 1
+
+
+async def test_verify_deleted_recreated_with_wrong_data_is_mismatch() -> None:
+    # Re-created under a new id but with the WRONG title -> data-field mismatch.
+    repo = InMemoryEntityRepository(
+        entities={"NEWD": {"sharedId": "NEWD", "_id": "new1", "title": "WRONG", "language": "en"}}
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot("run-1", _snapshot("D", {"sharedId": "D", "_id": "d1", "title": "old D", "language": "en"}))
+    store.save_manifest(
+        "run-1",
+        _manifest(deleted=[EntityIdentity(shared_id="D", restored_shared_id="NEWD")]),
+    )
+
+    use_case = VerifyRevertUseCase(entity_repository=repo, backup_store=store)
+    result = await use_case.verify("run-1")
+
+    assert result.ok is False
+    assert len(result.mismatches) == 1
+    assert result.mismatches[0].kind == "entity"
