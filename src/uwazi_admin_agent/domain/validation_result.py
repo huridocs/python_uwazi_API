@@ -42,6 +42,19 @@ PLATFORM_MANAGED_FIELDS: frozenset[str] = frozenset({"editDate"})
 # same _id/sharedId, so identity is only ignored for the re-create case.
 IDENTITY_FIELDS: frozenset[str] = frozenset({"_id", "sharedId"})
 
+# File-bearing fields on a raw entity that are **denormalized views** of the
+# `files` collection (joined by `entity=<sharedId>` and split by `type` — see
+# `app/api/entities/entities.js::withDocuments`). On delete-revert the entity is
+# re-created with a fresh sharedId and its files are re-uploaded, minting fresh
+# file _ids/filenames, so the `documents`/`attachments` arrays can never match
+# the snapshot's by identity. The deleted-entry raw-diff excludes these fields
+# (file identity is inherently not preserved); a dedicated file-verification
+# check in `domain/revert_verification.py` compares by originalname+kind+
+# language to detect actual file-restore gaps (missing/extra files). Modified
+# entities keep their files (the update branch keeps _id/sharedId), so these are
+# only ignored for the re-create case, like IDENTITY_FIELDS.
+FILE_FIELDS: frozenset[str] = frozenset({"documents", "attachments"})
+
 
 def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return ``raw`` without :data:`PLATFORM_MANAGED_FIELDS` (``None`` passes through)."""

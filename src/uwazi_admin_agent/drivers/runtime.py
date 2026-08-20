@@ -34,10 +34,12 @@ from dotenv import load_dotenv
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
+from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.configuration import PACKAGE_DIR, RUNS_PATH
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.verify_revert_use_case import VerifyRevertUseCase
@@ -60,6 +62,7 @@ class Runtime:
         entity_api: EntityApiPort,
         relationship_api: RelationshipApiPort | None,
         entity_repository: EntityRepositoryPort,
+        file_repository: FileRepositoryPort,
         backup_store: BackupStorePort,
         audit_log: AuditLogPort,
         llm: LlmPort,
@@ -70,6 +73,7 @@ class Runtime:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
         self.entity_repository: EntityRepositoryPort = entity_repository
+        self.file_repository: FileRepositoryPort = file_repository
         self.backup_store: BackupStorePort = backup_store
         self.audit_log: AuditLogPort = audit_log
         self.llm: LlmPort = llm
@@ -96,6 +100,7 @@ def build_runtime() -> Runtime:
 
     api = UwaziApiAdapter(user=user, password=password, url=url)
     entity_repository = UwaziEntityRepository(api.client)
+    file_repository = UwaziFileRepository(api.client)
     backup_store = build_backup_store()
     audit_log = build_audit_log()
     llm = OllamaAdapter()
@@ -112,6 +117,7 @@ def build_runtime() -> Runtime:
         entity_repository=entity_repository,
         backup_store=backup_store,
         audit_log=audit_log,
+        file_repository=file_repository,
     )
     verify_use_case = VerifyRevertUseCase(
         entity_repository=entity_repository,
@@ -122,6 +128,7 @@ def build_runtime() -> Runtime:
         entity_api=api,
         relationship_api=api,
         entity_repository=entity_repository,
+        file_repository=file_repository,
         backup_store=backup_store,
         audit_log=audit_log,
         llm=llm,

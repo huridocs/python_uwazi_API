@@ -1,11 +1,14 @@
-"""Filesystem persistence for snapshots and manifests (§5 Phase 4).
+"""Filesystem persistence for snapshots, manifests, and captured file bytes (§5 Phase 4).
 
 Layout::
 
     <root>/<run_id>/manifest.json
     <root>/<run_id>/snapshots/<safe_shared_id>.json
+    <root>/<run_id>/files/<safe_shared_id>/<safe_file_id>.bin
 
-Pure filesystem - no network. Snapshots are keyed by ``(run_id, shared_id)``.
+Pure filesystem - no network. Snapshots are keyed by ``(run_id, shared_id)``;
+captured file bytes (delete-revert file restore) are keyed by
+``(run_id, shared_id, file_id)`` as parallel binary artifacts.
 """
 
 import re
@@ -51,6 +54,23 @@ class FilesystemBackupStore(BackupStorePort):
             raise FileNotFoundError(f"No snapshot for run={run_id} sharedId={shared_id}")
         return EntitySnapshot.model_validate_json(path.read_text(encoding="utf-8"))
 
+    # --- captured file bytes -------------------------------------------------
+
+    @override
+    def save_file_bytes(self, run_id: str, shared_id: str, file_id: str, data: bytes) -> None:
+        files_dir = self._run_dir(run_id) / "files" / _safe_name(shared_id)
+        files_dir.mkdir(parents=True, exist_ok=True)
+        path = files_dir / _safe_name(file_id)
+        _ = path.write_bytes(data)
+        logger.debug("file bytes saved run={} sharedId={} fileId={} bytes={}", run_id, shared_id, file_id, len(data))
+
+    @override
+    def load_file_bytes(self, run_id: str, shared_id: str, file_id: str) -> bytes:
+        path = self._run_dir(run_id) / "files" / _safe_name(shared_id) / _safe_name(file_id)
+        if not path.exists():
+            raise FileNotFoundError(f"No file bytes for run={run_id} sharedId={shared_id} fileId={file_id}")
+        return path.read_bytes()
+
     # --- manifests -----------------------------------------------------------
 
     @override
@@ -88,14 +108,19 @@ class FilesystemBackupStore(BackupStorePort):
 
     @override
     def clear_run(self, run_id: str) -> None:
-        """Remove a run's ``snapshots/`` directory; keep ``manifest.json``."""
-        snapshots_dir = self._run_dir(run_id) / "snapshots"
-        if not snapshots_dir.exists():
-            return
-        for path in snapshots_dir.iterdir():
-            path.unlink()
-        snapshots_dir.rmdir()
-        logger.debug("snapshots cleared run={}", run_id)
+        """Remove a run's ``snapshots/`` and ``files/`` directories; keep ``manifest.json``."""
+        run_dir = self._run_dir(run_id)
+        for sub in ("snapshots", "files"):
+            sub_dir = run_dir / sub
+            if sub_dir.exists():
+                self._rm_tree(sub_dir)
+        logger.debug("snapshots + file bytes cleared run={}", run_id)
+
+    @staticmethod
+    def _rm_tree(path: Path) -> None:
+        for child in path.iterdir():
+            child.unlink() if child.is_file() else FilesystemBackupStore._rm_tree(child)
+        path.rmdir()
 
     # --- helpers -------------------------------------------------------------
 

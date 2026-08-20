@@ -51,6 +51,13 @@ class InMemoryBackupStore(BackupStorePort):
     def load_snapshot(self, run_id: str, shared_id: str) -> EntitySnapshot: ...
 
     @override
+    def save_file_bytes(self, run_id: str, shared_id: str, file_id: str, data: bytes) -> None: ...
+
+    @override
+    def load_file_bytes(self, run_id: str, shared_id: str, file_id: str) -> bytes:
+        raise FileNotFoundError("not used by backup-intercept audit tests")
+
+    @override
     def save_manifest(self, run_id: str, manifest: MigrationManifest) -> None: ...
 
     @override

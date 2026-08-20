@@ -34,6 +34,7 @@ from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy, should_auto_
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_real_exec_namespace, run_script_sync
@@ -54,6 +55,7 @@ class ExecuteScriptUseCase:
         audit_log: AuditLogPort | None = None,
         cap: int = 1000,
         revert_use_case: RevertRunUseCase | None = None,
+        file_repository: FileRepositoryPort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._relationship_api: RelationshipApiPort | None = relationship_api
@@ -62,6 +64,7 @@ class ExecuteScriptUseCase:
         self._audit_log: AuditLogPort | None = audit_log
         self._cap: int = cap
         self._revert_use_case: RevertRunUseCase | None = revert_use_case
+        self._file_repository: FileRepositoryPort | None = file_repository
 
     async def execute(
         self,
@@ -102,6 +105,7 @@ class ExecuteScriptUseCase:
             loop=None,  # set inside the worker thread via intercept.set_loop()
             audit_log=self._audit_log,
             cap=self._cap,
+            file_repository=self._file_repository,
         )
 
         _result, error = await asyncio.to_thread(self._exec, script, intercept, language)

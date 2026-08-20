@@ -29,11 +29,13 @@ from uwazi_admin_agent.domain.backup_decision import (
     populate_manifest,
 )
 from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
+from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.manifest import MigrationManifest
-from uwazi_admin_agent.domain.snapshot import EntitySnapshot
+from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 
 
 class BackupIntercept:
@@ -55,6 +57,7 @@ class BackupIntercept:
         loop: asyncio.AbstractEventLoop | None,
         audit_log: AuditLogPort | None = None,
         cap: int = 1000,
+        file_repository: FileRepositoryPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -65,6 +68,7 @@ class BackupIntercept:
         self._backed_up: set[str] = set()
         self._audit_log: AuditLogPort | None = audit_log
         self._cap: int = cap
+        self._file_repository: FileRepositoryPort | None = file_repository
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -146,9 +150,21 @@ class BackupIntercept:
         self._apply_snapshot_decision(decision, language)
 
     def _backup_before_delete(self, shared_ids: list[str]) -> None:
-        """Snapshot first-touch entities, add to manifest.deleted (or remove from created)."""
+        """Snapshot first-touch entities, add to manifest.deleted (or remove from created).
+
+        For a delete, Uwazi tears down the entity's stored file bytes
+        (``BulkCleanupEntityUseCase`` → ``deleteEntityFiles`` →
+        ``deleteFilesFromStorage``), so this is the **only** path that captures
+        file bytes into the backup (modified/rewire paths keep the entity and its
+        files). For each first-touch deleted entity, after fetching the raw and
+        building the snapshot, capture the uploaded files' bytes via
+        :class:`FileRepositoryPort` and persist them via :class:`BackupStorePort`,
+        attaching the :class:`FileRef` metadata list to the snapshot. Best-effort:
+        a fetch failure drops that one file from the snapshot's ``files`` (revert
+        will not try to re-upload bytes it does not have); the snapshot still saves.
+        """
         decision = decide_backup("delete", shared_ids, self._created_set(), self._backed_up)
-        self._apply_snapshot_decision(decision, self._language)
+        self._apply_snapshot_decision(decision, self._language, capture_files=True)
 
     def _backup_before_rewire(self, from_ids: list[str], language: str) -> None:
         """Snapshot first-touch from-entities, add to modified, record RewiredRelationship."""
@@ -161,10 +177,15 @@ class BackupIntercept:
         self._enforce_cap()
         logger.debug("backup rewire: snapshotted {} from-entities, recorded {} rewired", len(snapshots), len(rewired))
 
-    def _apply_snapshot_decision(self, decision: BackupDecision, language: str) -> None:
-        """Fetch raws, save snapshots, populate manifest for a backup decision."""
+    def _apply_snapshot_decision(self, decision: BackupDecision, language: str, capture_files: bool = False) -> None:
+        """Fetch raws, save snapshots, populate manifest for a backup decision.
+
+        ``capture_files`` is set only on the delete path: after building each
+        snapshot, fetch the uploaded files' bytes and attach the :class:`FileRef`
+        metadata list so delete-revert can re-upload them.
+        """
         raws = self._fetch_raws(decision.snapshot_ids, language)
-        snapshots = self._save_snapshots(decision.snapshot_ids, raws)
+        snapshots = self._save_snapshots(decision.snapshot_ids, raws, capture_files=capture_files)
         _ = populate_manifest(self._manifest, decision, snapshots)
         self._enforce_cap()
         logger.debug("backup decision: snapshotted {} entities", len(snapshots))
@@ -221,23 +242,59 @@ class BackupIntercept:
             raws[sid] = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(sid, language))
         return raws
 
-    def _save_snapshots(self, shared_ids: list[str], raws: dict[str, dict[str, Any]]) -> dict[str, EntitySnapshot]:
-        """Build + persist EntitySnapshots; mark ids as backed up."""
+    def _save_snapshots(
+        self, shared_ids: list[str], raws: dict[str, dict[str, Any]], capture_files: bool = False
+    ) -> dict[str, EntitySnapshot]:
+        """Build + persist EntitySnapshots; mark ids as backed up.
+
+        When ``capture_files`` is set (delete path), also capture the uploaded
+        files' bytes for each entity and attach the :class:`FileRef` metadata
+        list to the snapshot (best-effort per file). The bytes live in the backup
+        store as parallel binary artifacts; the snapshot JSON carries only the
+        metadata, so raw fidelity (§2.5) is preserved and the snapshot stays
+        human-readable.
+        """
         snapshots: dict[str, EntitySnapshot] = {}
         now = datetime.now(timezone.utc)
         for sid in shared_ids:
             raw = raws[sid]
+            file_refs = self._capture_files(sid, raw) if capture_files else None
             snap = EntitySnapshot(
                 shared_id=sid,
                 internal_id=raw.get("_id"),
                 language=raw.get("language"),
                 raw=raw,
                 captured_at=now,
+                files=file_refs,
             )
             self._backup_store.save_snapshot(self._run_id, snap)
             snapshots[sid] = snap
             self._backed_up.add(sid)
         return snapshots
+
+    def _capture_files(self, shared_id: str, raw: dict[str, Any]) -> list[FileRef]:
+        """Fetch + persist the uploaded files for a to-be-deleted entity.
+
+        Returns the :class:`FileRef` metadata list to attach to the snapshot. If
+        no file repository is wired (e.g. tests), returns an empty list so the
+        snapshot records "no files captured" rather than ``None`` (``None`` means
+        "not a delete-path snapshot"; an empty list means "delete-path, no files").
+        Best-effort: a fetch failure for one file drops that file from the list
+        and logs a warning; the snapshot still saves with the remaining refs.
+        """
+        if self._file_repository is None:
+            return []
+        refs = extract_file_refs(raw)
+        captured: list[FileRef] = []
+        for ref in refs:
+            data = self._loop.run_until_complete(self._file_repository.get_file_bytes(ref.filename))
+            if data is None:
+                logger.warning("backup: file bytes not found sharedId={} filename={}", shared_id, ref.filename)
+                continue
+            self._backup_store.save_file_bytes(self._run_id, shared_id, ref.file_id, data)
+            captured.append(ref)
+        logger.debug("backup: captured {}/{} files sharedId={}", len(captured), len(refs), shared_id)
+        return captured
 
     def _created_set(self) -> set[str]:
         """The set of shared_ids currently in manifest.created."""

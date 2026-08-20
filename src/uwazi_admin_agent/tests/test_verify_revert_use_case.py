@@ -74,6 +74,13 @@ class InMemoryBackupStore(BackupStorePort):
         return self._snapshots[run_id][shared_id]
 
     @override
+    def save_file_bytes(self, run_id: str, shared_id: str, file_id: str, data: bytes) -> None: ...
+
+    @override
+    def load_file_bytes(self, run_id: str, shared_id: str, file_id: str) -> bytes:
+        raise FileNotFoundError("not used by verify-revert tests")
+
+    @override
     def save_manifest(self, run_id: str, manifest: MigrationManifest) -> None:
         self._manifests[run_id] = manifest
 
