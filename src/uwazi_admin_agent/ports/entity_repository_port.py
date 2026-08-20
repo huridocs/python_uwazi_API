@@ -27,7 +27,23 @@ class EntityRepositoryPort(ABC):
 
     @abstractmethod
     async def save_raw(self, raw: dict[str, Any]) -> None:
-        """Upsert a raw entity dict back via POST /api/entities (see §8 changelog)."""
+        """Upsert a raw entity dict back via POST /api/entities (see §8 changelog).
+
+        Used to restore a *modified* entity (the update branch requires the
+        original ``_id``/``sharedId`` in the raw).
+        """
+        ...
+
+    @abstractmethod
+    async def create_raw(self, raw: dict[str, Any]) -> str:
+        """Re-create a *deleted* entity from its snapshot raw via the create branch.
+
+        POSTs a create payload (no ``sharedId``) to /api/entities so Uwazi mints a
+        fresh ``sharedId``/``_id`` and restores the entity's DATA fields. Returns
+        the newly-minted ``sharedId`` so the revert use case can record it for
+        post-revert verification and audit. Identity is intentionally not
+        preserved (exact-data revert for deletes).
+        """
         ...
 
     @abstractmethod

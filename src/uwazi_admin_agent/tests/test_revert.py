@@ -6,6 +6,7 @@ import pytest
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
+    RecreateEntityAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
@@ -153,17 +154,17 @@ def test_missing_snapshot_propagates() -> None:
         build_revert_actions(manifest, _SnapshotStore({}))
 
 
-# --- deleted entities: restore from snapshot (same as modified) -------------
+# --- deleted entities: re-create from snapshot (new sharedId, exact-data revert) ---
 
 
-def test_deleted_restored_from_snapshot() -> None:
+def test_deleted_yields_recreate_action() -> None:
     store = _SnapshotStore({"X": _snapshot("X", {"_id": "x1", "title": "old X"})})
     manifest = _manifest(deleted=[_identity("X")])
 
     actions = build_revert_actions(manifest, store)
 
     assert len(actions) == 1
-    assert isinstance(actions[0], RestoreEntityAction)
+    assert isinstance(actions[0], RecreateEntityAction)
     assert actions[0].snapshot.shared_id == "X"
     assert actions[0].snapshot.raw["title"] == "old X"
 
@@ -210,7 +211,7 @@ def test_full_order_relationships_modified_deleted_created() -> None:
     assert [type(a) for a in actions] == [
         RestoreRelationshipAction,
         RestoreEntityAction,
-        RestoreEntityAction,
+        RecreateEntityAction,
         DeleteEntityAction,
     ]
     assert actions[0].entity.shared_id == "R"
@@ -225,7 +226,7 @@ def test_created_deletions_after_deleted_restores() -> None:
 
     actions = build_revert_actions(manifest, store)
 
-    assert isinstance(actions[0], RestoreEntityAction)
+    assert isinstance(actions[0], RecreateEntityAction)
     assert actions[0].snapshot.shared_id == "D"
     assert isinstance(actions[1], DeleteEntityAction)
     assert actions[1].shared_id == "C"
@@ -258,8 +259,8 @@ def test_modified_and_deleted_same_ordering_preserves_manifest_order() -> None:
     assert [type(a) for a in actions] == [
         RestoreEntityAction,
         RestoreEntityAction,
-        RestoreEntityAction,
-        RestoreEntityAction,
+        RecreateEntityAction,
+        RecreateEntityAction,
         DeleteEntityAction,
     ]
     assert [a.snapshot.shared_id for a in actions[:4]] == ["M1", "M2", "D1", "D2"]

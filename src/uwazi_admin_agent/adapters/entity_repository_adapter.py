@@ -15,6 +15,7 @@ from typing import Any, override
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.create_payload import to_create_payload
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_api.client import UwaziClient
 
@@ -69,6 +70,30 @@ class UwaziEntityRepository(EntityRepositoryPort):
             body = response.content.decode("utf-8", errors="replace")
             raise RuntimeError(f"save_raw failed ({response.status_code}): {body}")
         logger.debug("raw saved sharedId={}", raw.get("sharedId"))
+
+    @override
+    async def create_raw(self, raw: dict[str, Any]) -> str:
+        # Re-create a deleted entity via the create branch: POST a payload with no
+        # sharedId so Uwazi mints a fresh sharedId/_id and restores the data fields
+        # (title, template, icon, user, metadata, url-attachments). Returns the new
+        # sharedId from the response body (the non-multipart create returns the
+        # created entity dict). The locale cookie selects the row language.
+        payload = to_create_payload(raw)
+        language = raw.get("language") or "en"
+        response = self._client.http.post_json(
+            url=f"{self._client.http.url}/api/entities",
+            json=payload,
+            cookies={"locale": language},
+        )
+        if response.status_code != 200:
+            body = response.content.decode("utf-8", errors="replace")
+            raise RuntimeError(f"create_raw failed ({response.status_code}): {body}")
+        created = json.loads(response.content)
+        new_shared_id = created.get("sharedId")
+        if not new_shared_id:
+            raise RuntimeError(f"create_raw response missing sharedId: {created!r}")
+        logger.info("raw re-created (new sharedId={}, from snapshot sharedId={})", new_shared_id, raw.get("sharedId"))
+        return new_shared_id
 
     @override
     async def delete_by_shared_id(self, shared_id: str) -> None:

@@ -35,6 +35,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # proves Uwazi mutates it on save.
 PLATFORM_MANAGED_FIELDS: frozenset[str] = frozenset({"editDate"})
 
+# Identity fields re-minted by Uwazi when an entity is **re-created** via the
+# create branch (delete-revert). They differ by design between the snapshot and
+# the re-created entity, so the deleted-entry verification excludes them. They
+# are NOT added to PLATFORM_MANAGED_FIELDS — modified entities must keep the
+# same _id/sharedId, so identity is only ignored for the re-create case.
+IDENTITY_FIELDS: frozenset[str] = frozenset({"_id", "sharedId"})
+
 
 def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return ``raw`` without :data:`PLATFORM_MANAGED_FIELDS` (``None`` passes through)."""

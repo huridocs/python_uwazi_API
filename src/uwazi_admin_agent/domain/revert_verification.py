@@ -14,9 +14,14 @@ server-managed and advances on every save, including the revert save — see the
 fidelity, §2.5); only the *comparison* ignores them.
 
 Three checks:
-- **modified / deleted** entities: ``current_raw`` (excl. platform-managed)
-  equals ``snapshot.raw`` (excl. platform-managed). Deleted entities are
-  re-created by the revert, so they must be present and match.
+- **modified** entities: ``current_raw`` (excl. platform-managed)
+  equals ``snapshot.raw`` (excl. platform-managed). Identity (_id/sharedId) must
+  match too (modified entities keep their identity on the update branch).
+- **deleted** entities: re-created via the create branch, so Uwazi minted a
+  fresh _id/sharedId. The comparison excludes platform-managed **and** identity
+  fields (:data:`IDENTITY_FIELDS`) — only DATA fields are expected to match.
+  The current raw is fetched by the recorded ``restored_shared_id``; a ``None``
+  actual means the re-create failed (the old id is gone).
 - **rewired** relationships: ``current_raw[<property_name>]`` equals the
   recorded ``before``. Rewired from-entities are also in ``modified`` (so the
   full-raw check already covers ``relations``), but the plan calls out
@@ -34,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
-from uwazi_admin_agent.domain.validation_result import PLATFORM_MANAGED_FIELDS
+from uwazi_admin_agent.domain.validation_result import IDENTITY_FIELDS, PLATFORM_MANAGED_FIELDS
 
 MismatchKind = Literal["entity", "relationship", "created"]
 
@@ -44,6 +49,20 @@ def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None
     if raw is None:
         return None
     return {k: v for k, v in raw.items() if k not in PLATFORM_MANAGED_FIELDS}
+
+
+def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return ``raw`` without platform-managed and identity fields.
+
+    For a deleted entity that was re-created via the create branch, Uwazi minted
+    a fresh _id/sharedId, so those differ by design and must be excluded from the
+    comparison (only the data fields are expected to match). Modified entities
+    keep their identity, so they use the stricter _strip_platform_managed.
+    """
+    if raw is None:
+        return None
+    skip = PLATFORM_MANAGED_FIELDS | IDENTITY_FIELDS
+    return {k: v for k, v in raw.items() if k not in skip}
 
 
 class VerificationMismatch(BaseModel):
@@ -100,7 +119,10 @@ def verify_revert(
         checked += 1
         snap = snapshots[deleted.shared_id]
         actual = current_raws.get(deleted.shared_id)
-        if _strip_platform_managed(actual) != _strip_platform_managed(snap.raw):
+        # A deleted entity was re-created via the create branch, so its _id/sharedId
+        # are fresh by design - compare DATA fields only (excl. platform-managed and
+        # identity). A None actual means the re-create failed (the old id is gone).
+        if _strip_for_recreate(actual) != _strip_for_recreate(snap.raw):
             mismatches.append(
                 VerificationMismatch(shared_id=deleted.shared_id, kind="entity", expected=snap.raw, actual=actual)
             )

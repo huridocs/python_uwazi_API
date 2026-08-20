@@ -19,16 +19,34 @@ class RestoreRelationshipAction(BaseModel):
 
 
 class RestoreEntityAction(BaseModel):
-    """Restore a modified or deleted entity from its raw snapshot.
+    """Restore a modified entity from its raw snapshot.
 
-    For a modified entity, ``save_raw(snapshot.raw)`` overwrites the current
-    state. For a deleted entity, the same ``save_raw`` re-creates it (POST
-    /api/entities upserts by sharedId+locale). One action covers both.
+    ``save_raw(snapshot.raw)`` overwrites the current state via the POST
+    /api/entities update branch (the raw carries its original ``_id``/``sharedId``,
+    which the update branch requires). Used for entities the script *modified*.
     """
 
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["restore_entity"] = "restore_entity"
+    snapshot: EntitySnapshot
+
+
+class RecreateEntityAction(BaseModel):
+    """Re-create a deleted entity from its raw snapshot (exact-data revert).
+
+    The script deleted the entity, so its row is gone and the POST /api/entities
+    update branch (used by :class:`RestoreEntityAction`) would 422. Revert instead
+    goes through the **create branch** (no ``sharedId`` in the body), which mints a
+    fresh ``sharedId``/``_id`` and restores the entity's DATA fields (title,
+    template, icon, user, metadata, url-attachments). Identity is intentionally not
+    preserved — this is exact-data, not exact-identity, revert for the delete case
+    (see ``domain/create_payload.py`` for what is and isn't restorable).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["recreate_entity"] = "recreate_entity"
     snapshot: EntitySnapshot
 
 
@@ -42,7 +60,7 @@ class DeleteEntityAction(BaseModel):
 
 
 RevertAction: TypeAlias = Annotated[
-    RestoreRelationshipAction | RestoreEntityAction | DeleteEntityAction,
+    RestoreRelationshipAction | RestoreEntityAction | RecreateEntityAction | DeleteEntityAction,
     Field(discriminator="kind"),
 ]
 
@@ -56,9 +74,9 @@ def build_revert_actions(
     Ordering:
     1. Restore rewired relationships — so references are in place before
        entity content is touched.
-    2. Restore modified entities from their snapshots.
-    3. Restore deleted entities from their snapshots (same ``save_raw`` as
-       modified — POST upserts, re-creating the row).
+    2. Restore modified entities from their snapshots (update branch).
+    3. Re-create deleted entities from their snapshots (create branch — a new
+       sharedId is minted; identity is not preserved, only data).
     4. Delete created entities — **last**, so references held by restored
        entities are valid until every created entity is removed.
 
@@ -83,7 +101,7 @@ def build_revert_actions(
 
     for deleted in manifest.deleted:
         snapshot = load_snapshot(deleted.shared_id)
-        actions.append(RestoreEntityAction(snapshot=snapshot))
+        actions.append(RecreateEntityAction(snapshot=snapshot))
 
     for created in manifest.created:
         actions.append(DeleteEntityAction(shared_id=created.shared_id))
