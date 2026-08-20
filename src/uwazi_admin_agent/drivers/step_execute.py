@@ -54,6 +54,7 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
         audit_log=runtime.audit_log,
         cap=MAX_ENTITIES_PER_RUN,
         revert_use_case=runtime.revert_use_case,
+        file_repository=runtime.file_repository,
     )
 
     logger.info("execute: run={} on_error={}", run_name, policy.value)

@@ -29,7 +29,12 @@ async def _run_verify_async(run_name: str) -> int:
     logger.info("verify: run={}", run_name)
     result = await runtime.verify_use_case.verify(run_name)
 
-    print(f"verify: run={run_name} ok={result.ok} checked={result.checked} mismatches={len(result.mismatches)}")
+    print(
+        f"verify: run={run_name} ok={result.ok} checked={result.checked} "
+        f"mismatches={len(result.mismatches)} file_gaps={len(result.file_gaps)}"
+    )
     for m in result.mismatches:
         print(f"  - {m.shared_id} ({m.kind}): expected={m.expected!r} actual={m.actual!r}")
+    for g in result.file_gaps:
+        print(f"  - {g.shared_id} (file {g.gap}): {g.kind} {g.originalname!r}")
     return 0 if result.ok else 1

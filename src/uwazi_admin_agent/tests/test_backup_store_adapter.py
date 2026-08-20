@@ -84,3 +84,57 @@ def test_save_snapshot_safe_filename_for_unsafe_shared_id(tmp_path) -> None:
     store.save_snapshot("run-1", snap)
 
     assert store.load_snapshot("run-1", "weird/id") == snap
+
+
+# --- captured file bytes (delete-revert file restore) -----------------------
+
+
+def test_file_bytes_round_trips(tmp_path) -> None:
+    store = FilesystemBackupStore(tmp_path)
+
+    store.save_file_bytes("run-1", "abc1", "fdoc1", b"PDF-BYTES")
+
+    assert store.load_file_bytes("run-1", "abc1", "fdoc1") == b"PDF-BYTES"
+
+
+def test_load_file_bytes_raises_when_absent(tmp_path) -> None:
+    store = FilesystemBackupStore(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        store.load_file_bytes("run-1", "abc1", "missing")
+
+
+def test_file_bytes_isolated_per_shared_id_and_file_id(tmp_path) -> None:
+    store = FilesystemBackupStore(tmp_path)
+    store.save_file_bytes("run-1", "A", "f1", b"A-f1")
+    store.save_file_bytes("run-1", "A", "f2", b"A-f2")
+    store.save_file_bytes("run-1", "B", "f1", b"B-f1")
+
+    assert store.load_file_bytes("run-1", "A", "f1") == b"A-f1"
+    assert store.load_file_bytes("run-1", "A", "f2") == b"A-f2"
+    assert store.load_file_bytes("run-1", "B", "f1") == b"B-f1"
+
+
+def test_clear_run_wipes_snapshots_and_file_bytes_but_keeps_manifest(tmp_path) -> None:
+    store = FilesystemBackupStore(tmp_path)
+    store.save_manifest("run-1", _manifest("run-1"))
+    store.save_snapshot("run-1", _snapshot("abc1", {"_id": "a1", "sharedId": "abc1"}))
+    store.save_file_bytes("run-1", "abc1", "f1", b"BYTES")
+
+    store.clear_run("run-1")
+
+    # Manifest preserved.
+    assert store.load_manifest("run-1").run_id == "run-1"
+    # Snapshots + file bytes gone.
+    with pytest.raises(FileNotFoundError):
+        store.load_snapshot("run-1", "abc1")
+    with pytest.raises(FileNotFoundError):
+        store.load_file_bytes("run-1", "abc1", "f1")
+
+
+def test_clear_run_safe_when_nothing_persisted(tmp_path) -> None:
+    store = FilesystemBackupStore(tmp_path)
+    store.save_manifest("run-1", _manifest("run-1"))
+
+    store.clear_run("run-1")  # no snapshots/ files dirs yet — must not raise
+
+    assert store.load_manifest("run-1").run_id == "run-1"

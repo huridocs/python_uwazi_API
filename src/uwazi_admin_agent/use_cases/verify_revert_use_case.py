@@ -49,11 +49,12 @@ class VerifyRevertUseCase:
         current_raws = await self._fetch_current_raws(manifest)
         result = verify_revert(manifest, snapshots, current_raws)
         logger.info(
-            "verify run={} ok={} checked={} mismatches={}",
+            "verify run={} ok={} checked={} mismatches={} file_gaps={}",
             run_id,
             result.ok,
             result.checked,
             len(result.mismatches),
+            len(result.file_gaps),
         )
         return result
 

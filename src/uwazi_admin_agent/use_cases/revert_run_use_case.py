@@ -23,6 +23,7 @@ from typing import Any
 from loguru import logger
 
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
+from uwazi_admin_agent.domain.file_restore import build_file_restore_actions
 from uwazi_admin_agent.domain.manifest import RunStatus
 from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
@@ -35,6 +36,7 @@ from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_reve
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 
 
 class RevertRunUseCase:
@@ -45,10 +47,12 @@ class RevertRunUseCase:
         entity_repository: EntityRepositoryPort,
         backup_store: BackupStorePort,
         audit_log: AuditLogPort | None = None,
+        file_repository: FileRepositoryPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
         self._audit_log: AuditLogPort | None = audit_log
+        self._file_repository: FileRepositoryPort | None = file_repository
 
     async def revert(self, run_id: str) -> None:
         """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones.
@@ -98,6 +102,7 @@ class RevertRunUseCase:
                 action.snapshot.shared_id,
                 new_shared_id,
             )
+            await self._restore_files(action.snapshot, new_shared_id, run_id)
         elif isinstance(action, DeleteEntityAction):
             await self._entity_repository.delete_by_shared_id(action.shared_id)
             self._emit(run_id, "delete_created", [action.shared_id])
@@ -124,6 +129,62 @@ class RevertRunUseCase:
         await self._entity_repository.save_raw(raw)
         self._emit(run_id, "restore_relationship", [action.entity.shared_id])
         logger.debug("revert: restored relationship sharedId={} property={}", action.entity.shared_id, action.property_name)
+
+    async def _restore_files(self, snapshot: Any, new_shared_id: str, run_id: str) -> None:
+        """Re-upload the snapshot's captured files to the re-created entity.
+
+        Runs as a sub-step of :class:`RecreateEntityAction` *after* ``create_raw``
+        returns the new ``sharedId`` (uploads target ``shared_id`` + ``language``).
+        Best-effort: a failed upload is logged + recorded as a ``restore_file_failed``
+        audit record but does NOT fail the revert — the entity is already re-created
+        with its data; file gaps surface in post-revert verification. A missing file
+        repository (e.g. tests) or a snapshot with no captured files is a no-op.
+        """
+        if self._file_repository is None or not snapshot.files:
+            return
+        old_shared_id = snapshot.shared_id
+        actions = build_file_restore_actions(snapshot.files)
+        for act in actions:
+            try:
+                data = self._backup_store.load_file_bytes(run_id, old_shared_id, act.file_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort; missing bytes must not abort revert
+                self._emit_file(run_id, new_shared_id, failed=True, detail=f"load bytes: {exc}")
+                logger.warning(
+                    "revert: file bytes missing run={} old={} fileId={}: {}", run_id, old_shared_id, act.file_id, exc
+                )
+                continue
+            ok = await self._upload_one(act, data, new_shared_id)
+            if ok:
+                self._emit_file(run_id, new_shared_id, failed=False)
+                logger.debug("revert: re-uploaded file sharedId={} originalname={}", new_shared_id, act.originalname)
+            else:
+                self._emit_file(run_id, new_shared_id, failed=True, detail=act.originalname)
+                logger.warning("revert: file upload failed sharedId={} originalname={}", new_shared_id, act.originalname)
+
+    async def _upload_one(self, action: Any, data: bytes, new_shared_id: str) -> bool:
+        """Dispatch one file-restore action to the file repository."""
+        language = action.language
+        title = action.originalname
+        content_type = action.content_type
+        if action.kind == "upload_document":
+            return await self._file_repository.upload_document(data, new_shared_id, language, title, content_type)
+        return await self._file_repository.upload_attachment(data, new_shared_id, language, title, content_type)
+
+    def _emit_file(self, run_id: str, shared_id: str, *, failed: bool, detail: str | None = None) -> None:
+        """Append one file-restore audit record (no-op if no audit log)."""
+        if self._audit_log is None:
+            return
+        self._audit_log.append(
+            run_id,
+            make_audit_record(
+                run_id=run_id,
+                step=AuditStep.REVERT,
+                op_kind="restore_file_failed" if failed else "restore_file",
+                shared_ids=[shared_id],
+                outcome=AuditOutcome.FAILURE if failed else AuditOutcome.SUCCESS,
+                detail=detail,
+            ),
+        )
 
     def _emit(self, run_id: str, op_kind: str, shared_ids: list[str]) -> None:
         """Append one revert-action audit record (no-op if no audit log)."""
