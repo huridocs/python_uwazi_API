@@ -103,25 +103,31 @@ class BackupIntercept:
             self._emit("update", ids)
             return result
 
-        def delete_entities_intercepted(shared_ids: list[str]) -> list[dict]:
+        def delete_entities_intercepted(shared_ids: list[str], language: str | None = None) -> list[dict]:
+            del language  # ignored: delete is by sharedId across ALL language rows
             self._backup_before_delete(shared_ids)
             result = delete_entities(shared_ids)
             self._emit("delete", shared_ids)
             return result
 
-        def set_publish_status_intercepted(shared_ids: list[str], published: bool) -> list[dict]:
+        def set_publish_status_intercepted(
+            shared_ids: list[str], published: bool, language: str | None = None
+        ) -> list[dict]:
+            del language  # ignored: publish/unpublish act on all language rows by sharedId
             self._backup_before_modify(shared_ids, self._language)
             result = set_publish_status(shared_ids, published)
             self._emit("set_publish_status", shared_ids)
             return result
 
-        def publish_entities_intercepted(shared_ids: list[str]) -> dict:
+        def publish_entities_intercepted(shared_ids: list[str], language: str | None = None) -> dict:
+            del language
             self._backup_before_modify(shared_ids, self._language)
             result = publish_entities(shared_ids)
             self._emit("publish", shared_ids)
             return result
 
-        def unpublish_entities_intercepted(shared_ids: list[str]) -> dict:
+        def unpublish_entities_intercepted(shared_ids: list[str], language: str | None = None) -> dict:
+            del language
             self._backup_before_modify(shared_ids, self._language)
             result = unpublish_entities(shared_ids)
             self._emit("unpublish", shared_ids)

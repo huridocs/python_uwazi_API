@@ -179,17 +179,77 @@ def test_created_dummies_are_diffed_but_not_restore_checked() -> None:
 # --- deleted original is diffed and restore-checked -------------------------
 
 
-def test_deleted_original_is_diffed_and_restore_checked() -> None:
-    before = {"S1": _raw("A")}
+def _recreated_raw(title: str, **extra: Any) -> dict[str, Any]:
+    """A re-created entity raw: fresh _id/sharedId (create branch mints new ids)."""
+    return {"_id": "new-objid", "sharedId": "NEWID", "title": title, "language": "en", **extra}
+
+
+def test_deleted_original_recreated_with_new_identity_passes_on_data() -> None:
+    # The real re-create shape: revert mints a fresh _id/sharedId and re-uploaded
+    # files get fresh file ids. The gate must compare DATA only (excluding
+    # identity + file-bearing + platform-managed fields) -> passed=True.
+    before = {"S1": _raw("A", documents=[{"_id": "f1", "originalname": "a.pdf"}])}
     after = {"S1": None}  # script deleted it
-    post_revert = {"S1": _raw("A")}  # revert re-created it exactly
+    post_revert = {
+        "S1": _recreated_raw(
+            "A",
+            documents=[{"_id": "fnew", "originalname": "a.pdf"}],  # re-minted file id
+            editDate=1786964800999,  # advanced by the re-create save
+        )
+    }
 
     result = build_validation_outcome("deleted 1", None, before, after, post_revert)
 
     assert result.passed is True
     assert result.restore_equal is True
-    assert result.diffs[0].before == _raw("A")
+    assert result.restore_mismatches == []
+    assert result.diffs[0].before == before["S1"]
     assert result.diffs[0].after is None
+
+
+def test_deleted_original_recreated_with_wrong_data_fails() -> None:
+    # Re-create restored identity+files (excluded) but the DATA (title) differs.
+    before = {"S1": _raw("A")}
+    after = {"S1": None}
+    post_revert = {"S1": _recreated_raw("A-wrong-title")}
+
+    result = build_validation_outcome("deleted 1", None, before, after, post_revert)
+
+    assert result.passed is False
+    assert result.restore_equal is False
+    assert len(result.restore_mismatches) == 1
+    m = result.restore_mismatches[0]
+    assert m.shared_id == "S1"
+    # The recorded mismatch carries the FULL raws (incl. identity/editDate) for diagnostics.
+    assert m.expected == before["S1"]
+    assert m.actual == post_revert["S1"]
+
+
+def test_deleted_original_revert_failed_to_recreate_records_none_actual() -> None:
+    # Script deleted it, but revert failed to bring it back (post_revert None).
+    before = {"S1": _raw("A")}
+    after = {"S1": None}
+    post_revert = {"S1": None}
+
+    result = build_validation_outcome("deleted 1", None, before, after, post_revert)
+
+    assert result.passed is False
+    assert result.restore_equal is False
+    assert result.restore_mismatches[0].actual is None
+
+
+def test_modified_original_is_NOT_identity_excluded() -> None:
+    # A MODIFIED original keeps its _id/sharedId (update branch). Identity must
+    # still match - the re-create exclusion applies ONLY to deleted originals.
+    before = {"S1": _raw("A")}
+    after = {"S1": _raw("A-edited")}
+    post_revert = {"S1": {**_raw("A"), "_id": "DIFFERENT", "sharedId": "DIFFERENT"}}
+
+    result = build_validation_outcome("done", None, before, after, post_revert)
+
+    assert result.passed is False  # identity differs on a modified entity -> mismatch
+    assert result.restore_equal is False
+    assert result.restore_mismatches[0].shared_id == "S1"
 
 
 # --- defaults ---------------------------------------------------------------

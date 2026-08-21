@@ -39,6 +39,22 @@ from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
 _DUMMY_TITLE_PREFIX = "[uwazi-admin-agent-dummy] "
 
 
+def resolve_recreated_fetch_ids(old_ids: list[str], recreated: dict[str, str]) -> list[tuple[str, str]]:
+    """Map each original id to the id to fetch for the post-revert snapshot.
+
+    For an original the script DELETED, revert re-creates it via the create
+    branch with a **fresh** sharedId (recorded in ``recreated`` as ``old -> new``).
+    The post-revert snapshot must then fetch the re-created entity by its **new**
+    id (the old row is gone) and key the result under the **old** id, so the
+    restore-equality comparison sees the re-created raw (DATA-only, identity
+    excluded - see :mod:`domain.validation_result`) instead of ``None``.
+
+    Pure: the testable seam extracted from :class:`DummyEntityHarness`'s revert
+    step (the harness itself needs the real instance and is not unit-tested).
+    """
+    return [(sid, recreated.get(sid, sid)) for sid in old_ids]
+
+
 class DummyEntityHarness:
     """Create dummies, run the candidate script, revert, exact-restore-check, cleanup.
 
@@ -88,8 +104,8 @@ class DummyEntityHarness:
             after = await self._snapshot_raws_optional(scope)
 
             if script_error is None:
-                await self._revert_originals(before, after, scope)
-                post_revert = await self._snapshot_raws_optional(list(before.keys()))
+                recreated = await self._revert_originals(before, after, scope)
+                post_revert = await self._snapshot_raws_optional_mapped(list(before.keys()), recreated)
         except Exception as exc:  # noqa: BLE001 — harness-level error must not escape without cleanup
             script_error = script_error or f"Harness error: {type(exc).__name__}: {exc}"
             logger.error("dummy harness error: {}", exc)
@@ -196,23 +212,48 @@ class DummyEntityHarness:
         before: dict[str, dict[str, Any]],
         after: dict[str, dict[str, Any] | None],
         scope: set[str],
-    ) -> None:
+    ) -> dict[str, str]:
         """Restore each original dummy to its exact before raw (full raw, incl. relations).
 
         An original the script **deleted** (``after`` is None) cannot be restored
         via the update branch (its row is gone, so save_raw 422s); it is
         re-created via the create branch, minting a new sharedId. The new id is
-        added to ``scope`` so the §2.7 cleanup (``_delete_all(list(scope))``) still
-        deletes the re-created dummy — otherwise it would escape cleanup.
+        returned (``old -> new``) so the caller can fetch the re-created entity by
+        its new id for the post-revert snapshot, and added to ``scope`` so the
+        §2.7 cleanup (``_delete_all(list(scope))``) still deletes the re-created
+        dummy - otherwise it would escape cleanup.
         """
+        recreated: dict[str, str] = {}
         for sid, raw in before.items():
             if after.get(sid) is None:
                 new_shared_id = await self._entity_repository.create_raw(raw)
                 scope.add(new_shared_id)
+                recreated[sid] = new_shared_id
                 logger.info("re-created deleted dummy (old={} new={})", sid, new_shared_id)
             else:
                 await self._entity_repository.save_raw(raw)
         logger.info("reverted {} original dummies to before-state", len(before))
+        return recreated
+
+    async def _snapshot_raws_optional_mapped(
+        self, old_ids: list[str], recreated: dict[str, str]
+    ) -> dict[str, dict[str, Any] | None]:
+        """Post-revert snapshot keyed by **old** id, fetching re-created entities by
+        their **new** id (so a re-created original is compared, not ``None``).
+
+        Uses :func:`resolve_recreated_fetch_ids` (pure) to pick the fetch id per
+        original: the re-created new id if revert re-created it, else the old id.
+        A fetch that raises (the entity is gone - e.g. revert failed to restore a
+        deleted original) maps to ``None``, which the restore-equality check flags
+        as a mismatch.
+        """
+        out: dict[str, dict[str, Any] | None] = {}
+        for old_id, fetch_id in resolve_recreated_fetch_ids(old_ids, recreated):
+            try:
+                out[old_id] = await self._entity_repository.get_raw_by_shared_id(fetch_id, self._language)
+            except Exception:  # noqa: BLE001 — gone-by-revert-failure is expected, map to None
+                out[old_id] = None
+        return out
 
     async def _delete_all(self, shared_ids: list[str]) -> None:
         """Delete every dummy (originals + script-created) — the §2.7 cleanup guarantee."""

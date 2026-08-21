@@ -44,6 +44,9 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -274,19 +277,23 @@ def _scoped_write_helpers(
         assert_ids_in_scope([e.get("shared_id") for e in entities_dicts if e.get("shared_id")], scope, "update_entities")
         return update_entities(entities_dicts, language)
 
-    def delete_entities_scoped(shared_ids: list[str]) -> list[dict]:
+    def delete_entities_scoped(shared_ids: list[str], language: str | None = None) -> list[dict]:
+        del language  # ignored: delete is by sharedId across ALL language rows
         assert_ids_in_scope(shared_ids, scope, "delete_entities")
         return delete_entities(shared_ids)
 
-    def set_publish_status_scoped(shared_ids: list[str], published: bool) -> list[dict]:
+    def set_publish_status_scoped(shared_ids: list[str], published: bool, language: str | None = None) -> list[dict]:
+        del language  # ignored: publish/unpublish act on all language rows by sharedId
         assert_ids_in_scope(shared_ids, scope, "set_publish_status")
         return set_publish_status(shared_ids, published)
 
-    def publish_entities_scoped(shared_ids: list[str]) -> dict:
+    def publish_entities_scoped(shared_ids: list[str], language: str | None = None) -> dict:
+        del language
         assert_ids_in_scope(shared_ids, scope, "publish_entities")
         return publish_entities(shared_ids)
 
-    def unpublish_entities_scoped(shared_ids: list[str]) -> dict:
+    def unpublish_entities_scoped(shared_ids: list[str], language: str | None = None) -> dict:
+        del language
         assert_ids_in_scope(shared_ids, scope, "unpublish_entities")
         return unpublish_entities(shared_ids)
 
@@ -308,6 +315,93 @@ def _scoped_write_helpers(
         "set_publish_status": set_publish_status_scoped,
         "create_relationships": create_relationships_scoped,
     }
+
+
+def _move_files_noop_scoped(scope: set[str]) -> Any:
+    """Build the dummy-scoped no-op ``move_files_to_entity`` bound into the namespace.
+
+    Dummies are created via ``create_entities`` (no uploaded files), so file-move is
+    a no-op in validation: the helper scope-asserts the endpoints (defense-in-depth,
+    matching the other scoped write helpers) and returns a ``moved=0`` summary.
+    The real file-move logic is exercised only live (file ops cannot be
+    gate-validated on dummies - same inherent limitation as delete-revert file
+    restore, which is also "live confirmation pending").
+    """
+
+    def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
+        assert_ids_in_scope([*from_shared_ids, to_shared_id], scope, "move_files_to_entity")
+        return {"moved": 0, "failed": 0, "note": "no-op in validation - dummies carry no uploaded files"}
+
+    return move_files_to_entity
+
+
+def _build_move_files_real_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    loop: asyncio.AbstractEventLoop,
+    default_language: str,
+) -> Any:
+    """Build the real ``move_files_to_entity`` bound into the real exec namespace.
+
+    For each source: fetch its full raw (incl. ``documents``/``attachments``),
+    extract the uploaded-file refs (documents + uploaded attachments; URL
+    attachments have no bytes and are skipped - moving them is a flagged gap),
+    fetch each file's bytes via :class:`FileRepositoryPort`, and re-upload to the
+    target via ``upload_document``/``upload_attachment`` (documents first, then
+    attachments - ``extract_file_refs`` already returns them in that order).
+
+    Best-effort, like delete-revert file restore: a failed fetch/upload is
+    counted as ``failed`` but does NOT raise - the merge still deletes the sources
+    and the target keeps whatever files were moved. Revert is unaffected: the
+    target is restored to its pre-merge raw (``save_raw(before)`` drops the moved
+    files) and the sources are re-created with their files (the delete-revert path
+    captured their bytes before the delete and re-uploads them), so after revert
+    both sides carry their original files.
+
+    If either port is None (e.g. tests with no file repository wired), returns a
+    stub that raises a clear ``RuntimeError`` when the script actually calls it -
+    so an unwired script fails loudly instead of silently dropping files.
+    """
+    if entity_repository is None or file_repository is None:
+
+        def move_files_to_entity_unwired(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
+            raise RuntimeError(
+                "move_files_to_entity requires a wired entity_repository and "
+                "file_repository (got None). Wire FileRepositoryPort into the "
+                "runtime/execute use case to enable file-move for merges."
+            )
+
+        return move_files_to_entity_unwired
+
+    def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
+        lang = language or default_language
+        moved = 0
+        failed = 0
+        for from_sid in from_shared_ids:
+            raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(from_sid, lang))
+            for ref in extract_file_refs(raw):
+                data = loop.run_until_complete(file_repository.get_file_bytes(ref.filename))
+                if data is None:
+                    failed += 1
+                    continue
+                upload_lang = ref.language or lang
+                if ref.kind == "document":
+                    ok = loop.run_until_complete(
+                        file_repository.upload_document(data, to_shared_id, upload_lang, ref.originalname, ref.content_type)
+                    )
+                else:
+                    ok = loop.run_until_complete(
+                        file_repository.upload_attachment(
+                            data, to_shared_id, upload_lang, ref.originalname, ref.content_type
+                        )
+                    )
+                if ok:
+                    moved += 1
+                else:
+                    failed += 1
+        return {"moved": moved, "failed": failed}
+
+    return move_files_to_entity
 
 
 def build_exec_namespace(
@@ -332,6 +426,7 @@ def build_exec_namespace(
     namespace: dict[str, Any] = {
         "query_entities": _sync_query_entities_factory(dummy_entities, scope),
         **_scoped_write_helpers(crud, scope),
+        "move_files_to_entity": _move_files_noop_scoped(scope),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -404,6 +499,8 @@ def build_real_exec_namespace(
     intercept: Any,
     tool_cache: Any,
     default_language: str,
+    entity_repository: EntityRepositoryPort | None = None,
+    file_repository: FileRepositoryPort | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
 
@@ -415,11 +512,18 @@ def build_real_exec_namespace(
       (not scope-restricted). The ``intercept`` is a :class:`BackupIntercept`
       but typed ``Any`` here to keep the namespace builder decoupled from the
       intercept module.
+    - ``move_files_to_entity`` (merge support) is the real mover over
+      ``entity_repository`` + ``file_repository``; it is NOT intercept-decorated -
+      a merge's target is already snapshotted as ``modified`` by ``update_entities``
+      and the sources as ``deleted`` (their files captured) by ``delete_entities``,
+      so the moved files are covered by the existing snapshots on revert. If
+      either port is None a stub is bound that raises when the script calls it.
     """
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
     namespace: dict[str, Any] = {
         "query_entities": _real_sync_query_entities_factory(entity_api, loop),
         **intercept.decorate(crud),
+        "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }

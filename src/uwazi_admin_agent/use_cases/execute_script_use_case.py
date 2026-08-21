@@ -149,6 +149,8 @@ class ExecuteScriptUseCase:
                 intercept=intercept,
                 tool_cache=ToolCallCache(),
                 default_language=language,
+                entity_repository=self._entity_repository,
+                file_repository=self._file_repository,
             )
             return run_script_sync(script, namespace)
         finally:

@@ -55,12 +55,36 @@ IDENTITY_FIELDS: frozenset[str] = frozenset({"_id", "sharedId"})
 # only ignored for the re-create case, like IDENTITY_FIELDS.
 FILE_FIELDS: frozenset[str] = frozenset({"documents", "attachments"})
 
+# Fields excluded from the restore comparison **only** for an original the
+# script DELETED and revert RE-CREATED (the create branch mints a fresh
+# ``_id``/``sharedId`` and re-uploaded files get fresh file ids). Mirrors the
+# production ``revert_verification`` exclusion for deleted entries. Modified
+# originals keep identity + files, so this set is used solely for the
+# deleted-then-recreated case (``after[sid] is None`` and revert brought it
+# back). A deleted original revert FAILED to bring back (``post_revert`` is
+# None) falls through to the normal check -> ``None != expected`` -> mismatch.
+_RECREATE_EXCLUDED_FIELDS: frozenset[str] = PLATFORM_MANAGED_FIELDS | IDENTITY_FIELDS | FILE_FIELDS
+
 
 def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return ``raw`` without :data:`PLATFORM_MANAGED_FIELDS` (``None`` passes through)."""
     if raw is None:
         return None
     return {k: v for k, v in raw.items() if k not in PLATFORM_MANAGED_FIELDS}
+
+
+def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return ``raw`` without :data:`_RECREATE_EXCLUDED_FIELDS` (``None`` passes through).
+
+    Used only for the deleted-then-recreated original case: a re-created entity
+    has a fresh ``_id``/``sharedId`` and re-uploaded files get fresh file ids, so
+    those fields can never match the snapshot by identity. The DATA fields
+    (title/template/metadata/url-attachments-as-data/...) are still compared, so
+    a real data-loss revert (e.g. title not restored) is still caught.
+    """
+    if raw is None:
+        return None
+    return {k: v for k, v in raw.items() if k not in _RECREATE_EXCLUDED_FIELDS}
 
 
 class EntityDiff(BaseModel):
@@ -149,12 +173,26 @@ def build_validation_outcome(
     mismatches: list[RestoreMismatch] = []
     for sid, expected in before.items():
         actual = post_revert.get(sid)
-        # Compare data fields only: platform-managed fields (editDate) advance on
-        # every save, including the revert save, so they can never match. The
-        # recorded mismatch still carries the FULL expected/actual raws so the
-        # diagnostic output shows the real values (incl. editDate) when a real
-        # data field does differ.
-        if _strip_platform_managed(actual) != _strip_platform_managed(expected):
+        # Compare data fields only. Two cases:
+        # 1. Deleted-then-recreated original (script deleted it AND revert
+        #    re-created it via the create branch with a fresh sharedId): compare
+        #    DATA only, excluding identity + file-bearing fields (re-minted on
+        #    re-create) on top of the always-excluded platform-managed fields.
+        #    Mirrors production ``revert_verification`` for deleted entries.
+        # 2. Everything else (modified, or a deleted original revert failed to
+        #    bring back -> ``actual`` is None): compare excluding platform-managed
+        #    fields only. ``None != expected`` correctly records a mismatch when
+        #    revert failed to restore a deleted original.
+        # The recorded mismatch still carries the FULL expected/actual raws so
+        # the diagnostic output shows the real values (incl. identity/editDate)
+        # when a real data field does differ.
+        if after.get(sid) is None and actual is not None:
+            expected_cmp = _strip_for_recreate(expected)
+            actual_cmp = _strip_for_recreate(actual)
+        else:
+            expected_cmp = _strip_platform_managed(expected)
+            actual_cmp = _strip_platform_managed(actual)
+        if expected_cmp != actual_cmp:
             mismatches.append(RestoreMismatch(shared_id=sid, expected=expected, actual=actual))
 
     restore_equal = not mismatches
