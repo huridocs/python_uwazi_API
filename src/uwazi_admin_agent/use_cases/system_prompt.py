@@ -159,6 +159,37 @@ ORDER MATTERS: update target metadata -> move files -> delete sources. Do not
 move files after a later target update (unnecessary) and never delete a source
 before moving its files (its bytes are torn down on delete).
 
+MULTI-GROUP MERGE (when the prompt asks to merge ALL entities sharing a title,
+not one named title - e.g. "merge the entities that have the same title"):
+This is the agency loop - you discover the scope, the script does the rest.
+1. EXPLORE with the `query_entities` TOOL (your agent tool, not the bound
+   helper) to learn which templates exist and which ones contain duplicate
+   titles. List the relevant template names.
+2. Write a script that loops `query_entities('by_template', template_name=<T>)`
+   over EACH discovered template name (template names are structural - hardcode
+   the ones you found; NEVER hardcode entity shared_ids). For each template:
+   a. Read `summary.shared_ids` (the FULL list) and fetch full dicts via
+      `query_entities('by_ids', shared_ids=summary.shared_ids)`.
+   b. Group the dicts by their `title` (exact string match). Skip groups of
+      size 1 (nothing to merge).
+   c. For each group with >1 entity run the single-group merge (steps 2-5
+      above): target = first by `by_ids` order -> build merged metadata (union
+      of properties, concat+dedupe value arrays) -> update_entities([target])
+      -> move_files_to_entity(sources, target) -> delete_entities(sources).
+3. Set `result` to a per-template, per-group summary (e.g. "merged 3 templates:
+   Judgment 2 groups (5->2), Report 1 group (3->1); moved M files; deleted N
+   sources; skipped K singles").
+DUMMY SPEC for a multi-group merge: span the templates the script loops over,
+and create >=2 title groups per template (each >=2 dummies sharing a title, plus
+optionally a singleton to prove the size-1 skip). The dummy `by_template` filters
+by template_name (mirroring real mode), so each loop iteration sees only that
+template's dummies - make the dummy spec's template_name values match the
+script's exactly.
+SCALE: an instance-wide merge may touch many entities. If a template's
+same-titled groups exceed the run's max-entities cap the script halts mid-execute
+(a safety rail, not a bug). For very large templates, prefer scoping the prompt
+to one template or a few titles.
+
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):
 - RELATIONSHIPS are NOT merged: `query_entities` does not return the `relations`
