@@ -63,6 +63,15 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `from_entity_shared_id`, `to_entity_shared_id`, `relationship_type_name`;
       optionally `file_id` and `reference_text`. Returns a list of result dicts.
 
+  move_files_to_entity(from_shared_ids, to_shared_id, language='en')
+      Copy each source entity's UPLOADED files (documents + uploaded attachments)
+      to the target entity by re-uploading their bytes. Use this for MERGE tasks so
+      the sources' uploaded files are not lost when the sources are deleted.
+      Returns a dict {"moved": N, "failed": M}. URL attachments are NOT moved by
+      this helper (they have no stored bytes) - see MERGE TASKS for that gap. In
+      validation against dummies this is a no-op (dummies carry no uploaded
+      files); file-move is only exercised live.
+
 These stdlib modules are also bound: `json`, `re`, `collections`, `itertools`,
 `datetime`, `math`. Nothing else is available.
 
@@ -112,6 +121,54 @@ VALIDATION
 - You have a HARD limit of `validation_limit` attempts per turn. When it is
   reached the tool refuses — emit your best script from the exploration you did.
   Do NOT loop on validation.
+
+MERGE TASKS
+A "merge" collapses N source entities (sharing a title or some selector) into a
+single target entity, then removes the redundant sources. Express it as a
+composition of the bound helpers - NO new capability is needed beyond
+`move_files_to_entity`. Use this exact shape:
+
+1. Discover the sources with `query_entities` (e.g. `by_text` on the title),
+   then fetch their full dicts with `query_entities('by_ids', shared_ids=[...])`.
+   Pick the target = the FIRST entity in that result order; the rest are sources.
+2. Build the merged metadata. `query_entities('by_ids')` returns dicts carrying
+   each entity's `metadata` ({property_name: [values]}). Union the property
+   names across target + sources; for a property present on more than one,
+   concatenate the value arrays and DEDUPE (drop exact duplicate value dicts).
+   Properties only on the sources get added to the target; properties only on
+   the target stay (the update merges per-property, see step 3).
+3. Update the target with the merged metadata via `update_entities([{'shared_id':
+   target_id, 'template_name': <target template>, 'title': <target title>,
+   'metadata': <merged_metadata>}], language)`. The bound `update_entities` is a
+   PARTIAL update: it fetches the target, merges the posted metadata
+   per-property (so unmentioned properties are preserved), and PRESERVES the
+   target's existing documents/attachments (it re-sends them). So post ONLY the
+   merged metadata - do NOT try to pass `documents`/`attachments` (the helper's
+   entity model does not carry them; they would be dropped, and the partial
+   update keeps the target's files anyway). Do NOT pass `relations` either.
+4. Move the sources' UPLOADED files to the target BEFORE deleting the sources:
+   `move_files_to_entity(from_shared_ids=[<source ids>], to_shared_id=<target
+   id>, language)`. This re-uploads each source's documents + uploaded
+   attachments to the target. (The target's own files are already preserved by
+   step 3's partial update.)
+5. Delete the sources with `delete_entities([<source ids>])`.
+6. Set `result` to a concise summary (e.g. "merged N entities titled X into
+   target <id>; moved M files; deleted N-1 sources").
+
+ORDER MATTERS: update target metadata -> move files -> delete sources. Do not
+move files after a later target update (unnecessary) and never delete a source
+before moving its files (its bytes are torn down on delete).
+
+KNOWN LIMITATIONS (do not try to work around these in the script; note them in
+`result` if they apply):
+- RELATIONSHIPS are NOT merged: `query_entities` does not return the `relations`
+  field, so the script cannot see the sources' relationships to re-create them
+  pointing at the target. The sources' relationships are torn down when the
+  sources are deleted. If the operator needs relationships preserved, that is a
+  separate task (flag it in `result`).
+- URL ATTACHMENTS on the sources are NOT moved (no bytes to re-upload, and the
+  helper's entity model cannot add them to the target). They are lost on source
+  delete. Flag in `result` if any source had URL attachments.
 
 OUTPUT
 Return a `GeneratedScript`:
