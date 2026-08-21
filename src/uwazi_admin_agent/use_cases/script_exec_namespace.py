@@ -48,6 +48,7 @@ from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_agent.domain.agent_entity import AgentEntity
+from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
@@ -190,6 +191,26 @@ def assert_ids_in_scope(shared_ids: list[str], scope: set[str], helper: str) -> 
         )
 
 
+def filter_in_scope_by_template(in_scope: list[AgentEntity], template_name: str | None) -> list[AgentEntity]:
+    """Return the in-scope dummies belonging to ``template_name`` (dummy mode).
+
+    In real mode ``by_template`` returns only the entities of that template; the
+    dummy wrapper must mirror that so a script that loops ``by_template`` over
+    several discovered templates processes each template's dummies once.
+    Otherwise every ``by_template`` call returns ALL in-scope dummies and the
+    gate false-fails a correct multi-template script: deleted source dummies
+    reappear via the static ``dummy_entities`` list on the next iteration and
+    get re-processed (double merge / delete-already-deleted).
+
+    Pure: the testable seam extracted from :func:`_sync_query_entities_factory`.
+    A ``None`` template_name returns the list unchanged (defensive - the
+    ``by_template`` mode requires a template_name, but the helper stays total).
+    """
+    if not template_name:
+        return in_scope
+    return [e for e in in_scope if e.template_name == template_name]
+
+
 def _sync_query_entities_factory(
     dummy_entities: list[AgentEntity],
     scope: set[str],
@@ -228,17 +249,24 @@ def _sync_query_entities_factory(
             # helpers use (create/update take dict literals).
             return [by_id[sid].model_dump() for sid in wanted if sid in by_id]
         if mode in ("by_text", "by_filter", "by_template"):
+            # by_template must filter by template_name (mirror real mode) so a
+            # script looping by_template over several discovered templates
+            # processes each template's dummies once - otherwise every call
+            # returns ALL in-scope dummies and the gate false-fails a correct
+            # multi-template script. by_text/by_filter stay unfiltered (fuzzy
+            # text / property filters can't be simulated on dummies).
+            selected = filter_in_scope_by_template(in_scope, template_name) if mode == "by_template" else in_scope
             summary = AgentEntitySummary(
-                count=len(in_scope),
+                count=len(selected),
                 by_template={},
-                sample_titles=[e.title for e in in_scope[:5]],
-                shared_ids=[e.shared_id for e in in_scope],
+                sample_titles=[e.title for e in selected[:5]],
+                shared_ids=[e.shared_id for e in selected],
             )
             # A result object with `.summary` and `.examples` (dicts). The script
             # reads `summary.shared_ids`, then fetches full dicts via `by_ids`.
             return SimpleNamespace(
                 summary=summary,
-                examples=[e.model_dump() for e in in_scope[:5]],
+                examples=[e.model_dump() for e in selected[:5]],
             )
         return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
 
@@ -433,6 +461,28 @@ def build_exec_namespace(
     return namespace
 
 
+def build_search_result_view(result: AgentEntitySearchResult) -> SimpleNamespace:
+    """Build the bound ``query_entities`` search-mode return value (real mode).
+
+    Surfaces the FULL list of shared_ids (from ``result._all_entities``) instead
+    of the LLM-context-truncated ``result.summary.shared_ids`` (capped to 3 by
+    ``UwaziApiAdapter._summarize`` for the agent tool). A generated script that
+    discovers entities to group/merge needs every id, not a 3-sample; the
+    truncation is an LLM-context concern the bound script helper must not inherit.
+    Reading ``result._all_entities`` mirrors ``uwazi_agent``'s own tools
+    (``query_entities.py`` etc.); no ``uwazi_api``/``uwazi_agent`` modification.
+
+    Pure: the testable seam extracted from :func:`_real_sync_query_entities_factory`.
+    The rest of the summary (count, by_template, sample_titles, note) is
+    preserved; ``examples`` stays as the sample dicts (the script fetches full
+    dicts via ``by_ids``).
+    """
+    all_entities: list[AgentEntity] = result._all_entities
+    full_ids = [e.shared_id for e in all_entities if e.shared_id]
+    summary = result.summary.model_copy(update={"shared_ids": full_ids})
+    return SimpleNamespace(summary=summary, examples=[e.model_dump() for e in result.examples])
+
+
 def _real_sync_query_entities_factory(
     entity_api: EntityApiPort,
     loop: asyncio.AbstractEventLoop,
@@ -470,7 +520,7 @@ def _real_sync_query_entities_factory(
                     search_term=search_term, template_name=template_name, language=language, limit=limit
                 )
             )
-            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+            return build_search_result_view(result)
         if mode == "by_filter":
             if not template_name:
                 return "Error: 'by_filter' mode requires `template_name`."
@@ -479,14 +529,14 @@ def _real_sync_query_entities_factory(
                     template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
                 )
             )
-            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+            return build_search_result_view(result)
         if mode == "by_template":
             if not template_name:
                 return "Error: 'by_template' mode requires `template_name`."
             result = loop.run_until_complete(
                 entity_api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
             )
-            return SimpleNamespace(summary=result.summary, examples=[e.model_dump() for e in result.examples])
+            return build_search_result_view(result)
         return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
 
     return query_entities
