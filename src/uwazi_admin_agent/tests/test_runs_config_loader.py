@@ -104,4 +104,4 @@ def test_default_paths_are_package_scoped_under_uwazi_admin_agent_data() -> None
     assert configuration.RUNS_FILE == package_data / "active_run.yaml"
     assert configuration.PROMPTS_PATH == package_data / "prompts"
     assert configuration.RUNS_PATH == package_data / "runs"
-    assert configuration.ROOT_PATH.name == "uwazi_admin_agent"
+    assert configuration.ROOT_PATH.name == "python_uwazi_API"

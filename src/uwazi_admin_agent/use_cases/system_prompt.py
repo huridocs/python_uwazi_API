@@ -41,6 +41,21 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       entities your script must change. Do NOT assume any pre-populated `entities`
       variable — there is none; call `query_entities` yourself.
 
+  RETURN ACCESS (CRITICAL — subscript vs attribute — getting this wrong raises
+  TypeError and wastes a validation attempt):
+      - Search modes ("by_text" / "by_filter" / "by_template") return an OBJECT
+        with ATTRIBUTE access, NOT a dict. Subscripting it raises TypeError:
+            res = query_entities(mode="by_template", template_name="Judgment")
+            ids  = res.summary.shared_ids   # list[str]  — ATTRIBUTE access
+            ex   = res.examples             # list[dict] — ATTRIBUTE access
+            # WRONG, raises TypeError: res["summary"], res.summary["shared_ids"]
+      - "by_ids" returns a list[dict] (NOT a result object). Use subscript here:
+            dicts = query_entities(mode="by_ids", shared_ids=ids)
+            for d in dicts:
+                sid = d["shared_id"]; title = d["title"]; meta = d["metadata"]
+      The two return SHAPES are different on purpose: a search summarizes, `by_ids`
+      fetches full dicts. Read the shape, then access with the matching form.
+
   create_entities(entities_dicts, language='en')
       Create new entities. Each dict needs `title` and `template_name`
       (plus any `metadata`/`shared_id` you want to set). Returns a list of
@@ -115,6 +130,16 @@ VALIDATION
   equals its original raw (your changes are exactly reversible). The report also
   shows the per-dummy before/after diff and your `result` string so you can judge
   *semantic* correctness.
+- A PASS with **0 diffs** on a prompt that asks for a *change* means your script
+  did nothing (e.g. it failed to access the discovered ids - often wrong
+  `query_entities` return access, see EXECUTION SANDBOX / RETURN ACCESS - and so
+  silently merged/deleted nothing). A no-op script trivially passes the gate
+  (it ran clean AND restored equal because it changed nothing). Treat a 0-diff
+  PASS on a change-prompt as a FAIL: re-read your `result` string and the diff
+  list; if both report no changes yet the prompt asks for a change, your script
+  has a bug. Fix it and re-validate. (A 0-diff PASS is only correct when the
+  prompt legitimately has nothing to do - e.g. "delete entities matching X" when
+  none match.)
 - On FAIL: read the report (script error / restore mismatch / diff), FIX the
   script, and re-validate. Only emit the final `GeneratedScript` once validation
   PASSES (or you run out of attempts).
@@ -131,6 +156,9 @@ composition of the bound helpers - NO new capability is needed beyond
 1. Discover the sources with `query_entities` (e.g. `by_text` on the title),
    then fetch their full dicts with `query_entities('by_ids', shared_ids=[...])`.
    Pick the target = the FIRST entity in that result order; the rest are sources.
+   (Access the search result with ATTRIBUTE access - `res.summary.shared_ids` -
+   never subscript; see EXECUTION SANDBOX / RETURN ACCESS. `by_ids` returns a
+   list[dict], which you subscript.)
 2. Build the merged metadata. `query_entities('by_ids')` returns dicts carrying
    each entity's `metadata` ({property_name: [values]}). Union the property
    names across target + sources; for a property present on more than one,
@@ -168,8 +196,9 @@ This is the agency loop - you discover the scope, the script does the rest.
 2. Write a script that loops `query_entities('by_template', template_name=<T>)`
    over EACH discovered template name (template names are structural - hardcode
    the ones you found; NEVER hardcode entity shared_ids). For each template:
-   a. Read `summary.shared_ids` (the FULL list) and fetch full dicts via
-      `query_entities('by_ids', shared_ids=summary.shared_ids)`.
+   a. Read `summary.shared_ids` (the FULL list, ATTRIBUTE access on the search
+      result object - never subscript; see EXECUTION SANDBOX / RETURN ACCESS)
+      and fetch full dicts via `query_entities('by_ids', shared_ids=summary.shared_ids)`.
    b. Group the dicts by their `title` (exact string match). Skip groups of
       size 1 (nothing to merge).
    c. For each group with >1 entity run the single-group merge (steps 2-5
