@@ -79,6 +79,7 @@ async def run_validation_script(
         relationship_api=deps.relationship_api,
         entity_repository=deps.entity_repository,
         language=DUMMY_LANGUAGE,
+        search_probe=deps.search_probe,
     )
     result = await harness.run(python_code, dummy_spec)
     _log_result(result, run_number)
@@ -131,6 +132,9 @@ def _format_result(result: object, attempt: int, limit: int) -> str:
     if result.cleanup_error:
         parts.append(f"## Cleanup\n  WARNING: {result.cleanup_error}")
 
+    if result.es_settle_warning:
+        parts.append(f"## ES settle\n  WARNING: {result.es_settle_warning}")
+
     if result.passed:
         footer = "\n# VALIDATION PASSED — proceed to emit the final GeneratedScript. Do NOT call this tool again."
     elif remaining > 0:
@@ -152,9 +156,10 @@ def _log_result(result: object, run_number: int) -> None:
         logger.info("validation run {} PASSED — restore_equal, {} diff(s)", run_number, changed)
     else:
         logger.warning(
-            "validation run {} FAILED — restore_equal={} script_error={} cleanup_error={}",
+            "validation run {} FAILED — restore_equal={} script_error={} cleanup_error={} es_settle_warning={}",
             run_number,
             result.restore_equal,
             bool(result.script_error),
             bool(result.cleanup_error),
+            bool(result.es_settle_warning),
         )

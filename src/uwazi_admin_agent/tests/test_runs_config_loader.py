@@ -98,10 +98,10 @@ def test_default_paths_are_package_scoped_under_uwazi_admin_agent_data() -> None
 
     # The runtime data tree lives inside the package, not at the repo root,
     # so it cannot collide with uwazi_agent / uwazi_api data.
-    package_data = configuration.PACKAGE_DIR / "data"
+    package_data = configuration.ROOT_PATH / "data"
 
     assert configuration.DATA_DIR == package_data
     assert configuration.RUNS_FILE == package_data / "active_run.yaml"
     assert configuration.PROMPTS_PATH == package_data / "prompts"
     assert configuration.RUNS_PATH == package_data / "runs"
-    assert configuration.PACKAGE_DIR.name == "uwazi_admin_agent"
+    assert configuration.ROOT_PATH.name == "uwazi_admin_agent"
