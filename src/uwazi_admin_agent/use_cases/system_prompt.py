@@ -56,6 +56,23 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       The two return SHAPES are different on purpose: a search summarizes, `by_ids`
       fetches full dicts. Read the shape, then access with the matching form.
 
+  ENTITY SHAPE (CRITICAL - getting this wrong raises `TypeError: unhashable
+  type: 'list'/'dict'` and wastes a validation attempt):
+      An entity dict `d` (from `by_ids`) has scalar fields `d["title"]`,
+      `d["shared_id"]`, `d["template_name"]`, and `d["metadata"]` which is a DICT
+      `{property_name: [values]}` - every property's value is an ARRAY (list),
+      even single-value properties (e.g. `{"document_status": ["draft"]}`, NOT
+      `"draft"`). The `metadata` dict and its list values are NOT hashable:
+        - NEVER use `d["metadata"]` or `d["metadata"][prop]` as a dict key, set
+          member, or grouping key.
+            # WRONG -> TypeError: unhashable type: 'dict':
+            groups.setdefault(d["metadata"], [])
+            # WRONG -> TypeError: unhashable type: 'list':
+            groups.setdefault(d["metadata"]["document_status"], [])
+        - Group by a SCALAR field: `groups.setdefault(d["title"], [])`.
+        - To dedupe value arrays, compare by a STRING key, never by the list/dict:
+            key = json.dumps(v, sort_keys=True, default=str)   # hashable string
+
   create_entities(entities_dicts, language='en')
       Create new entities. Each dict needs `title` and `template_name`
       (plus any `metadata`/`shared_id` you want to set). Returns a list of
@@ -126,6 +143,22 @@ VALIDATION
   script can ONLY see/touch these dummies — `query_entities` returns only the
   dummies, and the write helpers refuse anything else), reverts them to their
   exact original raw state, and always deletes them afterwards.
+  DUMMY SPEC RULES (creating dummies that Uwazi rejects wastes a validation
+  attempt - the harness creates them in the REAL instance, which validates every
+  field):
+  - METADATA: use only SIMPLE non-thesaurus properties (text / numeric). AVOID
+    thesaurus, select, multiselect, and daterelationship properties - Uwazi
+    validates their values against the real thesaurus and REJECTS guessed labels
+    (e.g. `"draft"`, `"final"`) with `"not a valid thesaurus label"`, so dummy
+    creation fails and validation cannot run. If a such a property is essential,
+    first discover its EXACT valid labels from existing entities via the
+    `query_entities` TOOL and use those literal labels; never guess.
+  - Keep the dummy spec SMALL: 2-3 dummies per title group, 2-3 groups (plus
+    optionally a singleton to prove the size-1 skip). It proves the merge LOGIC,
+    not the production scale - the real instance may have 1000s of entities, but
+    the dummy gate only needs a representative sample. A merge unifies metadata
+    generically (union of property names), so ONE simple text property is enough
+    to exercise the merge - do NOT replicate every property of the template.
 - PASS = your script ran without raising AND every dummy's post-revert raw
   equals its original raw (your changes are exactly reversible). The report also
   shows the per-dummy before/after diff and your `result` string so you can judge
