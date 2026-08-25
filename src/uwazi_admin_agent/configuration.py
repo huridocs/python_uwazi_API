@@ -23,6 +23,20 @@ RUNS_PATH: Path = DATA_DIR / "runs"
 # discovery (``query_entities``) + script writing both consume requests.
 MAX_LLM_CALLS: int = 70
 
+# Output token budget per LLM call (pydantic-ai ``ModelSettings["max_tokens"]``).
+# The shared ``OllamaAdapter.get_model()`` builds the model with NO ``settings``, so
+# pydantic-ai falls back to the provider's default output limit. A long script (a
+# multi-group merge can be 100+ lines) plus the ``GeneratedScript`` JSON wrapping +
+# reasoning exceeds that default, and pydantic-ai aborts the whole ``generate`` with
+# ``UnexpectedModelBehavior: Model token limit (provider default) exceeded before
+# any response was generated`` on the final emit. Short scripts fit the default -> the
+# failure is intermittent. We set ``max_tokens`` on the admin agent's generation
+# ``Agent`` (not the shared adapter) so the fix is scoped to this package. This is a
+# per-call OUTPUT budget; it is independent of ``MAX_LLM_CALLS`` (a per-run REQUEST
+# count), so raising it does not lower the request budget. 8192 comfortably fits a
+# long merge script; it is a ceiling, not a target (shorter outputs cost nothing more).
+LLM_MAX_OUTPUT_TOKENS: int = 8192
+
 # Hard cap on ``run_validation_script`` calls per generation turn. The system
 # prompt asks the LLM to validate sparingly, but LLMs ignore prose limits and
 # loop; this counter (mirrors ``browser_agent``'s ``MAX_VALIDATION_ATTEMPTS``)

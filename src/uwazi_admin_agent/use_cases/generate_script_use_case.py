@@ -26,7 +26,7 @@ from loguru import logger
 from pydantic_ai import Agent, UsageLimits
 from pydantic_ai.models import Model
 
-from uwazi_admin_agent.configuration import MAX_LLM_CALLS
+from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
@@ -49,13 +49,23 @@ class GenerateScriptUseCase:
 
     @staticmethod
     def _build_agent(model: Model) -> Agent[AdminAgentDeps, GeneratedScript]:
-        """Construct the pydantic-ai agent (no deps/llm instance needed)."""
+        """Construct the pydantic-ai agent (no deps/llm instance needed).
+
+        ``model_settings`` raises the per-call OUTPUT token budget above the
+        provider default so a long script (multi-group merge) + the
+        ``GeneratedScript`` JSON wrapping + reasoning fits; without it pydantic-ai
+        aborts the final emit with ``UnexpectedModelBehavior`` (intermittent -
+        short scripts fit the default). Scoped here rather than on the shared
+        ``OllamaAdapter`` so only this package's generation is affected. Independent
+        of ``UsageLimits(request_limit=MAX_LLM_CALLS)`` (a request count, not tokens).
+        """
         return Agent(
             model,
             system_prompt=SYSTEM_PROMPT,
             deps_type=AdminAgentDeps,
             output_type=GeneratedScript,
             tools=[query_entities, run_validation_script],
+            model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
         )
 
     async def execute(self, prompt: str) -> GeneratedScript:

@@ -136,6 +136,19 @@ def _format_result(result: object, attempt: int, limit: int) -> str:
         parts.append(f"## ES settle\n  WARNING: {result.es_settle_warning}")
 
     if result.passed:
+        changed = sum(1 for d in result.diffs if d.changed)
+        if changed == 0:
+            parts.append(
+                "## No-op warning\n"
+                "  PASSED with 0 diffs - the script changed nothing. If the operator's\n"
+                "  prompt asks for a change, this is almost certainly a bug (the script\n"
+                "  failed to access the entities it discovered - check your\n"
+                "  `query_entities` return access - and so merged/deleted nothing). A\n"
+                "  no-op script trivially passes the gate. Treat this as a FAIL, fix\n"
+                "  the script, and re-validate."
+            )
+
+    if result.passed:
         footer = "\n# VALIDATION PASSED — proceed to emit the final GeneratedScript. Do NOT call this tool again."
     elif remaining > 0:
         footer = (
