@@ -8,11 +8,11 @@ This is a driver: it wires the service layer (:mod:`run_service`) to the UI and
 contains no business logic, matching the ``drivers/`` layer convention.
 """
 
-from __future__ import annotations
-
 import os
+from collections import deque
 from typing import Any
 
+from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.drivers.web.run_service import (
@@ -45,6 +45,18 @@ _creating_runs: dict[str, dict[str, Any]] = {}
 
 # JS set-literal string injected into the status badge slot for color lookup.
 _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.items()) + "}"
+
+# In-memory ring buffer of recent log lines (mirrors container stderr output).
+# A loguru sink appends formatted lines here so the UI can display them live.
+_LOG_BUFFER: deque[str] = deque(maxlen=2000)
+
+
+def _log_sink(message: Any) -> None:
+    """Loguru sink: append the formatted log record to the ring buffer."""
+    _LOG_BUFFER.append(str(message).rstrip("\n"))
+
+
+logger.add(_log_sink, level="DEBUG", format="{time:HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}")
 
 
 def _broadcast_notify(message: str, type: str = "positive", **kwargs: Any) -> None:
@@ -138,7 +150,7 @@ def runs_table() -> None:
         f"""
         <q-td :props="props">
             <q-btn dense flat icon="play_arrow" color="primary"
-                   :disable="['creating','executed','reverted'].includes(props.row.status)"
+                   :disable="props.row.status === 'creating'"
                    @click="$parent.$emit('execute', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
                    :disable="props.row.status === 'creating' || !{_can_revert_js("props.row.status")}"
@@ -244,6 +256,32 @@ def _prompt_dialog(run_id: str) -> None:
         dialog.props("persistent")
 
 
+def _logs_dialog() -> None:
+    """Show recent service logs in a maximized, scrollable modal (like ``docker compose logs``).
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it. A timer refreshes the log text every second
+    while the dialog is open.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full"):
+            dialog.props("maximized")
+            with ui.row().classes("items-center justify-between q-mb-md"):
+                ui.label("Service Logs").classes("text-h6")
+                with ui.row():
+                    ui.button("Refresh", icon="refresh", on_click=lambda: _refresh_logs(log_area)).props("flat dense")
+                    ui.button("Close", icon="close", on_click=lambda: dialog.close()).props("flat dense")
+            log_area = ui.textarea().classes("w-full").props("readonly autogrow").classes("font-mono text-caption")
+            log_area.style("height: calc(100vh - 140px)")
+
+            def _refresh_logs(la: Any) -> None:
+                la.value = "\n".join(_LOG_BUFFER)
+
+            _refresh_logs(log_area)
+            ui.timer(1.0, lambda: _refresh_logs(log_area))
+        dialog.open()
+
+
 def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str) -> None:
     dialog.close()
     result = on_confirm()
@@ -258,17 +296,16 @@ def _new_task_wizard() -> None:
     """Multi-step dialog to create + generate a run."""
     state: dict[str, str] = {"name": "", "prompt": ""}
 
-    with ui.dialog() as dialog:
-        dialog.props("maximized")
-        with ui.card().classes("w-full"):
-            with ui.stepper() as stepper:
-                _wizard_step_name(state, stepper)
-                _wizard_step_prompt(state, stepper)
-                _wizard_step_generate(state, dialog, stepper)
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
+        dialog.props("persistent")
+        with ui.stepper() as stepper:
+            _wizard_step_name(state, stepper, dialog)
+            _wizard_step_prompt(state, stepper, dialog)
+            _wizard_step_generate(state, dialog, stepper)
         dialog.open()
 
 
-def _wizard_step_name(state: dict[str, str], stepper: Any) -> None:
+def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any) -> None:
     with ui.step(name="name", title="Name", icon="edit"):
         ui.label("Name the run (a new folder will be created under data/runs/).").classes("text-body1 q-mb-md")
         name_input = ui.input(
@@ -277,6 +314,7 @@ def _wizard_step_name(state: dict[str, str], stepper: Any) -> None:
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
         with ui.row().classes("q-mt-lg"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_name_next(state, name_input, stepper))
 
 
@@ -293,7 +331,7 @@ def _wizard_name_next(state: dict[str, str], name_input: Any, stepper: Any) -> N
     stepper.set_value("prompt")
 
 
-def _wizard_step_prompt(state: dict[str, str], stepper: Any) -> None:
+def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any) -> None:
     with ui.step(name="prompt", title="Prompt", icon="chat"):
         ui.label("Describe the migration in natural language.").classes("text-body1 q-mb-md")
         prompt_input = (
@@ -303,9 +341,11 @@ def _wizard_step_prompt(state: dict[str, str], stepper: Any) -> None:
                 validation={"Required": lambda v: bool(v and v.strip())},
             )
             .classes("w-full")
-            .props("autogrow")
+            .props("autogrow input-style='min-height: 200px;'")
+            .style("width: 100%")
         )
         with ui.row().classes("q-mt-lg"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_prompt_next(state, prompt_input, stepper))
 
@@ -329,6 +369,7 @@ def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> N
             backward=lambda v: f"Prompt: {v[:120]}{'...' if len(v) > 120 else ''}",
         ).classes("text-body1")
         with ui.row().classes("q-mt-lg"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("prompt")).props("color=grey-7 flat")
             ui.button(
                 "Generate",
@@ -364,16 +405,55 @@ async def _do_generate(name: str, prompt: str) -> None:
 def _build_page() -> None:
     """Build the single-page layout."""
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    ui.add_head_html(
+        "<style>.q-stepper, .q-stepper__header, .q-stepper__step, .q-stepper__step-content, .q-stepper__step-inner, .q-stepper__content, .q-panel { width: 100% !important; max-width: none !important; }</style>"
+    )
     with ui.header().classes("items-center justify-between"):
-        ui.label("Uwazi Admin Agent").classes("text-h6")
-        ui.button("New Task", icon="add", on_click=_new_task_wizard)
+        with ui.row().classes("items-center"):
+            ui.label("Uwazi Admin Agent").classes("text-h6 q-mr-md")
+        with ui.row().classes("items-center"):
+            ui.button("Logs", icon="terminal", on_click=_logs_dialog).props("color=secondary flat")
+            ui.button("New Task", icon="add", on_click=_new_task_wizard)
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-6xl"):
-            ui.label("Migration Runs").classes("text-h5")
+            ui.label("Tasks").classes("text-h5")
             runs_table()
 
     ui.timer(5.0, runs_table.refresh)
+
+    # Prevent the browser back button from navigating away when a dialog is open.
+    # Push a sentinel state on page load; when back is pressed while a dialog is
+    # open, re-push the state and close the dialog instead of leaving the page.
+    ui.add_body_html(
+        """
+        <script>
+        (function() {
+          window.history.pushState({nicegui_dialog: true}, '');
+          window.addEventListener('popstate', function(e) {
+            const hasDialog = document.querySelector('.q-dialog__inner:not([style*="display: none"])');
+            if (hasDialog) {
+              // A dialog is open: re-push state and close the dialog instead of navigating away.
+              window.history.pushState({nicegui_dialog: true}, '');
+              // Click the Close or Cancel button inside the dialog.
+              const dlg = hasDialog.closest('.q-dialog');
+              if (dlg) {
+                const closeBtn = [...dlg.querySelectorAll('button')].find(b => {
+                  const t = b.textContent.trim().toLowerCase();
+                  return t.startsWith('close') || t === 'cancel';
+                });
+                if (closeBtn) closeBtn.click();
+                else hasDialog.click(); // backdrop click as fallback for non-persistent dialogs
+              }
+            } else {
+              // No dialog open: re-push so the user stays on the page.
+              window.history.pushState({nicegui_dialog: true}, '');
+            }
+          });
+        })();
+        </script>
+        """
+    )
 
 
 @ui.page("/")

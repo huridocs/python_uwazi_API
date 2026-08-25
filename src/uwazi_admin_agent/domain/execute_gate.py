@@ -4,9 +4,11 @@ Re-execute accumulation bug: ``execute`` loaded the persisted manifest (which
 already carried the previous run's touch set) and appended to it on every call,
 so ``modified`` grew by the touch set on each re-execute (2 -> 4 -> 6 ...) even
 though the real touch set was unchanged. The fix is a state gate: refuse to
-re-execute a run whose status is ``EXECUTED`` or ``FAILED`` (the operator must
-revert first); for any other status, allow — and reset the touch set when one is
-already present (the normal re-execute-after-revert path).
+re-execute a run whose status is ``FAILED`` (the operator must revert first to
+avoid re-running over a partially-applied state); for any other status
+(including ``EXECUTED``), allow — and reset the touch set when one is already
+present so re-execution starts clean (maintenance tasks can run repeatedly
+without manual revert between runs).
 
 This module holds the **pure** decision (no I/O) so it is the unit-test target.
 The use case applies it: on ``refuse`` it raises :class:`ExecuteRefusedError`;
@@ -44,14 +46,12 @@ class ExecuteGateDecision(BaseModel):
 def decide_execute_gate(status: RunStatus, has_touch_set: bool) -> ExecuteGateDecision:
     """Pure: decide whether a run may be (re-)executed given its current state.
 
-    ``EXECUTED`` is refused — re-executing would double-apply the script over an
-    un-reverted touch set; the operator must ``revert`` first. ``FAILED`` is
-    refused — a partial run must be reverted before re-executing. Any other
-    status is allowed; ``needs_reset`` is True when a touch set is already
-    present (e.g. re-execute after ``REVERTED``), so the caller clears it first.
+    ``FAILED`` is refused — a partial run must be reverted before re-executing
+    (re-running over a partially-applied state is unsafe). All other statuses
+    (including ``EXECUTED``) are allowed; ``needs_reset`` is True when a touch
+    set is already present, so the caller clears it before running — this lets
+    maintenance tasks re-execute repeatedly without manual revert.
     """
-    if status == RunStatus.EXECUTED:
-        return ExecuteGateDecision(action="refuse", reason="run already executed; revert first to re-run")
     if status == RunStatus.FAILED:
         return ExecuteGateDecision(action="refuse", reason="run previously failed; revert the partial first")
     return ExecuteGateDecision(action="allow", needs_reset=has_touch_set)
