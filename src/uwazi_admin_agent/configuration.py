@@ -68,7 +68,7 @@ ES_SETTLE_TIMEOUT_MS: int = 10_000
 ES_SETTLE_POLL_INTERVAL_MS: int = 250
 
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
-MAX_ENTITIES_PER_RUN: int = 1000
+MAX_ENTITIES_PER_RUN: int = 10000
 
 # Number of entities to apply per batch during execute. Consumed in Phase 5.
 EXECUTE_BATCH_SIZE: int = 50
