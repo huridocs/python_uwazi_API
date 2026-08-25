@@ -8,3 +8,19 @@ services:
       - GRAYLOG_PORT=${GRAYLOG_PORT:-12201}
     command: ["/app/.venv/bin/uvicorn", "uwazi_agent.drivers.rest.app:app", "--host", "0.0.0.0", "--port", "5054"]
     restart: unless-stopped
+
+  uwazi-admin-web:
+    build: .
+    network_mode: host
+    environment:
+      - UWAZI_URL=${UWAZI_URL}
+      - UWAZI_USER=${UWAZI_USER}
+      - UWAZI_PASSWORD=${UWAZI_PASSWORD}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+    volumes:
+      - admin_agent_data:/app/data
+    command: ["/app/.venv/bin/python", "-m", "uwazi_admin_agent.drivers.web.app"]
+    restart: unless-stopped
+
+volumes:
+  admin_agent_data:
