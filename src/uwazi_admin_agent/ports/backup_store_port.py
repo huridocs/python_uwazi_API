@@ -70,3 +70,13 @@ class BackupStorePort(ABC):
     def list_runs(self) -> list[str]:
         """List the run ids known to the store."""
         ...
+
+    @abstractmethod
+    def delete_run(self, run_id: str) -> None:
+        """Remove a run's entire folder (manifest, snapshots, files, script).
+
+        Unlike :meth:`clear_run` (which preserves the manifest), this wipes the
+        whole run directory so the run disappears from listings. No-op if the
+        run folder is absent.
+        """
+        ...

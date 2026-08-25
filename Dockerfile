@@ -26,5 +26,6 @@ COPY --chown=app:app pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=app:app . .
+RUN mkdir -p /app/data && chown -R app:app /app/data
 
 USER app

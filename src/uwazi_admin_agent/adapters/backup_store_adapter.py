@@ -116,6 +116,14 @@ class FilesystemBackupStore(BackupStorePort):
                 self._rm_tree(sub_dir)
         logger.debug("snapshots + file bytes cleared run={}", run_id)
 
+    @override
+    def delete_run(self, run_id: str) -> None:
+        """Remove the entire run directory (manifest, snapshots, files, script)."""
+        run_dir = self._run_dir(run_id)
+        if run_dir.exists():
+            self._rm_tree(run_dir)
+        logger.debug("run folder deleted run={}", run_id)
+
     @staticmethod
     def _rm_tree(path: Path) -> None:
         for child in path.iterdir():
