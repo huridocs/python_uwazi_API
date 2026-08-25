@@ -35,11 +35,13 @@ from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
-from uwazi_admin_agent.configuration import PACKAGE_DIR, RUNS_PATH
+from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
+from uwazi_admin_agent.configuration import ROOT_PATH, RUNS_PATH
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.verify_revert_use_case import VerifyRevertUseCase
@@ -49,9 +51,8 @@ from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 
-# ``load_dotenv`` is idempotent; safe to call from every CLI invocation. The
-# repo's ``.env`` lives at the project root (``PACKAGE_DIR.parents[1]``).
-_ENV_LOADED: bool = load_dotenv(PACKAGE_DIR.parents[1] / ".env")
+# ``load_dotenv`` is idempotent; safe to call from every CLI invocation.
+_ENV_LOADED: bool = load_dotenv(ROOT_PATH / ".env")
 
 
 class Runtime:
@@ -69,6 +70,7 @@ class Runtime:
         deps: AdminAgentDeps,
         revert_use_case: RevertRunUseCase,
         verify_use_case: VerifyRevertUseCase,
+        search_probe: SearchProbePort,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -80,6 +82,7 @@ class Runtime:
         self.deps: AdminAgentDeps = deps
         self.revert_use_case: RevertRunUseCase = revert_use_case
         self.verify_use_case: VerifyRevertUseCase = verify_use_case
+        self.search_probe: SearchProbePort = search_probe
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -101,6 +104,7 @@ def build_runtime() -> Runtime:
     api = UwaziApiAdapter(user=user, password=password, url=url)
     entity_repository = UwaziEntityRepository(api.client)
     file_repository = UwaziFileRepository(api.client)
+    search_probe = UwaziSearchProbe(api.client)
     backup_store = build_backup_store()
     audit_log = build_audit_log()
     llm = OllamaAdapter()
@@ -111,6 +115,7 @@ def build_runtime() -> Runtime:
         template_mapper=api.template_mapper,
         entity_api=api,
         relationship_api=api,
+        search_probe=search_probe,
     )
 
     revert_use_case = RevertRunUseCase(
@@ -135,4 +140,5 @@ def build_runtime() -> Runtime:
         deps=deps,
         revert_use_case=revert_use_case,
         verify_use_case=verify_use_case,
+        search_probe=search_probe,
     )

@@ -21,6 +21,7 @@ from pydantic import Field
 
 from uwazi_admin_agent.configuration import MAX_VALIDATION_ATTEMPTS
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
@@ -30,6 +31,13 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
     entity_repository: EntityRepositoryPort | None = Field(
         default=None,
         description="Raw entity repository for dummy snapshot/revert (§2.5). Set by the use case before the agent runs.",
+    )
+    search_probe: SearchProbePort | None = Field(
+        default=None,
+        description=(
+            "ES search probe for the dummy-gate settle (Option A). When None the "
+            "harness skips the ES-visibility settle (backward-compatible; tests stay green)."
+        ),
     )
     validation_attempts: int = Field(default=0, description="How many validation runs the agent has performed this turn.")
     validation_limit: int = Field(default=MAX_VALIDATION_ATTEMPTS, description="Hard cap on validation runs per turn.")

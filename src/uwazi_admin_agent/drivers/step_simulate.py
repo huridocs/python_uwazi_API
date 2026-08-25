@@ -60,6 +60,7 @@ async def _run_simulate_async(run_name: str) -> int:
         relationship_api=runtime.relationship_api,
         entity_repository=runtime.entity_repository,
         language=DUMMY_LANGUAGE,
+        search_probe=runtime.search_probe,
     )
 
     logger.info("simulate: run={} dummies={}", run_name, len(dummy_spec))
@@ -75,6 +76,8 @@ async def _run_simulate_async(run_name: str) -> int:
     _print_diffs(result)
     if result.cleanup_error:
         print(f"  cleanup warning: {result.cleanup_error}")
+    if result.es_settle_warning:
+        print(f"  ES settle warning: {result.es_settle_warning}")
     return 0 if result.passed else 1
 
 

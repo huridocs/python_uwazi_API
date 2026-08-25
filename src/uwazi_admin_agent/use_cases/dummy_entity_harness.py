@@ -14,18 +14,35 @@ each original dummy by posting its before raw via ``EntityRepositoryPort.save_ra
 raw round-trip is lossless per §8). This is the simpler, manifest-free counterpart
 of Phase 4's intercept+manifest revert builder, which is the production path.
 
+ES consistency (Option A): a revert re-indexes the dummy in ES (a newer
+unrefreshed version); the immediately-following ``deleteByQuery`` (``conflicts:
+'proceed'``) then skips it on version conflict, leaving an orphan. The harness
+prevents this by (A) skipping the no-op revert for unchanged dummies and
+(B) settling ES to the latest ``editDate`` before the cleanup delete. See
+:mod:`uwazi_admin_agent.domain.search_probe` for the full rationale.
+
 Not unit-tested (it needs the real instance); the DoD covers the pure parts only.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import ES_SETTLE_POLL_INTERVAL_MS, ES_SETTLE_TIMEOUT_MS
+from uwazi_admin_agent.domain.search_probe import (
+    FreshnessResult,
+    build_freshness_result,
+    entity_unchanged,
+    format_freshness_warning,
+    max_edit_date_per_shared_id,
+)
 from uwazi_admin_agent.domain.validation_result import build_validation_outcome
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_exec_namespace, run_script_sync
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
@@ -70,11 +87,16 @@ class DummyEntityHarness:
         relationship_api: RelationshipApiPort | None,
         entity_repository: EntityRepositoryPort,
         language: str = "en",
+        search_probe: SearchProbePort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._relationship_api: RelationshipApiPort | None = relationship_api
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._language: str = language
+        # Optional ES search probe for the freshness settle (Option A). ``None`` ->
+        # the settle is a no-op (backward-compatible; the gate keeps working without
+        # the orphan-race fix, e.g. in unit-test wiring that has no live ES).
+        self._search_probe: SearchProbePort | None = search_probe
 
     async def run(self, script: str, dummy_spec: list[AgentEntityCreate]) -> Any:
         """Validate ``script`` against dummies built from ``dummy_spec``.
@@ -93,10 +115,19 @@ class DummyEntityHarness:
         script_error: str | None = None
         script_created_ids: list[str] = []
         cleanup_error: str | None = None
+        es_settle_warning: str | None = None
 
         try:
             created_ids = await self._create_dummies(dummy_spec)
             scope.update(created_ids)
+            # Settle after create so the script's own deletes (and the final
+            # cleanup delete) see the just-indexed ES docs. Visibility suffices
+            # here (target 0 = "editDate present"): the create is the first
+            # version, so there is no newer unrefreshed version to conflict with
+            # a delete (Option A, part B).
+            create_settle = await self._wait_for_es_fresh({sid: 0 for sid in created_ids})
+            if create_settle is not None and create_settle.timed_out and create_settle.pending_ids:
+                es_settle_warning = format_freshness_warning("create", create_settle)
             before = await self._snapshot_raws(created_ids)
             dummy_entities = await self._fetch_dummy_entities(created_ids)
 
@@ -111,6 +142,26 @@ class DummyEntityHarness:
             logger.error("dummy harness error: {}", exc)
         finally:
             try:
+                # Settle-then-delete (Option A, part B): wait for ES to reflect the
+                # LATEST write to each alive dummy (the revert's re-index is the
+                # typical latest) before the sharedId-scoped deleteByQuery runs.
+                # deleteByQuery snapshots the refreshed index and skips docs whose
+                # version advanced since the snapshot (conflicts: 'proceed');
+                # settling to the latest editDate makes the snapshot see that latest
+                # version so it is removed cleanly (no orphan). Targets come only
+                # from alive raws (after/post_revert non-None values), so dead ids
+                # (script-deleted, not re-created) are not polled to a timeout.
+                # Runs in finally so the cleanup is race-free even on error paths.
+                alive_raws = [r for r in (*after.values(), *post_revert.values()) if r]
+                targets = max_edit_date_per_shared_id(alive_raws)
+                cleanup_settle = await self._wait_for_es_fresh(targets)
+                if (
+                    cleanup_settle is not None
+                    and cleanup_settle.timed_out
+                    and cleanup_settle.pending_ids
+                    and es_settle_warning is None
+                ):
+                    es_settle_warning = format_freshness_warning("cleanup", cleanup_settle)
                 await self._delete_all(list(scope))
             except Exception as exc:  # noqa: BLE001
                 cleanup_error = f"Cleanup failed: {type(exc).__name__}: {exc}"
@@ -125,6 +176,7 @@ class DummyEntityHarness:
             after=after,
             post_revert=post_revert,
             created_shared_ids=script_created_ids,
+            es_settle_warning=es_settle_warning,
         )
         result = result.model_copy(update={"cleanup_error": cleanup_error})
         return result
@@ -222,14 +274,24 @@ class DummyEntityHarness:
         its new id for the post-revert snapshot, and added to ``scope`` so the
         §2.7 cleanup (``_delete_all(list(scope))``) still deletes the re-created
         dummy - otherwise it would escape cleanup.
+
+        An original the script did **not** modify (``before == after`` excl.
+        platform-managed) is left untouched: its Mongo row is already at the
+        before-state, so ``save_raw`` would be a no-op that only bumps ``editDate``
+        and re-indexes ES - a newer unrefreshed version that the cleanup
+        ``deleteByQuery`` would skip on version conflict (the orphan root cause).
+        Skipping it (Option A, part A) avoids that re-index entirely.
         """
         recreated: dict[str, str] = {}
         for sid, raw in before.items():
-            if after.get(sid) is None:
+            after_raw = after.get(sid)
+            if after_raw is None:
                 new_shared_id = await self._entity_repository.create_raw(raw)
                 scope.add(new_shared_id)
                 recreated[sid] = new_shared_id
                 logger.info("re-created deleted dummy (old={} new={})", sid, new_shared_id)
+            elif entity_unchanged(raw, after_raw):
+                logger.debug("skipping no-op revert for unchanged dummy {}", sid)
             else:
                 await self._entity_repository.save_raw(raw)
         logger.info("reverted {} original dummies to before-state", len(before))
@@ -254,6 +316,53 @@ class DummyEntityHarness:
             except Exception:  # noqa: BLE001 — gone-by-revert-failure is expected, map to None
                 out[old_id] = None
         return out
+
+    async def _wait_for_es_fresh(self, targets: dict[str, int]) -> FreshnessResult | None:
+        """Poll ES until each ``shared_id``'s ``editDate`` reaches its target, or timeout.
+
+        Returns ``None`` when no :class:`SearchProbePort` is wired (the settle is
+        a no-op - backward-compatible) or when ``targets`` is empty. Otherwise
+        probes each id's ES ``editDate`` (``/api/v2/search?filter[sharedId]=<id>
+        &fields[]=editDate``) and sleeps ``ES_SETTLE_POLL_INTERVAL_MS`` between
+        rounds until every id is fresh (``editDate >= target``) or
+        ``ES_SETTLE_TIMEOUT_MS`` elapses (``timed_out``). A target of ``0`` reduces
+        to "visible" (any positive editDate qualifies).
+
+        ``editDate`` is bumped on every Uwazi save (server-managed), so it is a
+        monotonic "which version is refreshed" signal: once the ES ``editDate``
+        reaches the latest Mongo ``editDate`` seen for a sharedId, the index has
+        refreshed that latest version, so the subsequent ``deleteByQuery`` snapshots
+        it (no version conflict) and removes it cleanly.
+
+        Not unit-tested (I/O); the pure assembly is :func:`build_freshness_result`.
+        """
+        if self._search_probe is None or not targets:
+            return None
+        deadline = time.monotonic() + ES_SETTLE_TIMEOUT_MS / 1000.0
+        interval = ES_SETTLE_POLL_INTERVAL_MS / 1000.0
+        observed: dict[str, int | None] = {}
+        timed_out = False
+        while True:
+            observed = {}
+            for sid in targets:
+                observed[sid] = await self._search_probe.shared_id_edit_date(sid, self._language)
+            if all(observed[sid] is not None and observed[sid] >= targets[sid] for sid in targets):
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            await asyncio.sleep(interval)
+        result = build_freshness_result(targets, observed, timed_out)
+        if result.all_fresh:
+            logger.info("ES settle ok: {}/{} fresh", len(result.fresh_ids), len(result.expected_ids))
+        else:
+            logger.warning(
+                "ES settle not fresh: {}/{}, pending={}",
+                len(result.fresh_ids),
+                len(result.expected_ids),
+                result.pending_ids,
+            )
+        return result
 
     async def _delete_all(self, shared_ids: list[str]) -> None:
         """Delete every dummy (originals + script-created) — the §2.7 cleanup guarantee."""

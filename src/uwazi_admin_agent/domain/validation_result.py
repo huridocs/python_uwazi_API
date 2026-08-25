@@ -144,6 +144,15 @@ class ValidationResult(BaseModel):
     cleanup_error: str | None = Field(
         default=None, description="Error raised while deleting the dummies, if cleanup failed (should not happen)."
     )
+    es_settle_warning: str | None = Field(
+        default=None,
+        description=(
+            "Warning recorded when the ES-visibility settle timed out before every "
+            "freshly-created dummy was indexed (Option A). The gate proceeds best-effort "
+            "and deletes anyway; the shared index MAY be inconsistent and need a reindex. "
+            "Set by the harness, not the pure builder."
+        ),
+    )
 
 
 def build_validation_outcome(
@@ -153,6 +162,7 @@ def build_validation_outcome(
     after: dict[str, dict[str, Any] | None],
     post_revert: dict[str, dict[str, Any] | None],
     created_shared_ids: list[str] | None = None,
+    es_settle_warning: str | None = None,
 ) -> ValidationResult:
     """Assemble a :class:`ValidationResult` from the gathered raw dicts.
 
@@ -207,4 +217,5 @@ def build_validation_outcome(
         restore_equal=restore_equal,
         restore_mismatches=mismatches,
         created_shared_ids=created,
+        es_settle_warning=es_settle_warning,
     )
