@@ -49,6 +49,10 @@ _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.it
 # In-memory ring buffer of recent log lines (mirrors container stderr output).
 # A loguru sink appends formatted lines here so the UI can display them live.
 _LOG_BUFFER: deque[str] = deque(maxlen=2000)
+# The Uwazi instance this admin agent controls (mirrored into the container via
+# the UWAZI_URL env var). Shown in the header so the operator always knows which
+# instance a generated run will mutate.
+_CONTROLLED_UWAZI_URL = os.environ.get("UWAZI_URL", "not configured")
 
 
 def _log_sink(message: Any) -> None:
@@ -282,6 +286,64 @@ def _logs_dialog() -> None:
         dialog.open()
 
 
+# Markdown shown in the "Capabilities" modal: the task types this service can
+# carry out, each with concrete example prompts. Kept as a literal so the
+# examples stay in sync with the orchestrator's documented capabilities.
+_CAPABILITIES_MARKDOWN = """
+This admin agent orchestrates a Uwazi instance. Describe a task in plain
+language with **New Task**; the agent inspects the instance, then performs the
+change through a generated, revertible migration **run**.
+
+### Read-only / reporting
+- "List all templates and how many entities each has"
+- "Find entities whose title contains 'Annual Report 2024'"
+- "Show the Countries thesaurus and how often each value is used"
+
+### Schema — templates, thesauri, relationship types
+- "Add a `summary` markdown field to the Document template"
+- "Create a thesaurus `Topics` with values Human Rights, Environment, Health"
+- "Rename the relationship type `authored_by` to `author`"
+
+### Entities — create / update / delete (small batches, up to 5)
+- "Create 3 new Person entities from this spreadsheet"
+- "Set the `status` of entity `abc123` to `published`"
+
+### Bulk entity operations (large sets, via the Python agent)
+- "Publish all 2,000 entities in the Films template"
+- "Delete every draft entity created before 2023"
+
+### Relationships
+- "Link entity A to entity B as `author`"
+
+### Pages
+- "Create a page showing a timeline of all books by date added"
+- "Add a public page that lists every Country entity"
+
+### Safety
+Destructive operations (delete, publish/unpublish, schema removal) always require
+an explicit confirmation before they run. Every run can be **reverted** from the
+table, which restores backups and removes created entities.
+"""
+
+
+def _capabilities_dialog() -> None:
+    """Show the service's supported task types with concrete examples.
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it. Mirrors ``_logs_dialog``'s modal layout.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full"):
+            dialog.props("maximized")
+            with ui.row().classes("items-center justify-between q-mb-md"):
+                ui.label("Service Capabilities").classes("text-h6")
+                ui.button("Close", icon="close", on_click=lambda: dialog.close()).props("flat dense")
+            content = ui.column().classes("w-full q-pr-md").style("height: calc(100vh - 120px); overflow-y: auto")
+            with content:
+                ui.markdown(_CAPABILITIES_MARKDOWN)
+        dialog.open()
+
+
 def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str) -> None:
     dialog.close()
     result = on_confirm()
@@ -412,6 +474,10 @@ def _build_page() -> None:
         with ui.row().classes("items-center"):
             ui.label("Uwazi Admin Agent").classes("text-h6 q-mr-md")
         with ui.row().classes("items-center"):
+            ui.icon("link", color="secondary").classes("q-mr-xs")
+            ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
+            ui.separator().props("vertical").classes("q-mx-sm")
+            ui.button("Capabilities", icon="info", on_click=_capabilities_dialog).props("color=secondary flat")
             ui.button("Logs", icon="terminal", on_click=_logs_dialog).props("color=secondary flat")
             ui.button("New Task", icon="add", on_click=_new_task_wizard)
 
