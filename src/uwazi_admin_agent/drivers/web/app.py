@@ -9,6 +9,7 @@ This is a driver: it wires the service layer (:mod:`run_service`) to the UI and
 contains no business logic, matching the ``drivers/`` layer convention.
 """
 
+import asyncio
 import os
 from collections import deque
 from typing import Any
@@ -47,6 +48,11 @@ _STATUS_COLORS: dict[str, str] = {
 # The manifest is only saved after generation completes, so "creating" is a
 # UI-only status tracked here — not a persisted RunStatus value.
 _creating_runs: dict[str, dict[str, Any]] = {}
+
+# Transient UI state: the "Generating script…" notification shown while a run's
+# script is being generated. Keyed by run name so the background task can
+# dismiss it once generation completes.
+_generating_notifications: dict[str, Any] = {}
 
 # Transient UI state: runs with an in-flight execute/rollback. The manifest
 # still carries the pre-operation status until the background task finishes,
@@ -293,9 +299,16 @@ def runs_table() -> None:
 
 
 async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> None:
-    """Await a coroutine, notify on success/error, then refresh the table."""
+    """Await a coroutine operation, notify on success/error, then refresh the table.
+
+    The service coroutines (execute/rollback) perform *synchronous* HTTP via the
+    ``requests``-based Uwazi client, which would block the event loop for the
+    whole operation — stalling the outbox (so the in-flight badge and table
+    refresh never reach the browser) and the websocket heartbeat (connection
+    drops). Running the coroutine on a worker thread keeps the loop free.
+    """
     try:
-        await coro
+        await asyncio.to_thread(asyncio.run, coro)
         _broadcast_notify(success_msg, type="positive")
     except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
         _broadcast_notify(f"Error: {exc}", type="negative", multi_line=True)
@@ -321,7 +334,7 @@ def _confirm_dialog(
         with ui.dialog() as dialog, ui.card():
             ui.label(title).classes("text-h6")
             ui.label(message).classes("text-body1")
-            with ui.row():
+            with ui.row().classes("justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close())
                 ui.button(
                     "Confirm",
@@ -346,7 +359,7 @@ def _rename_dialog(run_id: str) -> None:
                 value=run_id,
                 validation={"Required": lambda v: bool(v and v.strip())},
             ).classes("w-full text-h6")
-            with ui.row().classes("q-mt-lg"):
+            with ui.row().classes("q-mt-lg justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
                 ui.button(
                     "Rename",
@@ -507,6 +520,13 @@ def _capabilities_dialog() -> None:
 
 def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str, run_id: str | None = None) -> None:
     dialog.close()
+    # Let the outbox flush the close before the background task starts: the
+    # revert/execute run a synchronous Uwazi login first, and blocking the
+    # event loop before the flush stalls the modal visibly open.
+    ui.timer(0.05, lambda: _start_confirmed_task(on_confirm, success_msg, run_id), once=True)
+
+
+def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None = None) -> None:
     result = on_confirm()
     if hasattr(result, "__await__"):
         if run_id is not None:
@@ -538,7 +558,7 @@ def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any) -> None:
             placeholder="e.g. merge-entities-2026",
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
-        with ui.row().classes("q-mt-lg"):
+        with ui.row().classes("q-mt-lg justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_name_next(state, name_input, stepper))
 
@@ -569,7 +589,7 @@ def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any) -> Non
             .props("autogrow input-style='min-height: 200px;'")
             .style("width: 100%")
         )
-        with ui.row().classes("q-mt-lg"):
+        with ui.row().classes("q-mt-lg justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_prompt_next(state, prompt_input, stepper))
@@ -593,7 +613,7 @@ def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> N
             "prompt",
             backward=lambda v: f"Prompt: {v[:120]}{'...' if len(v) > 120 else ''}",
         ).classes("text-body1")
-        with ui.row().classes("q-mt-lg"):
+        with ui.row().classes("q-mt-lg justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("prompt")).props("color=grey-7 flat")
             ui.button(
@@ -612,7 +632,12 @@ def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
     dialog.close()
     _creating_runs[name] = {"name": name, "prompt": prompt}
     runs_table.refresh()
-    ui.notify("Generating script (this may take a minute)...", type="ongoing")
+    _generating_notifications[name] = ui.notification(
+        "Generating script (this may take a minute)...",
+        type="ongoing",
+        spinner=True,
+        timeout=None,
+    )
     background_tasks.create(
         _do_generate(name, prompt, app.storage.user["user"], app.storage.user["password"]),
         name=f"generate {name}",
@@ -620,13 +645,18 @@ def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
 
 
 async def _do_generate(name: str, prompt: str, user: str, password: str) -> None:
+    # create_and_generate does synchronous Uwazi HTTP + LLM calls; run it on a
+    # worker thread so the event loop stays free to serve the UI and websocket.
     try:
-        await create_and_generate(name, prompt, user, password)
+        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password))
         _broadcast_notify(f"Run {name!r} created and generated", type="positive")
     except Exception as exc:  # noqa: BLE001
         _broadcast_notify(f"Generate failed: {exc}", type="negative", multi_line=True)
     finally:
         _creating_runs.pop(name, None)
+        notification = _generating_notifications.pop(name, None)
+        if notification is not None:
+            notification.dismiss()
         _broadcast_refresh()
 
 
