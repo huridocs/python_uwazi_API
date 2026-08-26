@@ -1,8 +1,9 @@
 """NiceGUI web UI for the admin agent — a driver replacing the CLI for common ops.
 
 Single page: a table of runs with status badges + row actions (execute, rollback,
-delete), and a "New Task" wizard (stepper) to create + generate a run. Mutating
-operations run as background tasks; the table auto-refreshes every 5s.
+view prompt, and a "more" menu with delete + rename), and a "New Task" wizard
+(stepper) to create + generate a run. Mutating operations run as background
+tasks; the table auto-refreshes every 5s.
 
 This is a driver: it wires the service layer (:mod:`run_service`) to the UI and
 contains no business logic, matching the ``drivers/`` layer convention.
@@ -22,8 +23,10 @@ from uwazi_admin_agent.drivers.web.run_service import (
     execute_run,
     get_run,
     list_runs,
+    rename_run,
     revert_run,
 )
+from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 
 # Quasar color names for each status value (used by the status badge slot).
 # "creating" is a UI-only status (not a persisted RunStatus) for runs whose
@@ -32,6 +35,8 @@ _STATUS_COLORS: dict[str, str] = {
     "creating": "blue-grey",
     "planned": "grey",
     "snapshotted": "orange",
+    "running": "blue",
+    "reverting": "purple",
     "executed": "green",
     "verified": "blue",
     "reverted": "indigo",
@@ -43,6 +48,26 @@ _STATUS_COLORS: dict[str, str] = {
 # UI-only status tracked here — not a persisted RunStatus value.
 _creating_runs: dict[str, dict[str, Any]] = {}
 
+# Transient UI state: runs with an in-flight execute/rollback. The manifest
+# still carries the pre-operation status until the background task finishes,
+# so "running"/"reverting" are UI-only labels tracked here.
+_running_runs: dict[str, str] = {}
+
+# JS expression: true when the row has an in-flight (not yet persisted) op.
+_IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
+
+
+def _mark_running(run_id: str, label: str) -> None:
+    """Show a run's status as in-flight (spinner + label) in the table."""
+    _running_runs[run_id] = label
+    runs_table.refresh()
+
+
+def _unmark_running(run_id: str) -> None:
+    """Clear a run's in-flight status; the persisted status takes over."""
+    _running_runs.pop(run_id, None)
+
+
 # JS set-literal string injected into the status badge slot for color lookup.
 _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.items()) + "}"
 
@@ -53,6 +78,57 @@ _LOG_BUFFER: deque[str] = deque(maxlen=2000)
 # the UWAZI_URL env var). Shown in the header so the operator always knows which
 # instance a generated run will mutate.
 _CONTROLLED_UWAZI_URL = os.environ.get("UWAZI_URL", "not configured")
+
+
+def _is_logged_in() -> bool:
+    """True when the session holds cached Uwazi credentials."""
+    return bool(app.storage.user.get("user") and app.storage.user.get("password"))
+
+
+def _login_page() -> None:
+    """Full-page login gate: validates the Uwazi account before the app loads.
+
+    Nothing of the admin app renders until the credentials pass a real
+    ``/api/login`` against the controlled Uwazi instance. Successful logins are
+    cached in the session (``app.storage.user``) and the user is sent to
+    ``/app``; failures show an inline error and keep the login page up.
+    """
+    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    with ui.column().classes("w-full items-center justify-center min-h-screen"):
+        with ui.card().classes("w-full max-w-sm"):
+            ui.label("Uwazi Admin Agent").classes("text-h6")
+            ui.label(
+                "Log in with the Uwazi account used to administer the instance. "
+                "The page stays locked until the credentials are validated."
+            ).classes("text-body1 q-mt-sm")
+            user_input = ui.input("Username").classes("w-full text-h6")
+            password_input = ui.input("Password", password=True).classes("w-full text-h6")
+            error_label = ui.label().classes("text-negative text-body2")
+
+            def _submit() -> None:
+                # Empty fields default to the local admin account (admin/admin).
+                user = (user_input.value or "").strip() or "admin"
+                password = password_input.value or "admin"
+                try:
+                    UwaziApiAdapter(user=user, password=password, url=_CONTROLLED_UWAZI_URL)
+                except Exception as exc:  # noqa: BLE001 — surface every validation failure
+                    error_label.set_text(f"Login failed: {exc}")
+                    return
+                app.storage.user["user"] = user
+                app.storage.user["password"] = password
+                ui.navigate.to("/app")
+
+            password_input.on("keydown.enter", _submit)
+            with ui.row().classes("q-mt-lg"):
+                ui.button("Log in", color="primary", on_click=_submit)
+
+
+def _logout() -> None:
+    """Drop the session credentials and return to the login page."""
+    app.storage.user.pop("user", None)
+    app.storage.user.pop("password", None)
+    ui.notify("Logged out", type="positive")
+    ui.navigate.to("/")
 
 
 def _log_sink(message: Any) -> None:
@@ -136,6 +212,11 @@ def runs_table() -> None:
     for name in _creating_runs:
         if name not in persisted_ids:
             rows.append(_creating_to_row(name))
+    # Overlay in-flight execute/rollback ops onto persisted rows.
+    for run_id, label in _running_runs.items():
+        for row in rows:
+            if row["id"] == run_id:
+                row["status"] = label
 
     table = ui.table(rows=rows, columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
 
@@ -144,7 +225,10 @@ def runs_table() -> None:
         f"""
         <q-td :props="props">
             <q-badge :color="({_STATUS_COLOR_JS})[props.row.status] || 'grey'"
-                     :label="props.row.status" />
+                     class="q-px1 q-py-2xs items-center">
+                <q-spinner v-if="{_IN_FLIGHT_JS}" size="12px" color="white" class="q-mr-xs" />
+                <span class="text-capitalize">{{{{ props.row.status }}}}</span>
+            </q-badge>
         </q-td>
         """,
     )
@@ -154,17 +238,14 @@ def runs_table() -> None:
         f"""
         <q-td :props="props">
             <q-btn dense flat icon="play_arrow" color="primary"
-                   :disable="props.row.status === 'creating'"
+                   :disable="{_IN_FLIGHT_JS}"
                    @click="$parent.$emit('execute', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
-                   :disable="props.row.status === 'creating' || !{_can_revert_js("props.row.status")}"
+                   :disable="{_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
                    @click="$parent.$emit('rollback', props.row)" />
-            <q-btn dense flat icon="description" color="info"
-                   :disable="props.row.status === 'creating'"
-                   @click="$parent.$emit('viewprompt', props.row)" />
-            <q-btn dense flat icon="delete" color="red"
-                   :disable="props.row.status === 'creating'"
-                   @click="$parent.$emit('delete', props.row)" />
+            <q-btn dense flat icon="more_vert" color="grey-8"
+                   :disable="{_IN_FLIGHT_JS}"
+                   @click="$parent.$emit('menu', props.row)" />
         </q-td>
         """,
     )
@@ -172,38 +253,46 @@ def runs_table() -> None:
 
     def _on_execute(e: Any) -> None:
         run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        background_tasks.create(_run_async(execute_run(run_id), f"Executed {run_id}"), name=f"execute {run_id}")
+        _mark_running(run_id, "running")
+        background_tasks.create(
+            _run_async(
+                execute_run(run_id, app.storage.user["user"], app.storage.user["password"]),
+                f"Executed {run_id}",
+                run_id,
+            ),
+            name=f"execute {run_id}",
+        )
 
     def _on_rollback(e: Any) -> None:
         run_id = e.args["name"] if isinstance(e.args, dict) else e.args
         _confirm_dialog(
             "Rollback run",
             f"Revert run {run_id!r}? This restores every backed-up entity and deletes created ones.",
-            lambda: revert_run(run_id),
+            lambda: revert_run(run_id, app.storage.user["user"], app.storage.user["password"]),
             success_msg=f"Reverted {run_id}",
+            run_id=run_id,
         )
+
+    def _on_rename(e: Any) -> None:
+        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+        _rename_dialog(run_id)
 
     def _on_delete(e: Any) -> None:
         run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _confirm_dialog(
-            "Delete run",
-            f"Permanently remove run {run_id!r}? This deletes the entire run folder. "
-            "If the run is EXECUTED, revert will no longer be possible.",
-            lambda: delete_run(run_id),
-            success_msg=f"Deleted {run_id}",
-        )
+        _delete_dialog(run_id)
 
-    def _on_view_prompt(e: Any) -> None:
+    def _on_menu(e: Any) -> None:
         run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _prompt_dialog(run_id)
+        _actions_dialog(run_id)
 
     table.on("execute", _on_execute)
     table.on("rollback", _on_rollback)
-    table.on("viewprompt", _on_view_prompt)
+    table.on("rename", _on_rename)
+    table.on("menu", _on_menu)
     table.on("delete", _on_delete)
 
 
-async def _run_async(coro: Any, success_msg: str) -> None:
+async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> None:
     """Await a coroutine, notify on success/error, then refresh the table."""
     try:
         await coro
@@ -211,6 +300,8 @@ async def _run_async(coro: Any, success_msg: str) -> None:
     except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
         _broadcast_notify(f"Error: {exc}", type="negative", multi_line=True)
     finally:
+        if run_id is not None:
+            _unmark_running(run_id)
         _broadcast_refresh()
 
 
@@ -219,6 +310,7 @@ def _confirm_dialog(
     message: str,
     on_confirm: Any,
     success_msg: str,
+    run_id: str | None = None,
 ) -> None:
     """Yes/no confirmation dialog; runs ``on_confirm`` (sync or async) on confirm.
 
@@ -234,30 +326,99 @@ def _confirm_dialog(
                 ui.button(
                     "Confirm",
                     color="negative",
-                    on_click=lambda: _confirm_and_close(dialog, on_confirm, success_msg),
+                    on_click=lambda: _confirm_and_close(dialog, on_confirm, success_msg, run_id),
                 )
     dialog.open()
 
 
-def _prompt_dialog(run_id: str) -> None:
-    """Show the run's prompt in a read-only modal.
+def _rename_dialog(run_id: str) -> None:
+    """Prompt for a new task name and rename the run in a background task.
 
     Created on the page layout (not inside the refreshable table) so the 5s
     auto-refresh doesn't destroy it.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+            dialog.props("persistent")
+            ui.label(f"Rename task — {run_id}").classes("text-h6")
+            name_input = ui.input(
+                "New name",
+                value=run_id,
+                validation={"Required": lambda v: bool(v and v.strip())},
+            ).classes("w-full text-h6")
+            with ui.row().classes("q-mt-lg"):
+                ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+                ui.button(
+                    "Rename",
+                    icon="edit",
+                    on_click=lambda: _rename_confirm(dialog, run_id, name_input),
+                )
+    dialog.open()
+
+
+def _actions_dialog(run_id: str) -> None:
+    """Task modal: the run's prompt plus Rename / Delete actions.
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it — the previous inline ``q-btn-dropdown``
+    closed whenever the table rebuilt.
     """
     try:
         detail = get_run(run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
+
+    def _rename() -> None:
+        dialog.close()
+        _rename_dialog(run_id)
+
+    def _delete() -> None:
+        dialog.close()
+        _delete_dialog(run_id)
+
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label(f"Prompt — {run_id}").classes("text-h6")
+            ui.label(f"Task — {run_id}").classes("text-h6")
             ui.label(detail.prompt).classes("text-body1 q-mt-md")
-            with ui.row().classes("q-mt-lg"):
-                ui.button("Close", on_click=lambda: dialog.close())
-        dialog.open()
-        dialog.props("persistent")
+            with ui.row().classes("w-full q-mt-lg justify-end"):
+                ui.button("Delete", icon="delete", color="negative", on_click=_delete)
+                ui.button("Rename", icon="edit", on_click=_rename)
+                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+    dialog.open()
+
+
+def _delete_dialog(run_id: str) -> None:
+    """Yes/no confirmation before permanently removing a run."""
+    _confirm_dialog(
+        "Delete run",
+        f"Permanently remove run {run_id!r}? This deletes the entire run folder. "
+        "If the run is EXECUTED, revert will no longer be possible.",
+        lambda: delete_run(run_id),
+        success_msg=f"Deleted {run_id}",
+        run_id=run_id,
+    )
+
+
+def _rename_confirm(dialog: Any, old_id: str, name_input: Any) -> None:
+    """Validate the new name, then rename the run via a background task."""
+    new_id = (name_input.value or "").strip()
+    if not new_id:
+        ui.notify("New name is required", type="warning")
+        return
+    if new_id == old_id:
+        dialog.close()
+        return
+    existing = {r.run_id for r in list_runs()}
+    if new_id in existing:
+        ui.notify(f"A task named {new_id!r} already exists", type="warning")
+        return
+    dialog.close()
+
+    async def _do() -> None:
+        rename_run(old_id, new_id)
+
+    background_tasks.create(_run_async(_do(), f"Renamed {old_id} → {new_id}"), name=f"rename {old_id}")
 
 
 def _logs_dialog() -> None:
@@ -344,11 +505,13 @@ def _capabilities_dialog() -> None:
         dialog.open()
 
 
-def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str) -> None:
+def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str, run_id: str | None = None) -> None:
     dialog.close()
     result = on_confirm()
     if hasattr(result, "__await__"):
-        background_tasks.create(_run_async(result, success_msg), name=success_msg)
+        if run_id is not None:
+            _mark_running(run_id, "reverting")
+        background_tasks.create(_run_async(result, success_msg, run_id), name=success_msg)
     else:
         ui.notify(success_msg, type="positive")
         runs_table.refresh()
@@ -450,12 +613,15 @@ def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
     _creating_runs[name] = {"name": name, "prompt": prompt}
     runs_table.refresh()
     ui.notify("Generating script (this may take a minute)...", type="ongoing")
-    background_tasks.create(_do_generate(name, prompt), name=f"generate {name}")
+    background_tasks.create(
+        _do_generate(name, prompt, app.storage.user["user"], app.storage.user["password"]),
+        name=f"generate {name}",
+    )
 
 
-async def _do_generate(name: str, prompt: str) -> None:
+async def _do_generate(name: str, prompt: str, user: str, password: str) -> None:
     try:
-        await create_and_generate(name, prompt)
+        await create_and_generate(name, prompt, user, password)
         _broadcast_notify(f"Run {name!r} created and generated", type="positive")
     except Exception as exc:  # noqa: BLE001
         _broadcast_notify(f"Generate failed: {exc}", type="negative", multi_line=True)
@@ -480,6 +646,7 @@ def _build_page() -> None:
             ui.button("Capabilities", icon="info", on_click=_capabilities_dialog).props("color=secondary flat")
             ui.button("Logs", icon="terminal", on_click=_logs_dialog).props("color=secondary flat")
             ui.button("New Task", icon="add", on_click=_new_task_wizard)
+            ui.button("Log out", icon="lock", on_click=_logout).props("color=secondary flat")
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-6xl"):
@@ -524,13 +691,29 @@ def _build_page() -> None:
 
 @ui.page("/")
 def _index() -> None:
+    """Login gate: nothing renders until the Uwazi credentials validate."""
+    _login_page()
+
+
+@ui.page("/app")
+def _app() -> None:
+    """Main admin app: only reachable with a validated session login."""
+    if not _is_logged_in():
+        ui.navigate.to("/")
+        return
     _build_page()
 
 
 def main() -> None:
     """Run the NiceGUI server (uvicorn under the hood) on port 5055."""
     port = int(os.environ.get("ADMIN_WEB_PORT", "5055"))
-    ui.run(host="0.0.0.0", port=port, reload=False, title="Uwazi Admin Agent")
+    ui.run(
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        title="Uwazi Admin Agent",
+        storage_secret=os.environ.get("ADMIN_WEB_STORAGE_SECRET", "dev-admin-web-secret"),
+    )
 
 
 if __name__ == "__main__":

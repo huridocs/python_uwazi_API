@@ -95,11 +95,15 @@ def build_audit_log(root: Path | None = None) -> AuditLogPort:
     return JsonlAuditLog(Path(root) if root is not None else RUNS_PATH)
 
 
-def build_runtime() -> Runtime:
-    """Construct the live ports + deps from env (the composition root)."""
+def build_runtime(user: str | None = None, password: str | None = None) -> Runtime:
+    """Construct the live ports + deps from env (the composition root).
+
+    Explicit ``user``/``password`` win when given; otherwise falls back to
+    ``UWAZI_USER``/``UWAZI_PASSWORD`` from the environment (CLI path).
+    """
     url = os.environ["UWAZI_URL"]
-    user = os.environ["UWAZI_USER"]
-    password = os.environ["UWAZI_PASSWORD"]
+    user = user if user is not None else os.environ["UWAZI_USER"]
+    password = password if password is not None else os.environ["UWAZI_PASSWORD"]
 
     api = UwaziApiAdapter(user=user, password=password, url=url)
     entity_repository = UwaziEntityRepository(api.client)

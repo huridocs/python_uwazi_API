@@ -80,3 +80,13 @@ class BackupStorePort(ABC):
         run folder is absent.
         """
         ...
+
+    @abstractmethod
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        """Move a run's folder to ``new_id`` and rewrite its manifest's ``run_id``.
+
+        Raises ``FileNotFoundError`` when the source folder is absent and
+        ``FileExistsError`` when the target already exists. No-op on a no-op
+        target is not expected: the caller must ensure ``new_id`` is free.
+        """
+        ...
