@@ -29,3 +29,7 @@ _version.py
 data/
 
 .notes
+
+# nicegui runtime storage (auto-generated, may contain secrets)
+.nicegui/
+**/.nicegui/
