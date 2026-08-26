@@ -1,12 +1,16 @@
 import builtins
+import datetime as _datetime_module
+import random as _random_module
 
 import pytest
 
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
+    _STDLIB,
     SAFE_BUILTINS,
     ScopeViolationError,
     assert_ids_in_scope,
     filter_ids_to_scope,
+    run_script_sync,
 )
 
 # --- filter_ids_to_scope ----------------------------------------------------
@@ -124,3 +128,51 @@ def test_safe_builtins_blocks_import_in_exec() -> None:
     # usual suspects.
     with pytest.raises((ImportError, NameError, KeyError)):
         exec("import os", ns)  # noqa: S102
+
+
+# --- _STDLIB: random + datetime-as-module (create-task fix) -----------------
+
+
+def test_stdlib_binds_random_module() -> None:
+    """`random` is bound (pure-compute, no I/O) so 'fill with random information'
+    create scripts use `random.randint/choice` instead of `__import__` or a
+    hand-rolled pseudo-random."""
+    assert _STDLIB["random"] is _random_module
+
+
+def test_stdlib_binds_datetime_as_module_not_class() -> None:
+    """`datetime` is bound as the MODULE so the script uses the standard
+    `datetime.datetime.now()` / `datetime.timedelta()` idiom (the LLM's natural
+    instinct) and gets `timedelta`/`date`/`time` for free. Pinning this guards the
+    live bug where the LLM wrote `datetime.datetime.datetime...` (treating the
+    bound name as a class while it was the module, or vice-versa)."""
+    assert _STDLIB["datetime"] is _datetime_module
+
+
+def test_run_script_sync_random_and_datetime_module_idiom_run_clean() -> None:
+    """A script using `random.choice` and the `datetime.datetime.now()` /
+    `datetime.timedelta()` module idiom must run clean under the scoped namespace.
+    No network - `run_script_sync` is pure w.r.t. the namespace contents."""
+    ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
+    code = (
+        "choices = random.choice(['a', 'b', 'c'])\n"
+        "now = datetime.datetime.now()\n"
+        "delta = datetime.timedelta(days=3)\n"
+        "result = 'choice=%s; now_ok=%s; delta=%s' % (choices, isinstance(now, datetime.datetime), delta)\n"
+    )
+    result, error = run_script_sync(code, ns)
+    assert error is None
+    assert result is not None
+    assert "now_ok=True" in result
+    assert "delta=3 days" in result
+
+
+def test_run_script_sync_rejects_datetime_class_idiom() -> None:
+    """`datetime.now()` (treating the bound name as the class) must FAIL because
+    `datetime` is the module - the module has no `now`. Pins the contract so the
+    LLM cannot silently use the old class-form idiom."""
+    ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
+    code = "now = datetime.now()\n"
+    result, error = run_script_sync(code, ns)
+    assert error is not None
+    assert "AttributeError" in error

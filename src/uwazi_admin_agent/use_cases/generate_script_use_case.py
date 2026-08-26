@@ -33,6 +33,10 @@ from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_agent.ports.llm_port import LlmPort
+from uwazi_agent.use_cases.tools.get_template_names import list_templates
+from uwazi_agent.use_cases.tools.get_templates_by_names import get_templates_by_names
+from uwazi_agent.use_cases.tools.get_thesauris_by_names import get_thesauris_by_names
+from uwazi_agent.use_cases.tools.get_thesauris_names import list_thesauri
 from uwazi_agent.use_cases.tools.query_entities import query_entities
 
 
@@ -64,7 +68,25 @@ class GenerateScriptUseCase:
             system_prompt=SYSTEM_PROMPT,
             deps_type=AdminAgentDeps,
             output_type=GeneratedScript,
-            tools=[query_entities, run_validation_script],
+            tools=[
+                # Discovery: entities (for the script's target set).
+                query_entities,
+                # Schema inspection (Phase-8 create/fix): without these the LLM
+                # cannot learn a template's property names/types/required-fields or
+                # thesaurus labels, so it GUESSES (e.g. a `summary` property that
+                # does not exist) -> Uwazi rejects the create -> 0 entities. These
+                # read-only tools are reused from `uwazi_agent` (plan §3: import,
+                # not copy). All deps they touch (template_api, thesauri_api,
+                # template_mapper, schema_store) are wired in `drivers/runtime.py`;
+                # `stats_api` is None there, which degrades gracefully (no usage
+                # counts - the LLM needs names/types/labels, not counts).
+                get_templates_by_names,
+                list_templates,
+                get_thesauris_by_names,
+                list_thesauri,
+                # The validation gate.
+                run_validation_script,
+            ],
             model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
         )
 
