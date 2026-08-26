@@ -28,3 +28,22 @@ def test_build_agent_max_tokens_value_is_large_enough() -> None:
     """A multi-group merge script is ~100+ lines; 8192 is a sane floor. Pin it so
     a future edit can't silently shrink it below a useful output budget."""
     assert LLM_MAX_OUTPUT_TOKENS >= 4096
+
+
+def test_build_agent_registers_schema_inspection_tools() -> None:
+    """The generation agent must expose template + thesauri inspection tools so the
+    LLM can learn a template's property names/types/required-fields and thesaurus
+    labels BEFORE writing a create/update script. Without these the LLM guesses
+    property names (e.g. a `summary` that isn't on the template) -> Uwazi rejects
+    the create -> 0 entities. Reused from ``uwazi_agent`` (plan §3: import, not
+    copy). Construction is lazy (string model) - no provider contact."""
+    agent = GenerateScriptUseCase._build_agent("test")
+    names = set(agent._function_toolset.tools.keys())
+    assert {
+        "query_entities",
+        "run_validation_script",
+        "get_templates_by_names",
+        "list_templates",
+        "get_thesauris_by_names",
+        "list_thesauri",
+    } <= names

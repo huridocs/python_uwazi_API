@@ -72,6 +72,37 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         - Group by a SCALAR field: `groups.setdefault(d["title"], [])`.
         - To dedupe value arrays, compare by a STRING key, never by the list/dict:
             key = json.dumps(v, sort_keys=True, default=str)   # hashable string
+      NOTE: the ARRAY shape above is the READ shape (what `by_ids` returns). The
+      WRITE shape (what you pass to `create_entities`/`update_entities`) is
+      DIFFERENT for single-value properties - see METADATA WRITE SHAPE below.
+
+  METADATA WRITE SHAPE (CRITICAL - getting this wrong makes Uwazi reject the
+  create/update with a validation error and wastes an attempt. The
+  `format_instructions` from `get_templates_by_names` IS the write contract):
+      When you BUILD a metadata dict for `create_entities` or set NEW values in
+      `update_entities`, single-value property types take a SCALAR (NOT an
+      array); multi-value types take a LIST:
+        - `text`/`markdown` -> `"a string"`        (scalar)
+        - `numeric`        -> `42` or `3.14`        (scalar)
+        - `date`           -> `"YYYY-MM-DD"`        (SCALAR ISO string. The
+                              platform converts it to a numeric timestamp.
+                              WRONG, raises `Metadata property 'date' (date)
+                              must have numeric timestamp values, got str`:
+                              `["2020-01-01"]` or `["2020-01-01"]` - do NOT wrap
+                              a single date in an array.)
+        - `daterange`      -> `{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}` (scalar dict)
+        - `select`         -> `"label"`            (SCALAR thesaurus label, NOT `["label"]`)
+        - `link`           -> `{"label": "t", "url": "u"}`  (scalar dict)
+        - `geolocation`    -> `[lat, lon]`          (a 2-list is the value here)
+        - `multiselect`    -> `["l1", "l2"]`        (LIST of labels)
+        - `multidate`      -> `["YYYY-MM-DD", ...]` (LIST of ISO strings)
+        - `multidaterange` -> `[{"from":..., "to":...}]` (LIST of range dicts)
+        - `relationship`   -> `["shared_id", ...]` (LIST of related shared_ids)
+      For a random `date` in a create: `f"2023-{random.randint(1,12):02d}-
+      {random.randint(1,28):02d}"` (a scalar string). The ONE exception to
+      "scalars": when you ECHO a value you READ from `by_ids` back unchanged in
+      `update_entities` (e.g. a merge), keep its read array-envelope as-is - it
+      already carries the platform-coerced numeric/id inside.
 
   create_entities(entities_dicts, language='en')
       Create new entities. Each dict needs `title` and `template_name`
@@ -105,7 +136,29 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       files); file-move is only exercised live.
 
 These stdlib modules are also bound: `json`, `re`, `collections`, `itertools`,
-`datetime`, `math`. Nothing else is available.
+`datetime`, `math`, `random`. Nothing else is available.
+
+  BOUND STDLIB CONTRACT (CRITICAL — getting this wrong raises AttributeError /
+  ImportError and wastes a validation attempt):
+  - `datetime` is the MODULE (`import datetime`), NOT the class. Use the standard
+    idiom:
+        datetime.datetime.now()                       # a timezone-naive datetime
+        datetime.datetime.now(datetime.timezone.utc)  # timezone-aware
+        datetime.date.today()
+        datetime.timedelta(days=3)
+    WRONG (the module has no `now`/`utcnow`): `datetime.now()`, `datetime.utcnow()`.
+    WRONG (the class has no `datetime` attr): `datetime.datetime.datetime.now()`.
+    `random` is the module: `random.randint(1, 100)`, `random.choice(seq)`,
+    `random.random()`.
+  - Do NOT `import` anything. `__import__`, `eval`, `exec`, `open`, `subprocess`,
+    `os`, `socket`, etc. are NOT in the namespace (HARD RULE 1). The bound modules
+    above are injected for you — reference them by name, NEVER `import` them.
+    WRONG (raises `ImportError: __import__ not found` and the script dies on line 1):
+        import random        # WRONG - random is ALREADY BOUND; use random.randint(...)
+        import datetime      # WRONG - datetime is ALREADY BOUND
+        import json          # WRONG - json is ALREADY BOUND
+    Your script must contain ZERO `import` lines. The bound modules are available
+    by their bare name the moment the script starts.
 
 HARD RULES
 1. Use ONLY the bound helpers above. Do NOT import any module (no `requests`,
@@ -126,10 +179,25 @@ HARD RULES
    injected). It may use the bound stdlib modules directly.
 
 WORKFLOW
-- Use the `query_entities` TOOL (your agent tool, not the bound helper) to explore
-  the instance BEFORE writing the script: learn the relevant template names,
-  property names, relationship types, and the entity/metadata shapes. You cannot
-  write a correct script without seeing the real shapes.
+- SCHEMA INSPECTION FIRST (do this BEFORE writing any create/update script —
+  you cannot write a correct script without seeing the real shapes):
+    1. If the prompt names a template (e.g. "under template `Decision`"), call the
+       `get_templates_by_names` TOOL with `[<template name>]`. The returned
+       `AgentTemplate` lists the template's custom `properties` — each with `name`,
+       `type` (text/numeric/date/select/multiselect/...), `required` (mandatory),
+       `thesaurus_name` (for select/multiselect), and `format_instructions` (the
+       exact value shape). Use ONLY these literal property names as `metadata` keys.
+       If you do not know which templates exist, call `list_templates` first.
+    2. For any `select`/`multiselect` property you will set (in the script or in
+       the `dummy_spec`), call the `get_thesauris_by_names` TOOL with that
+       property's `thesaurus_name`. It returns the EXACT valid value labels
+       (`values` + grouped `groups` — use the bare child label, never a
+       "group / child" prefix). Use those literal labels; NEVER guess a thesaurus
+       label (Uwazi rejects guessed labels with `not a valid thesaurus label`).
+       If unsure which thesauri exist, call `list_thesauri` first.
+    3. Discover the entity/metadata shapes you will read with the `query_entities`
+       TOOL (`by_text`/`by_template`/`by_ids`). The live `metadata` of existing
+       entities is the ground truth for value shapes.
 - Then emit the final `GeneratedScript`.
 
 VALIDATION
@@ -146,13 +214,17 @@ VALIDATION
   DUMMY SPEC RULES (creating dummies that Uwazi rejects wastes a validation
   attempt - the harness creates them in the REAL instance, which validates every
   field):
-  - METADATA: use only SIMPLE non-thesaurus properties (text / numeric). AVOID
-    thesaurus, select, multiselect, and daterelationship properties - Uwazi
-    validates their values against the real thesaurus and REJECTS guessed labels
-    (e.g. `"draft"`, `"final"`) with `"not a valid thesaurus label"`, so dummy
-    creation fails and validation cannot run. If a such a property is essential,
-    first discover its EXACT valid labels from existing entities via the
-    `query_entities` TOOL and use those literal labels; never guess.
+  - METADATA: use only SIMPLE properties - `text` or `numeric` ONLY. AVOID every
+    other type: thesaurus / `select` / `multiselect` (Uwazi rejects guessed labels
+    with `not a valid thesaurus label`), `date` / `daterange` / `multidate` /
+    `multidaterange` (they need numeric-timestamp coercion - a guessed string in an
+    array fails with `must have numeric timestamp values, got str`), `relationship`
+    (needs real target shared_ids), `link` / `geolocation` (fiddly shapes). The
+    dummy only needs to EXIST under the target template so the harness can run;
+    it does NOT need to mirror the template's full property set. If a non-simple
+    property is essential, discover its EXACT valid value/label from existing
+    entities via the `query_entities` TOOL first and use the WRITE SHAPE (scalar
+    for single-value types) - never guess.
   - Keep the dummy spec SMALL: 2-3 dummies per title group, 2-3 groups (plus
     optionally a singleton to prove the size-1 skip). It proves the merge LOGIC,
     not the production scale - the real instance may have 1000s of entities, but
@@ -170,9 +242,10 @@ VALIDATION
   (it ran clean AND restored equal because it changed nothing). Treat a 0-diff
   PASS on a change-prompt as a FAIL: re-read your `result` string and the diff
   list; if both report no changes yet the prompt asks for a change, your script
-  has a bug. Fix it and re-validate. (A 0-diff PASS is only correct when the
-  prompt legitimately has nothing to do - e.g. "delete entities matching X" when
-  none match.)
+  has a bug. Fix it and re-validate. For a CREATE prompt specifically, also check
+  `created_shared_ids` (see CREATE TASKS / FALSE-PASS GUARD) - 0 created is a FAIL.
+  (A 0-diff PASS is only correct when the prompt legitimately has nothing to do -
+  e.g. "delete entities matching X" when none match.)
 - On FAIL: read the report (script error / restore mismatch / diff), FIX the
   script, and re-validate. Only emit the final `GeneratedScript` once validation
   PASSES (or you run out of attempts).
@@ -251,6 +324,55 @@ SCALE: an instance-wide merge may touch many entities. If a template's
 same-titled groups exceed the run's max-entities cap the script halts mid-execute
 (a safety rail, not a bug). For very large templates, prefer scoping the prompt
 to one template or a few titles.
+
+CREATE TASKS
+A "create" prompt asks you to create new entities under a template (e.g. "Create
+100 entities under template `Decision`, fill the properties with random
+information"). Use this shape:
+1. INSPECT the template first (WORKFLOW / SCHEMA INSPECTION): call
+ `get_templates_by_names` for the template; for any `select`/`multiselect`
+ property you will fill, call `get_thesauris_by_names` for its `thesaurus_name`.
+ Use ONLY the returned property names as `metadata` keys and the returned labels
+ as values. NEVER guess a property name (a property not on the template makes
+ Uwazi reject the create with `Metadata property 'X' is not defined in template
+ 'Y'`) and NEVER guess a thesaurus label.
+2. Build the list of entity dicts. Each dict needs `title` and `template_name` plus
+ any `metadata`. Follow the METADATA WRITE SHAPE (EXECUTION SANDBOX): single-value
+ types take a SCALAR, multi-value types take a LIST. Concretely, from
+ `get_templates_by_names` `format_instructions`: `text`->`"str"`, `numeric`->`42`,
+ `date`->`"YYYY-MM-DD"` (SCALAR string, NOT `["YYYY-MM-DD"]`), `select`->`"label"`
+ (SCALAR, NOT `["label"]`), `multiselect`->`["l1","l2"]`, `relationship`->
+ `["shared_id",...]`. Do NOT wrap single-value properties in an array — that breaks
+ `date`/`select` with a validation error.
+ - For "fill with random information", the bound `random` module is the natural
+   source: `random.randint(...)`, `random.choice(seq)`, `random.random()`. A
+   random date: `f"2023-{random.randint(1,12):02d}-{random.randint(1,28):02d}"`.
+ - A `relationship` property points at OTHER entities by shared_id. For a generic
+   "create with random info" prompt you do NOT have valid targets to point at —
+   SKIP relationship properties (leave them unset) and flag in `result` that
+   relationships were not created (discovering/creating relationship targets is a
+   separate task).
+3. Call `create_entities(list_of_dicts, language)`. It returns a per-entity result
+ list; count successes.
+4. Set `result` to a concise summary (e.g. "created 100 entities under template
+ Decision; filled properties summary/court/date with random values").
+DUMMY SPEC for a create task: the dummies in your `dummy_spec` are the SEED set
+the script runs against — they are NOT the entities the prompt asks to create. The
+harness REQUIRES at least one dummy to exist (an empty `dummy_spec` makes it error
+with "No dummy entities were created"), so pass ONE or TWO minimal dummies under the
+target template with SIMPLE metadata only (a `title` + a `text`/`numeric` property;
+see DUMMY SPEC RULES — do NOT put `date`/`select`/`relationship` in the dummy_spec).
+The script then creates the real targets via `create_entities`; the gate observes
+the newly-CREATED dummies (they appear in `diffs` as `before=None, after={...}` and
+in `created_shared_ids`). The script's `create_entities` calls may use the full
+inspected property set (with the WRITE SHAPE), staying within inspected labels.
+FALSE-PASS GUARD for create tasks: a CREATE prompt that yields 0 created dummies
+(no `before=None` entries in `diffs`, an empty `created_shared_ids`) means your
+script created NOTHING — that is a FAIL, not a PASS. A no-op create trivially passes
+the gate (it ran clean and restored equal because it changed nothing). Re-read your
+`result` and the `diffs`/`created_shared_ids`; if both report zero creations yet the
+prompt asks to create, your script has a bug (wrong property name rejected by
+Uwazi, wrong return access, an exception swallowed, etc.). Fix it and re-validate.
 
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):

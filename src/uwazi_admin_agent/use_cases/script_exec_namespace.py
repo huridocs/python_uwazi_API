@@ -18,7 +18,7 @@ This module:
   the shapes the system prompt declares (``AgentEntitySearchResult`` for search
   modes, ``list[AgentEntity]`` for ``by_ids``), post-filtered to scope;
 - binds the declared stdlib subset (``json, re, collections, itertools,
-  datetime, math``) and a curated ``SAFE_BUILTINS`` (no ``open``/``__import__``
+  datetime (module), math, random``) and a curated ``SAFE_BUILTINS`` (no ``open``/``__import__``
   /``eval``/``exec``/``compile``/``getattr``/...);
 - provides **no** ``entities`` list (discovery is runtime).
 
@@ -34,13 +34,14 @@ import asyncio
 import builtins as _builtins
 import collections
 import contextlib
+import datetime as _datetime
 import io
 import itertools
 import json
 import math
+import random
 import re
 import traceback
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -55,13 +56,19 @@ from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_functions
 
 # stdlib subset the system prompt promises the script (see system_prompt.py).
+# `datetime` is bound as the MODULE (``import datetime``), NOT the class, so the
+# script uses the standard ``datetime.datetime.now()`` / ``datetime.timedelta()``
+# idiom (matches the LLM's natural instinct and gives ``timedelta``/``date``/
+# ``time`` for free). ``random`` is pure-compute (no I/O) and is the natural tool
+# for "fill with random information" create scripts.
 _STDLIB: dict[str, Any] = {
     "json": json,
     "re": re,
     "collections": collections,
     "itertools": itertools,
-    "datetime": datetime,
+    "datetime": _datetime,
     "math": math,
+    "random": random,
 }
 
 # Curated builtins: enough to write the migration scripts, with the
