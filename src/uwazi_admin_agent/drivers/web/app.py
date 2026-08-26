@@ -334,7 +334,7 @@ def _confirm_dialog(
         with ui.dialog() as dialog, ui.card():
             ui.label(title).classes("text-h6")
             ui.label(message).classes("text-body1")
-            with ui.row().classes("justify-end"):
+            with ui.row().classes("w-full justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close())
                 ui.button(
                     "Confirm",
@@ -359,7 +359,7 @@ def _rename_dialog(run_id: str) -> None:
                 value=run_id,
                 validation={"Required": lambda v: bool(v and v.strip())},
             ).classes("w-full text-h6")
-            with ui.row().classes("q-mt-lg justify-end"):
+            with ui.row().classes("q-mt-lg w-full justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
                 ui.button(
                     "Rename",
@@ -558,7 +558,7 @@ def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any) -> None:
             placeholder="e.g. merge-entities-2026",
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
-        with ui.row().classes("q-mt-lg justify-end"):
+        with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_name_next(state, name_input, stepper))
 
@@ -589,7 +589,7 @@ def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any) -> Non
             .props("autogrow input-style='min-height: 200px;'")
             .style("width: 100%")
         )
-        with ui.row().classes("q-mt-lg justify-end"):
+        with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
             ui.button("Next", on_click=lambda: _wizard_prompt_next(state, prompt_input, stepper))
@@ -613,7 +613,7 @@ def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> N
             "prompt",
             backward=lambda v: f"Prompt: {v[:120]}{'...' if len(v) > 120 else ''}",
         ).classes("text-body1")
-        with ui.row().classes("q-mt-lg justify-end"):
+        with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: stepper.set_value("prompt")).props("color=grey-7 flat")
             ui.button(
