@@ -14,8 +14,6 @@ services:
     network_mode: host
     environment:
       - UWAZI_URL=${UWAZI_URL}
-      - UWAZI_USER=${UWAZI_USER}
-      - UWAZI_PASSWORD=${UWAZI_PASSWORD}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
     volumes:
       - admin_agent_data:/app/data

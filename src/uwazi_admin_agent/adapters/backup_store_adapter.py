@@ -124,6 +124,27 @@ class FilesystemBackupStore(BackupStorePort):
             self._rm_tree(run_dir)
         logger.debug("run folder deleted run={}", run_id)
 
+    @override
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        """Move a run's folder to ``new_id`` and rewrite its manifest's ``run_id``."""
+        old_dir = self._run_dir(old_id)
+        new_dir = self._run_dir(new_id)
+        if not old_dir.exists():
+            raise FileNotFoundError(f"No run folder for {old_id!r}")
+        if new_dir.exists():
+            raise FileExistsError(f"A run folder already exists for {new_id!r}")
+        old_dir.rename(new_dir)
+        try:
+            manifest = self.load_manifest(new_id)
+        except FileNotFoundError:
+            return
+        manifest.run_id = new_id
+        # Rename the inner prompt snapshot copy (runs/<id>/<id>.yaml) if present.
+        inner_old = new_dir / f"{old_id}.yaml"
+        if inner_old.is_file():
+            inner_old.rename(new_dir / f"{new_id}.yaml")
+        self.save_manifest(new_id, manifest)
+
     @staticmethod
     def _rm_tree(path: Path) -> None:
         for child in path.iterdir():
