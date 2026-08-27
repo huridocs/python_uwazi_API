@@ -10,13 +10,12 @@ No business logic: this is a driver that wires adapters to use cases, matching
 the ``drivers/`` layer convention.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import yaml
 
+from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
 from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
 from uwazi_admin_agent.configuration import (
@@ -27,11 +26,22 @@ from uwazi_admin_agent.configuration import (
     RUNS_FILE,
     RUNS_PATH,
 )
+from uwazi_admin_agent.domain.audit_record import AuditRecord
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
-from uwazi_admin_agent.drivers.runtime import build_backup_store, build_runtime
+from uwazi_admin_agent.domain.revert_verification import format_verification_result
+from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_runtime
+from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
+
+
+class GenerateError(Exception):
+    """Generation failed; the manifest is persisted as GENERATION_FAILED."""
+
+
+class RevertVerificationError(Exception):
+    """Revert succeeded but post-revert verification found mismatches."""
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,7 @@ class RunSummary:
     """One row in the runs table — the manifest's headline fields."""
 
     run_id: str
+    last_executed_at: datetime | None
     status: RunStatus
     created_at: datetime
     prompt: str
@@ -46,12 +57,11 @@ class RunSummary:
     deleted: int
     created: int
     rewired: int
+    error: str | None
 
 
 @dataclass(frozen=True)
 class RunDetail:
-    """A run's manifest plus its emitted script source (for inspect views)."""
-
     run_id: str
     status: RunStatus
     created_at: datetime
@@ -61,6 +71,17 @@ class RunDetail:
     deleted: int
     created: int
     rewired: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ExecutionEvent:
+    """One row in a run's execution-history modal (derived from audit records)."""
+
+    timestamp: datetime
+    type: str  # "execute" | "revert"
+    outcome: str  # "success" | "failure"
+    detail: str | None
 
 
 def _touch_counts(manifest: MigrationManifest) -> tuple[int, int, int, int]:
@@ -90,11 +111,13 @@ def list_runs() -> list[RunSummary]:
                 run_id=manifest.run_id,
                 status=manifest.status,
                 created_at=manifest.created_at,
+                last_executed_at=manifest.last_executed_at,
                 prompt=manifest.prompt,
                 modified=modified,
                 deleted=deleted,
                 created=created,
                 rewired=rewired,
+                error=manifest.error,
             )
         )
     return summaries
@@ -117,13 +140,53 @@ def get_run(run_id: str) -> RunDetail:
         deleted=deleted,
         created=created,
         rewired=rewired,
+        error=manifest.error,
     )
+
+
+def get_run_audit(run_id: str) -> list[AuditRecord]:
+    """Return a run's full audit trail (empty when the run has no audit log)."""
+    return build_audit_log().load(run_id)
+
+
+def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
+    """Keep only run-level lifecycle audit records (execute / revert).
+
+    Per-entity writes (update, delete, restore_*, …) carry ``shared_ids`` and are
+    excluded; the run-level records emitted by the execute/revert use cases use
+    ``op_kind`` ``"execute"`` / ``"revert"`` with empty ``shared_ids``.
+    """
+    return [r for r in records if r.op_kind in ("execute", "revert")]
+
+
+def get_execution_history(run_id: str, audit_log: AuditLogPort | None = None) -> list[ExecutionEvent]:
+    """Return a run's execute/revert events, newest first, for the history modal.
+
+    Reads the run's on-disk audit log (``<RUNS_PATH>/<run_id>/audit.jsonl``) unless
+    an ``audit_log`` is injected (used by tests); a run with no audit log (never
+    executed, or pre-Phase 6) yields an empty list.
+    """
+    log = audit_log if audit_log is not None else JsonlAuditLog(RUNS_PATH)
+    audit = log.load(run_id)
+    events = _run_level_events(audit)
+    events.sort(key=lambda r: r.timestamp, reverse=True)
+    return [
+        ExecutionEvent(
+            timestamp=r.timestamp,
+            type=r.op_kind,
+            outcome=r.outcome.value,
+            detail=r.detail,
+        )
+        for r in events
+    ]
 
 
 async def create_and_generate(name: str, prompt: str, user: str, password: str) -> None:
     """Write the prompt + active-run pointer, then generate the script + manifest.
 
-    Raises on LLM/Uwazi failure (the caller surfaces it via ``ui.notify``).
+    On failure the manifest is persisted with ``status=GENERATION_FAILED`` (the
+    prompt yaml stays on disk for retry) and :class:`GenerateError` is raised
+    so the caller shows a short toast; the full detail lives on the manifest.
     """
     PROMPTS_PATH.mkdir(parents=True, exist_ok=True)
     (PROMPTS_PATH / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
@@ -140,8 +203,22 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str) 
         entity_repository=runtime.entity_repository,
     )
 
-    script = await use_case.execute(prompt)
-    emit_generated_script(script, run_path)
+    try:
+        script = await use_case.execute(prompt)
+        emit_generated_script(script, run_path)
+    except Exception as exc:
+        manifest = MigrationManifest(
+            run_id=name,
+            created_at=datetime.now(timezone.utc),
+            prompt=prompt,
+            script="",
+            status=RunStatus.GENERATION_FAILED,
+            snapshot_dir=str(run_path),
+            error=str(exc),
+            error_step="generate",
+        )
+        runtime.backup_store.save_manifest(name, manifest)
+        raise GenerateError(str(exc)) from exc
 
     manifest = MigrationManifest(
         run_id=name,
@@ -157,11 +234,15 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str) 
 async def execute_run(run_id: str, user: str, password: str, on_error: str | None = None) -> None:
     """Execute a run's persisted script against real entities.
 
-    Raises :class:`ExecuteRefusedError`/:class:`CapExceededError`/:class:`RuntimeError`.
+    Raises :class:`GenerateError` when the run never generated a script,
+    :class:`ExecuteRefusedError` when the gate refuses, or
+    :class:`ScriptExecutionError`/:class:`CapExceededError` on script failure.
     """
     policy = _resolve_on_error(on_error)
     runtime = build_runtime(user=user, password=password)
     manifest = runtime.backup_store.load_manifest(run_id)
+    if manifest.status == RunStatus.GENERATION_FAILED:
+        raise GenerateError("script generation failed; retry or delete the task")
     script = (RUNS_PATH / run_id / "script.py").read_text(encoding="utf-8")
 
     use_case = ExecuteScriptUseCase(
@@ -187,11 +268,20 @@ async def execute_run(run_id: str, user: str, password: str, on_error: str | Non
 async def revert_run(run_id: str, user: str, password: str) -> None:
     """Revert a run and verify the restore.
 
-    Raises :class:`RevertRefusedError` on refusal.
+    Raises :class:`RevertRefusedError` on refusal and
+    :class:`RevertVerificationError` when the revert succeeded but the
+    post-revert verification found mismatches (persisted on the manifest).
     """
     runtime = build_runtime(user=user, password=password)
     await runtime.revert_use_case.revert(run_id)
-    await runtime.verify_use_case.verify(run_id)
+    result = await runtime.verify_use_case.verify(run_id)
+    if not result.ok:
+        detail = format_verification_result(result)
+        manifest = runtime.backup_store.load_manifest(run_id)
+        manifest.error = detail
+        manifest.error_step = "verify"
+        runtime.backup_store.save_manifest(run_id, manifest)
+        raise RevertVerificationError(detail)
 
 
 def delete_run(run_id: str) -> None:
@@ -239,6 +329,22 @@ __all__ = [
     "rename_run",
     "execute_run",
     "get_run",
+    "list_runs",
+    "revert_run",
+]
+
+
+__all__ = [
+    "GenerateError",
+    "RevertVerificationError",
+    "RunDetail",
+    "RunSummary",
+    "create_and_generate",
+    "delete_run",
+    "rename_run",
+    "execute_run",
+    "get_run",
+    "get_run_audit",
     "list_runs",
     "revert_run",
 ]

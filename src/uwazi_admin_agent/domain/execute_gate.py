@@ -29,6 +29,10 @@ class ExecuteRefusedError(Exception):
     """Raised by the execute use case when the gate refuses a (re-)execute."""
 
 
+class ScriptExecutionError(Exception):
+    """Raised when a validated script fails mid-run (carries the full error detail)."""
+
+
 class ExecuteGateDecision(BaseModel):
     """Outcome of :func:`decide_execute_gate`.
 
@@ -54,4 +58,6 @@ def decide_execute_gate(status: RunStatus, has_touch_set: bool) -> ExecuteGateDe
     """
     if status == RunStatus.FAILED:
         return ExecuteGateDecision(action="refuse", reason="run previously failed; revert the partial first")
+    if status == RunStatus.GENERATION_FAILED:
+        return ExecuteGateDecision(action="refuse", reason="script generation failed; delete or retry the task")
     return ExecuteGateDecision(action="allow", needs_reset=has_touch_set)
