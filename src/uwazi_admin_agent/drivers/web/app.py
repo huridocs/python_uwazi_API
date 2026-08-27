@@ -1,9 +1,10 @@
 """NiceGUI web UI for the admin agent — a driver replacing the CLI for common ops.
 
-Single page: a table of runs with status badges + row actions (execute, rollback,
-view prompt, and a "more" menu with delete + rename), and a "New Task" wizard
-(stepper) to create + generate a run. Mutating operations run as background
-tasks; the table auto-refreshes every 5s.
+Single page: a table of runs with status badges + row actions (execute, revert,
+info, and a per-row "more" menu with rename / history / error details / retry /
+delete), and a "New Task" wizard (stepper) to create + generate a run. Mutating
+operations run as background tasks; the table auto-refreshes every 5s by pushing
+rows in place, so open row menus survive the refresh.
 
 This is a driver: it wires the service layer (:mod:`run_service`) to the UI and
 contains no business logic, matching the ``drivers/`` layer convention.
@@ -78,7 +79,7 @@ def _can_execute_js(status_var: str) -> str:
 def _mark_running(run_id: str, label: str) -> None:
     """Show a run's status as in-flight (spinner + label) in the table."""
     _running_runs[run_id] = label
-    runs_table.refresh()
+    _broadcast_rows()
 
 
 def _unmark_running(run_id: str) -> None:
@@ -168,13 +169,6 @@ def _broadcast_notify(message: str, type: str = "positive", **kwargs: Any) -> No
         client.outbox.enqueue_message("notify", options, client.id)
 
 
-def _broadcast_refresh() -> None:
-    """Refresh the runs table on every connected client (safe from background tasks)."""
-    for client in app.clients():
-        with client:
-            runs_table.refresh()
-
-
 def _notify_error(title: str, detail: str, type_: str = "negative") -> None:
     """Short headline toast; the full detail lives in the run's error dialog."""
     first_line = (detail or "").strip().splitlines()[0] if (detail or "").strip() else title
@@ -231,9 +225,8 @@ def _can_revert_js(status_var: str) -> str:
     return f"({status_var} === 'executed' || {status_var} === 'failed')"
 
 
-@ui.refreshable
-def runs_table() -> None:
-    """Render the runs table (refreshable so the timer / actions can rebuild it)."""
+def _run_rows() -> list[dict[str, Any]]:
+    """Compute the current table rows (persisted runs + transient placeholders)."""
     runs = list_runs()
     persisted_ids = {r.run_id for r in runs}
     rows = [_summary_to_row(r) for r in runs]
@@ -246,8 +239,18 @@ def runs_table() -> None:
         for row in rows:
             if row["id"] == run_id:
                 row["status"] = label
+    return rows
 
-    table = ui.table(rows=rows, columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
+
+def _build_runs_table() -> ui.table:
+    """Create the runs table once per client; refreshes update rows in place.
+
+    The 5s auto-refresh used to delete and rebuild the whole table via
+    ``@ui.refreshable``, which destroyed any open row menu. Reassigning
+    ``table.rows`` and calling ``update()`` re-renders the cells reactively
+    while an open ``q-menu`` (rendered in a portal) survives untouched.
+    """
+    table = ui.table(rows=_run_rows(), columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
 
     table.add_slot(
         "body-cell-status",
@@ -262,78 +265,186 @@ def runs_table() -> None:
         """,
     )
 
+    # Actions: execute, revert, info, then the row menu button LAST. The menu
+    # itself is a page-level ``ui.menu`` (``_build_row_menu``): a menu nested in
+    # the cell is unmounted whenever the 5s rows update re-renders the table
+    # body — exactly the bug this design avoids. The ``rowmenu`` event carries
+    # the row and the click event so the server can replay it on an off-screen
+    # anchor at the cursor position.
     table.add_slot(
         "body-cell-actions",
         f"""
-        <q-td :props="props">
+        <q-td :props="props" class="text-no-wrap">
             <q-btn dense flat icon="play_arrow" color="primary"
                    :disable="{_IN_FLIGHT_JS} || !{_can_execute_js("props.row.status")}"
                    @click="$parent.$emit('execute', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
                    :disable="{_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
                    @click="$parent.$emit('rollback', props.row)" />
+            <q-btn dense flat icon="info" color="grey-8"
+                   @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="{_IN_FLIGHT_JS}"
-                   @click="$parent.$emit('menu', props.row)" />
-            <q-btn dense flat icon="history" color="secondary"
-                   :disable="{_IN_FLIGHT_JS}"
-                   @click="$parent.$emit('history', props.row)" />
-            <q-btn v-if="props.row.error" dense flat icon="warning" color="negative"
-                   @click="$parent.$emit('errors', props.row)" />
+                   @click="$parent.$emit('rowmenu', props.row, $event)" />
         </q-td>
         """,
     )
     table.add_slot("no-data", '<div class="text-body1 text-grey-7 q-pa-md">No tasks</div>')
 
-    def _on_execute(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _mark_running(run_id, "running")
-        background_tasks.create(
-            _run_async(
-                execute_run(run_id, app.storage.user["user"], app.storage.user["password"]),
-                f"Executed {run_id}",
-                run_id,
-            ),
-            name=f"execute {run_id}",
-        )
-
-    def _on_rollback(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _confirm_dialog(
-            "Rollback run",
-            f"Revert run {run_id!r}? This restores every backed-up entity and deletes created ones.",
-            lambda: revert_run(run_id, app.storage.user["user"], app.storage.user["password"]),
-            success_msg=f"Reverted {run_id}",
-            run_id=run_id,
-        )
-
-    def _on_rename(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _rename_dialog(run_id)
-
-    def _on_delete(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _delete_dialog(run_id)
-
-    def _on_menu(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _actions_dialog(run_id)
-
-    def _on_history(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _history_dialog(run_id)
-
-    def _on_errors(e: Any) -> None:
-        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-        _error_dialog(run_id)
-
     table.on("execute", _on_execute)
     table.on("rollback", _on_rollback)
-    table.on("rename", _on_rename)
-    table.on("menu", _on_menu)
+    table.on("info", _on_info)
+    table.on("rowmenu", _on_rowmenu)
     table.on("history", _on_history)
     table.on("errors", _on_errors)
     table.on("delete", _on_delete)
+    return table
+
+
+def _build_row_menu() -> None:
+    """Build the page-level per-row menu (once per client, outside the table).
+
+    Items are server-side elements, so opening the menu never re-renders the
+    table; the selected run's id travels through ``app.storage.client``. The
+    menu is shown by replaying the row click on an off-screen anchor with the
+    recorded coordinates, so Quasar positions it at the cursor
+    (``touch-position``). The two conditional items (Retry / Error details)
+    are toggled per selection in ``_on_rowmenu``.
+    """
+    with ui.button(icon="more_vert").props("flat dense").classes("fixed top-[-100px] left-[-100px]") as anchor:
+        # Raw ``q-menu`` element: ``ui.menu`` refuses the ``touch-position`` prop,
+        # which is what makes Quasar place the menu at the replayed click's
+        # coordinates. ``auto-close`` covers what ``ui.menu_item``'s registered
+        # close callback would do (the raw element isn't a ``ui.menu``).
+        menu = ui.element("q-menu").props("touch-position auto-close")
+        with menu:
+            retry_item = ui.menu_item("Retry generation", lambda: _row_menu_action(_rowmenu_retry))
+            errors_item = ui.menu_item("Error details", lambda: _row_menu_action(_error_dialog))
+            ui.separator()
+            ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
+            ui.menu_item("History", lambda: _row_menu_action(_history_dialog))
+            ui.menu_item("Delete", lambda: _row_menu_action(_delete_dialog)).classes("text-negative")
+    retry_item.set_visibility(False)
+    errors_item.set_visibility(False)
+    context.client._row_menu = menu  # noqa: SLF001 — per-client handle
+    context.client._row_menu_anchor = anchor  # noqa: SLF001
+    context.client._row_menu_retry = retry_item  # noqa: SLF001
+    context.client._row_menu_errors = errors_item  # noqa: SLF001
+
+
+def _row_menu_action(action: Any) -> None:
+    """Run a menu action against the run selected in the row menu."""
+    run_id = app.storage.client.get("rowmenu_run", "")
+    if run_id:
+        action(run_id)
+
+
+def _rowmenu_retry(run_id: str) -> None:
+    """Delete the failed run and restart its generation with the same prompt."""
+    try:
+        detail = get_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        return
+    delete_run(run_id)
+    _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
+
+
+def _on_history(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _history_dialog(run_id)
+
+
+def _on_errors(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _error_dialog(run_id)
+
+
+def _on_info(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _info_dialog(run_id)
+
+
+def _refresh_rows_client() -> None:
+    """Push fresh rows into this client's live table without rebuilding it."""
+    table = getattr(context.client, "_runs_table", None)
+    if table is None or table.is_deleted:
+        return
+    table.rows = _run_rows()
+    table.update()
+
+
+def _broadcast_rows() -> None:
+    """Refresh table rows on every connected client (safe from background tasks)."""
+    for client in app.clients():
+        with client:
+            _refresh_rows_client()
+
+
+def _on_execute(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _mark_running(run_id, "running")
+    background_tasks.create(
+        _run_async(
+            execute_run(run_id, app.storage.user["user"], app.storage.user["password"]),
+            f"Executed {run_id}",
+            run_id,
+        ),
+        name=f"execute {run_id}",
+    )
+
+
+def _on_rollback(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _confirm_dialog(
+        "Rollback run",
+        f"Revert run {run_id!r}? This restores every backed-up entity and deletes created ones.",
+        lambda: revert_run(run_id, app.storage.user["user"], app.storage.user["password"]),
+        success_msg=f"Reverted {run_id}",
+        run_id=run_id,
+    )
+
+
+def _on_delete(e: Any) -> None:
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    _delete_dialog(run_id)
+
+
+def _on_rowmenu(e: Any) -> None:
+    """Open the page-level row menu for the clicked run at the click position.
+
+    ``e.args`` is ``[row, click_event]``; only ``clientX``/``clientY`` survive
+    event serialization. Conditional items (Retry / Error details) are toggled
+    per the run's state, then the row's click is replayed on the off-screen
+    anchor so Quasar positions the menu at the cursor (``touch-position``).
+    """
+    args = e.args if isinstance(e.args, list) else [e.args]
+    row = args[0] if args else {}
+    run_id = row["name"] if isinstance(row, dict) else row
+    click = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+    app.storage.client["rowmenu_run"] = run_id
+    show_retry = False
+    show_errors = False
+    try:
+        detail = get_run(run_id)
+        show_retry = detail.status.value == "generation_failed"
+        show_errors = bool(detail.error)
+    except Exception:  # noqa: BLE001 — a missing run just hides the conditional items
+        pass
+    context.client._row_menu_retry.set_visibility(show_retry)  # noqa: SLF001
+    context.client._row_menu_errors.set_visibility(show_errors)  # noqa: SLF001
+
+    anchor = context.client._row_menu_anchor  # noqa: SLF001
+    client_x = int(click.get("clientX", 0) or 0)
+    client_y = int(click.get("clientY", 0) or 0)
+    ui.run_javascript(
+        f"""
+        (() => {{
+          const anchor = getHtmlElement({anchor.id});
+          anchor.dispatchEvent(new MouseEvent('click', {{clientX: {client_x}, clientY: {client_y}, bubbles: true}}));
+        }})()
+        """
+    )
 
 
 async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> None:
@@ -359,7 +470,7 @@ async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> 
     finally:
         if run_id is not None:
             _unmark_running(run_id)
-        _broadcast_refresh()
+        _broadcast_rows()
 
 
 def _confirm_dialog(
@@ -413,12 +524,11 @@ def _rename_dialog(run_id: str) -> None:
     dialog.open()
 
 
-def _actions_dialog(run_id: str) -> None:
-    """Task modal: the run's prompt plus Rename / Delete actions.
+def _info_dialog(run_id: str) -> None:
+    """Modal: the run's name and prompt (plus any recorded error hint).
 
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it — the previous inline ``q-btn-dropdown``
-    closed whenever the table rebuilt.
+    Created on the page layout (not inside the table) so the row auto-refresh
+    can't destroy it. Read-only; actions live in the row's ``more_vert`` menu.
     """
     try:
         detail = get_run(run_id)
@@ -426,38 +536,17 @@ def _actions_dialog(run_id: str) -> None:
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
 
-    def _rename() -> None:
-        dialog.close()
-        _rename_dialog(run_id)
-
-    def _delete() -> None:
-        dialog.close()
-        _delete_dialog(run_id)
-
-    def _view_error() -> None:
-        dialog.close()
-        _error_dialog(run_id)
-
-    def _retry_generation() -> None:
-        dialog.close()
-        delete_run(run_id)
-        _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
-
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
             ui.label(f"Task — {run_id}").classes("text-h6")
-            ui.label(detail.prompt).classes("text-body1 q-mt-md")
+            ui.separator()
+            ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+            ui.label(detail.prompt or "—").classes("text-body1")
             if detail.error:
-                with ui.card().classes("w-full q-mt-md bg-red-1"):
-                    first_line = detail.error.strip().splitlines()[0]
-                    ui.label(f"Last error: {first_line}").classes("text-body2 text-red-10")
-                    ui.button("View details", icon="warning", color="negative", on_click=_view_error).props("flat dense")
-            if detail.status.value == "generation_failed":
-                with ui.row().classes("w-full q-mt-md justify-end"):
-                    ui.button("Retry generation", icon="refresh", color="primary", on_click=_retry_generation)
+                ui.separator()
+                ui.label("Last error").classes("text-subtitle1 text-grey-7")
+                ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10")
             with ui.row().classes("w-full q-mt-lg justify-end"):
-                ui.button("Delete", icon="delete", color="negative", on_click=_delete)
-                ui.button("Rename", icon="edit", on_click=_rename)
                 ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
     dialog.open()
 
@@ -699,7 +788,7 @@ def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None 
         background_tasks.create(_run_async(result, success_msg, run_id), name=success_msg)
     else:
         ui.notify(success_msg, type="positive")
-        runs_table.refresh()
+        _broadcast_rows()
 
 
 def _new_task_wizard() -> None:
@@ -795,7 +884,7 @@ def _start_generation(name: str, prompt: str, user: str, password: str) -> None:
     run so both produce the identical toast/table/background-task flow.
     """
     _creating_runs[name] = {"name": name, "prompt": prompt}
-    runs_table.refresh()
+    _broadcast_rows()
     _generating_notifications[name] = ui.notification(
         "Generating script (this may take a minute)...",
         type="ongoing",
@@ -831,7 +920,7 @@ async def _do_generate(name: str, prompt: str, user: str, password: str) -> None
         notification = _generating_notifications.pop(name, None)
         if notification is not None:
             notification.dismiss()
-        _broadcast_refresh()
+        _broadcast_rows()
 
 
 def _build_page() -> None:
@@ -846,18 +935,21 @@ def _build_page() -> None:
         with ui.row().classes("items-center"):
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
-            ui.separator().props("vertical").classes("q-mx-sm")
-            ui.button("Capabilities", icon="info", on_click=_capabilities_dialog).props("color=secondary flat")
-            ui.button("Logs", icon="terminal", on_click=_logs_dialog).props("color=secondary flat")
-            ui.button("New Task", icon="add", on_click=_new_task_wizard)
-            ui.button("Log out", icon="lock", on_click=_logout).props("color=secondary flat")
+            with ui.button(icon="menu").props("flat round color=secondary"):
+                with ui.menu():
+                    ui.menu_item("Capabilities", _capabilities_dialog)
+                    ui.menu_item("Logs", _logs_dialog)
+                    ui.menu_item("New Task", _new_task_wizard)
+                    ui.separator()
+                    ui.menu_item("Log out", _logout)
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-6xl"):
-            ui.label("Tasks").classes("text-h5")
-            runs_table()
+            table = _build_runs_table()
+            context.client._runs_table = table  # noqa: SLF001 — per-client handle for in-place refresh
+    _build_row_menu()
 
-    ui.timer(5.0, runs_table.refresh)
+    ui.timer(5.0, _refresh_rows_client)
 
     # Prevent the browser back button from navigating away when a dialog is open.
     # Push a sentinel state on page load; when back is pressed while a dialog is
