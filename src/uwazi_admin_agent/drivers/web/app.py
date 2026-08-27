@@ -73,7 +73,7 @@ _IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)
 
 def _can_execute_js(status_var: str) -> str:
     """JS expression: True when the run may be executed (no script on generation failure)."""
-    return f"{status_var} !== 'generation_failed'"
+    return f"({status_var} !== 'generation_failed')"
 
 
 def _mark_running(run_id: str, label: str) -> None:
@@ -935,13 +935,14 @@ def _build_page() -> None:
         with ui.row().classes("items-center"):
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
-            with ui.button(icon="menu").props("flat round color=secondary"):
-                with ui.menu():
-                    ui.menu_item("Capabilities", _capabilities_dialog)
-                    ui.menu_item("Logs", _logs_dialog)
-                    ui.menu_item("New Task", _new_task_wizard)
-                    ui.separator()
-                    ui.menu_item("Log out", _logout)
+            with ui.row().classes("items-center q-ml-md"):
+                ui.button("New Task", icon="add", on_click=_new_task_wizard).props("flat color=secondary")
+                with ui.button(icon="menu").props("flat round color=secondary"):
+                    with ui.menu():
+                        ui.menu_item("Logs", _logs_dialog)
+                        ui.menu_item("Capabilities", _capabilities_dialog)
+                        ui.separator()
+                        ui.menu_item("Log out", _logout)
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-6xl"):

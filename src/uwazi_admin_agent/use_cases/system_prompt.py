@@ -409,19 +409,24 @@ document, so the strategy is a SAMPLE-DERIVED extractor function, not
 one-document logic. Use this exact shape:
 1. Call the `author_html_extractor` TOOL with a precise description of the
    values to extract + the target template/properties. It samples real HTML
-   files, authors a pure `def extract(html) -> dict | None` with ordered
+   files, authors a pure `def extract(html, ctx) -> dict | None` with ordered
    fallback strategies, and proves it in this exact sandbox. Embed the returned
    `def extract` source VERBATIM in your script - ZERO edits (no renaming, no
    re-indenting, no "improvements"): it was proven in this exact namespace
    (`def` works, `class` does not, everything it calls is bound).
+   Pass the entity's `ctx` so the extractor can pick the row/value that belongs
+   to THIS entity when the HTML holds rows for several entities.
 2. Per entity: `files = get_entity_files(sid)`; then
    `html_files = [f for f in files if htmlextract.is_html(f)]`
    (`is_html` is the fifth `htmlextract` member: content_type text/html or
    .html/.htm originalname). Then `data = get_file_bytes(f["filename"])`;
    `None` -> count it as missing and continue (do NOT crash the bulk run).
-3. `parsed = extract(data.decode("utf-8", errors="replace"))`; when it returns
-   None the value was NOT found - LEAVE THE ENTITY UNTOUCHED (hard rule 3:
-   never write a guessed/fallback value) and count it as unmatched.
+3. Build the per-entity context from the entity dict you already fetched via
+   `by_ids` (no extra fetch): `ctx = {"shared_id": d["shared_id"], "title":
+   d["title"], "metadata": d["metadata"]}`. Then
+   `parsed = extract(data.decode("utf-8", errors="replace"), ctx)`; when it
+   returns None the value was NOT found for THIS entity - LEAVE THE ENTITY UNTOUCHED
+   (hard rule 3: never write a guessed/fallback value) and count it as unmatched.
 4. Accumulate update dicts (`shared_id` + `template_name` + `metadata` per
    METADATA WRITE SHAPE - single-value types take a SCALAR) and call
    `update_entities(updates, language)` in chunks of ~50.
