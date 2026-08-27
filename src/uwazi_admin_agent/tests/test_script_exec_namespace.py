@@ -192,30 +192,44 @@ def test_stdlib_binds_htmlextract_members() -> None:
 
 
 def test_run_script_sync_extract_idiom_runs_clean() -> None:
-    """The embed idiom: a script defines `def extract(html)` using `re` +
-    `htmlextract.tables`, runs it over two literal HTML strings (one matching,
-    one not), and sets result. Proves the extraction contract end-to-end."""
+    """The embed idiom: a script defines `def extract(html, ctx)` using
+    `htmlextract.tables`, runs it over literal (html, ctx) PAIRS — two entities
+    with byte-identical HTML but different ctx must extract DIFFERENT rows —
+    and sets result. Proves the extraction contract end-to-end in the real
+    sandbox namespace."""
     ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
     code = """
-def extract(html):
+def extract(html, ctx):
     try:
         tables = htmlextract.tables(html)
         for table in tables:
             for row in table:
-                for i, cell in enumerate(row):
-                    if cell.strip().lower() == "case number":
-                        return {"case_number": row[i + 1]}
+                if row and row[0] == ctx["title"]:
+                    return {"case_number": row[1]}
         return None
     except Exception:
         return None
 
-matched = extract("<table><tr><td>Case Number</td><td>42</td></tr></table>")
-unmatched = extract("<p>nothing here</p>")
-result = f"{1 if matched else 0}/{2 if unmatched is None else 99}"
+html = (
+    "<table>"
+    "<tr><th>Title</th><th>Case number</th></tr>"
+    "<tr><td>Case A</td><td>2023/111</td></tr>"
+    "<tr><td>Case B</td><td>2023/222</td></tr>"
+    "</table>"
+)
+ctx_a = {"shared_id": "a", "title": "Case A", "metadata": {}}
+ctx_b = {"shared_id": "b", "title": "Case B", "metadata": {}}
+parsed_a = extract(html, ctx_a)
+parsed_b = extract(html, ctx_b)
+unmatched = extract(html, {"shared_id": "c", "title": "Case C", "metadata": {}})
+result = (
+    f"{parsed_a['case_number']}|{parsed_b['case_number']}|"
+    f"{'None' if unmatched is None else 'BUG'}"
+)
 """
     result, error = run_script_sync(code, ns)
     assert error is None
-    assert result == "1/2"
+    assert result == "2023/111|2023/222|None"
 
 
 def test_run_script_sync_import_html_fails() -> None:

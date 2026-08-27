@@ -251,6 +251,7 @@ def test_prompt_has_extraction_tasks_section() -> None:
         "get_entity_files",
         "get_file_bytes",
         "htmlextract",
+        "extract(html, ctx)",
     ):
         assert token in SYSTEM_PROMPT, token
 

@@ -1,12 +1,12 @@
 """The ``author_html_extractor`` tool: a nested subagent that authors the pure
-``def extract(html) -> dict | None`` function for HTML extraction tasks (§
+``def extract(html, ctx) -> dict | None`` function for HTML extraction tasks (§
 extraction phase).
 
 Why a subagent: a bulk extraction over ~5000 entities cannot hardcode one
 document's layout — the value sits in a different spot per document. Instead a
 nested extractor agent SAMPLES ~8-12 real HTML supporting files (via
 ``peek_entity_files`` / ``peek_file_text``), authors a pure
-``def extract(html) -> dict | None`` with ordered fallback strategies, and
+``def extract(html, ctx) -> dict | None`` with ordered fallback strategies, and
 SELF-PROVES it with ``run_validation_script`` against the same literal samples.
 The main generation agent then embeds the returned source VERBATIM in the
 emitted bulk script — zero edits — because it was proven in this exact sandbox
@@ -41,7 +41,7 @@ _EXTRACTOR_SYSTEM_PROMPT = """\
 class ExtractorFunction(BaseModel):
 Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
 
-    def extract(html: str) -> dict | None:
+    def extract(html: str, ctx: dict) -> dict | None:
 
 - NO import lines. NO class statements. (The target sandbox has no
   `__import__` and no `__build_class__`; `def` works.)
@@ -53,6 +53,14 @@ Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
       htmlextract.meta(html)   -> {meta name-or-property: content}
       htmlextract.title(html)  -> <title> text or ""
 - Also allowed: the bound `re` module and plain str/list/dict methods.
+- `ctx` carries the entity's identity: a plain dict
+  `{"shared_id": str, "title": str, "metadata": {prop: [values]}}` built by the
+  bulk script per entity. When one HTML document holds rows/values for MULTIPLE
+  entities (e.g. a table with one row per entity, distinguishable only by an
+  entity property), use `ctx` to select the entry that belongs to THIS entity
+  (e.g. match `ctx["title"]` or a `ctx["metadata"]` value against the row) and
+  return only that entity's values. When the HTML holds one entity's data, you
+  may ignore `ctx`.
 - Strategy: ORDERED FALLBACKS for scattered values, because the value is NOT in
   the same spot in every document. Try in order, first hit wins:
   1. meta tag lookup (htmlextract.meta)
@@ -64,13 +72,16 @@ Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
 - Guard the whole body with try/except returning None on odd input. Fully
   deterministic: no random, no I/O, no prints.
 WORKFLOW: use the `query_entities` tool to sample ~8-12 real entities across the
-target set, filter to their HTML files with `htmlextract.is_html` semantics
-(content_type text/html or .html/.htm originalname), fetch their texts with
-`peek_file_text`, study where the target values appear, author `extract`, then
-SELF-PROVE it: call `run_validation_script` with a script that defines your
-`extract` VERBATIM and runs it over the fetched literal HTML strings, setting
-`result` to the matched/total counts (per fallback strategy if useful). Refine
-until coverage is good, then emit ExtractorFunction with honest
+target set — capture each sampled entity's title and metadata too, since they
+become its `ctx` — filter to their HTML files with `htmlextract.is_html`
+semantics (content_type text/html or .html/.htm originalname), fetch their texts
+with `peek_file_text`, study where the target values appear, author `extract`,
+then SELF-PROVE it: call `run_validation_script` with a script that defines your
+`extract` VERBATIM and runs it over literal (html, ctx) PAIRS (NOT bare html
+strings), setting `result` to the matched/total counts (per fallback strategy if
+useful). The pairs MUST include at least one case where two entities share
+byte-identical HTML but different `ctx` and must extract different rows/values.
+Refine until coverage is good, then emit ExtractorFunction with honest
 samples_total/samples_matched numbers and notes about unmatched samples.
 """
 
@@ -80,7 +91,7 @@ class ExtractorFunction(BaseModel):
 
     python_code: str = Field(
         description=(
-            "The complete source of a single pure `def extract(html: str) -> dict | None` "
+            "The complete source of a single pure `def extract(html: str, ctx: dict) -> dict | None` "
             "function. NO import lines, NO class statements."
         )
     )
@@ -93,7 +104,7 @@ class ExtractorFunction(BaseModel):
 def validate_extractor_source(code: str) -> str | None:
     """Validate emitted extractor source WITHOUT mocks: parse it, reject imports
     and classes, then ``exec`` it in the script sandbox and require a callable
-    one-argument ``extract``.
+    two-argument ``extract``.
 
     Returns ``None`` when valid, otherwise a rejection message the generation
     agent can act on. Pure seam (no LLM, no I/O) — unit-tested directly.
@@ -116,16 +127,21 @@ def validate_extractor_source(code: str) -> str | None:
     if not callable(extract):
         return "Rejected: extractor source must define a callable named `extract`."
     code_obj = getattr(extract, "__code__", None)
-    if code_obj is None or code_obj.co_argcount != 1:
+    if (
+        code_obj is None
+        or code_obj.co_argcount != 2
+        or code_obj.co_flags & 0x04  # CO_VARARGS
+        or code_obj.co_flags & 0x08  # CO_VARKEYWORDS
+    ):
         argcount = code_obj.co_argcount if code_obj is not None else -1
-        return f"Rejected: `extract` must take exactly one argument (html), got {argcount}."
+        return f"Rejected: `extract` must take exactly two arguments (html, ctx), got {argcount}."
     return None
 
 
 def author_html_extractor(ctx: RunContext[AdminAgentDeps], task: str) -> str:
     """Run the nested extractor subagent on ``task`` (a precise description of the
     values to extract + the target template/properties). Returns the validated
-    `def extract(html)` source wrapped in a fenced block, plus its coverage
+    `def extract(html, ctx)` source wrapped in a fenced block, plus its coverage
     stats. The generation agent embeds the source VERBATIM in the bulk script."""
     deps: AdminAgentDeps = ctx.deps
     extractor_agent = deps.extractor_agent
