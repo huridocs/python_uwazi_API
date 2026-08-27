@@ -26,6 +26,7 @@ from pydantic_ai import RunContext
 
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
+from uwazi_agent.domain.agent_template import AgentTemplate
 
 
 async def run_validation_script(
@@ -67,6 +68,9 @@ async def run_validation_script(
             f"consume a validation attempt. ({deps.validation_attempts}/{deps.validation_limit} used)"
         )
 
+    rejection = await _missing_required_property_rejection(deps, dummy_spec, deps.validation_attempts, deps.validation_limit)
+    if rejection is not None:
+        return rejection
     deps.validation_attempts += 1
     run_number = deps.validation_attempts
 
@@ -93,6 +97,43 @@ def _limit_reached(deps: AdminAgentDeps) -> str:
         "Emit the final GeneratedScript now using the patterns you verified during\n"
         "exploration. Do not call run_validation_script again."
     )
+
+
+async def _missing_required_property_rejection(
+    deps: AdminAgentDeps,
+    dummy_spec: list[AgentEntityCreate],
+    attempts: int,
+    limit: int,
+) -> str | None:
+    """Reject a dummy_spec missing required template properties, before any
+    attempt is consumed. Degrades silently (returns None) on lookup failure —
+    the harness stays the source of truth; this only catches the guaranteed
+    first-attempt loss early."""
+    if deps.template_api is None:
+        return None
+    try:
+        names = sorted({s.template_name for s in dummy_spec})
+        templates: list[AgentTemplate] = await deps.template_api.get_templates_by_names(names)
+        required_by_template = {t.name: [p.name for p in t.properties if p.required] for t in templates}
+    except Exception as exc:  # noqa: BLE001 — lookup failure must never block validation
+        logger.warning("required-property pre-check skipped: template lookup failed ({})", exc)
+        return None
+
+    for spec in dummy_spec:
+        missing = [prop for prop in required_by_template.get(spec.template_name, []) if prop not in spec.metadata]
+        if missing:
+            first = missing[0]
+            prop_type = next(
+                (p.type.value for t in templates if t.name == spec.template_name for p in t.properties if p.name == first),
+                "unknown",
+            )
+            return (
+                f"# VALIDATION REJECTED — dummy_spec for template '{spec.template_name}' is missing "
+                f"required property '{first}' (type {prop_type}). Add it to the dummy metadata (use the "
+                "WRITE SHAPE from get_templates_by_names format_instructions). This did NOT consume a "
+                f"validation attempt. ({attempts}/{limit} used)"
+            )
+    return None
 
 
 def _format_result(result: object, attempt: int, limit: int) -> str:

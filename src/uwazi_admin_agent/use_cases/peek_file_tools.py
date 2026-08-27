@@ -9,9 +9,9 @@ tools give it that window:
 - ``peek_entity_files``: list the uploaded file refs (documents + uploaded
   attachments) for a batch of entities — filenames, kinds, content types.
 - ``peek_file_text``: fetch one file's bytes and return them decoded as text
-  (``utf-8``/``replace``), truncated to ``MAX_PEEK_CHARS`` with a
-  ``[truncated]`` marker — HTML supporting files can be huge and the LLM
-  context is not.
+  (``utf-8``/``replace``), truncated to ``MAX_PEEK_CHARS`` keeping head AND tail
+  with a ``[truncated]`` marker — HTML supporting files can be huge and the LLM
+  context is not; pagination/footer tables often live near the file's end.
 
 Both are read-only over the raw repository ports wired on
 :class:`AdminAgentDeps` (``entity_repository`` / ``file_repository``, set in
@@ -26,8 +26,11 @@ from typing import Any
 
 from loguru import logger
 from pydantic_ai import RunContext
-
 from uwazi_admin_agent.configuration import MAX_PEEK_CHARS
+
+# Tail window kept when truncating: pagination/footer tables live near the end.
+_PEEK_TAIL_CHARS: int = 50_000
+
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 
@@ -59,8 +62,9 @@ async def peek_entity_files(ctx: RunContext[AdminAgentDeps], shared_ids: list[st
 
 async def peek_file_text(ctx: RunContext[AdminAgentDeps], shared_id: str, filename: str) -> str:
     """Fetch one supporting file's bytes by storage filename and return them
-    decoded as text (utf-8, errors='replace'), truncated to MAX_PEEK_CHARS with a
-    '[truncated]' marker. ``shared_id`` is accepted for logging/traceability only."""
+    decoded as text (utf-8, errors='replace'), truncated to MAX_PEEK_CHARS keeping
+    head and tail with a '[truncated]' marker. ``shared_id`` is accepted for
+    logging/traceability only."""
     deps: AdminAgentDeps = ctx.deps
     del shared_id  # traceability only: the storage filename is the fetch key
     if deps.file_repository is None:
@@ -74,7 +78,12 @@ async def peek_file_text(ctx: RunContext[AdminAgentDeps], shared_id: str, filena
     if data is None:
         return f"Error: file not found: {filename}"
     text = data.decode("utf-8", errors="replace")
+    return _truncate_peek(text)
+
+
+def _truncate_peek(text: str) -> str:
+    """Head+tail truncation to MAX_PEEK_CHARS (pure; unit-testable offline)."""
     if len(text) > MAX_PEEK_CHARS:
-        logger.info("peek_file_text: truncated {} to {} chars", filename, MAX_PEEK_CHARS)
-        text = text[:MAX_PEEK_CHARS] + "\n[truncated]"
+        head, tail = MAX_PEEK_CHARS - _PEEK_TAIL_CHARS, _PEEK_TAIL_CHARS
+        return text[:head] + "\n[...middle truncated...]\n" + text[-tail:] + "[truncated]"
     return text

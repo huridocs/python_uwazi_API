@@ -57,7 +57,7 @@ MAX_EXTRACTOR_LLM_CALLS: int = 40
 
 # Per-file character truncation for peek_file_text (generation-time HTML
 # sampling). HTML supporting files can be huge; the LLM context is not.
-MAX_PEEK_CHARS: int = 50_000
+MAX_PEEK_CHARS: int = 200_000
 
 # Row locale used when the dummy harness creates/snapshots/reverts dummies. The
 # generated script is target-agnostic; the harness fixes the locale for its own

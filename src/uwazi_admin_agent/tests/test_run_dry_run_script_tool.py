@@ -37,6 +37,10 @@ def _report(**overrides: object) -> DryRunReport:
             {"op": "update", "shared_id": "a", "metadata": {"summary": "2nd"}},
             {"op": "update", "shared_id": "b", "metadata": {"summary": "2nd"}},
         ],
+        "samples": [
+            {"shared_id": "a", "metadata": {"summary": "2nd"}},
+            {"shared_id": "b", "metadata": {"summary": "2nd"}},
+        ],
     }
     base.update(overrides)
     return DryRunReport(**base)
@@ -156,7 +160,7 @@ def test_format_result_shows_counters_and_records() -> None:
     assert "# Dry run attempt 1/3" in out
     assert "(real data, ZERO writes applied): PASSED" in out
     assert "update=2" in out
-    assert "- {'op': 'update', 'shared_id': 'a'" in out
+    assert "- a: {'summary': '2nd'}" in out
     assert "emit the final GeneratedScript" in out
 
 
@@ -172,10 +176,26 @@ def test_format_result_noop_warning_on_zero_writes() -> None:
     assert "No-op warning" in out
 
 
-def test_format_result_caps_records_at_20() -> None:
-    records = [{"op": "update", "shared_id": f"s{i}"} for i in range(25)]
-    out = _format_result(_report(records=records, would_update=25), 1, 3)
+def test_format_result_samples_more_tail_when_updates_exceed_cap() -> None:
+    """`... and N more` compares against would_update, not the sample count."""
+    samples = [{"shared_id": f"s{i}", "metadata": {"summary": "x"}} for i in range(3)]
+    out = _format_result(_report(samples=samples, would_update=8), 1, 3)
     assert "... and 5 more" in out
+
+
+def test_report_carries_update_samples() -> None:
+    """_format_result renders per-entity update values from `samples`."""
+    out = _format_result(_report(), 1, 3)
+    assert "First would-be update values" in out
+    assert "  - a: {'summary': '2nd'}" in out
+    assert "  - b: {'summary': '2nd'}" in out
+
+
+def test_report_samples_fall_back_to_records_when_empty() -> None:
+    """Without samples, the raw records dump is still rendered."""
+    out = _format_result(_report(samples=[]), 1, 3)
+    assert "First would-be operations" in out
+    assert "'summary': '2nd'" in out
 
 
 def test_format_result_last_attempt_footer() -> None:

@@ -264,6 +264,12 @@ VALIDATION
     property is essential, discover its EXACT valid value/label from existing
     entities via the `query_entities` TOOL first and use the WRITE SHAPE (scalar
     for single-value types) - never guess.
+  - REQUIRED: before authoring the `dummy_spec`, call `get_templates_by_names`
+    for the target template and include EVERY property with `required: true` in
+    each dummy's metadata (with a valid value per `format_instructions`; for
+    `select` use a thesaurus label you fetched). Uwazi rejects a dummy missing a
+    required property — that wastes an attempt. The tool also pre-checks this
+    and will reject the spec without consuming an attempt, but do not rely on it.
   - Keep the dummy spec SMALL: 2-3 dummies per title group, 2-3 groups (plus
     optionally a singleton to prove the size-1 skip). It proves the merge LOGIC,
     not the production scale - the real instance may have 1000s of entities, but
@@ -300,8 +306,9 @@ DRY RUN (real-data rehearsal — do this after the dummy gate PASSES, before emi
   it end-to-end against real data with zero mutations.
 - Read the report like a proof:
   - `would-update` must equal the number of entities the prompt wants changed;
-  - the first records show the per-entity values (shared_id + metadata) —
-    verify they are the REAL extracted values, not guesses or constants;
+  - the `samples` lines show the per-entity would-be values (`shared_id`:
+    `metadata`) — verify they are the REAL extracted values for THAT entity,
+    not guesses or constants;
   - your `result` string's match rate must be honest (e.g. matched=96,
     unmatched=0). A low match rate is a script bug or a data gap — fix the
     script or surface it in `GeneratedScript.description`.

@@ -78,9 +78,12 @@ semantics (content_type text/html or .html/.htm originalname), fetch their texts
 with `peek_file_text`, study where the target values appear, author `extract`,
 then SELF-PROVE it: call `run_validation_script` with a script that defines your
 `extract` VERBATIM and runs it over literal (html, ctx) PAIRS (NOT bare html
-strings), setting `result` to the matched/total counts (per fallback strategy if
 useful). The pairs MUST include at least one case where two entities share
 byte-identical HTML but different `ctx` and must extract different rows/values.
+The pairs MUST also include at least one NEGATIVE control: an html whose table
+contains rows for OTHER entities but not the `ctx` entity — `extract` must
+return None (or the strictly-matching row), never a wrong row. A false positive
+writes another entity's value into this entity.
 Refine until coverage is good, then emit ExtractorFunction with honest
 samples_total/samples_matched numbers and notes about unmatched samples.
 """
