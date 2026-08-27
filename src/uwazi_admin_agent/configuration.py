@@ -44,6 +44,12 @@ LLM_MAX_OUTPUT_TOKENS: int = 32768
 # retrying validation until the ``MAX_LLM_CALLS`` budget is exhausted.
 MAX_VALIDATION_ATTEMPTS: int = 5
 
+# Hard cap on ``run_dry_run_script`` calls per generation turn. The dry run is
+# the REAL-data rehearsal (real reads, recorded no-op writes) the agent uses to
+# prove extraction logic end-to-end before emitting; the counter backstops a
+# validation loop the same way MAX_VALIDATION_ATTEMPTS does for the dummy gate.
+MAX_DRY_RUN_ATTEMPTS: int = 3
+
 # UsageLimits request cap for the extractor subagent (author_html_extractor).
 # The extractor samples files, authors `def extract`, and self-proves it via
 # run_validation_script — fewer requests than a full generation run.

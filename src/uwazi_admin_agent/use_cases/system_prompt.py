@@ -110,8 +110,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       per-entity result dicts.
 
   update_entities(entities_dicts, language='en')
-      Update existing entities. Each dict needs `shared_id` and `template_name`
-      plus the fields/metadata you are changing. Returns a list of result dicts.
+      Update existing entities PARTIALLY. Each dict needs `shared_id` and
+      `template_name` plus the fields/metadata you are changing - `title` is
+      OPTIONAL and usually OMITTED (omitting it preserves the stored title;
+      only pass `title` when the task renames entities). Returns a list of
+      result dicts.
 
   delete_entities(shared_ids)
       Delete entities by shared_id. `shared_ids` is a list of strings.
@@ -125,6 +128,16 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Create entity-to-entity relationships. Each dict needs
       `from_entity_shared_id`, `to_entity_shared_id`, `relationship_type_name`;
       optionally `file_id` and `reference_text`. Returns a list of result dicts.
+
+  run_dry_run_script(python_code)
+      Rehearse a candidate script against the REAL entities with ZERO writes:
+      `query_entities` / `get_entity_files` / `get_file_bytes` perform REAL
+      reads (real supporting files, real metadata), while every write helper
+      only RECORDS what it would have written. Returns a report: pass/fail,
+      your `result`, the would-be-write counters (update/create/delete/
+      publish/unpublish/rewire) and the first per-op records (shared_id +
+      values). Use it to prove match rates and per-entity values against real
+      data BEFORE emitting the final script. See DRY RUN below.
 
   move_files_to_entity(from_shared_ids, to_shared_id, language='en')
       Copy each source entity's UPLOADED files (documents + uploaded attachments)
@@ -279,6 +292,26 @@ VALIDATION
   reached the tool refuses — emit your best script from the exploration you did.
   Do NOT loop on validation.
 
+DRY RUN (real-data rehearsal — do this after the dummy gate PASSES, before emitting)
+- The `run_dry_run_script` tool runs your candidate script against the REAL
+  entities with real supporting files and records (never applies) every write.
+  The dummy gate cannot prove the fetch→extract→update path (dummies carry no
+  uploaded files, so `get_file_bytes` returns None there); the dry run proves
+  it end-to-end against real data with zero mutations.
+- Read the report like a proof:
+  - `would-update` must equal the number of entities the prompt wants changed;
+  - the first records show the per-entity values (shared_id + metadata) —
+    verify they are the REAL extracted values, not guesses or constants;
+  - your `result` string's match rate must be honest (e.g. matched=96,
+    unmatched=0). A low match rate is a script bug or a data gap — fix the
+    script or surface it in `GeneratedScript.description`.
+- On FAIL or wrong values: fix the script and re-run the dry run. You have a
+  HARD limit of `dry_run_limit` attempts per turn; when it is reached, emit
+  your best script. Do NOT loop.
+- Skip the dry run for scripts the dummy gate fully proves (no supporting-file
+  reads, no real-data-dependent values). It costs a real-instance pass; use it
+  when extraction/fetch logic is involved.
+
 MERGE TASKS
 A "merge" collapses N source entities (sharing a title or some selector) into a
 single target entity, then removes the redundant sources. Express it as a
@@ -428,8 +461,9 @@ one-document logic. Use this exact shape:
    returns None the value was NOT found for THIS entity - LEAVE THE ENTITY UNTOUCHED
    (hard rule 3: never write a guessed/fallback value) and count it as unmatched.
 4. Accumulate update dicts (`shared_id` + `template_name` + `metadata` per
-   METADATA WRITE SHAPE - single-value types take a SCALAR) and call
-   `update_entities(updates, language)` in chunks of ~50.
+   METADATA WRITE SHAPE - single-value types take a SCALAR; do NOT include
+   `title` - update is partial and omitting it preserves the stored title) and
+   call `update_entities(updates, language)` in chunks of ~50.
 5. `result` MUST report: entities scanned, files fetched, matched, unmatched,
    missing-files. A low match rate is visible BEFORE execute is run - surface
    it honestly in `GeneratedScript.description` so the operator can re-generate

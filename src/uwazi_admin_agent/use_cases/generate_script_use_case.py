@@ -35,6 +35,7 @@ from uwazi_admin_agent.use_cases.author_extractor_tool import (
     build_extractor_agent,
 )
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
+from uwazi_admin_agent.use_cases.run_dry_run_script_tool import run_dry_run_script
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_agent.ports.llm_port import LlmPort
@@ -94,6 +95,8 @@ class GenerateScriptUseCase:
                 list_thesauri,
                 # The validation gate.
                 run_validation_script,
+                # The real-data rehearsal: real reads, recorded no-op writes.
+                run_dry_run_script,
                 # HTML extraction: sampling peek tools + the nested extractor author.
                 author_html_extractor,
                 peek_entity_files,
@@ -105,6 +108,7 @@ class GenerateScriptUseCase:
     async def execute(self, prompt: str) -> GeneratedScript:
         """Run the agent once on ``prompt`` and return the generated script."""
         self._deps.validation_attempts = 0  # fresh budget per generation turn
+        self._deps.dry_run_attempts = 0  # fresh dry-run budget per generation turn
         agent = self._build_agent(self._llm.get_model())
         run = await agent.run(
             prompt,

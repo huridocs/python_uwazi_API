@@ -23,6 +23,7 @@ import sys
 from typing import Sequence
 
 from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
+from uwazi_admin_agent.drivers.step_dry_run import run_dry_run
 from uwazi_admin_agent.drivers.step_execute import run_execute
 from uwazi_admin_agent.drivers.step_generate import run_generate
 from uwazi_admin_agent.drivers.step_inspect_run import run_inspect_run
@@ -39,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Admin agent: turn a natural-language prompt into a safe, revertable Uwazi migration.",
     )
     sub = parser.add_subparsers(
-        dest="command", required=True, metavar="{generate,simulate,execute,revert,verify,list-runs,inspect-run}"
+        dest="command", required=True, metavar="{generate,simulate,dry-run,execute,revert,verify,list-runs,inspect-run}"
     )
 
     sub.add_parser(
@@ -51,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
         "simulate",
         help="Re-run the dummy-entity validation gate on the emitted script using a local dummy_spec.yaml.",
     )
+
+    p_dry_run = sub.add_parser(
+        "dry-run",
+        help="Rehearse the emitted script against real entities with recorded (no-op) writes.",
+    )
+    p_dry_run.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
+
     p_simulate.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
 
     p_execute = sub.add_parser(
@@ -100,6 +108,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "generate":
         return run_generate()
+    if command == "dry-run":
+        return run_dry_run(run_name=_resolve_run_name(args.run))
     if command == "simulate":
         return run_simulate(run_name=_resolve_run_name(args.run))
     if command == "execute":

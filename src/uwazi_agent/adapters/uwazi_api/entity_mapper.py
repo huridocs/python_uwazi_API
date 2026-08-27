@@ -111,7 +111,7 @@ class EntityMapper:
     def _build_api_entity(
         self,
         template_name: str,
-        title: str,
+        title: str | None,
         metadata: dict[str, Any],
         language: str,
         published: Optional[bool],
