@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field
 
 class AgentEntity(BaseModel):
     shared_id: str
-    title: str
+    # Optional so partial-update dicts (metadata-only, the common bulk-extraction
+    # shape) validate without inventing a title; the mapper/repository preserve
+    # the stored title when it is None (entity_repository.update_partially).
+    title: str | None = None
     template_name: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     language: str = "en"

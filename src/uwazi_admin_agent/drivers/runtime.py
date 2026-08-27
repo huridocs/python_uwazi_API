@@ -37,13 +37,14 @@ from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepo
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
-from uwazi_admin_agent.configuration import ROOT_PATH, RUNS_PATH
+from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, ROOT_PATH, RUNS_PATH
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.verify_revert_use_case import VerifyRevertUseCase
 from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
@@ -122,7 +123,12 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         entity_api=api,
         relationship_api=api,
         search_probe=search_probe,
-        file_repository=file_repository,
+        dry_run_use_case=DryRunScriptUseCase(
+            entity_api=api,
+            entity_repository=entity_repository,
+            file_repository=file_repository,
+            default_language=DUMMY_LANGUAGE,
+        ),
     )
 
     revert_use_case = RevertRunUseCase(

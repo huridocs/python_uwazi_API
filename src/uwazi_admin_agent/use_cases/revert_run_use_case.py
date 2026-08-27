@@ -98,6 +98,8 @@ class RevertRunUseCase:
         manifest.error = None
         manifest.error_step = None
         self._backup_store.save_manifest(run_id, manifest)
+        self._backup_store.update_status(run_id, RunStatus.REVERTED)
+        self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
             "revert done run={} actions={} modified={} deleted={} created={}",
             run_id,

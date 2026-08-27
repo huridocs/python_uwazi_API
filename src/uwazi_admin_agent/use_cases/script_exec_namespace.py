@@ -692,6 +692,164 @@ def build_real_exec_namespace(
     return namespace
 
 
+def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the 7 write helpers for the dry-run namespace: recorders, no I/O.
+
+    Each helper appends one record per operation into the shared ``records``
+    list and returns the same success-shaped value the real helpers return, so
+    an identical script runs to completion. Nothing is sent to Uwazi: this is
+    the dry-run write boundary (real reads, recorded writes).
+
+    The returned dict ALSO carries the records list itself under the
+    underscore-prefixed key ``_dry_run_records`` (the namespace convention for
+    non-helper keys) so the caller can read what was recorded after
+    :func:`run_script_sync`.
+    """
+
+    def create_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
+        del language  # recorded per-dict, not as a language override
+        for i, d in enumerate(entities_dicts):
+            records.append(
+                {
+                    "op": "create",
+                    "title": d.get("title", ""),
+                    "template_name": d.get("template_name", ""),
+                    "metadata": d.get("metadata", {}),
+                }
+            )
+        return [{"shared_id": f"dry-created-{i}", "success": True} for i, d in enumerate(entities_dicts)]
+
+    def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
+        for d in entities_dicts:
+            records.append(
+                {
+                    "op": "update",
+                    "shared_id": d.get("shared_id"),
+                    "template_name": d.get("template_name"),
+                    "metadata": d.get("metadata"),
+                    "title": d.get("title"),
+                    "language": language,
+                }
+            )
+        return [{"shared_id": d.get("shared_id"), "success": True} for d in entities_dicts]
+
+    def delete_entities(shared_ids: list[str]) -> list[dict]:
+        for sid in shared_ids:
+            records.append({"op": "delete", "shared_id": sid})
+        return [{"shared_id": sid, "success": True} for sid in shared_ids]
+
+    def publish_entities(shared_ids: list[str]) -> dict:
+        for sid in shared_ids:
+            records.append({"op": "publish", "shared_id": sid})
+        return _dry_run_publish_summary(len(shared_ids))
+
+    def unpublish_entities(shared_ids: list[str]) -> dict:
+        for sid in shared_ids:
+            records.append({"op": "unpublish", "shared_id": sid})
+        return _dry_run_publish_summary(len(shared_ids))
+
+    def set_publish_status(shared_ids: list[str], published: bool) -> list[dict]:
+        for sid in shared_ids:
+            records.append({"op": "set_publish_status", "shared_id": sid, "published": published})
+        return [{"shared_id": sid, "success": True} for sid in shared_ids]
+
+    def create_relationships(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
+        del language
+        for r in relationships_dicts:
+            records.append({"op": "create_relationships", **r})
+        return [{"success": True} for _ in relationships_dicts]
+
+    return {
+        "create_entities": create_entities,
+        "update_entities": update_entities,
+        "delete_entities": delete_entities,
+        "publish_entities": publish_entities,
+        "unpublish_entities": unpublish_entities,
+        "set_publish_status": set_publish_status,
+        "create_relationships": create_relationships,
+        "_dry_run_records": records,
+    }
+
+
+def _dry_run_publish_summary(count: int) -> dict[str, Any]:
+    """The summary-dict shape the real ``publish_entities``/``unpublish_entities`` return."""
+    return {
+        "success_count": count,
+        "failure_count": 0,
+        "rate_limited": [],
+        "permission_denied": [],
+        "not_found": [],
+        "errors": [],
+    }
+
+
+def build_dry_run_namespace(
+    entity_api: EntityApiPort | None,
+    loop: asyncio.AbstractEventLoop,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    dry_run_records: list[dict[str, Any]],
+    entity_repository: EntityRepositoryPort | None = None,
+) -> dict[str, Any]:
+    """Construct the dry-run exec namespace: REAL reads, recorded writes.
+
+    Composed from the same factories as :func:`build_real_exec_namespace` —
+    that is the point of the dry run (the extraction logic, the ``ctx``
+    contract, and the update-dict build run for real):
+    - ``query_entities`` / ``get_entity_files`` / ``get_file_bytes`` are the
+      REAL helpers (live reads against the wired ports; the factory's
+      unwired stubs raise a clear ``RuntimeError`` when the port is ``None``);
+    - all 7 write helpers plus ``move_files_to_entity`` are pure recorders
+      appending into ``dry_run_records`` — no I/O at all, so the dry run can
+      never mutate Uwazi.
+    """
+    namespace: dict[str, Any] = {
+        "query_entities": (
+            _dry_run_query_entities_unwired() if entity_api is None else _real_sync_query_entities_factory(entity_api, loop)
+        ),
+        **_dry_run_write_helpers(dry_run_records),
+        "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
+        "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
+        "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
+        **_STDLIB,
+        "__builtins__": SAFE_BUILTINS,
+    }
+    return namespace
+
+
+def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
+    """Dry-run ``move_files_to_entity``: record the request, move nothing."""
+
+    def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
+        del language
+        records.append(
+            {
+                "op": "move_files",
+                "from_shared_ids": list(from_shared_ids),
+                "to_shared_id": to_shared_id,
+            }
+        )
+        return {"moved": len(from_shared_ids), "failed": 0}
+
+    return move_files_to_entity
+
+
+def _dry_run_query_entities_unwired() -> Any:
+    """Unwired ``query_entities`` stub for the dry-run namespace (``entity_api is None``).
+
+    Mirrors the loud-failure convention of the other real helpers' unwired
+    stubs: raise a clear ``RuntimeError`` when the script actually calls it.
+    """
+
+    def query_entities_unwired(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            "query_entities requires a wired entity_api (got None). Wire "
+            "EntityApiPort into the runtime to enable entity discovery reads."
+        )
+
+    return query_entities_unwired
+
+
 @contextlib.contextmanager
 def _captured_stdout():
     buf = io.StringIO()

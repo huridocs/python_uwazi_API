@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import Field
 
-from uwazi_admin_agent.configuration import MAX_VALIDATION_ATTEMPTS
+from uwazi_admin_agent.configuration import MAX_DRY_RUN_ATTEMPTS, MAX_VALIDATION_ATTEMPTS
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
@@ -51,6 +51,16 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
             "and the bound get_file_bytes helper. Set by build_runtime."
         ),
     )
+    dry_run_use_case: Any | None = Field(
+        default=None,
+        description=(
+            "DryRunScriptUseCase wired by build_runtime. The run_dry_run_script "
+            "tool calls it to rehearse a candidate script against REAL entities "
+            "with recorded (no-op) writes — real reads, zero mutations."
+        ),
+    )
+    dry_run_attempts: int = Field(default=0, description="How many dry runs the agent has performed this turn.")
+    dry_run_limit: int = Field(default=MAX_DRY_RUN_ATTEMPTS, description="Hard cap on dry runs per turn.")
     extractor_agent: Any | None = Field(
         default=None,
         description=(

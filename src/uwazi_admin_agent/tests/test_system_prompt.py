@@ -283,3 +283,24 @@ def test_prompt_documents_non_html_limitation() -> None:
     """KNOWN LIMITATIONS must cover non-HTML files and URL attachments."""
     assert "NON-HTML" in SYSTEM_PROMPT
     assert SYSTEM_PROMPT.count("URL ATTACHMENTS") >= 2
+
+
+def test_prompt_has_dry_run_section() -> None:
+    """A DRY RUN section must exist and pin the real-data rehearsal contract:
+    the tool name, zero writes, the would-be counters, and the hard limit."""
+    for token in (
+        "DRY RUN (real-data rehearsal",
+        "run_dry_run_script",
+        "zero mutations",
+        "would-update",
+        "dry_run_limit",
+    ):
+        assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_dry_run_tool_in_sandbox_contract() -> None:
+    """The sandbox contract must document `run_dry_run_script` with its zero-write
+    semantics so the LLM knows it is bound before it reaches for a CLI step."""
+    assert "run_dry_run_script(python_code)" in SYSTEM_PROMPT
+    assert "ZERO writes" in SYSTEM_PROMPT
+    assert "RECORDS what it would have written" in SYSTEM_PROMPT
