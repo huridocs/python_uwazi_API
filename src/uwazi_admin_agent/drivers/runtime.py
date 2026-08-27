@@ -122,6 +122,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         entity_api=api,
         relationship_api=api,
         search_probe=search_probe,
+        file_repository=file_repository,
     )
 
     revert_use_case = RevertRunUseCase(

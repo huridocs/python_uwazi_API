@@ -9,6 +9,8 @@ from uwazi_admin_agent.use_cases.script_exec_namespace import (
     SAFE_BUILTINS,
     ScopeViolationError,
     assert_ids_in_scope,
+    build_exec_namespace,
+    build_real_exec_namespace,
     filter_ids_to_scope,
     run_script_sync,
 )
@@ -176,3 +178,127 @@ def test_run_script_sync_rejects_datetime_class_idiom() -> None:
     result, error = run_script_sync(code, ns)
     assert error is not None
     assert "AttributeError" in error
+
+
+# --- htmlextract binding (extraction phase) -----------------------------------
+
+
+def test_stdlib_binds_htmlextract_members() -> None:
+    """`htmlextract` is bound as the fifth stdlib entry with its five members:
+    text/title/tables/meta (pure parsers) + is_html (file-ref classifier)."""
+    hx = _STDLIB["htmlextract"]
+    for member in ("text", "title", "tables", "meta", "is_html"):
+        assert callable(getattr(hx, member)), member
+
+
+def test_run_script_sync_extract_idiom_runs_clean() -> None:
+    """The embed idiom: a script defines `def extract(html)` using `re` +
+    `htmlextract.tables`, runs it over two literal HTML strings (one matching,
+    one not), and sets result. Proves the extraction contract end-to-end."""
+    ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
+    code = """
+def extract(html):
+    try:
+        tables = htmlextract.tables(html)
+        for table in tables:
+            for row in table:
+                for i, cell in enumerate(row):
+                    if cell.strip().lower() == "case number":
+                        return {"case_number": row[i + 1]}
+        return None
+    except Exception:
+        return None
+
+matched = extract("<table><tr><td>Case Number</td><td>42</td></tr></table>")
+unmatched = extract("<p>nothing here</p>")
+result = f"{1 if matched else 0}/{2 if unmatched is None else 99}"
+"""
+    result, error = run_script_sync(code, ns)
+    assert error is None
+    assert result == "1/2"
+
+
+def test_run_script_sync_import_html_fails() -> None:
+    """`import html` must fail (zero import lines; `__import__` is not bound)."""
+
+    ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
+    result, error = run_script_sync("import html\nresult = 'x'\n", ns)
+    assert result is None
+    assert error is not None and "ImportError" in error
+
+
+# --- dummy-scoped file-fetch stubs ----------------------------------------------
+
+
+def test_dummy_namespace_get_entity_files_scoped() -> None:
+    """`get_entity_files` returns [] in-scope and raises ScopeViolationError
+    out-of-scope; `get_file_bytes` returns None (dummies carry no files)."""
+    import asyncio as _asyncio
+
+    namespace = build_exec_namespace(
+        entity_api=None,
+        relationship_api=None,
+        loop=_asyncio.new_event_loop(),
+        scope={"DUMMY1"},
+        dummy_entities=[],
+        tool_cache=None,
+        default_language="en",
+    )
+    code = """
+in_scope = get_entity_files("DUMMY1")
+refused = False
+try:
+    get_entity_files("REAL_ID")
+except RuntimeError:
+    refused = True
+missing = get_file_bytes("x.html")
+result = f"{len(in_scope)}|{refused}|{missing}"
+"""
+    result, error = run_script_sync(code, namespace)
+    assert error is None
+    assert result == "0|True|None"
+
+
+def test_real_namespace_unwired_file_helpers_raise_runtime_error() -> None:
+    """With no repositories wired, the real `get_entity_files`/`get_file_bytes`
+    fail LOUDLY (RuntimeError naming the helper) instead of silently no-op'ing."""
+    import asyncio as _asyncio
+
+    class _Decorate:
+        def decorate(self, crud):
+            names = [
+                "create_entities",
+                "update_entities",
+                "delete_entities",
+                "publish_entities",
+                "unpublish_entities",
+                "set_publish_status",
+                "create_relationships",
+            ]
+            return dict(zip(names, crud))
+
+    namespace = build_real_exec_namespace(
+        entity_api=None,
+        relationship_api=None,
+        loop=_asyncio.new_event_loop(),
+        intercept=_Decorate(),
+        tool_cache=None,
+        default_language="en",
+        entity_repository=None,
+        file_repository=None,
+    )
+    code = """
+e1 = e2 = "no-raise"
+try:
+    get_entity_files("A")
+except RuntimeError:
+    e1 = "RuntimeError"
+try:
+    get_file_bytes("f")
+except RuntimeError:
+    e2 = "RuntimeError"
+result = e1 + "|" + e2
+"""
+    result, error = run_script_sync(code, namespace)
+    assert error is None
+    assert result == "RuntimeError|RuntimeError"

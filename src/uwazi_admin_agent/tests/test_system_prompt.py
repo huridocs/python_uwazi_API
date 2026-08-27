@@ -235,3 +235,50 @@ def test_prompt_create_tasks_requires_at_least_one_dummy() -> None:
     task (the script creates the real targets)."""
     assert "REQUIRES at least one dummy" in SYSTEM_PROMPT
     assert "No dummy entities were created" in SYSTEM_PROMPT
+
+
+# --- Extraction contract (HTML supporting-file phase) --------------------------
+
+
+def test_prompt_has_extraction_tasks_section() -> None:
+    """An EXTRACTION TASKS section must exist and pin the sample-derived shape:
+    author via the tool, embed VERBATIM, per-entity fetch, decode, unmatched ->
+    untouched."""
+    for token in (
+        "EXTRACTION TASKS",
+        "author_html_extractor",
+        "VERBATIM",
+        "get_entity_files",
+        "get_file_bytes",
+        "htmlextract",
+    ):
+        assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_extraction_leaves_unmatched_untouched() -> None:
+    """`extract` returning None must leave the entity untouched (hard rule 3)."""
+    assert "LEAVE THE ENTITY UNTOUCHED" in SYSTEM_PROMPT
+
+
+def test_prompt_extraction_reports_match_counts() -> None:
+    """`result` must report scanned/fetched/matched/unmatched/missing counts so a
+    low match rate is visible before execute."""
+    assert "missing-files" in SYSTEM_PROMPT
+    assert "unmatched" in SYSTEM_PROMPT
+
+
+def test_prompt_pins_htmlextract_import_is_wrong() -> None:
+    """The prompt must call out `import html` as WRONG (raises ImportError)."""
+    assert "import html" in SYSTEM_PROMPT
+
+
+def test_prompt_documents_file_helper_validation_noop() -> None:
+    """The prompt must state that the file-fetch path is live-only (dummies carry
+    no files; validation uses literal HTML strings)."""
+    assert "dummies carry no files" in SYSTEM_PROMPT.lower() or "dummies carry no uploaded files" in SYSTEM_PROMPT
+
+
+def test_prompt_documents_non_html_limitation() -> None:
+    """KNOWN LIMITATIONS must cover non-HTML files and URL attachments."""
+    assert "NON-HTML" in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.count("URL ATTACHMENTS") >= 2

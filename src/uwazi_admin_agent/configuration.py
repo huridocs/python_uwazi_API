@@ -44,6 +44,15 @@ LLM_MAX_OUTPUT_TOKENS: int = 32768
 # retrying validation until the ``MAX_LLM_CALLS`` budget is exhausted.
 MAX_VALIDATION_ATTEMPTS: int = 5
 
+# UsageLimits request cap for the extractor subagent (author_html_extractor).
+# The extractor samples files, authors `def extract`, and self-proves it via
+# run_validation_script — fewer requests than a full generation run.
+MAX_EXTRACTOR_LLM_CALLS: int = 40
+
+# Per-file character truncation for peek_file_text (generation-time HTML
+# sampling). HTML supporting files can be huge; the LLM context is not.
+MAX_PEEK_CHARS: int = 50_000
+
 # Row locale used when the dummy harness creates/snapshots/reverts dummies. The
 # generated script is target-agnostic; the harness fixes the locale for its own
 # create/read/revert so the before/after/post-revert raws are comparable.
