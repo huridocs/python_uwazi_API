@@ -46,4 +46,7 @@ def test_build_agent_registers_schema_inspection_tools() -> None:
         "list_templates",
         "get_thesauris_by_names",
         "list_thesauri",
+        "author_html_extractor",
+        "peek_entity_files",
+        "peek_file_text",
     } <= names

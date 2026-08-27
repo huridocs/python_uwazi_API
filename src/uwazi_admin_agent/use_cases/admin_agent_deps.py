@@ -17,10 +17,13 @@ is sound because ``AdminAgentDeps`` *is-a* ``UwaziAgentToolsDependencies``
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import Field
 
 from uwazi_admin_agent.configuration import MAX_VALIDATION_ATTEMPTS
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
@@ -41,3 +44,17 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
     )
     validation_attempts: int = Field(default=0, description="How many validation runs the agent has performed this turn.")
     validation_limit: int = Field(default=MAX_VALIDATION_ATTEMPTS, description="Hard cap on validation runs per turn.")
+    file_repository: FileRepositoryPort | None = Field(
+        default=None,
+        description=(
+            "Raw file repository for generation-time HTML sampling (peek_file_text) "
+            "and the bound get_file_bytes helper. Set by build_runtime."
+        ),
+    )
+    extractor_agent: Any | None = Field(
+        default=None,
+        description=(
+            "The extractor subagent (pydantic-ai Agent), built once by "
+            "GenerateScriptUseCase and called by the author_html_extractor tool."
+        ),
+    )

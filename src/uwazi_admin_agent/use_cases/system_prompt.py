@@ -135,8 +135,34 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       validation against dummies this is a no-op (dummies carry no uploaded
       files); file-move is only exercised live.
 
+  get_entity_files(shared_id, language=None)
+      List an entity's UPLOADED supporting files (documents + uploaded
+      attachments). Returns a list of file dicts, each with `kind`
+      ("document" or "attachment"), `filename` (storage name - the fetch key),
+      `originalname`, `language`, `content_type`; `[]` when the entity has no
+      uploaded files. URL attachments are absent (no stored bytes). In
+      validation against dummies this returns `[]` (dummies carry no files);
+      the fetch path is only exercised live.
+
+  get_file_bytes(filename)
+      Fetch one file's raw bytes by its storage `filename` (from
+      `get_entity_files`). Returns the bytes, or None when the file is absent
+      (count it as missing and continue - never crash the bulk run). Decode
+      yourself: `data.decode("utf-8", errors="replace")`.
+
+  htmlextract — pure HTML parsing over the bound namespace (NO import):
+      htmlextract.text(html)    # all visible text, tags stripped, whitespace collapsed
+      htmlextract.title(html)   # <title> contents or ""
+      htmlextract.tables(html)  # list of tables; each = rows of cell-text lists (colspan-padded)
+      htmlextract.meta(html)    # {meta name-or-property: content}
+      htmlextract.is_html(ref)  # True when a file dict from get_entity_files is HTML
+    Idiom: `rows = htmlextract.tables(html)`. WRONG (raises ImportError and the
+    script dies on line 1): `import html`. These are pure functions bound in
+    your namespace - reference them by name, never import them.
+
 These stdlib modules are also bound: `json`, `re`, `collections`, `itertools`,
-`datetime`, `math`, `random`. Nothing else is available.
+`datetime`, `math`, `random`, plus the `htmlextract` namespace above. Nothing
+else is available.
 
   BOUND STDLIB CONTRACT (CRITICAL — getting this wrong raises AttributeError /
   ImportError and wastes a validation attempt):
@@ -374,6 +400,41 @@ the gate (it ran clean and restored equal because it changed nothing). Re-read y
 prompt asks to create, your script has a bug (wrong property name rejected by
 Uwazi, wrong return access, an exception swallowed, etc.). Fix it and re-validate.
 
+EXTRACTION TASKS
+An "extraction" prompt asks you to read each entity's HTML supporting file and
+write extracted values into its metadata (e.g. "for every entity under template
+`Court decision`, extract the case number from the uploaded HTML document into
+the `case_number` property"). The value is NOT in the same spot in every
+document, so the strategy is a SAMPLE-DERIVED extractor function, not
+one-document logic. Use this exact shape:
+1. Call the `author_html_extractor` TOOL with a precise description of the
+   values to extract + the target template/properties. It samples real HTML
+   files, authors a pure `def extract(html) -> dict | None` with ordered
+   fallback strategies, and proves it in this exact sandbox. Embed the returned
+   `def extract` source VERBATIM in your script - ZERO edits (no renaming, no
+   re-indenting, no "improvements"): it was proven in this exact namespace
+   (`def` works, `class` does not, everything it calls is bound).
+2. Per entity: `files = get_entity_files(sid)`; then
+   `html_files = [f for f in files if htmlextract.is_html(f)]`
+   (`is_html` is the fifth `htmlextract` member: content_type text/html or
+   .html/.htm originalname). Then `data = get_file_bytes(f["filename"])`;
+   `None` -> count it as missing and continue (do NOT crash the bulk run).
+3. `parsed = extract(data.decode("utf-8", errors="replace"))`; when it returns
+   None the value was NOT found - LEAVE THE ENTITY UNTOUCHED (hard rule 3:
+   never write a guessed/fallback value) and count it as unmatched.
+4. Accumulate update dicts (`shared_id` + `template_name` + `metadata` per
+   METADATA WRITE SHAPE - single-value types take a SCALAR) and call
+   `update_entities(updates, language)` in chunks of ~50.
+5. `result` MUST report: entities scanned, files fetched, matched, unmatched,
+   missing-files. A low match rate is visible BEFORE execute is run - surface
+   it honestly in `GeneratedScript.description` so the operator can re-generate
+   with a refined prompt instead of wide-scale partial writes.
+6. DUMMY SPEC unchanged (text/numeric only). Dummies carry no uploaded files, so
+   the fetch path cannot be gate-validated (live-only, like
+   `move_files_to_entity`); instead validate the composed extraction LOGIC in
+   the gate using literal HTML strings passed through `extract` + `htmlextract`
+   directly.
+
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):
 - RELATIONSHIPS are NOT merged: `query_entities` does not return the `relations`
@@ -384,6 +445,10 @@ KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 - URL ATTACHMENTS on the sources are NOT moved (no bytes to re-upload, and the
   helper's entity model cannot add them to the target). They are lost on source
   delete. Flag in `result` if any source had URL attachments.
+- NON-HTML supporting files (PDFs, images, ...) are NOT parsed: `extract` runs
+  on HTML only. Skip them and note the skipped count in `result`.
+- URL ATTACHMENTS are absent from `get_entity_files` (no stored bytes), so
+  their content cannot be extracted. Flag in `result` if that matters.
 
 OUTPUT
 Return a `GeneratedScript`:

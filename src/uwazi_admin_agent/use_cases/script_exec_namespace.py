@@ -46,6 +46,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_agent.domain.agent_entity import AgentEntity
@@ -61,6 +62,19 @@ from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_fu
 # idiom (matches the LLM's natural instinct and gives ``timedelta``/``date``/
 # ``time`` for free). ``random`` is pure-compute (no I/O) and is the natural tool
 # for "fill with random information" create scripts.
+# Curated pure HTML-extraction API (domain/html_extract.py) bound as a
+# namespace so extraction scripts can parse supporting-file HTML without any
+# import (bs4/lxml are unavailable; this is stdlib html.parser under the hood).
+_HTMLEXTRACT: Any = SimpleNamespace(
+    text=html_text,
+    title=html_title,
+    tables=html_tables,
+    meta=html_meta,
+    is_html=is_html_ref,
+)
+
+# stdlib subset the system prompt promises the script (see system_prompt.py).
+
 _STDLIB: dict[str, Any] = {
     "json": json,
     "re": re,
@@ -69,7 +83,9 @@ _STDLIB: dict[str, Any] = {
     "datetime": _datetime,
     "math": math,
     "random": random,
+    "htmlextract": _HTMLEXTRACT,
 }
+
 
 # Curated builtins: enough to write the migration scripts, with the
 # namespace-escape vectors removed. The PRIMARY safety in dummy mode is the
@@ -439,6 +455,91 @@ def _build_move_files_real_helper(
     return move_files_to_entity
 
 
+def _get_entity_files_noop_scoped(scope: set[str]) -> Any:
+    """Build the dummy-scoped no-op ``get_entity_files`` bound into the namespace.
+
+    Dummies are created via ``create_entities`` (no uploaded files), so file
+    fetch is a no-op in validation: the helper scope-asserts the shared_id
+    (defense-in-depth, matching the other scoped helpers) and returns ``[]``.
+    The real fetch logic is exercised only live — same documented limitation as
+    ``move_files_to_entity`` (dummies carry no uploaded files).
+    """
+
+    def get_entity_files(shared_id: str, language: str | None = None) -> list[dict]:
+        del language  # ignored: dummies carry no files to localize
+        assert_ids_in_scope([shared_id], scope, "get_entity_files")
+        return []
+
+    return get_entity_files
+
+
+def _get_file_bytes_noop() -> Any:
+    """Build the dummy no-op ``get_file_bytes`` (dummies carry no files)."""
+
+    def get_file_bytes(filename: str) -> bytes | None:
+        return None
+
+    return get_file_bytes
+
+
+def _build_get_entity_files_real_helper(
+    entity_repository: EntityRepositoryPort | None,
+    loop: asyncio.AbstractEventLoop,
+    default_language: str,
+) -> Any:
+    """Build the real ``get_entity_files`` bound into the real exec namespace.
+
+    Fetches the entity's full raw (incl. ``documents``/``attachments``) and
+    returns each uploaded file as a plain dict (``file_id``, ``kind``
+    "document"|"attachment", ``filename``, ``originalname``, ``language``,
+    ``content_type``). URL attachments are skipped (``extract_file_refs`` has no
+    stored bytes for them). Unwired ``entity_repository`` -> a stub that raises
+    a clear ``RuntimeError`` when the script calls it (loud, not silent).
+    """
+    if entity_repository is None:
+
+        def get_entity_files_unwired(shared_id: str, language: str | None = None) -> list[dict]:
+            raise RuntimeError(
+                "get_entity_files requires a wired entity_repository (got None). "
+                "Wire EntityRepositoryPort into the runtime/execute use case to "
+                "enable supporting-file extraction."
+            )
+
+        return get_entity_files_unwired
+
+    def get_entity_files(shared_id: str, language: str | None = None) -> list[dict]:
+        lang = language or default_language
+        raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(shared_id, lang))
+        return [ref.model_dump() for ref in extract_file_refs(raw)]
+
+    return get_entity_files
+
+
+def _build_get_file_bytes_real_helper(file_repository: FileRepositoryPort | None, loop: asyncio.AbstractEventLoop) -> Any:
+    """Build the real ``get_file_bytes`` bound into the real exec namespace.
+
+    Returns the file's raw bytes or ``None`` when the file is absent (the
+    script counts it as missing and continues — mirrors best-effort
+    ``move_files_to_entity``). Unwired ``file_repository`` -> a stub that
+    raises a clear ``RuntimeError`` when the script calls it.
+    """
+    if file_repository is None:
+
+        def get_file_bytes_unwired(filename: str) -> bytes | None:
+            raise RuntimeError(
+                "get_file_bytes requires a wired file_repository (got None). "
+                "Wire FileRepositoryPort into the runtime/execute use case to "
+                "enable supporting-file extraction."
+            )
+
+        return get_file_bytes_unwired
+
+    def get_file_bytes(filename: str) -> bytes | None:
+        return loop.run_until_complete(file_repository.get_file_bytes(filename))
+
+    return get_file_bytes
+
+
 def build_exec_namespace(
     entity_api: Any,
     relationship_api: Any,
@@ -462,6 +563,8 @@ def build_exec_namespace(
         "query_entities": _sync_query_entities_factory(dummy_entities, scope),
         **_scoped_write_helpers(crud, scope),
         "move_files_to_entity": _move_files_noop_scoped(scope),
+        "get_entity_files": _get_entity_files_noop_scoped(scope),
+        "get_file_bytes": _get_file_bytes_noop(),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -581,6 +684,8 @@ def build_real_exec_namespace(
         "query_entities": _real_sync_query_entities_factory(entity_api, loop),
         **intercept.decorate(crud),
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
+        "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
+        "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }

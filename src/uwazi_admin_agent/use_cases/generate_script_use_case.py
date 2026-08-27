@@ -30,6 +30,11 @@ from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.author_extractor_tool import (
+    author_html_extractor,
+    build_extractor_agent,
+)
+from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_agent.ports.llm_port import LlmPort
@@ -50,6 +55,9 @@ class GenerateScriptUseCase:
         self._last_messages: list[Any] = []
         # Wire the raw repository onto the deps so the validation tool can snapshot/revert.
         deps.entity_repository = entity_repository
+        # Build the extractor subagent ONCE (the use case owns the LlmPort) and
+        # share it with the author_html_extractor tool via the deps.
+        deps.extractor_agent = build_extractor_agent(self._llm.get_model())
 
     @staticmethod
     def _build_agent(model: Model) -> Agent[AdminAgentDeps, GeneratedScript]:
@@ -86,6 +94,10 @@ class GenerateScriptUseCase:
                 list_thesauri,
                 # The validation gate.
                 run_validation_script,
+                # HTML extraction: sampling peek tools + the nested extractor author.
+                author_html_extractor,
+                peek_entity_files,
+                peek_file_text,
             ],
             model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
         )
