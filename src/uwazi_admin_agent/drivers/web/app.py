@@ -17,12 +17,18 @@ from typing import Any
 from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
+from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.drivers.web.run_service import (
+    GenerateError,
+    RevertVerificationError,
     RunSummary,
     create_and_generate,
     delete_run,
     execute_run,
+    get_execution_history,
     get_run,
+    get_run_audit,
     list_runs,
     rename_run,
     revert_run,
@@ -42,6 +48,7 @@ _STATUS_COLORS: dict[str, str] = {
     "verified": "blue",
     "reverted": "indigo",
     "failed": "red",
+    "generation_failed": "deep-orange",
 }
 
 # Transient UI state: runs whose script is being generated (not yet persisted).
@@ -61,6 +68,11 @@ _running_runs: dict[str, str] = {}
 
 # JS expression: true when the row has an in-flight (not yet persisted) op.
 _IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
+
+
+def _can_execute_js(status_var: str) -> str:
+    """JS expression: True when the run may be executed (no script on generation failure)."""
+    return f"{status_var} !== 'generation_failed'"
 
 
 def _mark_running(run_id: str, label: str) -> None:
@@ -163,16 +175,24 @@ def _broadcast_refresh() -> None:
             runs_table.refresh()
 
 
+def _notify_error(title: str, detail: str, type_: str = "negative") -> None:
+    """Short headline toast; the full detail lives in the run's error dialog."""
+    first_line = (detail or "").strip().splitlines()[0] if (detail or "").strip() else title
+    _broadcast_notify(title, type=type_, caption=first_line)
+
+
 def _summary_to_row(run: RunSummary) -> dict[str, Any]:
     return {
         "id": run.run_id,
         "name": run.run_id,
         "status": run.status.value,
         "created": run.created_at.strftime("%Y-%m-%d %H:%M"),
+        "last_executed": run.last_executed_at.strftime("%Y-%m-%d %H:%M") if run.last_executed_at else "—",
         "modified": run.modified,
         "deleted": run.deleted,
         "created_count": run.created,
         "rewired": run.rewired,
+        "error": bool(run.error),
     }
 
 
@@ -183,10 +203,12 @@ def _creating_to_row(name: str) -> dict[str, Any]:
         "name": name,
         "status": "creating",
         "created": "—",
+        "last_executed": "—",
         "modified": 0,
         "deleted": 0,
         "created_count": 0,
         "rewired": 0,
+        "error": False,
     }
 
 
@@ -195,6 +217,7 @@ def _columns() -> list[dict[str, Any]]:
         {"name": "name", "label": "Run", "field": "name", "align": "left", "sortable": True},
         {"name": "status", "label": "Status", "field": "status", "align": "left", "sortable": True},
         {"name": "created", "label": "Created", "field": "created", "align": "left", "sortable": True},
+        {"name": "last_executed", "label": "Last execution", "field": "last_executed", "align": "left", "sortable": True},
         {"name": "modified", "label": "Modified", "field": "modified", "align": "right", "sortable": True},
         {"name": "deleted", "label": "Deleted", "field": "deleted", "align": "right", "sortable": True},
         {"name": "created_count", "label": "Created", "field": "created_count", "align": "right", "sortable": True},
@@ -244,7 +267,7 @@ def runs_table() -> None:
         f"""
         <q-td :props="props">
             <q-btn dense flat icon="play_arrow" color="primary"
-                   :disable="{_IN_FLIGHT_JS}"
+                   :disable="{_IN_FLIGHT_JS} || !{_can_execute_js("props.row.status")}"
                    @click="$parent.$emit('execute', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
                    :disable="{_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
@@ -252,6 +275,11 @@ def runs_table() -> None:
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="{_IN_FLIGHT_JS}"
                    @click="$parent.$emit('menu', props.row)" />
+            <q-btn dense flat icon="history" color="secondary"
+                   :disable="{_IN_FLIGHT_JS}"
+                   @click="$parent.$emit('history', props.row)" />
+            <q-btn v-if="props.row.error" dense flat icon="warning" color="negative"
+                   @click="$parent.$emit('errors', props.row)" />
         </q-td>
         """,
     )
@@ -291,10 +319,20 @@ def runs_table() -> None:
         run_id = e.args["name"] if isinstance(e.args, dict) else e.args
         _actions_dialog(run_id)
 
+    def _on_history(e: Any) -> None:
+        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+        _history_dialog(run_id)
+
+    def _on_errors(e: Any) -> None:
+        run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+        _error_dialog(run_id)
+
     table.on("execute", _on_execute)
     table.on("rollback", _on_rollback)
     table.on("rename", _on_rename)
     table.on("menu", _on_menu)
+    table.on("history", _on_history)
+    table.on("errors", _on_errors)
     table.on("delete", _on_delete)
 
 
@@ -310,8 +348,14 @@ async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> 
     try:
         await asyncio.to_thread(asyncio.run, coro)
         _broadcast_notify(success_msg, type="positive")
+    except GenerateError as exc:
+        _notify_error("Generation failed", str(exc))
+    except RevertVerificationError as exc:
+        _notify_error("Revert completed but verification found mismatches", str(exc))
+    except (ExecuteRefusedError, RevertRefusedError) as exc:
+        _notify_error("Refused", str(exc), type_="warning")
     except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
-        _broadcast_notify(f"Error: {exc}", type="negative", multi_line=True)
+        _notify_error("Error", str(exc))
     finally:
         if run_id is not None:
             _unmark_running(run_id)
@@ -390,13 +434,134 @@ def _actions_dialog(run_id: str) -> None:
         dialog.close()
         _delete_dialog(run_id)
 
+    def _view_error() -> None:
+        dialog.close()
+        _error_dialog(run_id)
+
+    def _retry_generation() -> None:
+        dialog.close()
+        delete_run(run_id)
+        _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
+
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
             ui.label(f"Task — {run_id}").classes("text-h6")
             ui.label(detail.prompt).classes("text-body1 q-mt-md")
+            if detail.error:
+                with ui.card().classes("w-full q-mt-md bg-red-1"):
+                    first_line = detail.error.strip().splitlines()[0]
+                    ui.label(f"Last error: {first_line}").classes("text-body2 text-red-10")
+                    ui.button("View details", icon="warning", color="negative", on_click=_view_error).props("flat dense")
+            if detail.status.value == "generation_failed":
+                with ui.row().classes("w-full q-mt-md justify-end"):
+                    ui.button("Retry generation", icon="refresh", color="primary", on_click=_retry_generation)
             with ui.row().classes("w-full q-mt-lg justify-end"):
                 ui.button("Delete", icon="delete", color="negative", on_click=_delete)
                 ui.button("Rename", icon="edit", on_click=_rename)
+                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+    dialog.open()
+
+
+def _history_dialog(run_id: str) -> None:
+    """Modal: a run's execute/revert history (time, type, outcome).
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it. Reads the run's audit log via
+    ``get_execution_history``; a run with no executions shows an empty state.
+    """
+    events = get_execution_history(run_id)
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
+            ui.label(f"Execution history — {run_id}").classes("text-h6")
+            if not events:
+                ui.label("No executions recorded yet.").classes("text-grey-7 q-pa-md")
+            else:
+                rows = [
+                    {
+                        "time": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                        "type": e.type.capitalize(),
+                        "outcome": e.outcome,
+                        "detail": e.detail or "",
+                    }
+                    for e in events
+                ]
+                columns = [
+                    {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
+                    {"name": "type", "label": "Type", "field": "type", "align": "left", "sortable": True},
+                    {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
+                    {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
+                ]
+                ui.table(
+                    rows=rows,
+                    columns=columns,
+                    row_key="time",
+                    pagination={"rowsPerPage": 0},
+                ).classes("w-full")
+            with ui.row().classes("w-full q-mt-md justify-end"):
+                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+    dialog.open()
+
+
+def _error_dialog(run_id: str) -> None:
+    """Modal: the run's last error detail plus its full audit trail.
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it — same pattern as ``_logs_dialog``.
+    """
+    try:
+        detail = get_run(run_id)
+        records = get_run_audit(run_id)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        return
+
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
+            ui.label(f"Error details — {run_id}").classes("text-h6")
+            if detail.error:
+                ui.textarea(value=detail.error).classes("w-full font-mono text-caption").props(
+                    "readonly outlined autogrow"
+                ).style("max-height: 40vh")
+            else:
+                ui.label("No error recorded on this run.").classes("text-grey-7")
+
+            ui.label("Audit trail").classes("text-subtitle1 q-mt-lg")
+            if not records:
+                ui.label("No audit records.").classes("text-grey-7")
+            else:
+                rows = [
+                    {
+                        "time": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                        "step": r.step.value,
+                        "op": r.op_kind,
+                        "outcome": r.outcome.value,
+                        "detail": r.detail or "",
+                    }
+                    for r in records
+                ]
+                columns = [
+                    {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
+                    {"name": "step", "label": "Step", "field": "step", "align": "left", "sortable": True},
+                    {"name": "op", "label": "Op", "field": "op", "align": "left", "sortable": True},
+                    {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
+                    {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
+                ]
+                audit_table = ui.table(
+                    rows=rows,
+                    columns=columns,
+                    row_key="time",
+                    pagination={"rowsPerPage": 0},
+                ).classes("w-full")
+                audit_table.add_slot(
+                    "body-cell-outcome",
+                    """
+                    <q-td :props="props"
+                          :class="props.row.outcome === 'failure' ? 'text-red-8' : ''">
+                        {{ props.row.outcome }}
+                    </q-td>
+                    """,
+                )
+            with ui.row().classes("w-full q-mt-md justify-end"):
                 ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
     dialog.open()
 
@@ -623,13 +788,12 @@ def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> N
             )
 
 
-def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
-    name = state.get("name", "")
-    prompt = state.get("prompt", "")
-    if not name or not prompt:
-        ui.notify("Name and prompt are required", type="warning")
-        return
-    dialog.close()
+def _start_generation(name: str, prompt: str, user: str, password: str) -> None:
+    """Register the in-flight placeholder + notification and launch generation.
+
+    Shared by the new-task wizard and the retry path on a ``generation_failed``
+    run so both produce the identical toast/table/background-task flow.
+    """
     _creating_runs[name] = {"name": name, "prompt": prompt}
     runs_table.refresh()
     _generating_notifications[name] = ui.notification(
@@ -639,9 +803,19 @@ def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
         timeout=None,
     )
     background_tasks.create(
-        _do_generate(name, prompt, app.storage.user["user"], app.storage.user["password"]),
+        _do_generate(name, prompt, user, password),
         name=f"generate {name}",
     )
+
+
+def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
+    name = state.get("name", "")
+    prompt = state.get("prompt", "")
+    if not name or not prompt:
+        ui.notify("Name and prompt are required", type="warning")
+        return
+    dialog.close()
+    _start_generation(name, prompt, app.storage.user["user"], app.storage.user["password"])
 
 
 async def _do_generate(name: str, prompt: str, user: str, password: str) -> None:
@@ -651,7 +825,7 @@ async def _do_generate(name: str, prompt: str, user: str, password: str) -> None
         await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password))
         _broadcast_notify(f"Run {name!r} created and generated", type="positive")
     except Exception as exc:  # noqa: BLE001
-        _broadcast_notify(f"Generate failed: {exc}", type="negative", multi_line=True)
+        _notify_error("Generation failed", str(exc))
     finally:
         _creating_runs.pop(name, None)
         notification = _generating_notifications.pop(name, None)

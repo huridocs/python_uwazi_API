@@ -179,6 +179,32 @@ class RevertVerificationResult(BaseModel):
     )
 
 
+def _hint(value: Any) -> str:
+    """Compact one-line hint of an expected/actual value for the summary."""
+    if value is None:
+        return "None"
+    if isinstance(value, dict):
+        return f"dict({', '.join(f'{k}={value[k]!r}' for k in sorted(value))})" if value else "{}"
+    text = str(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def format_verification_result(result: RevertVerificationResult) -> str:
+    """Pure: compact multi-line summary of a post-revert verification outcome.
+
+    One line per mismatch (kind + shared_id + expected/actual hint) and one per
+    file gap; used verbatim as the operator-facing error detail.
+    """
+    lines = [
+        f"revert verification failed ({len(result.mismatches)} mismatch(es), {len(result.file_gaps)} file gap(s), checked={result.checked})"
+    ]
+    for m in result.mismatches:
+        lines.append(f"- {m.kind} {m.shared_id}: expected {_hint(m.expected)}, got {_hint(m.actual)}")
+    for g in result.file_gaps:
+        lines.append(f"- file {g.gap} {g.kind} {g.originalname!r} on {g.shared_id}")
+    return "\n".join(lines)
+
+
 def verify_revert(
     manifest: MigrationManifest,
     snapshots: dict[str, EntitySnapshot],

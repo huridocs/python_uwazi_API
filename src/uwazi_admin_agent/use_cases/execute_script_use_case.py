@@ -21,9 +21,8 @@ dedicated event loop for the sync CRUD helpers' ``run_until_complete`` calls).
 Not unit-tested (needs ports); validated via the simulation run.
 """
 
-from __future__ import annotations
-
 import asyncio
+from datetime import datetime, timezone
 
 from loguru import logger
 
@@ -112,7 +111,10 @@ class ExecuteScriptUseCase:
         manifest = intercept.manifest
 
         if error:
+            manifest.last_executed_at = datetime.now(timezone.utc)
             manifest.status = RunStatus.FAILED
+            manifest.error = error
+            manifest.error_step = "execute"
             self._backup_store.save_manifest(run_id, manifest)
             self._emit_run(AuditOutcome.FAILURE, run_id, detail=error.splitlines()[0] if error else error)
             logger.error("execute script failed run={} error={}", run_id, error.splitlines()[0] if error else error)
@@ -121,10 +123,14 @@ class ExecuteScriptUseCase:
                 assert self._revert_use_case is not None  # guarded above
                 await self._revert_use_case.revert(run_id)
                 return self._backup_store.load_manifest(run_id)
-            raise RuntimeError(f"Script execution failed: {error}")
+            raise ScriptExecutionError(error)
 
+        manifest.last_executed_at = datetime.now(timezone.utc)
         manifest.status = RunStatus.EXECUTED
+        manifest.error = None
+        manifest.error_step = None
         self._backup_store.save_manifest(run_id, manifest)
+
         self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
             "execute script done run={} modified={} deleted={} created={} rewired={}",

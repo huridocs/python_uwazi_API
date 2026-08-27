@@ -9,11 +9,13 @@ from typing import Any
 
 from uwazi_admin_agent.domain.manifest import EntityIdentity, MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.revert_verification import (
+    FileGap,
     RevertVerificationResult,
     VerificationMismatch,
     build_file_gaps,
     build_inbound_ref_gaps,
     build_relationship_gaps,
+    format_verification_result,
     verify_revert,
 )
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
@@ -881,3 +883,65 @@ def test_relationship_gap_is_frozen() -> None:
     gap = RelationshipGap(shared_id="A", from_shared_id="newA", to_shared_id="newB", relation_type="r")
     with pytest.raises(Exception):
         gap.gap = "extra"  # type: ignore[misc]
+
+
+# --- format_verification_result ----------------------------------------------
+
+
+def test_format_verification_result_ok() -> None:
+    result = RevertVerificationResult(ok=True, checked=3, mismatches=[], file_gaps=[])
+    text = format_verification_result(result)
+    assert "checked=3" in text
+    assert "0 mismatch" in text
+
+
+def test_format_verification_result_lists_mismatches() -> None:
+    result = RevertVerificationResult(
+        ok=False,
+        checked=2,
+        mismatches=[
+            VerificationMismatch(
+                shared_id="A",
+                kind="entity",
+                expected={"title": "old"},
+                actual=None,
+            ),
+            VerificationMismatch(
+                shared_id="C",
+                kind="created",
+                expected=None,
+                actual={"title": "survived"},
+            ),
+        ],
+    )
+    text = format_verification_result(result)
+    lines = text.splitlines()
+    assert len(lines) == 3
+    assert "entity A" in lines[1]
+    assert "expected" in lines[1]
+    assert "got None" in lines[1]
+    assert "created C" in lines[2]
+
+
+def test_format_verification_result_lists_file_gaps() -> None:
+    result = RevertVerificationResult(
+        ok=False,
+        checked=1,
+        file_gaps=[FileGap(shared_id="D", gap="missing", originalname="report.pdf", kind="document")],
+    )
+    text = format_verification_result(result)
+    assert "file missing document 'report.pdf' on D" in text
+
+
+def test_format_verification_result_truncates_long_values() -> None:
+    long_title = "x" * 200
+    result = RevertVerificationResult(
+        ok=False,
+        checked=1,
+        mismatches=[
+            VerificationMismatch(shared_id="A", kind="entity", expected=long_title, actual="short"),
+        ],
+    )
+    text = format_verification_result(result)
+    assert "xxx..." in text
+    assert long_title not in text

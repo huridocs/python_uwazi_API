@@ -16,6 +16,7 @@ class RunStatus(str, Enum):
     VERIFIED = "verified"
     REVERTED = "reverted"
     FAILED = "failed"
+    GENERATION_FAILED = "generation_failed"
 
 
 class RewiredRelationship(BaseModel):
@@ -63,9 +64,21 @@ class MigrationManifest(BaseModel):
         description="Entities that existed pre-run and were deleted by the script (revert = restore from snapshot).",
     )
     status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
+    last_executed_at: datetime | None = Field(
+        default=None,
+        description="When this run was last executed or reverted (UTC); None until the first execution.",
+    )
     snapshot_dir: str | None = Field(
         default=None,
         description="Where this run's snapshots live, if persisted (§5.2).",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Full error detail from the last failed lifecycle step; cleared on success.",
+    )
+    error_step: str | None = Field(
+        default=None,
+        description="Which step failed: 'generate' | 'execute' | 'revert' | 'verify'.",
     )
 
     def reset_touch_set(self) -> None:

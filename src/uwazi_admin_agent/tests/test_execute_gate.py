@@ -33,6 +33,12 @@ def test_gate_refuses_failed_even_without_touch_set() -> None:
     assert decision.action == "refuse"
 
 
+def test_generation_failed_refused() -> None:
+    decision = decide_execute_gate(RunStatus.GENERATION_FAILED, has_touch_set=False)
+    assert decision.action == "refuse"
+    assert "generation" in decision.reason
+
+
 # --- allow cases -------------------------------------------------------------
 
 

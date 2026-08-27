@@ -19,8 +19,7 @@ Testable with an in-memory repo + in-memory backup store (the DoD's "with an
 in-memory repo").
 """
 
-from __future__ import annotations
-
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -80,14 +79,25 @@ class RevertRunUseCase:
 
         actions = build_revert_actions(manifest, lambda sid: self._backup_store.load_snapshot(run_id, sid))
 
-        for action in actions:
-            await self._execute_action(action, run_id, manifest)
+        try:
+            for action in actions:
+                await self._execute_action(action, run_id, manifest)
+        except Exception as exc:
+            op_kind = type(action).__name__
+            manifest.error = f"revert failed at {op_kind}: {exc}"
+            manifest.error_step = "revert"
+            manifest.last_executed_at = datetime.now(timezone.utc)
+            self._backup_store.save_manifest(run_id, manifest)
+            self._backup_store.update_status(run_id, RunStatus.FAILED)
+            self._emit_run(AuditOutcome.FAILURE, run_id)
+            logger.error("revert failed run={} at={} error={}", run_id, op_kind, exc)
+            raise
 
         # Persist any restored_shared_id mappings recorded during re-creates so
-        # post-revert verification can fetch the re-created rows by their new ids.
+        manifest.last_executed_at = datetime.now(timezone.utc)
+        manifest.error = None
+        manifest.error_step = None
         self._backup_store.save_manifest(run_id, manifest)
-        self._backup_store.update_status(run_id, RunStatus.REVERTED)
-        self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
             "revert done run={} actions={} modified={} deleted={} created={}",
             run_id,
