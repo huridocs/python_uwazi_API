@@ -9,6 +9,7 @@ from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.template_property_port import TemplatePropertyLookupPort
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 
 pytestmark = pytest.mark.anyio
@@ -28,6 +29,7 @@ class InMemoryEntityRepository(EntityRepositoryPort):
     def __init__(self, entities: dict[str, dict[str, Any]] | None = None) -> None:
         self._entities: dict[str, dict[str, Any]] = dict(entities or {})
         self._next_id = 0
+        self.save_calls: list[dict[str, Any]] = []
 
     @override
     async def get_raw_by_shared_id(self, shared_id: str, language: str | None = None) -> dict[str, Any]:
@@ -48,6 +50,7 @@ class InMemoryEntityRepository(EntityRepositoryPort):
         if sid is None:
             raise RuntimeError("raw missing sharedId")
         self._entities[sid] = dict(raw)
+        self.save_calls.append(dict(raw))
 
     @override
     async def create_raw(self, raw: dict[str, Any]) -> str:
@@ -119,11 +122,30 @@ class InMemoryBackupStore(BackupStorePort):
         self._snapshots.pop(run_id, None)
         for key in list(self._file_bytes):
             if key[0] == run_id:
-                self._file_bytes.pop(key, None)
+                self._file_bytes.pop(key)
 
     @override
     def list_runs(self) -> list[str]:
         return sorted(self._manifests.keys())
+
+    @override
+    def delete_run(self, run_id: str) -> None:
+        self._manifests.pop(run_id, None)
+        self._snapshots.pop(run_id, None)
+        for key in list(self._file_bytes):
+            if key[0] == run_id:
+                self._file_bytes.pop(key)
+
+    @override
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        if old_id not in self._manifests:
+            raise FileNotFoundError(old_id)
+        if new_id in self._manifests:
+            raise FileExistsError(new_id)
+        self._manifests[new_id] = self._manifests.pop(old_id)
+        self._manifests[new_id].run_id = new_id
+        if old_id in self._snapshots:
+            self._snapshots[new_id] = self._snapshots.pop(old_id)
 
 
 class InMemoryFileRepository(FileRepositoryPort):
@@ -159,6 +181,34 @@ class InMemoryFileRepository(FileRepositoryPort):
             return False
         self.uploads.append(("attachment", shared_id, title, content_type))
         return True
+
+
+class InMemoryTemplatePropertyLookup(TemplatePropertyLookupPort):
+    """Resolves a relationship property name from a literal ``(template, type)`` map.
+
+    ``mapping`` keys ``(template_id, relation_type_id)`` to a property ``name``.
+    ``unresolved`` makes every lookup return ``None`` to exercise the best-effort
+    inbound-skip path. ``calls`` records lookups so tests can assert resolution
+    was attempted with the right ``(template, relation_type, content)``.
+    """
+
+    def __init__(
+        self,
+        mapping: dict[tuple[str, str], str] | None = None,
+        unresolved: bool = False,
+    ) -> None:
+        self.mapping: dict[tuple[str, str], str] = mapping or {}
+        self.unresolved: bool = unresolved
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    @override
+    async def find_relationship_property_name(
+        self, template_id: str, relation_type_id: str, content_id: str | None = None
+    ) -> str | None:
+        self.calls.append((template_id, relation_type_id, content_id))
+        if self.unresolved:
+            return None
+        return self.mapping.get((template_id, relation_type_id))
 
 
 # --- helpers ----------------------------------------------------------------
@@ -488,3 +538,206 @@ async def test_revert_deleted_missing_file_bytes_is_best_effort() -> None:
     assert repo.get("new-1")["title"] == "old X"
     assert file_repo.uploads == []
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+# --- delete-revert: strip co-deleted refs + re-apply relationship refs --------
+
+
+def _rel(entity: str, hub: str, template: str | None) -> dict:
+    return {"entity": entity, "hub": hub, "template": template}
+
+
+def _mutual_snapshots() -> tuple[EntitySnapshot, EntitySnapshot]:
+    snap_a = _snapshot(
+        "A",
+        {
+            "sharedId": "A",
+            "_id": "a1",
+            "title": "A",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+            "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+        },
+    )
+    snap_b = _snapshot(
+        "B",
+        {
+            "sharedId": "B",
+            "_id": "b1",
+            "title": "B",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "A", "label": "A"}]},
+            "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+        },
+    )
+    return snap_a, snap_b
+
+
+async def test_revert_deleted_mutual_strips_refs_then_reapplies_remapped() -> None:
+    repo = InMemoryEntityRepository(entities={})  # both deleted
+    store = InMemoryBackupStore()
+    snap_a, snap_b = _mutual_snapshots()
+    store.save_snapshot("run-1", snap_a)
+    store.save_snapshot("run-1", snap_b)
+    store.save_manifest("run-1", _manifest(deleted=[_identity("A", "en"), _identity("B", "en")]))
+
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
+    await use_case.revert("run-1")
+
+    # Both re-created under fresh sharedIds (A -> new-1, B -> new-2 in call order).
+    assert repo.has("new-1") and repo.has("new-2")
+    # The co-deleted metadata refs were STRIPPED before create (so create did not
+    # 400), then RE-APPLIED remapped to the NEW sharedIds via the entity-save
+    # path (no self-refs): new-1 -> new-2, new-2 -> new-1.
+    assert repo.get("new-1")["metadata"]["entity_relation"] == [{"value": "new-2", "label": "B"}]
+    assert repo.get("new-2")["metadata"]["entity_relation"] == [{"value": "new-1", "label": "A"}]
+    # Snapshot raw is untouched (raw fidelity): the original ref is still there.
+    assert store.load_snapshot("run-1", "A").raw["metadata"]["entity_relation"] == [{"value": "B", "label": "B"}]
+    # restored_shared_id recorded for verification.
+    assert {e.restored_shared_id for e in store.load_manifest("run-1").deleted} == {"new-1", "new-2"}
+    assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+async def test_revert_deleted_mutual_reapply_does_not_need_template_lookup() -> None:
+    # The mutual re-apply (Part 2) re-saves re-created entities with remapped
+    # metadata; it does NOT need the template-property lookup (that is only for
+    # inbound refs on still-existing entities). So it works with no lookup wired.
+    repo = InMemoryEntityRepository(entities={})
+    store = InMemoryBackupStore()
+    snap_a, snap_b = _mutual_snapshots()
+    store.save_snapshot("run-1", snap_a)
+    store.save_snapshot("run-1", snap_b)
+    store.save_manifest("run-1", _manifest(deleted=[_identity("A", "en"), _identity("B", "en")]))
+
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
+    await use_case.revert("run-1")
+
+    assert repo.get("new-1")["metadata"]["entity_relation"] == [{"value": "new-2", "label": "B"}]
+    assert repo.get("new-2")["metadata"]["entity_relation"] == [{"value": "new-1", "label": "A"}]
+    assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+async def test_revert_inbound_ref_on_still_existing_entity_is_restored() -> None:
+    # Defect 1: A deleted (re-created new-1); B still-existing had B->A, which the
+    # delete cascade stripped (B.metadata.entity_relation == []). Revert re-adds
+    # the ref on B remapped to new-1, using the template lookup to resolve the
+    # property name on B's template.
+    repo = InMemoryEntityRepository(
+        entities={
+            "B": {
+                "sharedId": "B",
+                "_id": "b1",
+                "title": "B",
+                "language": "en",
+                "template": "tmplB",
+                "metadata": {"entity_relation": []},
+            }
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "A",
+            {
+                "sharedId": "A",
+                "_id": "a1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [
+                    _rel("A", "h2", None),
+                    _rel("B", "h2", "rtype1"),
+                    _rel("B", "h1", None),
+                    _rel("A", "h1", "rtype1"),
+                ],
+            },
+        ),
+    )
+    store.save_manifest("run-1", _manifest(deleted=[_identity("A", "en")]))
+
+    lookup = InMemoryTemplatePropertyLookup(mapping={("tmplB", "rtype1"): "entity_relation"})
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, template_property_lookup=lookup)
+    await use_case.revert("run-1")
+
+    # A re-created; B's cascade-stripped ref restored pointing at new-1 (B's other
+    # metadata untouched — only the entity_relation entry is appended).
+    assert repo.has("new-1")
+    assert repo.get("B")["metadata"]["entity_relation"] == [{"value": "new-1", "label": "A"}]
+    assert lookup.calls == [("tmplB", "rtype1", "tmplA")]
+    assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+async def test_revert_inbound_ref_skipped_best_effort_when_property_unresolved() -> None:
+    # The template lookup cannot resolve the property name (e.g. the existing
+    # entity's template has no matching relationship property). The inbound ref
+    # is skipped (best-effort); the revert still succeeds and A is re-created.
+    repo = InMemoryEntityRepository(
+        entities={
+            "B": {
+                "sharedId": "B",
+                "_id": "b1",
+                "title": "B",
+                "language": "en",
+                "template": "tmplB",
+                "metadata": {"entity_relation": []},
+            }
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "A",
+            {
+                "sharedId": "A",
+                "_id": "a1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [_rel("B", "h1", None), _rel("A", "h1", "rtype1")],
+            },
+        ),
+    )
+    store.save_manifest("run-1", _manifest(deleted=[_identity("A", "en")]))
+
+    lookup = InMemoryTemplatePropertyLookup(unresolved=True)
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, template_property_lookup=lookup)
+    await use_case.revert("run-1")
+
+    assert repo.has("new-1")
+    # B's ref was NOT restored (lookup unresolved) — best-effort, not fatal.
+    assert repo.get("B")["metadata"]["entity_relation"] == []
+    assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+async def test_revert_deleted_self_ref_is_stripped_then_reapplied_remapped() -> None:
+    # A references itself (a self-ref by its own sharedId) — must be stripped
+    # before create so the create branch does not 400 on the not-yet-existing old
+    # id, then re-applied remapped to the NEW sharedId (A' -> A'), mirroring the
+    # original self-ref as exact-data revert.
+    repo = InMemoryEntityRepository(entities={})
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "A",
+            {
+                "sharedId": "A",
+                "_id": "a1",
+                "title": "A",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "A", "label": "A"}]},
+            },
+        ),
+    )
+    store.save_manifest("run-1", _manifest(deleted=[_identity("A", "en")]))
+
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
+    await use_case.revert("run-1")
+
+    assert repo.has("new-1")
+    assert repo.get("new-1")["metadata"]["entity_relation"] == [{"value": "new-1", "label": "A"}]
+    assert store.load_snapshot("run-1", "A").raw["metadata"]["entity_relation"] == [{"value": "A", "label": "A"}]

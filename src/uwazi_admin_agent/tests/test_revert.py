@@ -6,6 +6,7 @@ import pytest
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
+    ReapplyRelationshipRefsAction,
     RecreateEntityAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
@@ -265,3 +266,163 @@ def test_modified_and_deleted_same_ordering_preserves_manifest_order() -> None:
     ]
     assert [a.snapshot.shared_id for a in actions[:4]] == ["M1", "M2", "D1", "D2"]
     assert actions[4].shared_id == "C1"
+
+
+# --- relationship ref re-apply AFTER entity re-creates (§2.6) ---------------
+
+
+def _rel(entity: str, hub: str, template: str | None) -> dict:
+    return {"entity": entity, "hub": hub, "template": template}
+
+
+def test_mutual_deleted_yields_reapply_after_entity_recreates() -> None:
+    # A and B relate to each other (hub h1); both deleted and both hold a co-deleted
+    # metadata ref, so each is a re-create target for the re-apply action.
+    store = _SnapshotStore(
+        {
+            "A": _snapshot(
+                "A",
+                {
+                    "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                    "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+                },
+            ),
+            "B": _snapshot(
+                "B",
+                {
+                    "metadata": {"entity_relation": [{"value": "A", "label": "A"}]},
+                    "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+                },
+            ),
+        }
+    )
+    manifest = _manifest(deleted=[_identity("A"), _identity("B")], created=[_identity("C")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [
+        RecreateEntityAction,
+        RecreateEntityAction,
+        ReapplyRelationshipRefsAction,
+        DeleteEntityAction,
+    ]
+    rel_action = actions[2]
+    assert isinstance(rel_action, ReapplyRelationshipRefsAction)
+    assert rel_action.recreate_targets == ["A", "B"]
+    assert rel_action.inbound_targets == []
+
+
+def test_reapply_action_after_recreates_before_delete_created() -> None:
+    store = _SnapshotStore(
+        {
+            "A": _snapshot(
+                "A",
+                {
+                    "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                    "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+                },
+            ),
+            "B": _snapshot(
+                "B",
+                {
+                    "metadata": {"entity_relation": [{"value": "A", "label": "A"}]},
+                    "relations": [_rel("A", "h1", None), _rel("B", "h1", "rtype1")],
+                },
+            ),
+        }
+    )
+    manifest = _manifest(deleted=[_identity("A"), _identity("B")], created=[_identity("NEW")])
+
+    actions = build_revert_actions(manifest, store)
+
+    types = [type(a) for a in actions]
+    assert types.index(ReapplyRelationshipRefsAction) > types.index(RecreateEntityAction)
+    assert types.index(ReapplyRelationshipRefsAction) < types.index(DeleteEntityAction)
+
+
+def test_no_reapply_action_when_deleted_have_only_still_existing_refs() -> None:
+    # D relates only to a still-existing entity (STATE) and holds no co-deleted ref;
+    # STATE is not in the manifest, but the hub is FROM=D (deleted) so it is not an
+    # inbound ref either — no re-apply action is emitted.
+    store = _SnapshotStore(
+        {
+            "D": _snapshot(
+                "D",
+                {
+                    "metadata": {"entity_relation": [{"value": "STATE", "label": "State"}]},
+                    "relations": [_rel("D", "h1", None), _rel("STATE", "h1", "rtype1")],
+                },
+            )
+        }
+    )
+    manifest = _manifest(deleted=[_identity("D")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [RecreateEntityAction]
+
+
+def test_reapply_action_carries_inbound_ref_from_still_existing_entity() -> None:
+    # A is deleted; B (still exists, NOT in the manifest) had a ref to A — the hub
+    # from=B(null), to=A(rtype1). A's own metadata has no co-deleted ref, so
+    # recreate_targets is empty, but the inbound ref on B is captured for restore.
+    store = _SnapshotStore(
+        {
+            "A": _snapshot(
+                "A",
+                {
+                    "template": "tmplA",
+                    "metadata": {"entity_relation": [{"value": "STATE", "label": "State"}]},
+                    "relations": [
+                        _rel("A", "h2", None),
+                        _rel("STATE", "h2", "rtype1"),
+                        _rel("B", "h1", None),
+                        _rel("A", "h1", "rtype1"),
+                    ],
+                },
+            )
+        }
+    )
+    manifest = _manifest(deleted=[_identity("A")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [RecreateEntityAction, ReapplyRelationshipRefsAction]
+    rel_action = actions[1]
+    assert isinstance(rel_action, ReapplyRelationshipRefsAction)
+    assert rel_action.recreate_targets == []
+    assert len(rel_action.inbound_targets) == 1
+    ref = rel_action.inbound_targets[0]
+    assert ref.existing_shared_id == "B"
+    assert ref.deleted_shared_id == "A"
+    assert ref.relation_type == "rtype1"
+    assert ref.deleted_template_id == "tmplA"
+
+
+def test_reapply_action_excludes_inbound_refs_on_manifest_members() -> None:
+    # B is in the manifest (modified) AND had a ref to deleted A — the stale-id
+    # limitation excludes B from inbound restore; no re-apply action (A has no
+    # co-deleted ref either).
+    store = _SnapshotStore(
+        {
+            "A": _snapshot(
+                "A",
+                {
+                    "metadata": {"entity_relation": [{"value": "STATE", "label": "State"}]},
+                    "relations": [_rel("B", "h1", None), _rel("A", "h1", "rtype1")],
+                },
+            ),
+            "B": _snapshot("B", {"_id": "b1"}),
+        }
+    )
+    manifest = _manifest(modified=[_identity("B")], deleted=[_identity("A")])
+
+    actions = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in actions] == [RestoreEntityAction, RecreateEntityAction]
+
+
+def test_reapply_relationship_refs_action_is_frozen() -> None:
+    action = ReapplyRelationshipRefsAction()
+    with pytest.raises(Exception):
+        action.recreate_targets = []  # type: ignore[misc]

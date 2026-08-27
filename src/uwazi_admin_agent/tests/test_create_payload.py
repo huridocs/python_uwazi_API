@@ -3,7 +3,7 @@
 Pure transform: literal raw dicts in, plain assertions out. No I/O, no mocks.
 """
 
-from uwazi_admin_agent.domain.create_payload import to_create_payload
+from uwazi_admin_agent.domain.create_payload import strip_deleted_entity_refs, to_create_payload
 
 
 def _full_raw() -> dict:
@@ -83,3 +83,59 @@ def test_missing_title_yields_empty_title_field_absent() -> None:
     payload = to_create_payload(raw)
     assert "title" not in payload
     assert payload == {"metadata": {}}
+
+
+# --- strip_deleted_entity_refs (delete-revert: avoid create-branch 400) --------
+
+
+def test_strip_drops_refs_to_co_deleted_and_self() -> None:
+    metadata = {
+        "entity_relation": [{"value": "B", "label": "B title"}, {"value": "C", "label": "C title"}],
+        "caption": [{"value": "hello"}],
+    }
+    # deleted_ids = self (A) + co-deleted B; C still exists.
+    stripped = strip_deleted_entity_refs(metadata, {"A", "B"})
+
+    assert stripped["entity_relation"] == [{"value": "C", "label": "C title"}]
+    # Non-relationship property whose values happen to be {value: ...} but whose
+    # value is not a deleted sharedId is preserved unchanged.
+    assert stripped["caption"] == [{"value": "hello"}]
+
+
+def test_strip_preserves_refs_to_still_existing_entities() -> None:
+    metadata = {"entity_relation": [{"value": "STATE", "label": "State"}, {"value": "B", "label": "B"}]}
+    stripped = strip_deleted_entity_refs(metadata, {"A", "B"})
+    assert stripped["entity_relation"] == [{"value": "STATE", "label": "State"}]
+
+
+def test_strip_drops_all_refs_when_only_co_deleted_targets() -> None:
+    metadata = {"entity_relation": [{"value": "B", "label": "B"}]}
+    stripped = strip_deleted_entity_refs(metadata, {"A", "B"})
+    assert stripped["entity_relation"] == []
+
+
+def test_strip_leaves_thesaurus_and_scalar_values_untouched() -> None:
+    # Thesaurus/select values are UUIDs (never sharedIds), dates are scalars —
+    # these are not {value: sharedId} relationship refs and must pass through.
+    # deleted_ids holds only entity sharedIds, so no thesaurus value matches.
+    metadata = {
+        "status": [{"value": "uuid-123", "label": "Final"}],
+        "date": [{"value": 1700000000}],
+        "title_scalar": "A plain title",
+        "tags": ["x", "y"],
+        "empty_rel": [],
+    }
+    stripped = strip_deleted_entity_refs(metadata, {"A", "B"})
+    assert stripped == metadata
+
+
+def test_strip_does_not_mutate_input() -> None:
+    metadata = {"entity_relation": [{"value": "B", "label": "B"}, {"value": "C", "label": "C"}]}
+    before = {k: list(v) if isinstance(v, list) else v for k, v in metadata.items()}
+    strip_deleted_entity_refs(metadata, {"A", "B"})
+    assert metadata == before
+    assert metadata["entity_relation"][0]["value"] == "B"  # original entry untouched
+
+
+def test_strip_handles_missing_metadata() -> None:
+    assert strip_deleted_entity_refs({}, {"A"}) == {}

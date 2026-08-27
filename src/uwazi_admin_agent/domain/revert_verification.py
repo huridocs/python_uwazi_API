@@ -41,6 +41,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest
+from uwazi_admin_agent.domain.relationship_restore import (
+    CapturedHub,
+    InboundRef,
+    extract_inbound_refs_from_existing,
+    extract_mutual_deleted_hubs,
+    remap_metadata_refs,
+)
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, IDENTITY_FIELDS, PLATFORM_MANAGED_FIELDS
 
@@ -55,7 +62,7 @@ def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None
 
 
 def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return ``raw`` without platform-managed, identity, and file fields.
+    """Return ``raw`` without platform-managed, identity, file, and relations fields.
 
     For a deleted entity that was re-created via the create branch, Uwazi minted
     a fresh _id/sharedId, so those differ by design and must be excluded from the
@@ -64,13 +71,34 @@ def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     collection and are re-minted on re-upload (fresh file _ids/filenames), so
     they can never match by identity — they are excluded here and a dedicated
     :func:`build_file_gaps` check compares by originalname+kind to detect actual
-    file-restore gaps. Modified entities keep their identity and their files, so
-    they use the stricter _strip_platform_managed.
+    file-restore gaps. ``relations`` is likewise a read-only denormalized view of
+    the ``connections`` collection (``getByDocument``): its hub ids and endpoint
+    sharedIds are re-minted/re-derived on re-create, so it is excluded here and a
+    dedicated :func:`build_relationship_gaps` check verifies the mutual-deleted
+    hubs came back (by remapped endpoints + type). Modified entities keep their
+    identity, files, and relationships, so they use the stricter
+    :func:`_strip_platform_managed` (``relations`` IS compared for them).
     """
     if raw is None:
         return None
-    skip = PLATFORM_MANAGED_FIELDS | IDENTITY_FIELDS | FILE_FIELDS
+    skip = PLATFORM_MANAGED_FIELDS | IDENTITY_FIELDS | FILE_FIELDS | {"relations"}
     return {k: v for k, v in raw.items() if k not in skip}
+
+
+def _remap_for_recreate(raw: dict[str, Any] | None, id_map: dict[str, str]) -> dict[str, Any] | None:
+    """Return ``raw`` with in-metadata relationship refs remapped via ``id_map``.
+
+    Wraps :func:`remap_metadata_refs` on the ``metadata`` field only (the rest of
+    the raw is untouched). Used before :func:`_strip_for_recreate` so a deleted
+    entity's snapshot ref to a co-deleted entity (OLD sharedId) compares equal to
+    the re-created entity's ref (NEW sharedId, re-populated by the bulk
+    re-create's ``updateEntitiesMetadataByHub``). ``None`` passes through. Pure.
+    """
+    if raw is None or not id_map:
+        return raw
+    copy = dict(raw)
+    copy["metadata"] = remap_metadata_refs(raw.get("metadata", {}) or {}, id_map)
+    return copy
 
 
 class VerificationMismatch(BaseModel):
@@ -105,6 +133,25 @@ class FileGap(BaseModel):
     kind: Literal["document", "attachment"] = Field(description="The file kind that did not match.")
 
 
+class RelationshipGap(BaseModel):
+    """One mutual-deleted relationship hub that did not come back after revert.
+
+    Emitted when the snapshot captured a hub between two deleted entities but
+    the re-created entities' ``relations`` show no matching hub post-revert (the
+    bulk re-create was skipped or failed). Keyed by the re-created (new) endpoint
+    sharedIds + the relation type, since the hub id is re-minted on re-create
+    (like file ids) and cannot be compared by identity.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    shared_id: str = Field(description="The re-created (from-side) entity whose hub did not come back.")
+    gap: Literal["missing"] = Field(default="missing", description="The hub is absent post-revert.")
+    from_shared_id: str = Field(description="The re-created FROM endpoint's NEW sharedId.")
+    to_shared_id: str = Field(description="The re-created TO endpoint's NEW sharedId.")
+    relation_type: str = Field(description="The relation-type id the hub should carry.")
+
+
 class RevertVerificationResult(BaseModel):
     """Outcome of verifying a run's revert against its snapshots."""
 
@@ -119,6 +166,15 @@ class RevertVerificationResult(BaseModel):
             "Per-file gaps for re-created (deleted) entities: files the snapshot "
             "captured but the re-created entity is missing, or unexpected files. "
             "Empty when every captured file was re-uploaded and no extras appeared."
+        ),
+    )
+    relationship_gaps: list[RelationshipGap] = Field(
+        default_factory=list,
+        description=(
+            "Per-hub gaps for re-created (deleted) entities that were mutually "
+            "related: relationship hubs the snapshot captured but the re-created "
+            "entities do not have post-revert (the bulk re-create was skipped or "
+            "failed). Empty when every mutual-deleted hub was re-created."
         ),
     )
 
@@ -140,7 +196,14 @@ def verify_revert(
     """
     mismatches: list[VerificationMismatch] = []
     file_gaps: list[FileGap] = []
+    relationship_gaps: list[RelationshipGap] = []
     checked = 0
+
+    # Old→new sharedId map for re-created deleted entities. Used to remap
+    # in-metadata relationship-property refs before comparing a deleted entry's
+    # snapshot vs its re-created current raw (the ref's value is a sharedId that
+    # was re-minted on re-create, so it differs by design unless remapped).
+    id_map: dict[str, str] = {e.shared_id: e.restored_shared_id for e in manifest.deleted if e.restored_shared_id}
 
     for modified in manifest.modified:
         checked += 1
@@ -158,8 +221,15 @@ def verify_revert(
         # A deleted entity was re-created via the create branch, so its _id/sharedId
         # are fresh by design and its documents/attachments are re-minted on re-upload
         # — compare DATA fields only (excl. platform-managed, identity, and file
-        # fields). A None actual means the re-create failed (the old id is gone).
-        if _strip_for_recreate(actual) != _strip_for_recreate(snap.raw):
+        # fields). In-metadata relationship-property refs to co-deleted entities
+        # are remapped via id_map first: the snapshot carries the OLD sharedId as
+        # the ref value while the re-created entity carries the NEW sharedId (the
+        # bulk re-create's updateEntitiesMetadataByHub re-populated it); remapping
+        # the snapshot's ref makes the two comparable. A None actual means the
+        # re-create failed (the old id is gone).
+        expected_cmp = _strip_for_recreate(_remap_for_recreate(snap.raw, id_map))
+        actual_cmp = _strip_for_recreate(_remap_for_recreate(actual, id_map))
+        if expected_cmp != actual_cmp:
             mismatches.append(
                 VerificationMismatch(shared_id=deleted.shared_id, kind="entity", expected=snap.raw, actual=actual)
             )
@@ -188,8 +258,43 @@ def verify_revert(
                 VerificationMismatch(shared_id=created.shared_id, kind="created", expected=None, actual=actual)
             )
 
-    ok = not mismatches and not file_gaps
-    return RevertVerificationResult(ok=ok, checked=checked, mismatches=mismatches, file_gaps=file_gaps)
+    # Mutual-deleted relationship hubs: the snapshot captured hubs between
+    # deleted entities; revert should have re-created them (with remapped
+    # endpoints) via ReapplyRelationshipRefsAction's re-created-entity re-save.
+    # build_relationship_gaps checks each re-created entity's relations for the
+    # expected direction-aware hub. A hub whose endpoints were not both
+    # re-created is skipped (the entity mismatch above already flags the failed
+    # re-create).
+    deleted_ids = {e.shared_id for e in manifest.deleted}
+    deleted_snapshots = {sid: snapshots[sid] for sid in deleted_ids if sid in snapshots}
+    expected_hubs = extract_mutual_deleted_hubs(deleted_snapshots, deleted_ids)
+    if expected_hubs:
+        relationship_gaps.extend(build_relationship_gaps(expected_hubs, id_map, current_raws))
+
+    # Inbound refs from still-existing entities to deleted ones: the delete
+    # cascade (deleteReferencesToSharedIds) stripped these refs; revert's
+    # ReapplyRelationshipRefsAction should have re-added them (remapped to the
+    # NEW sharedId) on the still-existing entity. build_inbound_ref_gaps checks
+    # each still-existing entity's relations for the restored direction-aware
+    # hub. Existing entities that are themselves in the manifest are excluded —
+    # that stale-id edge case is a documented limitation.
+    manifest_ids = (
+        {e.shared_id for e in manifest.modified}
+        | {e.shared_id for e in manifest.deleted}
+        | {e.shared_id for e in manifest.created}
+    )
+    inbound_refs = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=manifest_ids)
+    if inbound_refs:
+        relationship_gaps.extend(build_inbound_ref_gaps(inbound_refs, id_map, current_raws))
+
+    ok = not mismatches and not file_gaps and not relationship_gaps
+    return RevertVerificationResult(
+        ok=ok,
+        checked=checked,
+        mismatches=mismatches,
+        file_gaps=file_gaps,
+        relationship_gaps=relationship_gaps,
+    )
 
 
 # --- file-restore gap check --------------------------------------------------
@@ -246,4 +351,116 @@ def build_file_gaps(
     for act_name, act_kind in actual:
         if (act_name, act_kind) not in expected:
             gaps.append(FileGap(shared_id=shared_id, gap="extra", originalname=act_name, kind=act_kind))
+    return gaps
+
+
+# --- mutual-relationship-restore gap check ----------------------------------
+
+
+def _hub_exists(
+    relations: list[Any],
+    new_from: str,
+    new_to: str,
+    relation_type: str,
+) -> bool:
+    """Pure: does ``relations`` contain a hub matching the remapped from→to direction + type?
+
+    The hub id is re-minted on re-create, so the match is by DIRECTION, not just
+    endpoint set: a hub matches ``new_from → new_to`` of type ``relation_type``
+    iff it has a FROM row ``{entity: new_from, template: null}`` AND a TO row
+    ``{entity: new_to, template: relation_type}``. Direction-awareness is required
+    to distinguish A'→B' from B'→A' (both share the endpoint set ``{A', B'}``);
+    a direction-unaware check would false-pass a missing B'→A' hub. The
+    denormalized ``relations`` view preserves each row's ``entity`` + ``template``
+    (``processRelationshipCollection`` → ``withConnectedData`` spreads the
+    connection row's fields), so the from/to rows are identifiable.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for rel in relations:
+        if not isinstance(rel, dict) or rel.get("hub") is None:
+            continue
+        grouped.setdefault(str(rel["hub"]), []).append(rel)
+    for rows in grouped.values():
+        has_from = any(isinstance(r, dict) and str(r.get("entity")) == str(new_from) and not r.get("template") for r in rows)
+        has_to = any(
+            isinstance(r, dict) and str(r.get("entity")) == str(new_to) and str(r.get("template")) == str(relation_type)
+            for r in rows
+        )
+        if has_from and has_to:
+            return True
+    return False
+
+
+def build_relationship_gaps(
+    expected_hubs: list[CapturedHub],
+    id_map: dict[str, str],
+    current_raws: dict[str, dict[str, Any] | None],
+) -> list[RelationshipGap]:
+    """Pure: compare captured mutual-deleted hubs against re-created entities' relations.
+
+    For each captured hub, remap its endpoints via ``id_map`` (old→new) and
+    check the re-created from-entity's ``relations`` for a matching hub. A hub
+    whose endpoints were not both re-created (missing from ``id_map``) is skipped
+    — the entity mismatch already flags the failed re-create. A re-created
+    entity whose current raw is ``None`` is likewise skipped. Emits one
+    :class:`RelationshipGap` per hub that did not come back. Pure: no I/O.
+    """
+    gaps: list[RelationshipGap] = []
+    for hub in expected_hubs:
+        new_from = id_map.get(hub.from_shared_id)
+        new_to = id_map.get(hub.to_shared_id)
+        if not new_from or not new_to:
+            continue
+        actual = current_raws.get(hub.from_shared_id)
+        if not isinstance(actual, dict):
+            continue
+        relations_raw = actual.get("relations")
+        relations = relations_raw if isinstance(relations_raw, list) else []
+        if not _hub_exists(relations, new_from, new_to, hub.relation_type):
+            gaps.append(
+                RelationshipGap(
+                    shared_id=hub.from_shared_id,
+                    from_shared_id=new_from,
+                    to_shared_id=new_to,
+                    relation_type=hub.relation_type,
+                )
+            )
+    return gaps
+
+
+def build_inbound_ref_gaps(
+    inbound_refs: list[InboundRef],
+    id_map: dict[str, str],
+    current_raws: dict[str, dict[str, Any] | None],
+) -> list[RelationshipGap]:
+    """Pure: check cascade-stripped inbound refs from still-existing entities were restored.
+
+    For each :class:`InboundRef` (still-existing entity → deleted entity), remap
+    the deleted endpoint via ``id_map`` (old→new) and check the still-existing
+    entity's ``relations`` for a direction-matching hub ``existing → new``. A
+    ref whose deleted target was not re-created (missing from ``id_map``) is
+    skipped — the entity mismatch already flags the failed re-create. A still-
+    existing entity whose current raw is ``None`` (unexpectedly absent) is
+    skipped. Emits one :class:`RelationshipGap` per unrestored inbound ref
+    (``shared_id`` = the still-existing entity). Pure: no I/O.
+    """
+    gaps: list[RelationshipGap] = []
+    for ref in inbound_refs:
+        new_to = id_map.get(ref.deleted_shared_id)
+        if not new_to:
+            continue
+        actual = current_raws.get(ref.existing_shared_id)
+        if not isinstance(actual, dict):
+            continue
+        relations_raw = actual.get("relations")
+        relations = relations_raw if isinstance(relations_raw, list) else []
+        if not _hub_exists(relations, ref.existing_shared_id, new_to, ref.relation_type):
+            gaps.append(
+                RelationshipGap(
+                    shared_id=ref.existing_shared_id,
+                    from_shared_id=ref.existing_shared_id,
+                    to_shared_id=new_to,
+                    relation_type=ref.relation_type,
+                )
+            )
     return gaps

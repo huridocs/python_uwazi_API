@@ -102,6 +102,22 @@ class InMemoryBackupStore(BackupStorePort):
     def list_runs(self) -> list[str]:
         return sorted(self._manifests.keys())
 
+    @override
+    def delete_run(self, run_id: str) -> None:
+        self._manifests.pop(run_id, None)
+        self._snapshots.pop(run_id, None)
+
+    @override
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        if old_id not in self._manifests:
+            raise FileNotFoundError(old_id)
+        if new_id in self._manifests:
+            raise FileExistsError(new_id)
+        self._manifests[new_id] = self._manifests.pop(old_id)
+        self._manifests[new_id].run_id = new_id
+        if old_id in self._snapshots:
+            self._snapshots[new_id] = self._snapshots.pop(old_id)
+
 
 # --- helpers ----------------------------------------------------------------
 
@@ -314,3 +330,117 @@ async def test_verify_deleted_recreated_with_wrong_data_is_mismatch() -> None:
     assert result.ok is False
     assert len(result.mismatches) == 1
     assert result.mismatches[0].kind == "entity"
+
+
+# --- inbound ref on a still-existing (non-manifest) entity -------------------
+
+
+def _rel(entity: str, hub: str, template: str | None) -> dict[str, Any]:
+    return {"entity": entity, "hub": hub, "template": template}
+
+
+async def test_verify_inbound_ref_on_still_existing_restored_is_ok() -> None:
+    # A deleted (re-created newA); B still-existing had B->A (cascade-stripped,
+    # then restored by revert to B->newA). B is NOT in the manifest; the use case
+    # discovers it from A's snapshot relations, fetches B, and the inbound gap
+    # check confirms B's hub to newA is present.
+    repo = InMemoryEntityRepository(
+        entities={
+            "newA": {
+                "sharedId": "newA",
+                "_id": "na1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [_rel("newA", "h2", None), _rel("B", "h2", "rtype1")],
+            },
+            "B": {
+                "sharedId": "B",
+                "_id": "b1",
+                "title": "B",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "newA", "label": "A"}]},
+                "relations": [_rel("B", "h1", None), _rel("newA", "h1", "rtype1")],
+            },
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "A",
+            {
+                "sharedId": "A",
+                "_id": "a1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [
+                    _rel("A", "h2", None),
+                    _rel("B", "h2", "rtype1"),
+                    _rel("B", "h1", None),
+                    _rel("A", "h1", "rtype1"),
+                ],
+            },
+        ),
+    )
+    store.save_manifest(
+        "run-1",
+        _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="newA")]),
+    )
+
+    use_case = VerifyRevertUseCase(entity_repository=repo, backup_store=store)
+    result = await use_case.verify("run-1")
+
+    assert result.ok is True
+    assert result.relationship_gaps == []
+
+
+async def test_verify_inbound_ref_on_still_existing_not_restored_is_flagged() -> None:
+    # B->A was cascade-stripped and revert did NOT restore it: B has no hub to
+    # newA. The use case fetches B (a non-manifest entity) and the inbound gap
+    # check flags it.
+    repo = InMemoryEntityRepository(
+        entities={
+            "newA": {
+                "sharedId": "newA",
+                "_id": "na1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [_rel("newA", "h2", None), _rel("B", "h2", "rtype1")],
+            },
+            "B": {"sharedId": "B", "_id": "b1", "title": "B", "language": "en", "relations": []},
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "A",
+            {
+                "sharedId": "A",
+                "_id": "a1",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [_rel("B", "h1", None), _rel("A", "h1", "rtype1")],
+            },
+        ),
+    )
+    store.save_manifest(
+        "run-1",
+        _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="newA")]),
+    )
+
+    use_case = VerifyRevertUseCase(entity_repository=repo, backup_store=store)
+    result = await use_case.verify("run-1")
+
+    assert result.ok is False
+    assert len(result.relationship_gaps) == 1
+    assert result.relationship_gaps[0].shared_id == "B"
+    assert result.relationship_gaps[0].to_shared_id == "newA"
