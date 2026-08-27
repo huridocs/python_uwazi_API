@@ -36,6 +36,7 @@ from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStor
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
+from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
 from uwazi_admin_agent.configuration import ROOT_PATH, RUNS_PATH
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -108,6 +109,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     api = UwaziApiAdapter(user=user, password=password, url=url)
     entity_repository = UwaziEntityRepository(api.client)
     file_repository = UwaziFileRepository(api.client)
+    template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     search_probe = UwaziSearchProbe(api.client)
     backup_store = build_backup_store()
     audit_log = build_audit_log()
@@ -127,6 +129,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         backup_store=backup_store,
         audit_log=audit_log,
         file_repository=file_repository,
+        template_property_lookup=template_property_lookup,
     )
     verify_use_case = VerifyRevertUseCase(
         entity_repository=entity_repository,

@@ -23,6 +23,7 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.relationship_restore import extract_inbound_refs_from_existing
 from uwazi_admin_agent.domain.revert_verification import RevertVerificationResult, verify_revert
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -46,19 +47,20 @@ class VerifyRevertUseCase:
             sid: self._backup_store.load_snapshot(run_id, sid)
             for sid in {e.shared_id for e in (*manifest.modified, *manifest.deleted)}
         }
-        current_raws = await self._fetch_current_raws(manifest)
+        current_raws = await self._fetch_current_raws(manifest, snapshots)
         result = verify_revert(manifest, snapshots, current_raws)
         logger.info(
-            "verify run={} ok={} checked={} mismatches={} file_gaps={}",
+            "verify run={} ok={} checked={} mismatches={} file_gaps={} relationship_gaps={}",
             run_id,
             result.ok,
             result.checked,
             len(result.mismatches),
             len(result.file_gaps),
+            len(result.relationship_gaps),
         )
         return result
 
-    async def _fetch_current_raws(self, manifest: Any) -> dict[str, dict[str, Any] | None]:
+    async def _fetch_current_raws(self, manifest: Any, snapshots: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
         """Fetch the current raw for every checked entity (``None`` if absent).
 
         Modified/created entries are fetched by their manifest ``shared_id``. A
@@ -67,6 +69,14 @@ class VerifyRevertUseCase:
         when no re-create happened yet (e.g. an older manifest or pre-revert); the
         result is still keyed by the manifest ``shared_id`` so :func:`verify_revert`
         can look it up uniformly.
+
+        Still-existing entities that held an inbound ref to a deleted entity
+        (cascade-stripped on delete; restored by revert's inbound-ref re-apply)
+        are NOT in the manifest, so they are discovered here from the deleted
+        snapshots' ``relations`` and fetched by their own sharedId so the
+        inbound-ref gap check can inspect their post-revert relations. Existing
+        entities that are themselves manifest members are excluded (documented
+        stale-id limitation).
         """
         fetch_keys: list[tuple[str, str]] = []
         for entry in manifest.modified:
@@ -76,6 +86,18 @@ class VerifyRevertUseCase:
             fetch_keys.append((entry.shared_id, target))
         for entry in manifest.created:
             fetch_keys.append((entry.shared_id, entry.shared_id))
+
+        deleted_ids = {e.shared_id for e in manifest.deleted}
+        deleted_snapshots = {sid: snapshots[sid] for sid in deleted_ids if sid in snapshots}
+        manifest_ids = (
+            {e.shared_id for e in manifest.modified}
+            | {e.shared_id for e in manifest.deleted}
+            | {e.shared_id for e in manifest.created}
+        )
+        inbound_refs = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=manifest_ids)
+        for ref in inbound_refs:
+            fetch_keys.append((ref.existing_shared_id, ref.existing_shared_id))
+
         current_raws: dict[str, dict[str, Any] | None] = {}
         for key, target in fetch_keys:
             current_raws[key] = await self._fetch_optional(target)

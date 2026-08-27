@@ -12,6 +12,8 @@ from uwazi_admin_agent.domain.revert_verification import (
     RevertVerificationResult,
     VerificationMismatch,
     build_file_gaps,
+    build_inbound_ref_gaps,
+    build_relationship_gaps,
     verify_revert,
 )
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
@@ -95,7 +97,6 @@ def test_modified_entity_data_field_mismatch_is_flagged() -> None:
 
 
 def test_modified_entity_editdate_only_difference_is_ok() -> None:
-    # editDate is platform-managed — a difference there alone is not a mismatch.
     manifest = _manifest(modified=[EntityIdentity(shared_id="A")])
     snapshots = {"A": _snapshot("A", {"_id": "a1", "title": "old", "editDate": 1000, "language": "en"})}
 
@@ -300,11 +301,6 @@ def test_revert_verification_result_constructs() -> None:
 
 
 def test_deleted_entity_reuploaded_files_do_not_trigger_raw_mismatch() -> None:
-    # The snapshot raw carries the original documents/attachments arrays (with
-    # original file _ids/filenames). The re-created entity has re-uploaded files
-    # with fresh _ids/filenames but the same originalnames — the raw-diff must
-    # exclude documents/attachments (file identity is re-minted) and the
-    # file-gap check must pass (originalnames match).
     manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
     snapshots = {
         "D": _snapshot_with_files(
@@ -379,8 +375,6 @@ def test_build_file_gaps_all_present_is_empty() -> None:
 
 
 def test_build_file_gaps_ignores_url_attachments_in_actual() -> None:
-    # URL attachments on the re-created entity are restored by the create path,
-    # not by re-upload — they must not appear as "extra" gaps.
     refs = [_file_ref("f1", "document", "report.pdf")]
     actual = {
         "documents": [{"originalname": "report.pdf"}],
@@ -391,8 +385,6 @@ def test_build_file_gaps_ignores_url_attachments_in_actual() -> None:
 
 
 def test_build_file_gaps_matches_by_originalname_and_kind_not_file_id() -> None:
-    # Fresh file _ids/filenames on re-upload must not cause gaps — the match is
-    # by originalname + kind.
     refs = [_file_ref("old-id", "document", "report.pdf")]
     actual = {"documents": [{"_id": "fresh-id", "originalname": "report.pdf", "filename": "freshhash"}], "attachments": []}
 
@@ -429,8 +421,6 @@ def test_verify_revert_reports_file_gaps_for_deleted_with_files() -> None:
 
 
 def test_verify_revert_skips_file_gap_check_when_actual_is_none() -> None:
-    # Re-create failed (actual is None) — the entity mismatch already flags it;
-    # the file-gap check must not crash on a None actual.
     manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
     snapshots = {
         "D": _snapshot_with_files(
@@ -448,7 +438,6 @@ def test_verify_revert_skips_file_gap_check_when_actual_is_none() -> None:
 
 
 def test_verify_revert_skips_file_gap_check_when_snapshot_has_no_files() -> None:
-    # An older snapshot (pre-change) has files=None — no file-gap check runs.
     manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
     snapshots = {"D": _snapshot("D", {"_id": "d1", "sharedId": "D", "title": "old D", "language": "en"})}
     current = {"D": {"_id": "new1", "sharedId": "NEW", "title": "old D", "language": "en"}}
@@ -465,5 +454,430 @@ def test_file_gap_is_frozen() -> None:
     from uwazi_admin_agent.domain.revert_verification import FileGap
 
     gap = FileGap(shared_id="D", gap="missing", originalname="x.pdf", kind="document")
+    with pytest.raises(Exception):
+        gap.gap = "extra"  # type: ignore[misc]
+
+
+# --- mutual-deleted relationships: metadata remap + direction-aware gaps ------
+
+
+def _rel(entity: str, hub: str, template: str | None) -> dict[str, Any]:
+    return {"entity": entity, "hub": hub, "template": template}
+
+
+def _mutual_relations() -> list[dict[str, Any]]:
+    # Two hubs: h1 = A->B (from A, to B); h2 = B->A (from B, to A). The
+    # denormalized view shows both hubs from either endpoint.
+    return [
+        _rel("A", "h1", None),
+        _rel("B", "h1", "rtype1"),
+        _rel("B", "h2", None),
+        _rel("A", "h2", "rtype1"),
+    ]
+
+
+def test_deleted_mutual_relationship_restored_verifies_ok() -> None:
+    # A and B were mutually related (two hubs); both deleted and re-created
+    # (newA, newB). The entity-save path rebuilt BOTH hubs from the remapped
+    # metadata (no self-refs). After remapping the snapshot OLD refs, both sides
+    # match and each direction-aware hub is present in the re-created relations.
+    manifest = _manifest(
+        deleted=[
+            EntityIdentity(shared_id="A", restored_shared_id="newA", language="en"),
+            EntityIdentity(shared_id="B", restored_shared_id="newB", language="en"),
+        ]
+    )
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A title",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B title"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+        "B": _snapshot(
+            "B",
+            {
+                "_id": "b1",
+                "sharedId": "B",
+                "title": "B title",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "A", "label": "A title"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+    }
+    current = {
+        "A": {
+            "_id": "na1",
+            "sharedId": "newA",
+            "title": "A title",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "newB", "label": "B title"}]},
+            "relations": [
+                _rel("newA", "nh1", None),
+                _rel("newB", "nh1", "rtype1"),
+                _rel("newB", "nh2", None),
+                _rel("newA", "nh2", "rtype1"),
+            ],
+        },
+        "B": {
+            "_id": "nb1",
+            "sharedId": "newB",
+            "title": "B title",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "newA", "label": "A title"}]},
+            "relations": [
+                _rel("newA", "nh1", None),
+                _rel("newB", "nh1", "rtype1"),
+                _rel("newB", "nh2", None),
+                _rel("newA", "nh2", "rtype1"),
+            ],
+        },
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is True
+    assert result.mismatches == []
+    assert result.relationship_gaps == []
+
+
+def test_deleted_mutual_relationship_not_restored_is_flagged() -> None:
+    # The re-apply was skipped/failed: the re-created entities have NO hubs and
+    # the metadata ref was stripped on create (not re-applied). The remap makes
+    # the snapshot expect the NEW sharedId; the current has nothing -> entity
+    # mismatch, plus a relationship_gap per missing direction (A'->B' and B'->A').
+    manifest = _manifest(
+        deleted=[
+            EntityIdentity(shared_id="A", restored_shared_id="newA", language="en"),
+            EntityIdentity(shared_id="B", restored_shared_id="newB", language="en"),
+        ]
+    )
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A title",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B title"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+        "B": _snapshot(
+            "B",
+            {
+                "_id": "b1",
+                "sharedId": "B",
+                "title": "B title",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "A", "label": "A title"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+    }
+    current = {
+        "A": {"_id": "na1", "sharedId": "newA", "title": "A title", "language": "en", "metadata": {}, "relations": []},
+        "B": {"_id": "nb1", "sharedId": "newB", "title": "B title", "language": "en", "metadata": {}, "relations": []},
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is False
+    assert any(m.kind == "entity" and m.shared_id == "A" for m in result.mismatches)
+    assert len(result.relationship_gaps) == 2
+    gap_pairs = {(g.from_shared_id, g.to_shared_id) for g in result.relationship_gaps}
+    assert gap_pairs == {("newA", "newB"), ("newB", "newA")}
+    assert all(g.relation_type == "rtype1" for g in result.relationship_gaps)
+
+
+def test_deleted_mutual_one_direction_missing_is_flagged() -> None:
+    # Only the A'->B' hub came back; the B'->A' hub is missing. A direction-
+    # unaware check would false-pass (both share the {newA,newB} endpoint set);
+    # the direction-aware check flags exactly the missing B'->A' direction.
+    manifest = _manifest(
+        deleted=[
+            EntityIdentity(shared_id="A", restored_shared_id="newA", language="en"),
+            EntityIdentity(shared_id="B", restored_shared_id="newB", language="en"),
+        ]
+    )
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+        "B": _snapshot(
+            "B",
+            {
+                "_id": "b1",
+                "sharedId": "B",
+                "title": "B",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "A", "label": "A"}]},
+                "relations": _mutual_relations(),
+            },
+        ),
+    }
+    current = {
+        "A": {
+            "_id": "na1",
+            "sharedId": "newA",
+            "title": "A",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "newB", "label": "B"}]},
+            "relations": [_rel("newA", "nh1", None), _rel("newB", "nh1", "rtype1")],
+        },
+        "B": {
+            "_id": "nb1",
+            "sharedId": "newB",
+            "title": "B",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "newA", "label": "A"}]},
+            "relations": [_rel("newA", "nh1", None), _rel("newB", "nh1", "rtype1")],
+        },
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is False
+    assert len(result.relationship_gaps) == 1
+    assert result.relationship_gaps[0].from_shared_id == "newB"
+    assert result.relationship_gaps[0].to_shared_id == "newA"
+
+
+def test_deleted_ref_to_still_existing_entity_verifies_ok_without_remap() -> None:
+    # A was deleted (re-created newA) and referenced STATE (still exists). The
+    # STATE ref is preserved on create and not remapped (STATE not in id_map);
+    # the one-way hub is auto-restored by the create path, so no relationship gap.
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="newA", language="en")])
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A title",
+                "language": "en",
+                "metadata": {"entity_relation": [{"value": "STATE", "label": "State"}]},
+                "relations": [_rel("A", "h1", None), _rel("STATE", "h1", "rtype1")],
+            },
+        ),
+    }
+    current = {
+        "A": {
+            "_id": "na1",
+            "sharedId": "newA",
+            "title": "A title",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "STATE", "label": "State"}]},
+            "relations": [_rel("newA", "nh", None), _rel("STATE", "nh", "rtype1")],
+        },
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is True
+    assert result.relationship_gaps == []
+
+
+# --- build_relationship_gaps (direction-aware) -------------------------------
+
+
+def _hub(from_sid: str, to_sid: str, hub: str, relation_type: str):
+    from uwazi_admin_agent.domain.relationship_restore import CapturedHub
+
+    return CapturedHub(hub=hub, from_shared_id=from_sid, to_shared_id=to_sid, relation_type=relation_type)
+
+
+def test_build_relationship_gaps_missing_hub_is_flagged() -> None:
+    hubs = [_hub("A", "B", "h1", "rtype1")]
+    current = {"A": {"relations": []}}
+
+    gaps = build_relationship_gaps(hubs, {"A": "newA", "B": "newB"}, current)
+
+    assert len(gaps) == 1
+    assert gaps[0].gap == "missing"
+    assert gaps[0].from_shared_id == "newA"
+    assert gaps[0].to_shared_id == "newB"
+
+
+def test_build_relationship_gaps_present_hub_is_empty() -> None:
+    hubs = [_hub("A", "B", "h1", "rtype1")]
+    current = {"A": {"relations": [_rel("newA", "nh", None), _rel("newB", "nh", "rtype1")]}}
+
+    assert build_relationship_gaps(hubs, {"A": "newA", "B": "newB"}, current) == []
+
+
+def test_build_relationship_gaps_reversed_direction_is_flagged() -> None:
+    # The hub present is B'->A' (from=newB), but we expect A'->B' (from=newA).
+    # Direction-awareness flags it; an endpoint-set check would false-pass.
+    hubs = [_hub("A", "B", "h1", "rtype1")]
+    current = {"A": {"relations": [_rel("newB", "nh", None), _rel("newA", "nh", "rtype1")]}}
+
+    gaps = build_relationship_gaps(hubs, {"A": "newA", "B": "newB"}, current)
+
+    assert len(gaps) == 1
+    assert gaps[0].from_shared_id == "newA"
+
+
+def test_build_relationship_gaps_skips_unmapped_endpoint() -> None:
+    hubs = [_hub("A", "B", "h1", "rtype1")]
+    assert build_relationship_gaps(hubs, {"A": "newA"}, {"A": {"relations": []}}) == []
+
+
+def test_build_relationship_gaps_skips_none_current() -> None:
+    hubs = [_hub("A", "B", "h1", "rtype1")]
+    assert build_relationship_gaps(hubs, {"A": "newA", "B": "newB"}, {"A": None}) == []
+
+
+# --- build_inbound_ref_gaps (still-existing -> re-created) --------------------
+
+
+def _inbound(existing: str, deleted: str, relation_type: str):
+    from uwazi_admin_agent.domain.relationship_restore import InboundRef
+
+    return InboundRef(existing_shared_id=existing, deleted_shared_id=deleted, relation_type=relation_type)
+
+
+def test_build_inbound_ref_gaps_missing_hub_is_flagged() -> None:
+    refs = [_inbound("B", "A", "rtype1")]
+    current = {"B": {"relations": []}}
+
+    gaps = build_inbound_ref_gaps(refs, {"A": "newA"}, current)
+
+    assert len(gaps) == 1
+    assert gaps[0].gap == "missing"
+    assert gaps[0].shared_id == "B"
+    assert gaps[0].from_shared_id == "B"
+    assert gaps[0].to_shared_id == "newA"
+    assert gaps[0].relation_type == "rtype1"
+
+
+def test_build_inbound_ref_gaps_present_hub_is_empty() -> None:
+    refs = [_inbound("B", "A", "rtype1")]
+    current = {"B": {"relations": [_rel("B", "nh", None), _rel("newA", "nh", "rtype1")]}}
+
+    assert build_inbound_ref_gaps(refs, {"A": "newA"}, current) == []
+
+
+def test_build_inbound_ref_gaps_skips_unmapped_deleted() -> None:
+    # A was not re-created (not in id_map) — the entity mismatch flags that.
+    refs = [_inbound("B", "A", "rtype1")]
+    assert build_inbound_ref_gaps(refs, {}, {"B": {"relations": []}}) == []
+
+
+def test_build_inbound_ref_gaps_skips_none_current() -> None:
+    refs = [_inbound("B", "A", "rtype1")]
+    assert build_inbound_ref_gaps(refs, {"A": "newA"}, {"B": None}) == []
+
+
+def test_verify_revert_inbound_ref_restored_verifies_ok() -> None:
+    # Defect 1: A deleted (re-created newA); B still-existing had B->A (cascade-
+    # stripped). Revert re-added B->newA. B is NOT in the manifest; verify
+    # discovers it from A's snapshot relations and checks B's relations.
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="newA", language="en")])
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [
+                    _rel("A", "h2", None),
+                    _rel("B", "h2", "rtype1"),
+                    _rel("B", "h1", None),
+                    _rel("A", "h1", "rtype1"),
+                ],
+            },
+        ),
+    }
+    current = {
+        "A": {
+            "_id": "na1",
+            "sharedId": "newA",
+            "title": "A",
+            "language": "en",
+            "template": "tmplA",
+            "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+            "relations": [_rel("newA", "h2", None), _rel("B", "h2", "rtype1")],
+        },
+        "B": {
+            "_id": "b1",
+            "sharedId": "B",
+            "title": "B",
+            "language": "en",
+            "metadata": {"entity_relation": [{"value": "newA", "label": "A"}]},
+            "relations": [_rel("B", "h1", None), _rel("newA", "h1", "rtype1")],
+        },
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is True
+    assert result.relationship_gaps == []
+
+
+def test_verify_revert_inbound_ref_not_restored_is_flagged() -> None:
+    # B->A was cascade-stripped and revert did NOT re-add it: B has no hub to
+    # newA. The inbound gap check flags B (a non-manifest entity).
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="newA", language="en")])
+    snapshots = {
+        "A": _snapshot(
+            "A",
+            {
+                "_id": "a1",
+                "sharedId": "A",
+                "title": "A",
+                "language": "en",
+                "template": "tmplA",
+                "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+                "relations": [_rel("B", "h1", None), _rel("A", "h1", "rtype1")],
+            },
+        ),
+    }
+    current = {
+        "A": {
+            "_id": "na1",
+            "sharedId": "newA",
+            "title": "A",
+            "language": "en",
+            "template": "tmplA",
+            "metadata": {"entity_relation": [{"value": "B", "label": "B"}]},
+            "relations": [_rel("newA", "h2", None), _rel("B", "h2", "rtype1")],
+        },
+        "B": {"_id": "b1", "sharedId": "B", "title": "B", "language": "en", "relations": []},
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is False
+    assert len(result.relationship_gaps) == 1
+    assert result.relationship_gaps[0].shared_id == "B"
+    assert result.relationship_gaps[0].to_shared_id == "newA"
+
+
+def test_relationship_gap_is_frozen() -> None:
+    import pytest
+
+    from uwazi_admin_agent.domain.revert_verification import RelationshipGap
+
+    gap = RelationshipGap(shared_id="A", from_shared_id="newA", to_shared_id="newB", relation_type="r")
     with pytest.raises(Exception):
         gap.gap = "extra"  # type: ignore[misc]

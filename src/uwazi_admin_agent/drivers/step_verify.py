@@ -31,10 +31,13 @@ async def _run_verify_async(run_name: str) -> int:
 
     print(
         f"verify: run={run_name} ok={result.ok} checked={result.checked} "
-        f"mismatches={len(result.mismatches)} file_gaps={len(result.file_gaps)}"
+        f"mismatches={len(result.mismatches)} file_gaps={len(result.file_gaps)} "
+        f"relationship_gaps={len(result.relationship_gaps)}"
     )
     for m in result.mismatches:
         print(f"  - {m.shared_id} ({m.kind}): expected={m.expected!r} actual={m.actual!r}")
     for g in result.file_gaps:
         print(f"  - {g.shared_id} (file {g.gap}): {g.kind} {g.originalname!r}")
+    for g in result.relationship_gaps:
+        print(f"  - {g.shared_id} (relationship {g.gap}): {g.from_shared_id} -> {g.to_shared_id} type={g.relation_type}")
     return 0 if result.ok else 1

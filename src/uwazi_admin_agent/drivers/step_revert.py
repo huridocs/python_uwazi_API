@@ -54,10 +54,13 @@ async def _run_revert_async(run_name: str) -> int:
     verification = await runtime.verify_use_case.verify(run_name)
     print(
         f"  verify: ok={verification.ok} checked={verification.checked} "
-        f"mismatches={len(verification.mismatches)} file_gaps={len(verification.file_gaps)}"
+        f"mismatches={len(verification.mismatches)} file_gaps={len(verification.file_gaps)} "
+        f"relationship_gaps={len(verification.relationship_gaps)}"
     )
     for m in verification.mismatches:
         print(f"    - {m.shared_id} ({m.kind}): expected={m.expected!r} actual={m.actual!r}")
     for g in verification.file_gaps:
         print(f"    - {g.shared_id} (file {g.gap}): {g.kind} {g.originalname!r}")
+    for g in verification.relationship_gaps:
+        print(f"    - {g.shared_id} (relationship {g.gap}): {g.from_shared_id} -> {g.to_shared_id} type={g.relation_type}")
     return 0 if verification.ok else 1
