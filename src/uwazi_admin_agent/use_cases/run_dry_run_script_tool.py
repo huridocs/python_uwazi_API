@@ -76,7 +76,13 @@ def _format_result(report: object, attempt: int, limit: int) -> str:
         f"publish={report.would_publish} unpublish={report.would_unpublish} rewire={report.would_rewire}"
     )
 
-    if report.records:
+    if report.samples:
+        lines = [f"  - {s['shared_id']}: {s['metadata']}" for s in report.samples]
+        parts.append("## First would-be update values (max 20, per entity)\n" + "\n".join(lines))
+        total_updates = report.would_update
+        if total_updates > len(report.samples):
+            parts.append(f"  ... and {total_updates - len(report.samples)} more")
+    elif report.records:
         shown = report.records[:20]
         lines = [f"  - {record}" for record in shown]
         parts.append("## First would-be operations (max 20)\n" + "\n".join(lines))

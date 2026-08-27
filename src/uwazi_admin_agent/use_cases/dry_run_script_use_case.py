@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -38,6 +38,12 @@ class DryRunReport(BaseModel):
     would_unpublish: int
     would_rewire: int
     records: list[dict[str, Any]]  # full per-op records; capped in rendering, not storage
+    samples: list[dict[str, Any]] = Field(
+        default_factory=list, description="First N would-be-update records, trimmed for LLM reading."
+    )
+
+
+_SAMPLES_CAP: int = 20
 
 
 class DryRunScriptUseCase:
@@ -87,6 +93,7 @@ class DryRunScriptUseCase:
             would_unpublish=counts["publish:False"],
             would_rewire=counts["move_files"] + counts["create_relationships"],
             records=records,
+            samples=_update_samples(records),
         )
 
 
@@ -112,3 +119,9 @@ def _count_ops(records: list[dict[str, Any]]) -> dict[str, int]:
     for fallback in ("create", "update", "delete", "publish", "publish:False", "move_files", "create_relationships"):
         counts.setdefault(fallback, 0)
     return counts
+
+
+def _update_samples(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """First N update records trimmed to (shared_id, metadata) for LLM reading."""
+    samples = [{"shared_id": r.get("shared_id"), "metadata": r.get("metadata")} for r in records if r.get("op") == "update"]
+    return samples[:_SAMPLES_CAP]

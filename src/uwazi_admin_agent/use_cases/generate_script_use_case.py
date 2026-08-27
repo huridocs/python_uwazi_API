@@ -117,8 +117,31 @@ class GenerateScriptUseCase:
         )
         self._last_messages = list(run.all_messages())
         script = self._coerce_result(run)
+        await self._post_generate_dry_run(script)
         logger.info("generated script: lines={} preview={}", script.python_code.count("\n") + 1, script.python_code[:200])
         return script
+
+    async def _post_generate_dry_run(self, script: GeneratedScript) -> None:
+        """Automatic real-data proof for extraction scripts: if the agent never
+        called run_dry_run_script this turn and the script updates entities, run
+        one dry run ourselves and surface the verdict. Non-fatal: on failure the
+        script is still returned (the operator decides); bypasses the agent's
+        dry-run budget counter (the system's own check, not the agent's)."""
+        if "update_entities" not in script.python_code or "matched" not in script.python_code:
+            return
+        if self._deps.dry_run_attempts > 0:
+            return  # the agent already proved it against real data this turn
+        if self._deps.dry_run_use_case is None:
+            logger.info("post-generate dry run skipped: dry_run_use_case not wired")
+            return
+        try:
+            report = await self._deps.dry_run_use_case.dry_run(script.python_code)
+        except Exception as exc:  # noqa: BLE001 — the gate must never lose the script
+            logger.warning("post-generate dry run failed: {}", exc)
+            print("dry-run check: ERROR (post-generate dry run raised; operator decides)")
+            return
+        logger.info("post-generate dry run: would_update={} passed={}", report.would_update, report.passed)
+        print(f"dry-run check: passed={report.passed} would-update={report.would_update}")
 
     async def repair(self, feedback: str) -> GeneratedScript:
         """Run a repair turn with ``feedback`` over the prior message history.

@@ -14,6 +14,7 @@ import pytest
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import (
     DryRunScriptUseCase,
     _count_ops,
+    _update_samples,
 )
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     _dry_run_write_helpers,
@@ -233,3 +234,13 @@ def test_count_ops_splits_publish_kinds() -> None:
     assert counts["publish:False"] == 2  # unpublish + set_publish_status(published=False)
     assert counts["move_files"] == 1
     assert counts["create_relationships"] == 1
+
+
+def test_update_samples_trims_to_shared_id_metadata_and_caps() -> None:
+    """Samples keep only (shared_id, metadata) from update records, capped at 20."""
+    records = [{"op": "update", "shared_id": f"s{i}", "metadata": {"k": i}, "op_kind": "update_entities"} for i in range(25)]
+    records.append({"op": "create", "shared_id": "c0", "metadata": {"k": 0}})
+    samples = _update_samples(records)
+    assert len(samples) == 20
+    assert samples[0] == {"shared_id": "s0", "metadata": {"k": 0}}
+    assert all("op" not in s and "op_kind" not in s for s in samples)
