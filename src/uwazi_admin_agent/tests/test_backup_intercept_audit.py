@@ -72,6 +72,12 @@ class InMemoryBackupStore(BackupStorePort):
     @override
     def list_runs(self) -> list[str]: ...
 
+    @override
+    def delete_run(self, run_id: str) -> None: ...
+
+    @override
+    def rename_run(self, old_id: str, new_id: str) -> None: ...
+
 
 class InMemoryEntityRepository(EntityRepositoryPort):
     @override
