@@ -247,7 +247,7 @@ if __name__ == "__main__":
     # response = create_thesaury(df, "test 2")
     # print(response)
 
-    # client = UwaziClient(url="https://upr-info-database.uwazi.io/")
+    # client = UwaziClient(url="")
     # df = client.exports.to_dataframe(template_name="State", batch_size=5)
     #
     # client = UwaziClient(url=UWAZI_URL, user=UWAZI_USER, password=UWAZI_PASSWORD)
