@@ -304,3 +304,106 @@ def test_prompt_dry_run_tool_in_sandbox_contract() -> None:
     assert "run_dry_run_script(python_code)" in SYSTEM_PROMPT
     assert "ZERO writes" in SYSTEM_PROMPT
     assert "RECORDS what it would have written" in SYSTEM_PROMPT
+
+
+# --- CREATE TASKS: fill relationship-type properties (not SKIP) ---------------
+
+
+def test_prompt_no_longer_skips_relationship_properties() -> None:
+    """The old CREATE TASKS rule told the LLM to SKIP relationship properties for a
+    generic 'create with random info' prompt, leaving every relationship property
+    empty on a live 'fill all properties' run. That blanket SKIP must be gone."""
+    assert "SKIP relationship properties" not in SYSTEM_PROMPT
+    assert "relationships were not created" not in SYSTEM_PROMPT
+
+
+def test_prompt_inspection_exposes_relationship_target_fields() -> None:
+    """`get_templates_by_names` populates `related_template_name` +
+    `relationship_type_name` for relationship properties; the SCHEMA INSPECTION block
+    must name them so the LLM knows which template each relationship prop points at."""
+    assert "related_template_name" in SYSTEM_PROMPT
+    assert "relationship_type_name" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_in_metadata_relationship_fill_not_create_relationships() -> None:
+    """Filling a template's relationship PROPERTY must use the in-metadata write path
+    (`metadata[rel_prop] = ["sid", ...]`), not `create_relationships` (which is for
+    connections NOT tied to a property)."""
+    assert "IN-METADATA" in SYSTEM_PROMPT
+    assert 'metadata[rel_prop] = ["sid", ...]' in SYSTEM_PROMPT
+    assert "NOT tied to a property" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_scenario_a_two_phase_self_pool() -> None:
+    """Scenario A (related_template_name == the template being created) is two-phase:
+    create all first with relationship props unset, collect minted shared_ids, then
+    update_entities to wire each entity to a random subset of the OTHER created ids
+    (self excluded). Gate-validatable (created dummies are in scope)."""
+    assert "Scenario A" in SYSTEM_PROMPT
+    assert "SELF/SAME-POOL" in SYSTEM_PROMPT
+    assert "Two-phase" in SYSTEM_PROMPT
+    assert "UNSET" in SYSTEM_PROMPT
+    assert "OTHER just-created ids" in SYSTEM_PROMPT
+    # self-exclusion is called out (the phrase wraps across a line; assert a
+    # contiguous piece + the rationale).
+    assert "the platform drops self-refs anyway" in SYSTEM_PROMPT
+    assert "gate-validatable" in SYSTEM_PROMPT.lower()
+
+
+def test_prompt_teaches_scenario_a_reads_minted_shared_ids_from_results() -> None:
+    """Scenario A must collect the just-created shared_ids from the create_entities
+    result list (`r["shared_id"]` for successful `r`), not assume any pre-populated
+    variable."""
+    assert 'r["shared_id"]' in SYSTEM_PROMPT
+    assert 'r["success"]' in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_scenario_a_small_subset_and_pool_guard() -> None:
+    """The random subset per entity must be small (capped via min(5, len(pool)-1))
+    and the script must guard len(pool) < 2 (can't wire to others)."""
+    assert "random.sample(pool, k)" in SYSTEM_PROMPT
+    assert "min(5, len(pool))" in SYSTEM_PROMPT
+    assert "len(pool) < 2" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_scenario_b_cross_template_query_existing() -> None:
+    """Scenario B (related_template_name != the created template) queries the
+    related template's existing entities via by_template and sets the subset in the
+    CREATE metadata directly (one-phase)."""
+    assert "Scenario B" in SYSTEM_PROMPT
+    assert "CROSS-TEMPLATE TO EXISTING" in SYSTEM_PROMPT
+    assert 'mode="by_template"' in SYSTEM_PROMPT
+    assert "directly in the CREATE dict" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_scenario_b_empty_pool_guard() -> None:
+    """Scenario B must guard an empty pool (leave unset + flag) and never
+    `random.sample([], k)` (raises ValueError)."""
+    assert "EMPTY" in SYSTEM_PROMPT
+    assert "ValueError: sample larger than population" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_scenario_b_is_live_only_no_related_dummies() -> None:
+    """Scenario B wiring is live-only: the dummy_spec must NOT add related-template
+    dummies (they false-fail the gate via orphan relationship hubs). The real wiring
+    is proven via dry-run + manual run."""
+    assert "LIVE-ONLY" in SYSTEM_PROMPT
+    assert "do NOT add related-template dummies" in SYSTEM_PROMPT
+    assert "orphan relationship hub" in SYSTEM_PROMPT
+    assert "run_dry_run_script" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_relationship_result_reporting() -> None:
+    """`result` must honestly report which relationship props were wired, the
+    scenario, refs-per-entity, and gate-proven vs live-only."""
+    assert "gate-proven" in SYSTEM_PROMPT
+    assert "live-only" in SYSTEM_PROMPT
+    assert "refs/entity" in SYSTEM_PROMPT or "refs/entity,".lower() in SYSTEM_PROMPT.lower()
+
+
+def test_prompt_teaches_create_then_update_reverts_as_delete() -> None:
+    """The prompt must reassure that a create-then-update-same-entity run reverts as
+    a clean delete (the update on a just-created entity adds nothing to the
+    manifest) — the safety property the whole two-phase workflow relies on."""
+    assert "clean DELETE" in SYSTEM_PROMPT
+    assert "adds nothing to the manifest" in SYSTEM_PROMPT

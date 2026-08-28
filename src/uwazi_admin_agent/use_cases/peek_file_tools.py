@@ -24,8 +24,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from loguru import logger
 from pydantic_ai import RunContext
+
 from uwazi_admin_agent.configuration import MAX_PEEK_CHARS
 
 # Tail window kept when truncating: pagination/footer tables live near the end.
