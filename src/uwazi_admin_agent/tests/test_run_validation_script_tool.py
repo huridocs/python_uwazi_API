@@ -8,16 +8,15 @@ The gate's ``passed`` semantics are unchanged (``ran_clean AND restore_equal``);
 the warning only nudges the LLM, it does not flip the pass.
 """
 
+from uwazi_admin_agent.domain.validation_result import EntityDiff, ValidationResult
+from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.run_validation_script_tool import _format_result, run_validation_script
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_property import AgentProperty
 from uwazi_agent.domain.agent_template import AgentTemplate
 from uwazi_agent.ports.entity_api_port import EntityApiPort
-from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_agent.ports.template_api_port import TemplateApiPort
-
-from uwazi_admin_agent.domain.validation_result import EntityDiff, ValidationResult
-from uwazi_admin_agent.use_cases.run_validation_script_tool import _format_result, run_validation_script
-from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 
 
 def _raw(title: str) -> dict:
@@ -95,8 +94,8 @@ def test_passed_noop_warning_still_reports_pass_footer() -> None:
 
 import asyncio
 
-from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 from uwazi_agent.ports.template_mapper_port import TemplateMapperPort
+from uwazi_agent.ports.thesauri_api_port import ThesauriApiPort
 
 
 class _TemplatePort(TemplateApiPort, ThesauriApiPort, TemplateMapperPort):

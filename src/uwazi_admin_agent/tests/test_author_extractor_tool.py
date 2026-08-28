@@ -6,7 +6,6 @@ extractor subagent's emitted source and the ``author_html_extractor`` tool.
 """
 
 from uwazi_admin_agent.use_cases.author_extractor_tool import validate_extractor_source
-
 from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS
 
 VALID_EXTRACT = """\

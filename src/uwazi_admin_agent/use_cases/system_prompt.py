@@ -224,8 +224,11 @@ WORKFLOW
        `get_templates_by_names` TOOL with `[<template name>]`. The returned
        `AgentTemplate` lists the template's custom `properties` — each with `name`,
        `type` (text/numeric/date/select/multiselect/...), `required` (mandatory),
-       `thesaurus_name` (for select/multiselect), and `format_instructions` (the
-       exact value shape). Use ONLY these literal property names as `metadata` keys.
+       `thesaurus_name` (for select/multiselect), `format_instructions` (the
+       exact value shape), and — for `relationship` properties only —
+       `related_template_name` (the template the property points at) and
+       `relationship_type_name` (the relation type). Use ONLY these literal
+       property names as `metadata` keys.
        If you do not know which templates exist, call `list_templates` first.
     2. For any `select`/`multiselect` property you will set (in the script or in
        the `dummy_spec`), call the `get_thesauris_by_names` TOOL with that
@@ -413,15 +416,74 @@ information"). Use this shape:
  - For "fill with random information", the bound `random` module is the natural
    source: `random.randint(...)`, `random.choice(seq)`, `random.random()`. A
    random date: `f"2023-{random.randint(1,12):02d}-{random.randint(1,28):02d}"`.
- - A `relationship` property points at OTHER entities by shared_id. For a generic
-   "create with random info" prompt you do NOT have valid targets to point at —
-   SKIP relationship properties (leave them unset) and flag in `result` that
-   relationships were not created (discovering/creating relationship targets is a
-   separate task).
-3. Call `create_entities(list_of_dicts, language)`. It returns a per-entity result
- list; count successes.
-4. Set `result` to a concise summary (e.g. "created 100 entities under template
- Decision; filled properties summary/court/date with random values").
+ - Fill NON-relationship properties in this step. Fill `relationship` properties
+   separately in step 3 below (they need target shared_ids that may not exist yet).
+3. FILL RELATIONSHIP PROPERTIES. A `relationship` property points at other entities
+ by `shared_id` (WRITE SHAPE: `["shared_id", ...]`). Use the IN-METADATA write path
+ — set `metadata[rel_prop] = ["sid", ...]` in `create_entities`/`update_entities`;
+ this builds the connection hubs via the entity-save path and excludes self-refs.
+ Do NOT use `create_relationships` for a template's relationship PROPERTY (that
+ helper is for connections NOT tied to a property). Read `related_template_name`
+ from the inspected property to pick the scenario:
+ - Scenario A — SELF/SAME-POOL (`related_template_name` == the template you are
+   creating): the targets are the entities you just created. Two-phase, because the
+   targets don't exist yet at create time:
+   1. Create ALL entities first with non-relationship properties filled and
+      `relationship` props UNSET (step 2).
+   2. Collect the minted shared_ids from the `create_entities` result list
+      (`r["shared_id"]` for each successful `r`; `r["success"]` is True).
+   3. For each created entity, `update_entities` to set each `relationship`
+      property to a RANDOM SUBSET of the OTHER just-created ids (exclude the
+      entity itself — the platform drops self-refs anyway, but excluding them
+      avoids no-op hubs):
+        pool = [s for s in created_sids if s != own_sid]
+        k = random.randint(1, min(5, len(pool)))   # small: keep hubs manageable
+        metadata[rel_prop] = random.sample(pool, k)
+      Guard `len(pool) < 2`: skip and flag (cannot wire to others with <2 created).
+   This IS gate-validatable: the created dummies are in scope, `update_entities`
+   on them is allowed, the refs point at in-scope created dummies (which exist in
+   the real instance), and the seed dummies are untouched so restore-equality holds.
+   Revert of a create-then-update-same-entity run is a clean DELETE (the update on
+   a just-created entity adds nothing to the manifest; revert deletes it, tearing
+   down its hubs) — already covered by the safety layer.
+ - Scenario B — CROSS-TEMPLATE TO EXISTING (`related_template_name` != the
+   template you are creating, or it is None): the targets already exist. One-phase:
+   1. `query_entities(mode="by_template", template_name=<related_template_name>)`
+      and read `res.summary.shared_ids` (ATTRIBUTE access — see EXECUTION SANDBOX /
+      RETURN ACCESS) for the pool of existing targets.
+   2. If the pool is NON-EMPTY, for each entity to create pick a random subset and
+      set `metadata[rel_prop] = [subset]` directly in the CREATE dict (step 2):
+        k = random.randint(1, min(5, len(pool)))
+        metadata[rel_prop] = random.sample(pool, k)
+      If the pool is EMPTY, leave the property UNSET and flag — NEVER
+      `random.sample([], k)` (raises `ValueError: sample larger than population`).
+   This is LIVE-ONLY for the wiring. In validation the related template has NO
+   dummies — do NOT add related-template dummies to the `dummy_spec`: a created
+   entity referencing a seed dummy leaves an orphan relationship hub the harness
+   revert cannot tear down (`relations` is a denormalized read-time view;
+   `UpdateEntitySchema` rejects it), so the seed's `post_revert` would mismatch
+   and false-fail the gate. The gate proves the script runs clean on an EMPTY
+   pool and creates entities; prove the real wiring with `run_dry_run_script`
+   (records the would-be refs against real entities) + the manual live run.
+4. Call `create_entities(list_of_dicts, language)` (Scenario A: step 3.1).
+   For Scenario B the `relationship` refs are already in the create dicts from
+   step 2 + step 3. Count successes.
+5. Set `result` to a concise, HONEST summary. Report which `relationship`
+   properties were wired, the scenario, refs-per-entity, and whether it was
+   gate-proven or live-only. Examples:
+   - `"created 1000 under Global Repository; filled text/numeric/date; wired
+     relationship 'related_cases' (-> Global Repository, type 'relates_to'):
+     scenario A two-phase, ~3 refs/entity, gate-proven"`
+   - `"created 100 under Decision; ...; relationship 'cited_by' (-> Judgement):
+     scenario B, 1200 existing targets, live-only (gate pool empty)"`
+   - `"created 100 under Decision; ...; relationship 'cited_by': no existing
+     targets in Judgement, left unset"`
+   For a Scenario-A run also confirm `created_shared_ids` is non-empty
+   (FALSE-PASS GUARD below).
+SCALE: a "Create N" run with two-phase wiring does N creates + N updates; keep the
+random subset per entity small (1–5 above) so relationship hubs stay manageable.
+The run's touch set is `created` only (an `update_entities` on a just-created
+entity adds nothing to `modified`), so N must stay <= `MAX_ENTITIES_PER_RUN`.
 DUMMY SPEC for a create task: the dummies in your `dummy_spec` are the SEED set
 the script runs against — they are NOT the entities the prompt asks to create. The
 harness REQUIRES at least one dummy to exist (an empty `dummy_spec` makes it error
@@ -432,6 +494,11 @@ The script then creates the real targets via `create_entities`; the gate observe
 the newly-CREATED dummies (they appear in `diffs` as `before=None, after={...}` and
 in `created_shared_ids`). The script's `create_entities` calls may use the full
 inspected property set (with the WRITE SHAPE), staying within inspected labels.
+DUMMY SPEC for relationship wiring: keep the SEED `dummy_spec` simple as above (no
+`relationship`, no related-template dummies). Scenario A's two-phase wiring is
+exercised on the CREATED dummies (the script creates ≥2, so the pool has targets);
+Scenario B's wiring is live-only (see step 3 — do NOT add related-template dummies,
+they false-fail the gate via orphan hubs).
 FALSE-PASS GUARD for create tasks: a CREATE prompt that yields 0 created dummies
 (no `before=None` entries in `diffs`, an empty `created_shared_ids`) means your
 script created NOTHING — that is a FAIL, not a PASS. A no-op create trivially passes
