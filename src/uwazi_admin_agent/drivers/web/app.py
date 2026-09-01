@@ -308,8 +308,8 @@ def _build_row_menu() -> None:
     table; the selected run's id travels through ``app.storage.client``. The
     menu is shown by replaying the row click on an off-screen anchor with the
     recorded coordinates, so Quasar positions it at the cursor
-    (``touch-position``). The two conditional items (Retry / Error details)
-    are toggled per selection in ``_on_rowmenu``.
+    (``touch-position``). The three conditional items (Show script / Retry / Error
+    details) are toggled per selection in ``_on_rowmenu``.
     """
     with ui.button(icon="more_vert").props("flat dense").classes("fixed top-[-100px] left-[-100px]") as anchor:
         # Raw ``q-menu`` element: ``ui.menu`` refuses the ``touch-position`` prop,
@@ -323,13 +323,16 @@ def _build_row_menu() -> None:
             ui.separator()
             ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
             ui.menu_item("History", lambda: _row_menu_action(_history_dialog))
+            script_item = ui.menu_item("Show script", lambda: _row_menu_action(_script_dialog))
             ui.menu_item("Delete", lambda: _row_menu_action(_delete_dialog)).classes("text-negative")
     retry_item.set_visibility(False)
     errors_item.set_visibility(False)
+    script_item.set_visibility(False)
     context.client._row_menu = menu  # noqa: SLF001 — per-client handle
     context.client._row_menu_anchor = anchor  # noqa: SLF001
     context.client._row_menu_retry = retry_item  # noqa: SLF001
     context.client._row_menu_errors = errors_item  # noqa: SLF001
+    context.client._row_menu_script = script_item  # noqa: SLF001
 
 
 def _row_menu_action(action: Any) -> None:
@@ -425,14 +428,17 @@ def _on_rowmenu(e: Any) -> None:
     app.storage.client["rowmenu_run"] = run_id
     show_retry = False
     show_errors = False
+    show_script = False
     try:
         detail = get_run(run_id)
         show_retry = detail.status.value == "generation_failed"
         show_errors = bool(detail.error)
+        show_script = bool(detail.script)
     except Exception:  # noqa: BLE001 — a missing run just hides the conditional items
         pass
     context.client._row_menu_retry.set_visibility(show_retry)  # noqa: SLF001
     context.client._row_menu_errors.set_visibility(show_errors)  # noqa: SLF001
+    context.client._row_menu_script.set_visibility(show_script)  # noqa: SLF001
 
     anchor = context.client._row_menu_anchor  # noqa: SLF001
     client_x = int(click.get("clientX", 0) or 0)
@@ -537,11 +543,13 @@ def _info_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").style("overflow-y: auto"):
             ui.label(f"Task — {run_id}").classes("text-h6")
             ui.separator()
             ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-            ui.label(detail.prompt or "—").classes("text-body1")
+            ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
+                "min-height: 120px"
+            )
             if detail.error:
                 ui.separator()
                 ui.label("Last error").classes("text-subtitle1 text-grey-7")
@@ -596,6 +604,10 @@ def _error_dialog(run_id: str) -> None:
 
     Created on the page layout (not inside the refreshable table) so the 5s
     auto-refresh doesn't destroy it — same pattern as ``_logs_dialog``.
+
+    The dialog is maximized (top to bottom): the error detail and audit trail
+    share the space between a pinned title and a pinned footer, so the Close
+    button is always visible without scrolling.
     """
     try:
         detail = get_run(run_id)
@@ -605,53 +617,83 @@ def _error_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
-            ui.label(f"Error details — {run_id}").classes("text-h6")
-            if detail.error:
-                ui.textarea(value=detail.error).classes("w-full font-mono text-caption").props(
-                    "readonly outlined autogrow"
-                ).style("max-height: 40vh")
-            else:
-                ui.label("No error recorded on this run.").classes("text-grey-7")
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+            dialog.props("maximized")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(f"Error details — {run_id}").classes("text-h6")
+                with ui.column().classes("w-full grow overflow-y-auto").style("min-height: 0"):
+                    if detail.error:
+                        ui.textarea(value=detail.error).classes("w-full font-mono text-caption").props(
+                            "readonly outlined"
+                        ).style("min-height: 200px")
+                    else:
+                        ui.label("No error recorded on this run.").classes("text-grey-7")
 
-            ui.label("Audit trail").classes("text-subtitle1 q-mt-lg")
-            if not records:
-                ui.label("No audit records.").classes("text-grey-7")
-            else:
-                rows = [
-                    {
-                        "time": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                        "step": r.step.value,
-                        "op": r.op_kind,
-                        "outcome": r.outcome.value,
-                        "detail": r.detail or "",
-                    }
-                    for r in records
-                ]
-                columns = [
-                    {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
-                    {"name": "step", "label": "Step", "field": "step", "align": "left", "sortable": True},
-                    {"name": "op", "label": "Op", "field": "op", "align": "left", "sortable": True},
-                    {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
-                    {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
-                ]
-                audit_table = ui.table(
-                    rows=rows,
-                    columns=columns,
-                    row_key="time",
-                    pagination={"rowsPerPage": 0},
-                ).classes("w-full")
-                audit_table.add_slot(
-                    "body-cell-outcome",
-                    """
-                    <q-td :props="props"
-                          :class="props.row.outcome === 'failure' ? 'text-red-8' : ''">
-                        {{ props.row.outcome }}
-                    </q-td>
-                    """,
-                )
-            with ui.row().classes("w-full q-mt-md justify-end"):
-                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+                    ui.label("Audit trail").classes("text-subtitle1 q-mt-lg")
+                    if not records:
+                        ui.label("No audit records.").classes("text-grey-7")
+                    else:
+                        rows = [
+                            {
+                                "time": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                                "step": r.step.value,
+                                "op": r.op_kind,
+                                "outcome": r.outcome.value,
+                                "detail": r.detail or "",
+                            }
+                            for r in records
+                        ]
+                        columns = [
+                            {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
+                            {"name": "step", "label": "Step", "field": "step", "align": "left", "sortable": True},
+                            {"name": "op", "label": "Op", "field": "op", "align": "left", "sortable": True},
+                            {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
+                            {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
+                        ]
+                        ui.table(
+                            rows=rows,
+                            columns=columns,
+                            row_key="time",
+                            pagination={"rowsPerPage": 0},
+                        ).classes("w-full")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+    dialog.open()
+
+
+def _script_dialog(run_id: str) -> None:
+    """Modal: the run's generated Python script (only reachable when a script exists).
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it — same pattern as ``_error_dialog``. The
+    run's generated script lives at ``<run>/script.py``; a run whose generation
+    failed has none, and the menu item is hidden in that case.
+
+    The dialog is maximized (top to bottom): the script fills the space between
+    the title and a pinned footer, so the Close button is always visible
+    without scrolling and never overlaps the scrollable text.
+    """
+    try:
+        detail = get_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        return
+    if not detail.script:
+        ui.notify("No generated script on this run.", type="warning")
+        return
+
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+            dialog.props("maximized")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(f"Generated script — {run_id}").classes("text-h6")
+                ui.textarea(value=detail.script).classes("w-full grow font-mono text-caption").props(
+                    "readonly outlined"
+                ).style("min-height: 0")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
     dialog.open()
 
 
