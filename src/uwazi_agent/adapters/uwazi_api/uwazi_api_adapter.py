@@ -62,28 +62,6 @@ def _categorize_publish_error(exc: Exception) -> str:
     return "INTERNAL"
 
 
-T = TypeVar("T")
-
-
-async def _parallel(items: list[T], worker: Callable[[T], Awaitable[T]], n: int = 4) -> list[T]:
-    """Run ``worker`` for every item concurrently with at most ``n`` in flight.
-
-    The mapper and the underlying Uwazi repos are cached and thread-safe
-    for reads, so the only thing we lose by parallelising is the global
-    serialisation of the previous implementation. Wall-clock time on a
-    batch of N mutations drops from N * round-trip-time to roughly
-    ceil(N / n) * round-trip-time, which is the main reason this helper
-    exists.
-    """
-    sem = asyncio.Semaphore(n)
-
-    async def _run(item: T) -> T:
-        async with sem:
-            return await worker(item)
-
-    return list(await asyncio.gather(*(_run(item) for item in items)))
-
-
 def _coerce_error_code(code: str):
     from uwazi_agent.domain.agent_entity_mutation_result import MutationErrorCode
 
@@ -286,7 +264,10 @@ class UwaziApiAdapter(
 
             return await asyncio.to_thread(_call)
 
-        return await _parallel(entities, _upload_one)
+        results = []
+        for agent_entity in entities:
+            results.append(await _upload_one(agent_entity))
+        return results
 
     async def get_entities_by_shared_ids(
         self, shared_ids: list[str], language: str, limit: int = 10000
@@ -304,8 +285,12 @@ class UwaziApiAdapter(
 
             return await asyncio.to_thread(_call)
 
-        results = await _parallel(target_ids, _fetch_one)
-        return [e for e in results if e is not None]
+        results = []
+        for shared_id in target_ids:
+            entity = await _fetch_one(shared_id)
+            if entity is not None:
+                results.append(entity)
+        return results
 
     async def search_entities_by_text(
         self,
@@ -424,14 +409,15 @@ class UwaziApiAdapter(
 
             return await asyncio.to_thread(_call)
 
-        return await _parallel(updates, _update_one)
+        results = []
+        for agent_entity in updates:
+            results.append(await _update_one(agent_entity))
+        return results
 
     async def delete_entities_by_shared_ids(self, shared_ids: list[str]) -> list[AgentEntityMutationResult]:
-        # Try the bulk endpoint first; only fall back to per-id if it rejects
-        # the whole batch. The per-id fallback is what dominates wall-clock
-        # time on a real delete (one HTTP round-trip per id), so we
-        # parallelise that path with ``_parallel`` to keep the latency
-        # bounded.
+        # Try the bulk endpoint first; only fall back to per-id if it
+        # rejects the whole batch. The per-id fallback runs strictly
+        # serially: parallel requests trip Uwazi's 429 rate limiter.
         def _bulk() -> list[AgentEntityMutationResult]:
             try:
                 self._entity_repo.delete_entities(list(shared_ids))
@@ -457,7 +443,10 @@ class UwaziApiAdapter(
 
             return await asyncio.to_thread(_call)
 
-        return await _parallel(shared_ids, _delete_one)
+        results = []
+        for shared_id in shared_ids:
+            results.append(await _delete_one(shared_id))
+        return results
 
     async def set_entities_publish_status(self, shared_ids: list[str], published: bool) -> list[AgentEntityMutationResult]:
         def _call_once() -> dict[str, Optional[str]]:
@@ -510,11 +499,9 @@ class UwaziApiAdapter(
         return await asyncio.to_thread(_call)
 
     async def get_publish_status(self, shared_ids: list[str], language: str) -> list[AgentPublishStatus]:
-        # Each id currently issues one HTTP request via
-        # ``_get_entity_permissions``; the loop is serial in the original
-        # implementation, so a 50-id batch takes 50 sequential round-trips.
-        # Parallelising with ``_parallel`` (4 in flight) brings the wall
-        # clock down to ~13 round-trips.
+        # Each id issues one HTTP request via ``_get_entity_permissions``;
+        # requests run strictly serially: parallel requests trip Uwazi's
+        # 429 rate limiter.
         async def _fetch_one(shared_id: str) -> AgentPublishStatus:
             def _call() -> AgentPublishStatus:
                 try:
@@ -530,7 +517,10 @@ class UwaziApiAdapter(
 
             return await asyncio.to_thread(_call)
 
-        return await _parallel(shared_ids, _fetch_one)
+        results = []
+        for shared_id in shared_ids:
+            results.append(await _fetch_one(shared_id))
+        return results
 
     # --- RelationshipTypeApiPort -----------------------------------------
 

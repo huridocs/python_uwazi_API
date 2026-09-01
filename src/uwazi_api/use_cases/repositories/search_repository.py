@@ -12,6 +12,8 @@ from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 
+_MAX_RESULT_WINDOW = 10_000  # Elasticsearch index.max_result_window default
+
 
 class SearchRepository:
     def __init__(
@@ -41,7 +43,9 @@ class SearchRepository:
             cookies={"locale": "en"},
         )
         if response.status_code != 200:
-            raise SearchError("Error getting entities shared ids")
+            raise SearchError(
+                f"Error getting entities shared ids: status={response.status_code}, body={response.text[:500]}"
+            )
         rows = json.loads(response.content).get("rows", [])
         return [row["sharedId"] for row in rows]
 
@@ -53,28 +57,43 @@ class SearchRepository:
         language: str = "en",
         published: Optional[bool] = None,
     ) -> list[Entity]:
-        params = {
-            "from": start_from,
-            "limit": batch_size,
-            "allAggregations": "false",
-            "sort": "creationDate",
-            "order": "desc",
-        }
-        if template_name:
-            template_id = self._resolve_template_id(template_name)
-            params["types"] = f'["{template_id}"]'
-        params["includeUnpublished"] = "false" if published else "true"
+        """Fetch entities, transparently paging under Elasticsearch's
+        ``index.max_result_window`` (10 000) via ``from``/``limit`` windows.
 
-        response = self.http.request_adapter.get(
-            f"{self.http.url}/api/search",
-            headers=self.http.headers,
-            params=params,
-            cookies={"locale": language},
-        )
-        if response.status_code != 200:
-            raise SearchError("Error getting entities")
-        rows = json.loads(response.content).get("rows", [])
-        return [Entity.model_validate(row) for row in rows]
+        ``batch_size`` larger than that window is silently served in
+        consecutive 10 000-sized pages; ``start_from`` offsets the first
+        returned entity within that paged stream.
+        """
+        page_size = min(batch_size, _MAX_RESULT_WINDOW)
+        collected: list[Entity] = []
+        page_from = start_from
+        while len(collected) < batch_size:
+            params = {
+                "from": page_from,
+                "limit": page_size,
+                "allAggregations": "false",
+                "sort": "creationDate",
+                "order": "desc",
+            }
+            if template_name:
+                template_id = self._resolve_template_id(template_name)
+                params["types"] = f'["{template_id}"]'
+            params["includeUnpublished"] = "false" if published else "true"
+
+            response = self.http.request_adapter.get(
+                f"{self.http.url}/api/search",
+                headers=self.http.headers,
+                params=params,
+                cookies={"locale": language},
+            )
+            if response.status_code != 200:
+                raise SearchError(f"Error getting entities: status={response.status_code}, body={response.text[:500]}")
+            rows = json.loads(response.content).get("rows", [])
+            collected.extend(Entity.model_validate(row) for row in rows)
+            if len(rows) < page_size:
+                break  # exhausted the matching set
+            page_from += page_size
+        return collected[:batch_size]
 
     def search_by_text(
         self,
@@ -222,7 +241,9 @@ class SearchRepository:
             cookies={"locale": language},
         )
         if response.status_code != 200:
-            raise SearchError(f"Error searching entities by filter: {response.status_code}")
+            raise SearchError(
+                f"Error searching entities by filter: status={response.status_code}, body={response.text[:500]}"
+            )
         rows = json.loads(response.content).get("rows", [])
         return [Entity.model_validate(row) for row in rows]
 
