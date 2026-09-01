@@ -17,8 +17,10 @@ no state to gate.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
@@ -62,8 +64,26 @@ class DryRunScriptUseCase:
         self._default_language = default_language
 
     async def dry_run(self, script: str) -> DryRunReport:
-        """Run ``script`` in the dry-run namespace; aggregate the records into a report."""
-        return await asyncio.to_thread(self._dry_run_sync, script)
+        """Run ``script`` in the dry-run namespace; aggregate the records into a report.
+
+        Logs the wall-clock duration on completion (and the traceback on a
+        crash): against a large remote instance the run's real reads can take
+        many minutes, and this boundary line is what separates "slow" from
+        "stuck" when nothing else logs during the script's execution.
+        """
+        started = time.monotonic()
+        try:
+            report = await asyncio.to_thread(self._dry_run_sync, script)
+        except Exception:  # noqa: BLE001 — re-raised; only the visibility changes
+            logger.exception("dry run crashed after {:.1f}s", time.monotonic() - started)
+            raise
+        logger.info(
+            "dry run finished in {:.1f}s passed={} script_error={}",
+            time.monotonic() - started,
+            report.passed,
+            bool(report.script_error),
+        )
+        return report
 
     def _dry_run_sync(self, script: str) -> DryRunReport:
         loop = asyncio.new_event_loop()

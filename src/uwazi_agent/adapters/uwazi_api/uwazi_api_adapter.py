@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Awaitable, Callable, Optional, TypeVar, cast
+from typing import Optional, cast
 
 from loguru import logger
 from requests.exceptions import RequestException
