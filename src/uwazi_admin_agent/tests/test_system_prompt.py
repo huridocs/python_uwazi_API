@@ -3,8 +3,9 @@
 Per ``AGENTS.md``: no mocks/stubs, no network. The system prompt is a module-level
 string; these are pure string-presence regression tests so the pinned
 ``query_entities`` return-access forms, the entity/metadata shape, the
-dummy-spec rules, and the no-op-on-change-prompt instruction cannot be silently
-dropped by a future edit. The bugs they prevent:
+``query_entities_full`` bulk-read contract, the dummy-spec rules, and the
+no-op-on-change-prompt instruction cannot be silently dropped by a future
+edit. The bugs they prevent:
 - the LLM wrote ``res["summary"]["shared_ids"]`` (subscript) when the search
   result is an OBJECT (``res.summary.shared_ids`` - attribute), raising
   ``TypeError: 'AgentEntitySummary' object is not subscriptable``;
@@ -78,6 +79,9 @@ def test_prompt_pins_search_result_attribute_access() -> None:
     """The prompt must show the correct ATTRIBUTE access form for search modes."""
     assert "res.summary.shared_ids" in SYSTEM_PROMPT
     assert "res.examples" in SYSTEM_PROMPT
+    # The ids-only paths (RETURN ACCESS example, CREATE Scenario B) keep
+    # teaching the attribute form.
+    assert SYSTEM_PROMPT.count("summary.shared_ids") >= 2
 
 
 def test_prompt_forbids_subscript_on_search_result() -> None:
@@ -104,11 +108,34 @@ def test_prompt_warns_noop_pass_on_change_prompt() -> None:
 
 
 def test_prompt_reinforces_attribute_access_in_merge_sections() -> None:
-    """The MERGE TASKS and MULTI-GROUP MERGE sections must reinforce the attribute
-    access at the point of use, not just in the EXECUTION SANDBOX block."""
-    # MERGE TASKS step 1 and MULTI-GROUP step 2a both reference summary.shared_ids.
-    assert SYSTEM_PROMPT.count("summary.shared_ids") >= 2
+    """The MERGE TASKS and MULTI-GROUP MERGE recipes must fetch full dicts via
+    the ONE-CALL `query_entities_full` (a subscript list[dict]) and must warn
+    against the search-then-`by_ids` refetch - the pattern that made bulk
+    scripts re-fetch one entity PER HTTP request."""
+    assert "query_entities_full(mode='by_text', search_term=<title>)" in SYSTEM_PROMPT
+    assert "query_entities_full(mode='by_template', template_name=<T>)" in SYSTEM_PROMPT
+    assert "one HTTP request PER" in SYSTEM_PROMPT
+    assert "one entity PER HTTP REQUEST" in SYSTEM_PROMPT
     assert "ATTRIBUTE access" in SYSTEM_PROMPT
+
+
+def test_prompt_declares_query_entities_full_helper() -> None:
+    """The sandbox contract must declare `query_entities_full` with its exact
+    signature, its three search modes (NOT by_ids), and its list[dict]
+    (subscript) return shape - the bulk-read fast path that keeps generated
+    scripts from paying the per-id `by_ids` refetch."""
+    assert "query_entities_full(mode, language='en', limit=10000, search_term=None," in SYSTEM_PROMPT
+    assert 'NOT "by_ids"' in SYSTEM_PROMPT
+    assert "PREFER this over search-then-`by_ids`" in SYSTEM_PROMPT
+    assert "ONE HTTP REQUEST PER ENTITY" in SYSTEM_PROMPT
+    assert 'query_entities_full(mode="by_template", template_name="Judgment")' in SYSTEM_PROMPT
+
+
+def test_prompt_keeps_by_ids_for_known_ids_only() -> None:
+    """`by_ids` must stay documented for ids that come from elsewhere (operator-
+    named, create results) - not as the bulk refetch of a search's own ids."""
+    assert 'dicts = query_entities(mode="by_ids", shared_ids=ids)' in SYSTEM_PROMPT
+    assert "ids that come from" in SYSTEM_PROMPT
 
 
 # --- Entity / metadata shape (Fix A) -----------------------------------------

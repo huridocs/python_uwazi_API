@@ -4,8 +4,8 @@ Operating model:
 
 - The LLM **generates a Python script** that performs the bulk change, using the
   CRUD helpers reused from ``uwazi_agent`` (create/update/delete/publish
-  entities, create_relationships, query_entities). It does not run free-form
-  network or DB code — only the bound helpers.
+  entities, create_relationships, query_entities, query_entities_full). It
+  does not run free-form network or DB code — only the bound helpers.
 - A run proceeds: prompt (active_run.yaml) -> generate script -> simulate
   against dummy entities in the real instance -> backup the real touch set ->
   execute against real entities -> (revert on demand).

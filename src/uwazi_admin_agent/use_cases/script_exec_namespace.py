@@ -17,6 +17,12 @@ This module:
   exposes no sync read helper), which in dummy mode returns only the dummies in
   the shapes the system prompt declares (``AgentEntitySearchResult`` for search
   modes, ``list[AgentEntity]`` for ``by_ids``), post-filtered to scope;
+- adds a **sync ``query_entities_full`` bulk-read wrapper**: the same search
+  modes returning EVERY matched entity as a full ``model_dump`` dict (the shape
+  ``by_ids`` returns). The search modes already fetch all matches through one
+  paged ``/api/search`` call; without this helper a script re-fetches them via
+  ``by_ids`` — one HTTP request PER shared_id, minutes at the 10 000-entity
+  scale — which is exactly the slow path it exists to replace;
 - binds the declared stdlib subset (``json, re, collections, itertools,
   datetime (module), math, random``) and a curated ``SAFE_BUILTINS`` (no ``open``/``__import__``
   /``eval``/``exec``/``compile``/``getattr``/...);
@@ -237,6 +243,25 @@ def filter_in_scope_by_template(in_scope: list[AgentEntity], template_name: str 
     return [e for e in in_scope if e.template_name == template_name]
 
 
+# The three search modes both bound read helpers share (the engine lives in
+# ``_run_search_mode``; ``by_ids`` is a ``query_entities``-only mode).
+_SEARCH_MODES: tuple[str, ...] = ("by_text", "by_filter", "by_template")
+
+
+def full_mode_usage_error(mode: str) -> str:
+    """The unknown-mode error BOTH ``query_entities_full`` factories return.
+
+    ``by_ids`` is deliberately absent from the mode list: ``query_entities_full``
+    exists so scripts never re-fetch a search's entities one id at a time;
+    ids-only or known-id reads belong to ``query_entities``. The error says
+    so, keeping the two helpers' contracts unambiguous. Pure.
+    """
+    return (
+        f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template'. "
+        "(For known shared_ids use query_entities(mode='by_ids', shared_ids=[...]).)"
+    )
+
+
 def _sync_query_entities_factory(
     dummy_entities: list[AgentEntity],
     scope: set[str],
@@ -297,6 +322,43 @@ def _sync_query_entities_factory(
         return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
 
     return query_entities
+
+
+def _sync_full_entities_factory(
+    dummy_entities: list[AgentEntity],
+    scope: set[str],
+) -> Any:
+    """Build the sync, dummy-scoped ``query_entities_full`` bound into the namespace.
+
+    Mirrors the real helper's contract for validation: the same three search
+    modes, returning the in-scope dummies as FULL entity dicts (``model_dump``)
+    — the shape ``by_ids`` returns — so the identical script runs in dummy and
+    real mode. Search criteria are ignored under scoping and ``by_template``
+    filters by ``template_name``, exactly like the dummy ``query_entities``.
+    ``by_ids`` is refused (the real helper does not offer it; ids-only and
+    known-id reads belong to ``query_entities``). A ``shared_ids`` argument is
+    accepted but IGNORED so the LLM's by_ids habit gets the guidance error
+    string instead of a TypeError crash.
+    """
+
+    def query_entities_full(
+        mode: str,
+        language: str = "en",
+        limit: int = 10000,
+        search_term: str | None = None,
+        template_name: str | None = None,
+        filters: list | None = None,
+        published: bool | None = None,
+        shared_ids: list[str] | None = None,
+    ) -> Any:  # list[dict] (full entities) or str (error)
+        _ = language, limit, search_term, filters, published, shared_ids  # search criteria ignored under scoping
+        if mode not in _SEARCH_MODES:
+            return full_mode_usage_error(mode)
+        in_scope = [e for e in dummy_entities if e.shared_id in scope]
+        selected = filter_in_scope_by_template(in_scope, template_name) if mode == "by_template" else in_scope
+        return [e.model_dump() for e in selected]
+
+    return query_entities_full
 
 
 def _scoped_write_helpers(
@@ -575,6 +637,7 @@ def build_exec_namespace(
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
     namespace: dict[str, Any] = {
         "query_entities": _sync_query_entities_factory(dummy_entities, scope),
+        "query_entities_full": _sync_full_entities_factory(dummy_entities, scope),
         **_scoped_write_helpers(crud, scope),
         "move_files_to_entity": _move_files_noop_scoped(scope),
         "get_entity_files": _get_entity_files_noop_scoped(scope),
@@ -590,6 +653,9 @@ def build_exec_namespace(
 # Fetching (and logging) in chunks keeps a slow remote instance narrated: one
 # INFO line per chunk instead of silence for the whole fetch. Behavior is
 # unchanged (same requests, same order, ``limit`` still trims the total set).
+# Scripts that need the full entities BEHIND A SEARCH should not pay this loop
+# at all: the bound ``query_entities_full`` returns them straight from the
+# search (one or two paged /api/search requests - see build_full_entities_view).
 _BY_IDS_CHUNK: int = 50
 
 
@@ -615,6 +681,90 @@ def build_search_result_view(result: AgentEntitySearchResult) -> SimpleNamespace
     return SimpleNamespace(summary=summary, examples=[e.model_dump() for e in result.examples])
 
 
+def build_full_entities_view(result: AgentEntitySearchResult) -> list[dict]:
+    """Build the bound ``query_entities_full`` search-mode return value (real mode).
+
+    Returns EVERY entity the search matched — from ``result._all_entities`` —
+    as the full ``model_dump`` dicts the script's dict-access idioms expect, the
+    SAME shape ``by_ids`` returns. This is the bulk-read fast path: the search
+    modes already fetch and map every matching entity into ``_all_entities``
+    (one or two paged ``/api/search`` requests), so a script gets the whole set
+    in ONE helper call instead of re-fetching each id through ``by_ids`` — one
+    HTTP request PER entity, minutes at bulk scale (the ~30-minutes-for-10k
+    path this helper replaces). Like :func:`build_search_result_view` it reads
+    ``result._all_entities`` (what ``uwazi_agent``'s own tools read); no
+    ``uwazi_api``/``uwazi_agent`` modification. Order follows the search result
+    (the same order ``summary.shared_ids`` carries), so "first entity"
+    semantics are unchanged.
+
+    Pure: the testable seam extracted from :func:`_real_full_entities_factory`.
+    """
+    return [e.model_dump() for e in result._all_entities]
+
+
+def _run_search_mode(
+    entity_api: EntityApiPort,
+    loop: asyncio.AbstractEventLoop,
+    helper_name: str,
+    mode: str,
+    language: str,
+    limit: int,
+    search_term: str | None,
+    template_name: str | None,
+    filters: list | None,
+    published: bool | None,
+) -> AgentEntitySearchResult | str:
+    """Run one search mode (``by_text``/``by_filter``/``by_template``) against the port.
+
+    The shared engine of the two bound real-mode read helpers —
+    ``query_entities`` (summary view) and ``query_entities_full`` (full-dicts
+    view) — so their search traffic is IDENTICAL BY CONSTRUCTION: same port
+    method, same arguments, same start/completion logging. A missing required
+    argument returns the bound helpers' error-string convention; a valid mode
+    returns the raw :class:`AgentEntitySearchResult` (its ``_all_entities``
+    carries every matched entity; the caller picks the view). Non-search modes
+    never reach here — both factories reject them first.
+    """
+    started = time.monotonic()
+    if mode == "by_text":
+        if not search_term:
+            return "Error: 'by_text' mode requires `search_term`."
+        logger.info("script {} by_text: term={!r} template={} limit={}", helper_name, search_term, template_name, limit)
+        result = loop.run_until_complete(
+            entity_api.search_entities_by_text(
+                search_term=search_term, template_name=template_name, language=language, limit=limit
+            )
+        )
+    elif mode == "by_filter":
+        if not template_name:
+            return "Error: 'by_filter' mode requires `template_name`."
+        logger.info(
+            "script {} by_filter: template={} filters={} limit={}", helper_name, template_name, len(filters or []), limit
+        )
+        result = loop.run_until_complete(
+            entity_api.search_entities_by_filter(
+                template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
+            )
+        )
+    elif mode == "by_template":
+        if not template_name:
+            return "Error: 'by_template' mode requires `template_name`."
+        logger.info("script {} by_template: template={} limit={}", helper_name, template_name, limit)
+        result = loop.run_until_complete(
+            entity_api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
+        )
+    else:  # both factories pre-validate the mode; unreachable by a script call
+        raise ValueError(f"non-search mode {mode!r} reached _run_search_mode")
+    logger.info(
+        "script {} {}: {} entities ({:.1f}s)",
+        helper_name,
+        mode,
+        len(result._all_entities),
+        time.monotonic() - started,
+    )
+    return result
+
+
 def _real_sync_query_entities_factory(
     entity_api: EntityApiPort,
     loop: asyncio.AbstractEventLoop,
@@ -630,7 +780,9 @@ def _real_sync_query_entities_factory(
     and ``by_ids`` logs per chunk: it is the one mode whose single call hides a
     long sequential per-entity fetch (one HTTP request per shared_id), and
     those progress lines are the difference between "slow" and "stuck"
-    against a remote instance.
+    against a remote instance. When a script needs the ENTITIES behind a
+    search (not just their ids), prefer the bound ``query_entities_full``:
+    it returns them straight from the search instead of re-fetching per id.
     """
 
     def query_entities(
@@ -664,52 +816,56 @@ def _real_sync_query_entities_factory(
                     time.monotonic() - started,
                 )
             return dumped
-        if mode == "by_text":
-            if not search_term:
-                return "Error: 'by_text' mode requires `search_term`."
-            logger.info("script query_entities by_text: term={!r} template={} limit={}", search_term, template_name, limit)
-            result = loop.run_until_complete(
-                entity_api.search_entities_by_text(
-                    search_term=search_term, template_name=template_name, language=language, limit=limit
-                )
-            )
-            logger.info(
-                "script query_entities by_text: {} entities ({:.1f}s)", len(result._all_entities), time.monotonic() - started
-            )
-            return build_search_result_view(result)
-        if mode == "by_filter":
-            if not template_name:
-                return "Error: 'by_filter' mode requires `template_name`."
-            logger.info(
-                "script query_entities by_filter: template={} filters={} limit={}", template_name, len(filters or []), limit
-            )
-            result = loop.run_until_complete(
-                entity_api.search_entities_by_filter(
-                    template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
-                )
-            )
-            logger.info(
-                "script query_entities by_filter: {} entities ({:.1f}s)",
-                len(result._all_entities),
-                time.monotonic() - started,
-            )
-            return build_search_result_view(result)
-        if mode == "by_template":
-            if not template_name:
-                return "Error: 'by_template' mode requires `template_name`."
-            logger.info("script query_entities by_template: template={} limit={}", template_name, limit)
-            result = loop.run_until_complete(
-                entity_api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
-            )
-            logger.info(
-                "script query_entities by_template: {} entities ({:.1f}s)",
-                len(result._all_entities),
-                time.monotonic() - started,
-            )
-            return build_search_result_view(result)
-        return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
+        if mode not in _SEARCH_MODES:
+            return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
+        outcome = _run_search_mode(
+            entity_api, loop, "query_entities", mode, language, limit, search_term, template_name, filters, published
+        )
+        if isinstance(outcome, str):
+            return outcome
+        return build_search_result_view(outcome)
 
     return query_entities
+
+
+def _real_full_entities_factory(
+    entity_api: EntityApiPort,
+    loop: asyncio.AbstractEventLoop,
+) -> Any:
+    """Build the sync, real ``query_entities_full`` that actually calls EntityApiPort.
+
+    The bulk-read counterpart of :func:`_real_sync_query_entities_factory`:
+    the same three search modes through the same shared engine
+    (:func:`_run_search_mode` — identical traffic by construction), but
+    returning the FULL entity dicts (:func:`build_full_entities_view`) instead
+    of the summary view, so a script reads a whole search's entities in ONE
+    call instead of re-fetching them per-id through ``by_ids`` (one HTTP
+    request per entity — unusable at bulk scale). A ``shared_ids`` argument is
+    accepted but IGNORED so the LLM's by_ids habit gets the guidance error
+    string instead of a TypeError crash.
+    """
+
+    def query_entities_full(
+        mode: str,
+        language: str = "en",
+        limit: int = 10000,
+        search_term: str | None = None,
+        template_name: str | None = None,
+        filters: list | None = None,
+        published: bool | None = None,
+        shared_ids: list[str] | None = None,
+    ) -> Any:  # list[dict] (full entities) or str (error)
+        _ = shared_ids  # ignored: by_ids reads belong to query_entities
+        if mode not in _SEARCH_MODES:
+            return full_mode_usage_error(mode)
+        outcome = _run_search_mode(
+            entity_api, loop, "query_entities_full", mode, language, limit, search_term, template_name, filters, published
+        )
+        if isinstance(outcome, str):
+            return outcome
+        return build_full_entities_view(outcome)
+
+    return query_entities_full
 
 
 def build_real_exec_namespace(
@@ -726,8 +882,9 @@ def build_real_exec_namespace(
 
     Same shape as the dummy namespace (target-agnostic, no ``entities`` list,
     same stdlib subset + ``SAFE_BUILTINS``) but:
-    - ``query_entities`` actually calls :class:`EntityApiPort` (async, via the
-      loop) and returns the same dict/``SimpleNamespace`` shapes.
+    - ``query_entities`` (summary view) and ``query_entities_full`` (bulk
+      full-entity view) actually call :class:`EntityApiPort` (async, via the
+      loop) and return the same dict/``SimpleNamespace`` shapes.
     - Write helpers come from ``intercept.decorate(crud)`` — backup-intercepted
       (not scope-restricted). The ``intercept`` is a :class:`BackupIntercept`
       but typed ``Any`` here to keep the namespace builder decoupled from the
@@ -742,6 +899,7 @@ def build_real_exec_namespace(
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
     namespace: dict[str, Any] = {
         "query_entities": _real_sync_query_entities_factory(entity_api, loop),
+        "query_entities_full": _real_full_entities_factory(entity_api, loop),
         **intercept.decorate(crud),
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
@@ -863,7 +1021,8 @@ def build_dry_run_namespace(
     Composed from the same factories as :func:`build_real_exec_namespace` —
     that is the point of the dry run (the extraction logic, the ``ctx``
     contract, and the update-dict build run for real):
-    - ``query_entities`` / ``get_entity_files`` / ``get_file_bytes`` are the
+    - ``query_entities`` / ``query_entities_full`` / ``get_entity_files`` /
+      ``get_file_bytes`` are the
       REAL helpers (live reads against the wired ports; the factory's
       unwired stubs raise a clear ``RuntimeError`` when the port is ``None``);
     - all 7 write helpers plus ``move_files_to_entity`` are pure recorders
@@ -873,6 +1032,9 @@ def build_dry_run_namespace(
     namespace: dict[str, Any] = {
         "query_entities": (
             _dry_run_query_entities_unwired() if entity_api is None else _real_sync_query_entities_factory(entity_api, loop)
+        ),
+        "query_entities_full": (
+            _dry_run_full_entities_unwired() if entity_api is None else _real_full_entities_factory(entity_api, loop)
         ),
         **_dry_run_write_helpers(dry_run_records),
         "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
@@ -916,6 +1078,22 @@ def _dry_run_query_entities_unwired() -> Any:
         )
 
     return query_entities_unwired
+
+
+def _dry_run_full_entities_unwired() -> Any:
+    """Unwired ``query_entities_full`` stub for the dry-run namespace (``entity_api is None``).
+
+    Same loud-failure convention as :func:`_dry_run_query_entities_unwired`:
+    raise a clear ``RuntimeError`` when the script actually calls it.
+    """
+
+    def query_entities_full_unwired(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            "query_entities_full requires a wired entity_api (got None). Wire "
+            "EntityApiPort into the runtime to enable entity discovery reads."
+        )
+
+    return query_entities_full_unwired
 
 
 @contextlib.contextmanager

@@ -99,6 +99,8 @@ def test_dry_run_namespace_binds_real_readers_and_dry_writers() -> None:
     with pytest.raises(RuntimeError):
         ns["query_entities"]("by_ids")
     with pytest.raises(RuntimeError):
+        ns["query_entities_full"]("by_template")
+    with pytest.raises(RuntimeError):
         ns["get_entity_files"]("some-id")
     with pytest.raises(RuntimeError):
         ns["get_file_bytes"]("file.pdf")
