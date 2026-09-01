@@ -123,6 +123,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         entity_api=api,
         relationship_api=api,
         search_probe=search_probe,
+        file_repository=file_repository,
         dry_run_use_case=DryRunScriptUseCase(
             entity_api=api,
             entity_repository=entity_repository,
