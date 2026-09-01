@@ -10,9 +10,9 @@ script must set ``result``; (d) it must do ONLY what the prompt asks.
 
 This contract binds Phase 3/4: the dummy harness and the real executor must build
 an exec namespace that supplies exactly these bound helpers (a sync
-``query_entities`` wrapper + the sync write helpers) and no ``entities`` list
-(discovery is runtime, so the touch set is emergent per §2.4 and the dummy gate
-per §2.7 holds).
+``query_entities`` wrapper + a sync ``query_entities_full`` bulk-read wrapper
++ the sync write helpers) and no ``entities`` list (discovery is runtime, so
+the touch set is emergent per §2.4 and the dummy gate per §2.7 holds).
 """
 
 from __future__ import annotations
@@ -53,12 +53,32 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
             dicts = query_entities(mode="by_ids", shared_ids=ids)
             for d in dicts:
                 sid = d["shared_id"]; title = d["title"]; meta = d["metadata"]
-      The two return SHAPES are different on purpose: a search summarizes, `by_ids`
-      fetches full dicts. Read the shape, then access with the matching form.
+      - "query_entities_full" (below) also returns a list[dict]: subscript it
+        exactly like "by_ids".
+      The return SHAPES are different on purpose: a search summarizes; `by_ids`
+      and `query_entities_full` fetch full dicts. Read the shape, then access
+      with the matching form.
+
+  query_entities_full(mode, language='en', limit=10000, search_term=None,
+                      template_name=None, filters=None, published=None)
+      Fetch ALL entities matching a search query as FULL entity dicts — the
+      SAME dict shape "by_ids" returns. `mode` is one of "by_text" /
+      "by_filter" / "by_template" (NOT "by_ids"). Returns a list[dict] you
+      SUBSCRIPT, never a result object:
+          dicts = query_entities_full(mode="by_template", template_name="Judgment")
+          for d in dicts:
+              sid = d["shared_id"]; title = d["title"]; meta = d["metadata"]
+      PREFER this over search-then-`by_ids` whenever the script needs the
+      entities themselves: ONE call returns every matching entity (one paged
+      search), while `query_entities(mode='by_ids', ...)` costs ONE HTTP REQUEST PER ENTITY
+      — unusable for bulk sets (10 000 entities is ~30 minutes). Use
+      `query_entities` when ids/summary alone suffice (e.g. picking random
+      relationship targets), and `by_ids` only for ids that come from
+      elsewhere (the operator names them, `create_entities` results).
 
   ENTITY SHAPE (CRITICAL - getting this wrong raises `TypeError: unhashable
   type: 'list'/'dict'` and wastes a validation attempt):
-      An entity dict `d` (from `by_ids`) has scalar fields `d["title"]`,
+      An entity dict `d` (from `by_ids` or `query_entities_full`) has scalar fields `d["title"]`,
       `d["shared_id"]`, `d["template_name"]`, and `d["metadata"]` which is a DICT
       `{property_name: [values]}` - every property's value is an ARRAY (list),
       even single-value properties (e.g. `{"document_status": ["draft"]}`, NOT
@@ -72,9 +92,10 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         - Group by a SCALAR field: `groups.setdefault(d["title"], [])`.
         - To dedupe value arrays, compare by a STRING key, never by the list/dict:
             key = json.dumps(v, sort_keys=True, default=str)   # hashable string
-      NOTE: the ARRAY shape above is the READ shape (what `by_ids` returns). The
-      WRITE shape (what you pass to `create_entities`/`update_entities`) is
-      DIFFERENT for single-value properties - see METADATA WRITE SHAPE below.
+      NOTE: the ARRAY shape above is the READ shape (what `by_ids` /
+      `query_entities_full` return). The WRITE shape (what you pass to
+      `create_entities`/`update_entities`) is DIFFERENT for single-value
+      properties - see METADATA WRITE SHAPE below.
 
   METADATA WRITE SHAPE (CRITICAL - getting this wrong makes Uwazi reject the
   create/update with a validation error and wastes an attempt. The
@@ -100,7 +121,8 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         - `relationship`   -> `["shared_id", ...]` (LIST of related shared_ids)
       For a random `date` in a create: `f"2023-{random.randint(1,12):02d}-
       {random.randint(1,28):02d}"` (a scalar string). The ONE exception to
-      "scalars": when you ECHO a value you READ from `by_ids` back unchanged in
+      "scalars": when you ECHO a value you READ from `by_ids` /
+      `query_entities_full` back unchanged in
       `update_entities` (e.g. a merge), keep its read array-envelope as-is - it
       already carries the platform-coerced numeric/id inside.
 
@@ -204,7 +226,8 @@ HARD RULES
    `urllib`, `socket`, `os`, `subprocess`, `open`, `pathlib`, etc.). No network,
    no database, no filesystem, no subprocesses. The safety boundary is the exec
    namespace: if a capability isn't bound above, you don't have it.
-2. Discover your target set with `query_entities` at runtime. The script must be
+2. Discover your target set with `query_entities` / `query_entities_full` at
+   runtime. The script must be
    target-agnostic: the SAME script is run against throwaway dummy entities
    (validation) and against real entities (execution). Never hardcode shared_ids
    you saw during exploration unless the operator's prompt explicitly names them.
@@ -250,7 +273,8 @@ VALIDATION
 - You MUST pass a `dummy_spec`: a list of throwaway entities to create, matching
   the template/shape your script targets (representative `title` + `template_name`
   + `metadata`). The harness creates them, runs your script against them (your
-  script can ONLY see/touch these dummies — `query_entities` returns only the
+  your script can ONLY see/touch these dummies — `query_entities` /
+  `query_entities_full` return only the
   dummies, and the write helpers refuse anything else), reverts them to their
   exact original raw state, and always deletes them afterwards.
   DUMMY SPEC RULES (creating dummies that Uwazi rejects wastes a validation
@@ -328,15 +352,16 @@ single target entity, then removes the redundant sources. Express it as a
 composition of the bound helpers - NO new capability is needed beyond
 `move_files_to_entity`. Use this exact shape:
 
-1. Discover the sources with `query_entities` (e.g. `by_text` on the title),
-   then fetch their full dicts with `query_entities('by_ids', shared_ids=[...])`.
-   Pick the target = the FIRST entity in that result order; the rest are sources.
-   (Access the search result with ATTRIBUTE access - `res.summary.shared_ids` -
-   never subscript; see EXECUTION SANDBOX / RETURN ACCESS. `by_ids` returns a
-   list[dict], which you subscript.)
-2. Build the merged metadata. `query_entities('by_ids')` returns dicts carrying
-   each entity's `metadata` ({property_name: [values]}). Union the property
-   names across target + sources; for a property present on more than one,
+1. Fetch the sources as full dicts with ONE call:
+   `dicts = query_entities_full(mode='by_text', search_term=<title>)` (or
+   `mode='by_template'` / `mode='by_filter'` for a wider set). Pick the target =
+   the FIRST entity in that result order; the rest are sources. (The result is a
+   list[dict], which you SUBSCRIPT - see EXECUTION SANDBOX / RETURN ACCESS. Do
+   NOT fetch a search's entities via `by_ids`: it costs one HTTP request PER
+   entity and is unusable at bulk scale.)
+2. Build the merged metadata. The full entity dicts carry each entity's
+   `metadata` ({property_name: [values]}). Union the property names across
+   target + sources; for a property present on more than one,
    concatenate the value arrays and DEDUPE (drop exact duplicate value dicts).
    Properties only on the sources get added to the target; properties only on
    the target stay (the update merges per-property, see step 3).
@@ -368,17 +393,19 @@ This is the agency loop - you discover the scope, the script does the rest.
 1. EXPLORE with the `query_entities` TOOL (your agent tool, not the bound
    helper) to learn which templates exist and which ones contain duplicate
    titles. List the relevant template names.
-2. Write a script that loops `query_entities('by_template', template_name=<T>)`
+2. Write a script that loops
+   `dicts = query_entities_full(mode='by_template', template_name=<T>)`
    over EACH discovered template name (template names are structural - hardcode
    the ones you found; NEVER hardcode entity shared_ids). For each template:
-   a. Read `summary.shared_ids` (the FULL list, ATTRIBUTE access on the search
-      result object - never subscript; see EXECUTION SANDBOX / RETURN ACCESS)
-      and fetch full dicts via `query_entities('by_ids', shared_ids=summary.shared_ids)`.
+   a. The call already returns the template's FULL entity dicts (a list[dict]
+      you SUBSCRIPT - see EXECUTION SANDBOX / RETURN ACCESS). Do NOT do
+      search-then-`by_ids`: `by_ids` fetches one entity PER HTTP REQUEST and is
+      far too slow for a whole template.
    b. Group the dicts by their `title` (exact string match). Skip groups of
       size 1 (nothing to merge).
    c. For each group with >1 entity run the single-group merge (steps 2-5
-      above): target = first by `by_ids` order -> build merged metadata (union
-      of properties, concat+dedupe value arrays) -> update_entities([target])
+      above): target = first in the fetched order -> build merged metadata
+      (union of properties, concat+dedupe value arrays) -> update_entities([target])
       -> move_files_to_entity(sources, target) -> delete_entities(sources).
 3. Set `result` to a per-template, per-group summary (e.g. "merged 3 templates:
    Judgment 2 groups (5->2), Report 1 group (3->1); moved M files; deleted N
