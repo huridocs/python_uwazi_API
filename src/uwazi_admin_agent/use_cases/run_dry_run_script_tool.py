@@ -51,6 +51,7 @@ async def run_dry_run_script(ctx: RunContext[AdminAgentDeps], python_code: str) 
     deps.dry_run_attempts += 1
     attempt = deps.dry_run_attempts
 
+    logger.info("dry run {} starting", attempt)
     report = await deps.dry_run_use_case.dry_run(python_code)
     _log_result(report, attempt)
     return _format_result(report, attempt, deps.dry_run_limit)

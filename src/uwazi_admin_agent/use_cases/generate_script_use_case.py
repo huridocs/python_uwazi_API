@@ -135,6 +135,7 @@ class GenerateScriptUseCase:
             logger.info("post-generate dry run skipped: dry_run_use_case not wired")
             return
         try:
+            logger.info("post-generate dry run starting")
             report = await self._deps.dry_run_use_case.dry_run(script.python_code)
         except Exception as exc:  # noqa: BLE001 — the gate must never lose the script
             logger.warning("post-generate dry run failed: {}", exc)

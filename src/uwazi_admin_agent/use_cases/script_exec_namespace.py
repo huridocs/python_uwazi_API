@@ -41,9 +41,12 @@ import json
 import math
 import random
 import re
+import time
 import traceback
 from types import SimpleNamespace
 from typing import Any
+
+from loguru import logger
 
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
@@ -509,8 +512,11 @@ def _build_get_entity_files_real_helper(
 
     def get_entity_files(shared_id: str, language: str | None = None) -> list[dict]:
         lang = language or default_language
+        started = time.monotonic()
         raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(shared_id, lang))
-        return [ref.model_dump() for ref in extract_file_refs(raw)]
+        refs = [ref.model_dump() for ref in extract_file_refs(raw)]
+        logger.info("script get_entity_files: {} -> {} file(s) ({:.1f}s)", shared_id, len(refs), time.monotonic() - started)
+        return refs
 
     return get_entity_files
 
@@ -535,7 +541,15 @@ def _build_get_file_bytes_real_helper(file_repository: FileRepositoryPort | None
         return get_file_bytes_unwired
 
     def get_file_bytes(filename: str) -> bytes | None:
-        return loop.run_until_complete(file_repository.get_file_bytes(filename))
+        started = time.monotonic()
+        data = loop.run_until_complete(file_repository.get_file_bytes(filename))
+        logger.info(
+            "script get_file_bytes: {} -> {} bytes ({:.1f}s)",
+            filename,
+            len(data) if data is not None else 0,
+            time.monotonic() - started,
+        )
+        return data
 
     return get_file_bytes
 
@@ -571,6 +585,14 @@ def build_exec_namespace(
     return namespace
 
 
+# ``by_ids`` is the one script read that hides a long sequential per-entity fetch
+# loop inside a single call (the adapter resolves one HTTP request per shared_id).
+# Fetching (and logging) in chunks keeps a slow remote instance narrated: one
+# INFO line per chunk instead of silence for the whole fetch. Behavior is
+# unchanged (same requests, same order, ``limit`` still trims the total set).
+_BY_IDS_CHUNK: int = 50
+
+
 def build_search_result_view(result: AgentEntitySearchResult) -> SimpleNamespace:
     """Build the bound ``query_entities`` search-mode return value (real mode).
 
@@ -603,6 +625,12 @@ def _real_sync_query_entities_factory(
     ``by_ids``, ``SimpleNamespace(summary, examples)`` for search modes) so the
     identical script runs in both validation and execution. Calls the
     ``EntityApiPort`` async methods via ``loop.run_until_complete``.
+
+    Every mode logs its start (params) and completion (result count + elapsed),
+    and ``by_ids`` logs per chunk: it is the one mode whose single call hides a
+    long sequential per-entity fetch (one HTTP request per shared_id), and
+    those progress lines are the difference between "slow" and "stuck"
+    against a remote instance.
     """
 
     def query_entities(
@@ -615,36 +643,68 @@ def _real_sync_query_entities_factory(
         published: bool | None = None,
         shared_ids: list[str] | None = None,
     ) -> Any:
+        started = time.monotonic()
         if mode == "by_ids":
             if not shared_ids:
                 return "Error: 'by_ids' mode requires `shared_ids` (a non-empty list)."
-            entities = loop.run_until_complete(
-                entity_api.get_entities_by_shared_ids(shared_ids=shared_ids, language=language, limit=limit)
-            )
-            return [e.model_dump() for e in entities]
+            target_ids = list(shared_ids[:limit])
+            logger.info("script query_entities by_ids: fetching {} entities", len(target_ids))
+            dumped: list[dict] = []
+            for offset in range(0, len(target_ids), _BY_IDS_CHUNK):
+                chunk = target_ids[offset : offset + _BY_IDS_CHUNK]
+                entities = loop.run_until_complete(
+                    entity_api.get_entities_by_shared_ids(shared_ids=chunk, language=language, limit=len(chunk))
+                )
+                dumped.extend(e.model_dump() for e in entities)
+                logger.info(
+                    "script query_entities by_ids: {}/{} ids -> {} entities so far ({:.1f}s)",
+                    offset + len(chunk),
+                    len(target_ids),
+                    len(dumped),
+                    time.monotonic() - started,
+                )
+            return dumped
         if mode == "by_text":
             if not search_term:
                 return "Error: 'by_text' mode requires `search_term`."
+            logger.info("script query_entities by_text: term={!r} template={} limit={}", search_term, template_name, limit)
             result = loop.run_until_complete(
                 entity_api.search_entities_by_text(
                     search_term=search_term, template_name=template_name, language=language, limit=limit
                 )
             )
+            logger.info(
+                "script query_entities by_text: {} entities ({:.1f}s)", len(result._all_entities), time.monotonic() - started
+            )
             return build_search_result_view(result)
         if mode == "by_filter":
             if not template_name:
                 return "Error: 'by_filter' mode requires `template_name`."
+            logger.info(
+                "script query_entities by_filter: template={} filters={} limit={}", template_name, len(filters or []), limit
+            )
             result = loop.run_until_complete(
                 entity_api.search_entities_by_filter(
                     template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
                 )
             )
+            logger.info(
+                "script query_entities by_filter: {} entities ({:.1f}s)",
+                len(result._all_entities),
+                time.monotonic() - started,
+            )
             return build_search_result_view(result)
         if mode == "by_template":
             if not template_name:
                 return "Error: 'by_template' mode requires `template_name`."
+            logger.info("script query_entities by_template: template={} limit={}", template_name, limit)
             result = loop.run_until_complete(
                 entity_api.get_entities_by_template(template_name=template_name, language=language, limit=limit)
+            )
+            logger.info(
+                "script query_entities by_template: {} entities ({:.1f}s)",
+                len(result._all_entities),
+                time.monotonic() - started,
             )
             return build_search_result_view(result)
         return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
@@ -708,6 +768,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     def create_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         del language  # recorded per-dict, not as a language override
+        logger.info("dry-run record: create_entities x{}", len(entities_dicts))
         for i, d in enumerate(entities_dicts):
             records.append(
                 {
@@ -720,6 +781,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         return [{"shared_id": f"dry-created-{i}", "success": True} for i, d in enumerate(entities_dicts)]
 
     def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
+        logger.info("dry-run record: update_entities x{}", len(entities_dicts))
         for d in entities_dicts:
             records.append(
                 {
@@ -734,27 +796,32 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         return [{"shared_id": d.get("shared_id"), "success": True} for d in entities_dicts]
 
     def delete_entities(shared_ids: list[str]) -> list[dict]:
+        logger.info("dry-run record: delete_entities x{}", len(shared_ids))
         for sid in shared_ids:
             records.append({"op": "delete", "shared_id": sid})
         return [{"shared_id": sid, "success": True} for sid in shared_ids]
 
     def publish_entities(shared_ids: list[str]) -> dict:
+        logger.info("dry-run record: publish_entities x{}", len(shared_ids))
         for sid in shared_ids:
             records.append({"op": "publish", "shared_id": sid})
         return _dry_run_publish_summary(len(shared_ids))
 
     def unpublish_entities(shared_ids: list[str]) -> dict:
+        logger.info("dry-run record: unpublish_entities x{}", len(shared_ids))
         for sid in shared_ids:
             records.append({"op": "unpublish", "shared_id": sid})
         return _dry_run_publish_summary(len(shared_ids))
 
     def set_publish_status(shared_ids: list[str], published: bool) -> list[dict]:
+        logger.info("dry-run record: set_publish_status x{} published={}", len(shared_ids), published)
         for sid in shared_ids:
             records.append({"op": "set_publish_status", "shared_id": sid, "published": published})
         return [{"shared_id": sid, "success": True} for sid in shared_ids]
 
     def create_relationships(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
         del language
+        logger.info("dry-run record: create_relationships x{}", len(relationships_dicts))
         for r in relationships_dicts:
             records.append({"op": "create_relationships", **r})
         return [{"success": True} for _ in relationships_dicts]
@@ -822,6 +889,7 @@ def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
 
     def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
         del language
+        logger.info("dry-run record: move_files_to_entity x{} -> {}", len(from_shared_ids), to_shared_id)
         records.append(
             {
                 "op": "move_files",
