@@ -19,6 +19,7 @@ from __future__ import annotations
 from loguru import logger
 from pydantic_ai import RunContext
 
+from uwazi_admin_agent.domain.file_cache import format_cache_stats
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 
 
@@ -76,6 +77,9 @@ def _format_result(report: object, attempt: int, limit: int) -> str:
         f"  update={report.would_update} create={report.would_create} delete={report.would_delete} "
         f"publish={report.would_publish} unpublish={report.would_unpublish} rewire={report.would_rewire}"
     )
+
+    if report.cache_stats is not None:
+        parts.append(f"## Cache\n  {format_cache_stats(report.cache_stats)}")
 
     if report.samples:
         lines = [f"  - {s['shared_id']}: {s['metadata']}" for s in report.samples]

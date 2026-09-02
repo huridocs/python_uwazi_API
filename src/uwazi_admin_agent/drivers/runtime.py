@@ -15,6 +15,13 @@ auto-revert records too) and a :class:`VerifyRevertUseCase` (post-revert
 verification), both held on the :class:`Runtime` so the step drivers can wire
 them into execute/revert/verify without re-constructing.
 
+The runtime also wires the persistent cross-task file/entity cache
+(:func:`build_file_cache`, rooted under ``data/file_cache/<instance>/``): both
+repositories are wrapped with read-through decorators at this seam so every
+consumer shares the cache without any contract change, and the store is held
+on the :class:`Runtime` for the step drivers to wire as the stats/
+invalidation port.
+
 Live wiring reads ``UWAZI_URL``/``UWAZI_USER``/``UWAZI_PASSWORD`` from the
 environment (mirrors ``uwazi_agent``'s ``run_agent`` driver). It is **not**
 unit-tested — it constructs real adapters that touch the network; the step
@@ -33,11 +40,24 @@ from dotenv import load_dotenv
 
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
+from uwazi_admin_agent.adapters.cached_entity_repository import CachedEntityRepository
+from uwazi_admin_agent.adapters.cached_file_repository import CachedFileRepository
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
+from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
-from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, ROOT_PATH, RUNS_PATH
+from uwazi_admin_agent.configuration import (
+    DUMMY_LANGUAGE,
+    ENTITY_CACHE_TTL_SECONDS,
+    FILE_CACHE_DIR,
+    FILE_CACHE_ENABLED,
+    FILE_CACHE_EVICT_SCAN_INTERVAL,
+    FILE_CACHE_MAX_BYTES,
+    ROOT_PATH,
+    RUNS_PATH,
+)
+from uwazi_admin_agent.domain.file_cache import instance_dir_name
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -73,6 +93,7 @@ class Runtime:
         revert_use_case: RevertRunUseCase,
         verify_use_case: VerifyRevertUseCase,
         search_probe: SearchProbePort,
+        file_cache: FileCacheStore | None,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -85,6 +106,10 @@ class Runtime:
         self.revert_use_case: RevertRunUseCase = revert_use_case
         self.verify_use_case: VerifyRevertUseCase = verify_use_case
         self.search_probe: SearchProbePort = search_probe
+        # The persistent file/entity cache (None = disabled). Held here so the
+        # step drivers can wire it into their use cases as the stats/invalidation
+        # port — the counters live on the store both decorators bump.
+        self.file_cache: FileCacheStore | None = file_cache
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -95,6 +120,34 @@ def build_backup_store(root: Path | None = None) -> BackupStorePort:
 def build_audit_log(root: Path | None = None) -> AuditLogPort:
     """Return a :class:`JsonlAuditLog` rooted at ``RUNS_PATH`` (or ``root``)."""
     return JsonlAuditLog(Path(root) if root is not None else RUNS_PATH)
+
+
+def build_file_cache(url: str) -> FileCacheStore | None:
+    """Build the persistent cross-task cache for the instance at ``url`` (None = off).
+
+    Rooted under ``FILE_CACHE_DIR`` (``data/file_cache/``) so it survives across
+    processes, tasks, and runs, and namespaced per instance URL (the same
+    sharedId on two instances means different data). Both CLI steps and the web
+    driver build their ports through :func:`build_runtime`, so wrapping the
+    repositories here covers every consumer (sandbox helpers, peek tools, dry
+    run, execute + backup intercept, revert/verify) with zero contract changes.
+    """
+    if not _cache_enabled():
+        return None
+    return FileCacheStore(
+        root=FILE_CACHE_DIR / instance_dir_name(url),
+        max_bytes=FILE_CACHE_MAX_BYTES,
+        ttl_seconds=ENTITY_CACHE_TTL_SECONDS,
+        evict_scan_interval=FILE_CACHE_EVICT_SCAN_INTERVAL,
+    )
+
+
+def _cache_enabled() -> bool:
+    """``FILE_CACHE_ENABLED`` unless the UWAZI_ADMIN_FILE_CACHE env var overrides it."""
+    raw = os.environ.get("UWAZI_ADMIN_FILE_CACHE")
+    if raw is None:
+        return FILE_CACHE_ENABLED
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 def build_runtime(user: str | None = None, password: str | None = None) -> Runtime:
@@ -108,8 +161,18 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     password = password if password is not None else os.environ["UWAZI_PASSWORD"]
 
     api = UwaziApiAdapter(user=user, password=password, url=url)
-    entity_repository = UwaziEntityRepository(api.client)
-    file_repository = UwaziFileRepository(api.client)
+    file_cache = build_file_cache(url)
+    base_entity_repository = UwaziEntityRepository(api.client)
+    base_file_repository = UwaziFileRepository(api.client)
+    # Wrap ONCE at this seam so every consumer transparently shares the
+    # persistent cache; when it is disabled the plain adapters are used and
+    # nothing downstream can tell the difference.
+    entity_repository: EntityRepositoryPort = (
+        CachedEntityRepository(base_entity_repository, file_cache) if file_cache is not None else base_entity_repository
+    )
+    file_repository: FileRepositoryPort = (
+        CachedFileRepository(base_file_repository, file_cache) if file_cache is not None else base_file_repository
+    )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     search_probe = UwaziSearchProbe(api.client)
     backup_store = build_backup_store()
@@ -129,6 +192,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
             entity_repository=entity_repository,
             file_repository=file_repository,
             default_language=DUMMY_LANGUAGE,
+            cache_stats=file_cache,
         ),
     )
 
@@ -156,4 +220,5 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         revert_use_case=revert_use_case,
         verify_use_case=verify_use_case,
         search_probe=search_probe,
+        file_cache=file_cache,
     )

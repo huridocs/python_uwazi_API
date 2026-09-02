@@ -577,7 +577,9 @@ def _build_get_entity_files_real_helper(
         started = time.monotonic()
         raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(shared_id, lang))
         refs = [ref.model_dump() for ref in extract_file_refs(raw)]
-        logger.info("script get_entity_files: {} -> {} file(s) ({:.1f}s)", shared_id, len(refs), time.monotonic() - started)
+        # debug, not info: a full pass is tens of thousands of calls — the dry-run/
+        # execute boundary logs one aggregate line (incl. cache stats) instead.
+        logger.debug("script get_entity_files: {} -> {} file(s) ({:.1f}s)", shared_id, len(refs), time.monotonic() - started)
         return refs
 
     return get_entity_files
@@ -605,7 +607,8 @@ def _build_get_file_bytes_real_helper(file_repository: FileRepositoryPort | None
     def get_file_bytes(filename: str) -> bytes | None:
         started = time.monotonic()
         data = loop.run_until_complete(file_repository.get_file_bytes(filename))
-        logger.info(
+        # debug, not info: same aggregate-not-per-file logging rationale as above.
+        logger.debug(
             "script get_file_bytes: {} -> {} bytes ({:.1f}s)",
             filename,
             len(data) if data is not None else 0,

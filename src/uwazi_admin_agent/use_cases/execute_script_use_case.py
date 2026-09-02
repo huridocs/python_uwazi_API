@@ -27,11 +27,14 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
-from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError, decide_execute_gate
+from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError, ScriptExecutionError, decide_execute_gate
+from uwazi_admin_agent.domain.file_cache import format_cache_stats
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy, should_auto_revert
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
+from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
+from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
@@ -55,6 +58,8 @@ class ExecuteScriptUseCase:
         cap: int = 1000,
         revert_use_case: RevertRunUseCase | None = None,
         file_repository: FileRepositoryPort | None = None,
+        cache_stats: CacheStatsPort | None = None,
+        cache_control: CacheInvalidationPort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._relationship_api: RelationshipApiPort | None = relationship_api
@@ -64,6 +69,8 @@ class ExecuteScriptUseCase:
         self._cap: int = cap
         self._revert_use_case: RevertRunUseCase | None = revert_use_case
         self._file_repository: FileRepositoryPort | None = file_repository
+        self._cache_stats: CacheStatsPort | None = cache_stats
+        self._cache_control: CacheInvalidationPort | None = cache_control
 
     async def execute(
         self,
@@ -86,6 +93,10 @@ class ExecuteScriptUseCase:
         if on_error_policy == OnErrorPolicy.STOP_AND_REVERT and self._revert_use_case is None:
             raise ValueError("on_error_policy=stop-and-revert requires a revert_use_case to be injected.")
 
+        # Per-boundary cache window: only THIS execute's reads count.
+        if self._cache_stats is not None:
+            self._cache_stats.reset_stats()
+
         gate = decide_execute_gate(manifest.status, self._has_touch_set(manifest))
         if gate.action == "refuse":
             assert gate.reason is not None  # refused decisions always carry a reason
@@ -105,10 +116,12 @@ class ExecuteScriptUseCase:
             audit_log=self._audit_log,
             cap=self._cap,
             file_repository=self._file_repository,
+            cache_control=self._cache_control,
         )
 
         _result, error = await asyncio.to_thread(self._exec, script, intercept, language)
         manifest = intercept.manifest
+        self._log_cache_stats(run_id)
 
         if error:
             manifest.last_executed_at = datetime.now(timezone.utc)
@@ -161,6 +174,12 @@ class ExecuteScriptUseCase:
             return run_script_sync(script, namespace)
         finally:
             loop.close()
+
+    def _log_cache_stats(self, run_id: str) -> None:
+        """One aggregate cache line at the run boundary (never per file)."""
+        if self._cache_stats is None:
+            return
+        logger.info("execute run={} | cache: {}", run_id, format_cache_stats(self._cache_stats.snapshot_stats()))
 
     def _emit_run(self, outcome: AuditOutcome, run_id: str, detail: str | None = None) -> None:
         """Append a run-level ``execute`` audit record (no-op if no audit log)."""

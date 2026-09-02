@@ -23,6 +23,8 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from uwazi_admin_agent.domain.file_cache import FileCacheStats, format_cache_stats
+from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 
@@ -43,6 +45,13 @@ class DryRunReport(BaseModel):
     samples: list[dict[str, Any]] = Field(
         default_factory=list, description="First N would-be-update records, trimmed for LLM reading."
     )
+    cache_stats: FileCacheStats | None = Field(
+        default=None,
+        description=(
+            "Aggregate persistent-cache counters for THIS dry run (None when the "
+            "cache is disabled/unwired): fetches vs hits for file bytes and raws."
+        ),
+    )
 
 
 _SAMPLES_CAP: int = 20
@@ -57,11 +66,13 @@ class DryRunScriptUseCase:
         entity_repository: Any | None,
         file_repository: Any | None,
         default_language: str = "en",
+        cache_stats: CacheStatsPort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._entity_repository = entity_repository
         self._file_repository = file_repository
         self._default_language = default_language
+        self._cache_stats: CacheStatsPort | None = cache_stats
 
     async def dry_run(self, script: str) -> DryRunReport:
         """Run ``script`` in the dry-run namespace; aggregate the records into a report.
@@ -72,16 +83,23 @@ class DryRunScriptUseCase:
         "stuck" when nothing else logs during the script's execution.
         """
         started = time.monotonic()
+        # Per-boundary cache window: only THIS dry run's reads count, so each of
+        # the up-to-4 passes a generation turn can run reports its own line.
+        if self._cache_stats is not None:
+            self._cache_stats.reset_stats()
         try:
             report = await asyncio.to_thread(self._dry_run_sync, script)
         except Exception:  # noqa: BLE001 — re-raised; only the visibility changes
             logger.exception("dry run crashed after {:.1f}s", time.monotonic() - started)
             raise
+        if self._cache_stats is not None:
+            report.cache_stats = self._cache_stats.snapshot_stats()
         logger.info(
-            "dry run finished in {:.1f}s passed={} script_error={}",
+            "dry run finished in {:.1f}s passed={} script_error={} | cache: {}",
             time.monotonic() - started,
             report.passed,
             bool(report.script_error),
+            format_cache_stats(report.cache_stats),
         )
         return report
 
