@@ -670,9 +670,10 @@ def _script_dialog(run_id: str) -> None:
     run's generated script lives at ``<run>/script.py``; a run whose generation
     failed has none, and the menu item is hidden in that case.
 
-    The dialog is maximized (top to bottom): the script fills the space between
-    the title and a pinned footer, so the Close button is always visible
-    without scrolling and never overlaps the scrollable text.
+    The dialog is maximized (top to bottom): ``ui.code`` fills the whole space
+    between the title and a pinned footer with Python syntax highlighting and
+    scrolls internally, so the Close button is always visible without scrolling
+    and never overlaps the code.
     """
     try:
         detail = get_run(run_id)
@@ -689,9 +690,7 @@ def _script_dialog(run_id: str) -> None:
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label(f"Generated script — {run_id}").classes("text-h6")
-                ui.textarea(value=detail.script).classes("w-full grow font-mono text-caption").props(
-                    "readonly outlined"
-                ).style("min-height: 0")
+                ui.code(detail.script, language="python").classes("w-full grow").style("min-height: 0")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", icon="close", on_click=dialog.close).props("flat")
     dialog.open()
