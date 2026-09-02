@@ -622,14 +622,13 @@ def _error_dialog(run_id: str) -> None:
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label(f"Error details — {run_id}").classes("text-h6")
-                with ui.column().classes("w-full grow overflow-y-auto").style("min-height: 0"):
-                    if detail.error:
-                        ui.textarea(value=detail.error).classes("w-full font-mono text-caption").props(
-                            "readonly outlined"
-                        ).style("min-height: 200px")
-                    else:
-                        ui.label("No error recorded on this run.").classes("text-grey-7")
-
+                if detail.error:
+                    ui.textarea(value=detail.error).classes("w-full grow font-mono text-caption").props(
+                        "readonly outlined"
+                    ).style("min-height: 0")
+                else:
+                    ui.label("No error recorded on this run.").classes("text-grey-7")
+                with ui.column().classes("w-full shrink-0").style("max-height: 40%; overflow-y: auto"):
                     ui.label("Audit trail").classes("text-subtitle1 q-mt-lg")
                     if not records:
                         ui.label("No audit records.").classes("text-grey-7")
