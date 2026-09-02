@@ -11,6 +11,13 @@ The pure decision logic lives in :mod:`uwazi_admin_agent.domain.backup_decision`
 this class does the I/O: fetches raws via :class:`EntityRepositoryPort`, saves
 snapshots via :class:`BackupStorePort`, and delegates to the underlying CRUD
 helper. Not unit-tested (needs ports); validated via the simulation run.
+
+This is also the write-path cache hook for sandbox CRUD writes: those go
+through ``EntityApiPort`` (not the raw repository), so this intercept is the
+only place that learns which entities a script mutated. Every intercepted
+mutating op drops the affected entities' cached raws via
+:class:`CacheInvalidationPort` right AFTER the underlying write (a failed
+write changes nothing and invalidates nothing), keeping later reads honest.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import ENTITY_CACHE_FRESH_SNAPSHOTS
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.backup_decision import (
     BackupDecision,
@@ -34,6 +42,7 @@ from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
+from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 
@@ -58,6 +67,7 @@ class BackupIntercept:
         audit_log: AuditLogPort | None = None,
         cap: int = 1000,
         file_repository: FileRepositoryPort | None = None,
+        cache_control: CacheInvalidationPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -69,6 +79,11 @@ class BackupIntercept:
         self._audit_log: AuditLogPort | None = audit_log
         self._cap: int = cap
         self._file_repository: FileRepositoryPort | None = file_repository
+        self._cache_control: CacheInvalidationPort | None = cache_control
+        # Snapshot correctness beats speed: with the default on, _fetch_raws
+        # drops the snapshotted entities' cached raws first so every backup
+        # captures live server truth, not the TTL window (see configuration).
+        self._snapshot_fresh: bool = ENTITY_CACHE_FRESH_SNAPSHOTS
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -100,6 +115,7 @@ class BackupIntercept:
             ids = [sid for e in entities_dicts if (sid := e.get("shared_id"))]
             self._backup_before_modify(ids, language or self._language)
             result = update_entities(entities_dicts, language)
+            self._invalidate(ids)
             self._emit("update", ids)
             return result
 
@@ -107,6 +123,7 @@ class BackupIntercept:
             del language  # ignored: delete is by sharedId across ALL language rows
             self._backup_before_delete(shared_ids)
             result = delete_entities(shared_ids)
+            self._invalidate(shared_ids)
             self._emit("delete", shared_ids)
             return result
 
@@ -116,6 +133,7 @@ class BackupIntercept:
             del language  # ignored: publish/unpublish act on all language rows by sharedId
             self._backup_before_modify(shared_ids, self._language)
             result = set_publish_status(shared_ids, published)
+            self._invalidate(shared_ids)
             self._emit("set_publish_status", shared_ids)
             return result
 
@@ -123,6 +141,7 @@ class BackupIntercept:
             del language
             self._backup_before_modify(shared_ids, self._language)
             result = publish_entities(shared_ids)
+            self._invalidate(shared_ids)
             self._emit("publish", shared_ids)
             return result
 
@@ -130,13 +149,17 @@ class BackupIntercept:
             del language
             self._backup_before_modify(shared_ids, self._language)
             result = unpublish_entities(shared_ids)
+            self._invalidate(shared_ids)
             self._emit("unpublish", shared_ids)
             return result
 
         def create_relationships_intercepted(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
             from_ids = [sid for r in relationships_dicts if (sid := r.get("from_entity_shared_id"))]
+            to_ids = [sid for r in relationships_dicts if (sid := r.get("to_entity_shared_id"))]
             self._backup_before_rewire(from_ids, language or self._language)
             result = create_relationships(relationships_dicts, language)
+            # Relations denormalize onto BOTH endpoints' raws — invalidate both.
+            self._invalidate(from_ids + to_ids)
             self._emit("create_relationships", from_ids)
             return result
 
@@ -242,7 +265,16 @@ class BackupIntercept:
         )
 
     def _fetch_raws(self, shared_ids: list[str], language: str) -> dict[str, dict[str, Any]]:
-        """Fetch the full raw (with relations) for each id via the entity repository."""
+        """Fetch the full raw (with relations) for each id via the entity repository.
+
+        Snapshot correctness beats speed: when ``ENTITY_CACHE_FRESH_SNAPSHOTS``
+        is on (the default), each snapshotted entity's cached raws are dropped
+        first so the backup comes from the live instance rather than the TTL
+        window — the refetch then repopulates the cache, and the post-write
+        invalidation clears that again, so the loop is self-correcting.
+        """
+        if self._snapshot_fresh:
+            self._invalidate(shared_ids)
         raws: dict[str, dict[str, Any]] = {}
         for sid in shared_ids:
             raws[sid] = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(sid, language))
@@ -305,3 +337,13 @@ class BackupIntercept:
     def _created_set(self) -> set[str]:
         """The set of shared_ids currently in manifest.created."""
         return {e.shared_id for e in self._manifest.created}
+
+    def _invalidate(self, shared_ids: list[str]) -> None:
+        """Drop cached raws for ``shared_ids`` (no-op without a wired cache control).
+
+        Script-created entities are never invalidated: a create mints a fresh
+        sharedId nothing can be cached under yet.
+        """
+        if self._cache_control is None or not shared_ids:
+            return
+        self._cache_control.invalidate_entities(shared_ids)

@@ -14,6 +14,7 @@ from loguru import logger
 
 from uwazi_admin_agent.adapters.script_emitter import SCRIPT_FILENAME
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, RUNS_PATH
+from uwazi_admin_agent.domain.file_cache import format_cache_stats
 from uwazi_admin_agent.drivers.runtime import build_runtime
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 
@@ -38,6 +39,7 @@ async def _run_dry_run_async(run_name: str) -> int:
         entity_repository=runtime.entity_repository,
         file_repository=runtime.file_repository,
         default_language=DUMMY_LANGUAGE,
+        cache_stats=runtime.file_cache,
     )
 
     logger.info("dry-run: run={}", run_name)
@@ -53,6 +55,8 @@ async def _run_dry_run_async(run_name: str) -> int:
         f"would-delete={report.would_delete} would-publish={report.would_publish} "
         f"would-unpublish={report.would_unpublish} would-rewire={report.would_rewire}"
     )
+    if report.cache_stats is not None:
+        print(f"  cache: {format_cache_stats(report.cache_stats)}")
     for record in report.records[:_MAX_PRINTED_RECORDS]:
         print(f"  - {record}")
     remaining = len(report.records) - _MAX_PRINTED_RECORDS

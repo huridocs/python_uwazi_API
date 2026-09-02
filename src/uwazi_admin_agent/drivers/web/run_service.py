@@ -254,6 +254,8 @@ async def execute_run(run_id: str, user: str, password: str, on_error: str | Non
         cap=MAX_ENTITIES_PER_RUN,
         revert_use_case=runtime.revert_use_case,
         file_repository=runtime.file_repository,
+        cache_stats=runtime.file_cache,
+        cache_control=runtime.file_cache,
     )
 
     await use_case.execute(

@@ -25,6 +25,7 @@ from uwazi_admin_agent.adapters.script_emitter import SCRIPT_FILENAME
 from uwazi_admin_agent.configuration import DEFAULT_ON_ERROR_POLICY, DUMMY_LANGUAGE, MAX_ENTITIES_PER_RUN, RUNS_PATH
 from uwazi_admin_agent.domain.cap_enforcement import CapExceededError
 from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.file_cache import format_cache_stats
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.drivers.runtime import build_runtime
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
@@ -55,6 +56,8 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
         cap=MAX_ENTITIES_PER_RUN,
         revert_use_case=runtime.revert_use_case,
         file_repository=runtime.file_repository,
+        cache_stats=runtime.file_cache,
+        cache_control=runtime.file_cache,
     )
 
     logger.info("execute: run={} on_error={}", run_name, policy.value)
@@ -75,6 +78,9 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
         f"  modified={len(result.modified)} deleted={len(result.deleted)} "
         f"created={len(result.created)} rewired={len(result.rewired)}"
     )
+    if runtime.file_cache is not None:
+        # Same window the use case just logged — the snapshot is non-destructive.
+        print(f"  cache: {format_cache_stats(runtime.file_cache.snapshot_stats())}")
     return 0 if result.status.value == "executed" else 1
 
 

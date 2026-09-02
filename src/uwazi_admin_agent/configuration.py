@@ -93,3 +93,38 @@ EXECUTE_BATCH_SIZE: int = 50
 # to revert explicitly; "stop-and-revert" auto-reverts whatever was backed up
 # before the error. Kept as a string so ``configuration.py`` stays stdlib-only.
 DEFAULT_ON_ERROR_POLICY: str = "stop"
+
+# --- persistent cross-task file/entity cache ----------------------------------
+#
+# A generated extraction script does an N+1 read per entity (one raw-entity GET
+# + one GET per supporting file), repeated across a turn's up-to-4 dry-run
+# passes, the execute pass, and every later task (~2h per full pass on the
+# production instance). The cache is rooted under DATA_DIR so it survives
+# across processes, tasks, and runs, and is namespaced per Uwazi instance URL
+# (the same sharedId on two instances means different data).
+#
+# File bytes are immutable per Uwazi storage filename (minted fresh on every
+# upload — app/api/files/filesystem.ts — and never rewritten), so they cache
+# forever. Entity raws are mutable (agent writes + direct human edits), so
+# they carry a TTL plus write-path invalidation (CachedEntityRepository on
+# save/delete; BackupIntercept for sandbox CRUD writes). Set
+# UWAZI_ADMIN_FILE_CACHE=0 to bypass the cache entirely for debugging.
+FILE_CACHE_ENABLED: bool = True
+FILE_CACHE_DIR: Path = DATA_DIR / "file_cache"
+# Hard cap on total cached bytes (files + raws) per instance. The 15k x 2 x
+# 60KB supporting-file working set is ~1.8 GB plus ~0.5 GB of raw JSONs, so
+# 4 GiB keeps a full pass resident; the amortized LRU eviction trims older
+# entries whenever the cap is exceeded.
+FILE_CACHE_MAX_BYTES: int = 4 * 1024 * 1024 * 1024
+# Puts between amortized eviction scans (one scan drops expired raws, then
+# oldest-mtime entries until back under 90% of FILE_CACHE_MAX_BYTES).
+FILE_CACHE_EVICT_SCAN_INTERVAL: int = 256
+# Freshness window for cached entity raws, in seconds. Human edits made
+# directly in Uwazi are invisible to write-path invalidation, so this bounds
+# how stale a cached raw can be against a direct human edit.
+ENTITY_CACHE_TTL_SECONDS: float = 600.0
+# When True (default), BackupIntercept snapshot fetches bypass the raw cache
+# (invalidate-then-refetch) so backups always capture live server truth — the
+# revert path's correctness outweighs execute speed. The script's own reads
+# still hit the cache. Flip to False to also serve snapshots from cache.
+ENTITY_CACHE_FRESH_SNAPSHOTS: bool = True
