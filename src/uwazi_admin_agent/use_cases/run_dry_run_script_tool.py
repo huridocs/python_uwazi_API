@@ -31,7 +31,9 @@ async def run_dry_run_script(ctx: RunContext[AdminAgentDeps], python_code: str) 
     live instance, while all write helpers (``create_entities``,
     ``update_entities``, ``delete_entities``, ``publish_entities``,
     ``unpublish_entities``, ``set_publish_status``, ``create_relationships``,
-    ``move_files_to_entity``) only RECORD what they would have written.
+    ``move_files_to_entity`` — and every ``*_parallel`` write/move name,
+    including ``move_files_to_entity_parallel``) only RECORD what they would
+    have written.
 
     Use this AFTER the dummy gate passed, to prove the script against real data
     (real HTML supporting files, real metadata shapes, real match rates) with

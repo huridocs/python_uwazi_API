@@ -469,11 +469,13 @@ def test_prompt_teaches_auto_throttle_not_manual_concurrency() -> None:
 
 
 def test_prompt_keeps_plain_helpers_for_server_side_bulk_ops() -> None:
-    """delete/publish/move_files have no `_parallel` variant (server-side bulk or
-    deliberately sequential); the prompt must say so so the LLM does not invent
-    nonexistent helpers."""
+    """delete/publish have no `_parallel` variant (server-side bulk); the prompt
+    must say so so the LLM does not invent nonexistent helpers. move_files is the
+    exception since the multi-target mover shipped: it now HAS a `_parallel`
+    sibling, and the prompt must point the single-target form at it."""
     assert "Keep the PLAIN helpers" in SYSTEM_PROMPT
     assert "no `_parallel` variant exists for them" in SYSTEM_PROMPT
+    assert "`move_files_to_entity` stays the SINGLE-target form" in SYSTEM_PROMPT
 
 
 def test_prompt_extraction_recipe_uses_the_parallel_helpers() -> None:
@@ -482,3 +484,38 @@ def test_prompt_extraction_recipe_uses_the_parallel_helpers() -> None:
     assert "get_entity_files_parallel(shared_ids, language)" in SYSTEM_PROMPT
     assert 'get_file_bytes_parallel([f["filename"] for f in html_files])' in SYSTEM_PROMPT
     assert "update_entities_parallel(updates, language)" in SYSTEM_PROMPT
+
+
+def test_prompt_declares_the_parallel_file_move_helper() -> None:
+    """The parallel file-move helper must be declared with its moves-list shape,
+    per-move result dicts, and the one-move-per-target ValueError guard — the
+    contract merge scripts batch against instead of looping the sequential
+    helper group by group."""
+    assert "move_files_to_entity_parallel(moves, language='en')" in SYSTEM_PROMPT
+    assert '{"from_shared_ids": [<source ids>], "to_shared_id": <target id>}' in SYSTEM_PROMPT
+    assert '{"to_shared_id": ..., "moved": N, "failed": M}' in SYSTEM_PROMPT
+    assert "at most ONE move per call" in SYSTEM_PROMPT
+    assert "raises ValueError" in SYSTEM_PROMPT
+
+
+def test_prompt_merge_recipe_moves_files_through_the_parallel_helper() -> None:
+    """MERGE TASKS step 4 must move files via the parallel helper (a single-group
+    merge is ONE move) and keep the update -> move -> delete ordering pinned —
+    the ordering the revert semantics (target snapshot pre-move, source bytes
+    captured pre-delete) rely on."""
+    assert 'move_files_to_entity_parallel([{"from_shared_ids": [<source ids>],' in SYSTEM_PROMPT
+    assert "a single-group merge is ONE" in SYSTEM_PROMPT
+    assert "update target metadata -> move files -> delete sources" in SYSTEM_PROMPT
+    assert "before moving its files (its bytes are torn down on delete)" in SYSTEM_PROMPT
+
+
+def test_prompt_multi_group_merge_batches_the_three_bulk_calls() -> None:
+    """MULTI-GROUP MERGE must collect per-group work in the discovery loop and
+    then apply the whole merge as ONE update_entities_parallel call, ONE
+    move_files_to_entity_parallel call, and ONE delete_entities call — in that
+    exact order."""
+    assert "Collect ONLY" in SYSTEM_PROMPT
+    assert "update_entities_parallel(all_target_updates, language)" in SYSTEM_PROMPT
+    assert "move_files_to_entity_parallel(all_moves, language)" in SYSTEM_PROMPT
+    assert "delete_entities(all_source_ids)" in SYSTEM_PROMPT
+    assert "Never delete a source before its group's move completed." in SYSTEM_PROMPT

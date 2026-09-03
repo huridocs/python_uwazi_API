@@ -177,6 +177,18 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
     get_file_bytes_parallel(filenames)
         Bulk `get_file_bytes`: returns a DICT `{filename: bytes_or_None}`.
         Collect all filenames first, then fetch them in ONE call.
+    move_files_to_entity_parallel(moves, language='en')
+        Parallel file-move for MERGE tasks (one task per TARGET, so different
+        targets' uploads overlap; each target's own files still move
+        sequentially). `moves` is a list of
+        `{"from_shared_ids": [<source ids>], "to_shared_id": <target id>}`
+        dicts. Returns a list of
+        `{"to_shared_id": ..., "moved": N, "failed": M}` in input order. Each
+        `to_shared_id` may appear in at most ONE move per call (a duplicated
+        target raises ValueError: concurrent uploads to the same entity race
+        its row and drop files). Batch a multi-group merge's moves into ONE
+        call; best-effort like `move_files_to_entity` (a failed fetch/upload
+        counts as `failed`, never crashes the run).
 
   Rules:
   - Same script runs unchanged in validation and dry-run: these names are
@@ -184,9 +196,10 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
   - Do NOT hand-roll a chunked `update_entities` loop when a `_parallel`
     variant exists — one `_parallel` call replaces it and is faster.
   - Keep the PLAIN helpers for `delete_entities`, `publish_entities`,
-    `unpublish_entities`, `set_publish_status`, and `move_files_to_entity`:
-    they are single server-side bulk requests already (or deliberately
-    sequential), so no `_parallel` variant exists for them.
+    `unpublish_entities`, and `set_publish_status`: they are single
+    server-side bulk requests, so no `_parallel` variant exists for them.
+    (`move_files_to_entity` stays the SINGLE-target form; its `_parallel`
+    sibling batches MANY targets.)
   - Bulk extraction idiom (fetches overlap, parsing stays plain Python):
         files_by_id = get_entity_files_parallel([d["shared_id"]] for d in dicts)  # WRONG: arg must be a LIST
         files_by_id = get_entity_files_parallel([d["shared_id"] for d in dicts])  # RIGHT
@@ -207,7 +220,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Copy each source entity's UPLOADED files (documents + uploaded attachments)
       to the target entity by re-uploading their bytes. Use this for MERGE tasks so
       the sources' uploaded files are not lost when the sources are deleted.
-      Returns a dict {"moved": N, "failed": M}. URL attachments are NOT moved by
+      Returns a dict {"moved": N, "failed": M}. For MANY targets in one pass
+      (multi-group merges) use `move_files_to_entity_parallel` (see PARALLEL
+      BULK HELPERS). URL attachments are NOT moved by
       this helper (they have no stored bytes) - see MERGE TASKS for that gap. In
       validation against dummies this is a no-op (dummies carry no uploaded
       files); file-move is only exercised live.
@@ -417,10 +432,11 @@ composition of the bound helpers - NO new capability is needed beyond
    entity model does not carry them; they would be dropped, and the partial
    update keeps the target's files anyway). Do NOT pass `relations` either.
 4. Move the sources' UPLOADED files to the target BEFORE deleting the sources:
-   `move_files_to_entity(from_shared_ids=[<source ids>], to_shared_id=<target
-   id>, language)`. This re-uploads each source's documents + uploaded
-   attachments to the target. (The target's own files are already preserved by
-   step 3's partial update.)
+   `move_files_to_entity_parallel([{"from_shared_ids": [<source ids>],
+   "to_shared_id": <target id>}], language)` — a single-group merge is ONE
+   move. This re-uploads each source's documents + uploaded attachments to
+   the target. (The target's own files are already preserved by step 3's
+   partial update.)
 5. Delete the sources with `delete_entities([<source ids>])`.
 6. Set `result` to a concise summary (e.g. "merged N entities titled X into
    target <id>; moved M files; deleted N-1 sources").
@@ -445,13 +461,21 @@ This is the agency loop - you discover the scope, the script does the rest.
       far too slow for a whole template.
    b. Group the dicts by their `title` (exact string match). Skip groups of
       size 1 (nothing to merge).
-   c. For each group with >1 entity run the single-group merge (steps 2-5
-      above): target = first in the fetched order -> build merged metadata
-      (union of properties, concat+dedupe value arrays) -> update_entities([target])
-      -> move_files_to_entity(sources, target) -> delete_entities(sources).
-3. Set `result` to a per-template, per-group summary (e.g. "merged 3 templates:
-   Judgment 2 groups (5->2), Report 1 group (3->1); moved M files; deleted N
-   sources; skipped K singles").
+   c. For each group with >1 entity: target = first in the fetched order ->
+      build merged metadata (union of properties, concat+dedupe value arrays)
+      -> append the target's update dict to `all_target_updates`, append
+      `{"from_shared_ids": [<source ids>], "to_shared_id": <target id>}` to
+      `all_moves`, and extend `all_source_ids` with the source ids.
+      Collect ONLY here — NO write helper runs inside the loop.
+3. After the template loops, apply the WHOLE merge with THREE bulk calls, in
+   this exact order: `update_entities_parallel(all_target_updates, language)`
+   -> `move_files_to_entity_parallel(all_moves, language)` (ONE call for
+   every group's move: different targets' uploads overlap, each target's
+   files stay sequential) -> `delete_entities(all_source_ids)`.
+   Never delete a source before its group's move completed.
+4. Set `result` to a per-template, per-group summary (e.g. "merged 3 templates:
+   Judgment 2 groups (5->2), Report 1 group (3->1); moved M files (sum the
+   per-move `moved` counts); deleted N sources; skipped K singles").
 DUMMY SPEC for a multi-group merge: span the templates the script loops over,
 and create >=2 title groups per template (each >=2 dummies sharing a title, plus
 optionally a singleton to prove the size-1 skip). The dummy `by_template` filters
