@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from uwazi_admin_agent.domain.file_cache import FileCacheStats, format_cache_stats
 from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
+from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 
 
@@ -115,6 +116,10 @@ class DryRunScriptUseCase:
                 default_language=self._default_language,
                 dry_run_records=records,
                 entity_repository=self._entity_repository,
+                # One throttle spans the whole dry-run pass: the parallel read
+                # helpers report their batch verdicts here, so a rehearsal
+                # backs off exactly like the execute pass it is rehearsing.
+                throttle=ThrottleController(),
             )
             result, error = run_script_sync(script, namespace)
         finally:

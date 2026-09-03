@@ -434,3 +434,51 @@ def test_prompt_teaches_create_then_update_reverts_as_delete() -> None:
     manifest) — the safety property the whole two-phase workflow relies on."""
     assert "clean DELETE" in SYSTEM_PROMPT
     assert "adds nothing to the manifest" in SYSTEM_PROMPT
+
+
+# --- PARALLEL BULK HELPERS (auto-throttled) ---------------------------------
+
+
+def test_prompt_declares_the_parallel_bulk_helpers() -> None:
+    """The sandbox contract must declare the three parallel WRITE helpers with the
+    same contracts as their sequential twins, so bulk scripts use them instead of
+    hand-rolling chunked sequential loops."""
+    assert "PARALLEL BULK HELPERS" in SYSTEM_PROMPT
+    assert "update_entities_parallel(entities_dicts, language='en')" in SYSTEM_PROMPT
+    assert "create_entities_parallel(entities_dicts, language='en')" in SYSTEM_PROMPT
+    assert "create_relationships_parallel(relationships_dicts, language='en')" in SYSTEM_PROMPT
+
+
+def test_prompt_declares_the_parallel_bulk_read_helpers() -> None:
+    """The two bulk READ helpers must be declared with their DICT return shapes
+    (subscript, not attribute) — the shape the extraction idiom reads."""
+    assert "get_entity_files_parallel(shared_ids, language=None)" in SYSTEM_PROMPT
+    assert "get_file_bytes_parallel(filenames)" in SYSTEM_PROMPT
+    assert "`{shared_id: [file dicts]}`" in SYSTEM_PROMPT
+    assert "`{filename: bytes_or_None}`" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_auto_throttle_not_manual_concurrency() -> None:
+    """The prompt must tell the LLM the helpers auto-throttle (back off toward 1 on
+    complaints, climb back to 4) and that the script passes the WHOLE list in ONE
+    call — never manages concurrency or chunking itself."""
+    assert "AUTO-THROTTLE" in SYSTEM_PROMPT
+    assert "pass the WHOLE list in ONE call" in SYSTEM_PROMPT
+    assert "backs off toward 1" in SYSTEM_PROMPT
+    assert "climbs back toward 4" in SYSTEM_PROMPT
+
+
+def test_prompt_keeps_plain_helpers_for_server_side_bulk_ops() -> None:
+    """delete/publish/move_files have no `_parallel` variant (server-side bulk or
+    deliberately sequential); the prompt must say so so the LLM does not invent
+    nonexistent helpers."""
+    assert "Keep the PLAIN helpers" in SYSTEM_PROMPT
+    assert "no `_parallel` variant exists for them" in SYSTEM_PROMPT
+
+
+def test_prompt_extraction_recipe_uses_the_parallel_helpers() -> None:
+    """The EXTRACTION TASKS recipe must fetch files through the bulk helpers (one
+    call per pass, not per entity) and apply updates in ONE parallel call."""
+    assert "get_entity_files_parallel(shared_ids, language)" in SYSTEM_PROMPT
+    assert 'get_file_bytes_parallel([f["filename"] for f in html_files])' in SYSTEM_PROMPT
+    assert "update_entities_parallel(updates, language)" in SYSTEM_PROMPT

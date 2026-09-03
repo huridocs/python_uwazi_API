@@ -58,6 +58,9 @@ from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
+from uwazi_admin_agent.use_cases.parallel_script_helpers import build_parallel_read_helpers, build_parallel_write_helpers
+from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
@@ -547,6 +550,44 @@ def _get_file_bytes_noop() -> Any:
     return get_file_bytes
 
 
+def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str, Any]:
+    """Bind the ``*_parallel`` names in DUMMY mode: shapes identical, no threads.
+
+    Validation runs against a handful of dummies, so the parallel write names
+    simply ALIAS the scoped sequential helpers — same scope enforcement, same
+    return shapes — and the read names mirror their single-item no-ops as
+    dicts. The identical script therefore runs unchanged in the gate; real
+    parallelism (and the throttle) is exercised only live, like file-move.
+    """
+    return {
+        "update_entities_parallel": scoped["update_entities"],
+        "create_entities_parallel": scoped["create_entities"],
+        "create_relationships_parallel": scoped["create_relationships"],
+        "get_entity_files_parallel": _dummy_files_parallel(scope),
+        "get_file_bytes_parallel": _dummy_bytes_parallel(),
+    }
+
+
+def _dummy_files_parallel(scope: set[str]) -> Any:
+    """Dummy ``get_entity_files_parallel``: scope-assert, ``[]`` per in-scope id."""
+
+    def get_entity_files_parallel(shared_ids: list[str], language: str | None = None) -> dict[str, list[dict]]:
+        del language  # ignored: dummies carry no files to localize
+        assert_ids_in_scope(list(shared_ids), scope, "get_entity_files_parallel")
+        return {sid: [] for sid in shared_ids}
+
+    return get_entity_files_parallel
+
+
+def _dummy_bytes_parallel() -> Any:
+    """Dummy ``get_file_bytes_parallel``: ``None`` per filename (no stored bytes)."""
+
+    def get_file_bytes_parallel(filenames: list[str]) -> dict[str, bytes | None]:
+        return {name: None for name in filenames}
+
+    return get_file_bytes_parallel
+
+
 def _build_get_entity_files_real_helper(
     entity_repository: EntityRepositoryPort | None,
     loop: asyncio.AbstractEventLoop,
@@ -638,10 +679,12 @@ def build_exec_namespace(
     ``exec``; the caller reads ``namespace["result"]`` afterwards.
     """
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
+    scoped = _scoped_write_helpers(crud, scope)
     namespace: dict[str, Any] = {
         "query_entities": _sync_query_entities_factory(dummy_entities, scope),
         "query_entities_full": _sync_full_entities_factory(dummy_entities, scope),
-        **_scoped_write_helpers(crud, scope),
+        **scoped,
+        **_dummy_parallel_helpers(scoped, scope),
         "move_files_to_entity": _move_files_noop_scoped(scope),
         "get_entity_files": _get_entity_files_noop_scoped(scope),
         "get_file_bytes": _get_file_bytes_noop(),
@@ -880,6 +923,7 @@ def build_real_exec_namespace(
     default_language: str,
     entity_repository: EntityRepositoryPort | None = None,
     file_repository: FileRepositoryPort | None = None,
+    throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
 
@@ -898,15 +942,24 @@ def build_real_exec_namespace(
       and the sources as ``deleted`` (their files captured) by ``delete_entities``,
       so the moved files are covered by the existing snapshots on revert. If
       either port is None a stub is bound that raises when the script calls it.
+    - The ``*_parallel`` bulk helpers (auto-throttled, up to
+      ``THROTTLE_MAX_WORKERS`` workers) share one :class:`ThrottleController`
+      for the whole run; ``throttle`` defaults to a fresh controller so bare
+      test/inspection builds stay valid, while :class:`ExecuteScriptUseCase`
+      passes its own so the allowance persists across every helper call.
     """
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
+    controller = throttle if throttle is not None else ThrottleController()
+    executor = ParallelExecutor(controller)
     namespace: dict[str, Any] = {
         "query_entities": _real_sync_query_entities_factory(entity_api, loop),
         "query_entities_full": _real_full_entities_factory(entity_api, loop),
         **intercept.decorate(crud),
+        **build_parallel_write_helpers(entity_api, relationship_api, intercept, tool_cache, default_language, executor),
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
+        **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1018,6 +1071,7 @@ def build_dry_run_namespace(
     default_language: str,
     dry_run_records: list[dict[str, Any]],
     entity_repository: EntityRepositoryPort | None = None,
+    throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
 
@@ -1030,8 +1084,15 @@ def build_dry_run_namespace(
       unwired stubs raise a clear ``RuntimeError`` when the port is ``None``);
     - all 7 write helpers plus ``move_files_to_entity`` are pure recorders
       appending into ``dry_run_records`` — no I/O at all, so the dry run can
-      never mutate Uwazi.
+      never mutate Uwazi. The ``*_parallel`` write names alias the same
+      recorders (same shapes, recorded exactly like the sequential call),
+      while the ``*_parallel`` READ names are the real auto-throttled
+      helpers — the read pass is where dry-run minutes go, so it gets the
+      same parallelism + throttle the execute pass will use.
     """
+    controller = throttle if throttle is not None else ThrottleController()
+    executor = ParallelExecutor(controller)
+    dry_writes = _dry_run_write_helpers(dry_run_records)
     namespace: dict[str, Any] = {
         "query_entities": (
             _dry_run_query_entities_unwired() if entity_api is None else _real_sync_query_entities_factory(entity_api, loop)
@@ -1039,14 +1100,31 @@ def build_dry_run_namespace(
         "query_entities_full": (
             _dry_run_full_entities_unwired() if entity_api is None else _real_full_entities_factory(entity_api, loop)
         ),
-        **_dry_run_write_helpers(dry_run_records),
+        **dry_writes,
+        **_dry_run_parallel_write_aliases(dry_writes),
         "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
+        **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
     return namespace
+
+
+def _dry_run_parallel_write_aliases(dry_writes: dict[str, Any]) -> dict[str, Any]:
+    """The ``*_parallel`` write names for the dry-run namespace: recorder aliases.
+
+    Dry-run writes are pure recorders with the sequential helpers' exact
+    shapes, so the parallel names alias them: the identical script runs to
+    completion and its would-be writes are recorded exactly as the sequential
+    call would (per entity), with zero mutations either way.
+    """
+    return {
+        "update_entities_parallel": dry_writes["update_entities"],
+        "create_entities_parallel": dry_writes["create_entities"],
+        "create_relationships_parallel": dry_writes["create_relationships"],
+    }
 
 
 def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:

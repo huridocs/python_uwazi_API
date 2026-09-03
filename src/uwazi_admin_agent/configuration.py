@@ -35,7 +35,7 @@ MAX_LLM_CALLS: int = 70
 # per-call OUTPUT budget; it is independent of ``MAX_LLM_CALLS`` (a per-run REQUEST
 # count), so raising it does not lower the request budget. 32768 comfortably fits a
 # long merge script; it is a ceiling, not a target (shorter outputs cost nothing more).
-LLM_MAX_OUTPUT_TOKENS: int = 32768
+LLM_MAX_OUTPUT_TOKENS: int = 65536
 
 # Hard cap on ``run_validation_script`` calls per generation turn. The system
 # prompt asks the LLM to validate sparingly, but LLMs ignore prose limits and
@@ -128,3 +128,26 @@ ENTITY_CACHE_TTL_SECONDS: float = 600.0
 # revert path's correctness outweighs execute speed. The script's own reads
 # still hit the cache. Flip to False to also serve snapshots from cache.
 ENTITY_CACHE_FRESH_SNAPSHOTS: bool = True
+
+# --- auto-throttled parallel bulk helpers --------------------------------------
+#
+# The generated scripts' bulk cost is serial HTTP: the update/create ports loop
+# per entity inside ONE port call (one request per entity, minutes per 10 000 on
+# a remote production instance), and the raw repositories block per fetch. The
+# ``*_parallel`` script helpers run that work on up to THROTTLE_MAX_WORKERS
+# worker threads and adapt the worker allowance after EVERY batch: a load
+# complaint (429 / rate-limit text) drops it by one toward THROTTLE_MIN_WORKERS,
+# and THROTTLE_PROMOTION_STREAK consecutive clean batches raise it by one back
+# toward the cap. "4 processes" = these 4 concurrent workers: the sandbox
+# helpers are closures (unpickleable) and share one logged-in session, so
+# threads — not OS processes — are the parallel unit.
+THROTTLE_MAX_WORKERS: int = 4
+THROTTLE_MIN_WORKERS: int = 1
+# Consecutive clean batches required before the allowance grows by one.
+THROTTLE_PROMOTION_STREAK: int = 3
+# Breather after a load complaint (the per-request retry layer already honors
+# Retry-After; this lets the instance drain before the NEXT batch arrives).
+THROTTLE_PENALTY_PAUSE_SECONDS: float = 1.0
+# Entities per port call inside the parallel write helpers — the same "~50"
+# granularity the sequential contract teaches, now one task per chunk.
+PARALLEL_WRITE_BATCH_SIZE: int = EXECUTE_BATCH_SIZE
