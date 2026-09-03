@@ -493,9 +493,21 @@ def test_prompt_declares_the_parallel_file_move_helper() -> None:
     helper group by group."""
     assert "move_files_to_entity_parallel(moves, language='en')" in SYSTEM_PROMPT
     assert '{"from_shared_ids": [<source ids>], "to_shared_id": <target id>}' in SYSTEM_PROMPT
-    assert '{"to_shared_id": ..., "moved": N, "failed": M}' in SYSTEM_PROMPT
+    assert '{"to_shared_id": ..., "moved": N, "failed": M, "skipped": K}' in SYSTEM_PROMPT
     assert "at most ONE move per call" in SYSTEM_PROMPT
     assert "raises ValueError" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_the_file_move_skips_duplicate_files() -> None:
+    """Both move helpers must teach that a file whose bytes are already on the
+    target is SKIPPED (counted in `skipped`), not re-uploaded — merging N
+    duplicate entities that share the same files must leave ONE copy of each
+    unique file, not N (the live multiplication incident: a merged target came
+    out with the same document 4 times, 1 English + 3 Spanish copies)."""
+    assert "A file whose BYTES" in SYSTEM_PROMPT
+    assert "SKIPPED as a duplicate" in SYSTEM_PROMPT
+    assert "multiply their shared files" in SYSTEM_PROMPT
+    assert "`skipped`" in SYSTEM_PROMPT
 
 
 def test_prompt_merge_recipe_moves_files_through_the_parallel_helper() -> None:

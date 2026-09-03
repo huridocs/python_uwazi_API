@@ -32,6 +32,14 @@ class FileRef(BaseModel):
         default=None, description="The entity row language (ISO 639-1) for the upload `locale` cookie."
     )
     content_type: str = Field(description="The MIME type for the multipart part Content-Type header.")
+    size: int | None = Field(
+        default=None,
+        description=(
+            "The file's byte size, when the raw entry carries it. Not used on restore; "
+            "the merge file-move uses it as the cheap duplicate-candidate key (exact "
+            "identity is the content digest)."
+        ),
+    )
 
 
 class EntityIdentity(BaseModel):

@@ -58,6 +58,7 @@ from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
     assert_unique_move_targets,
@@ -454,7 +455,7 @@ def _move_files_noop_scoped(scope: set[str]) -> Any:
 
     def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
         assert_ids_in_scope([*from_shared_ids, to_shared_id], scope, "move_files_to_entity")
-        return {"moved": 0, "failed": 0, "note": "no-op in validation - dummies carry no uploaded files"}
+        return {"moved": 0, "failed": 0, "skipped": 0, "note": "no-op in validation - dummies carry no uploaded files"}
 
     return move_files_to_entity
 
@@ -476,7 +477,7 @@ def _move_files_noop_parallel_scoped(scope: set[str]) -> Any:
         assert_unique_move_targets(moves)
         ids: list[str] = [sid for move in moves for sid in [*move["from_shared_ids"], move["to_shared_id"]]]
         assert_ids_in_scope(ids, scope, "move_files_to_entity_parallel")
-        return [{"to_shared_id": move["to_shared_id"], "moved": 0, "failed": 0} for move in moves]
+        return [{"to_shared_id": move["to_shared_id"], "moved": 0, "failed": 0, "skipped": 0} for move in moves]
 
     return move_files_to_entity_parallel
 
@@ -489,20 +490,30 @@ def _build_move_files_real_helper(
 ) -> Any:
     """Build the real ``move_files_to_entity`` bound into the real exec namespace.
 
-    For each source: fetch its full raw (incl. ``documents``/``attachments``),
-    extract the uploaded-file refs (documents + uploaded attachments; URL
-    attachments have no bytes and are skipped - moving them is a flagged gap),
-    fetch each file's bytes via :class:`FileRepositoryPort`, and re-upload to the
-    target via ``upload_document``/``upload_attachment`` (documents first, then
+    The body is the shared :func:`move_files_for_target` flow (the same one
+    ``move_files_to_entity_parallel`` runs per target): fetch the target's
+    raw and build the dedupe index, then per source — fetch its full raw
+    (incl. ``documents``/``attachments``), extract the uploaded-file refs
+    (documents + uploaded attachments; URL attachments have no bytes and are
+    skipped - moving them is a flagged gap), fetch each file's bytes, SKIP it
+    when byte-identical content is already on the target, else re-upload via
+    ``upload_document``/``upload_attachment`` (documents first, then
     attachments - ``extract_file_refs`` already returns them in that order).
+
+    Skipping duplicates matters: Uwazi never dedupes uploads (every upload
+    mints a fresh file row joined to the entity by ``sharedId``), so without
+    it, merging N duplicate entities that share the same files multiplies
+    those files N times on the target. A skip is decided by a sha256 match
+    only - a same-named but different file still uploads (no-loss bias).
 
     Best-effort, like delete-revert file restore: a failed fetch/upload is
     counted as ``failed`` but does NOT raise - the merge still deletes the sources
-    and the target keeps whatever files were moved. Revert is unaffected: the
-    target is restored to its pre-merge raw (``save_raw(before)`` drops the moved
-    files) and the sources are re-created with their files (the delete-revert path
-    captured their bytes before the delete and re-uploads them), so after revert
-    both sides carry their original files.
+    and the target keeps whatever files were moved. Revert does NOT remove
+    moved files: they are file-collection rows joined by ``sharedId``, not
+    fields on the entity row a raw restore can rewrite - after revert the
+    target still carries the moved copies (orphaned in storage semantics is
+    moot; they stay fully visible). The sources ARE re-created with their
+    files (the delete-revert path captured their bytes before the delete).
 
     If either port is None (e.g. tests with no file repository wired), returns a
     stub that raises a clear ``RuntimeError`` when the script actually calls it -
@@ -521,31 +532,9 @@ def _build_move_files_real_helper(
 
     def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
         lang = language or default_language
-        moved = 0
-        failed = 0
-        for from_sid in from_shared_ids:
-            raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(from_sid, lang))
-            for ref in extract_file_refs(raw):
-                data = loop.run_until_complete(file_repository.get_file_bytes(ref.filename))
-                if data is None:
-                    failed += 1
-                    continue
-                upload_lang = ref.language or lang
-                if ref.kind == "document":
-                    ok = loop.run_until_complete(
-                        file_repository.upload_document(data, to_shared_id, upload_lang, ref.originalname, ref.content_type)
-                    )
-                else:
-                    ok = loop.run_until_complete(
-                        file_repository.upload_attachment(
-                            data, to_shared_id, upload_lang, ref.originalname, ref.content_type
-                        )
-                    )
-                if ok:
-                    moved += 1
-                else:
-                    failed += 1
-        return {"moved": moved, "failed": failed}
+        return move_files_for_target(
+            entity_repository, file_repository, from_shared_ids, to_shared_id, lang, loop.run_until_complete
+        )
 
     return move_files_to_entity
 
@@ -1177,7 +1166,7 @@ def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
                 "to_shared_id": to_shared_id,
             }
         )
-        return {"moved": len(from_shared_ids), "failed": 0}
+        return {"moved": len(from_shared_ids), "failed": 0, "skipped": 0}
 
     return move_files_to_entity
 
@@ -1206,7 +1195,14 @@ def _dry_run_move_files_parallel_helper(records: list[dict[str, Any]]) -> Any:
                     "to_shared_id": move["to_shared_id"],
                 }
             )
-            summaries.append({"to_shared_id": move["to_shared_id"], "moved": len(move["from_shared_ids"]), "failed": 0})
+            summaries.append(
+                {
+                    "to_shared_id": move["to_shared_id"],
+                    "moved": len(move["from_shared_ids"]),
+                    "failed": 0,
+                    "skipped": 0,
+                }
+            )
         return summaries
 
     return move_files_to_entity_parallel

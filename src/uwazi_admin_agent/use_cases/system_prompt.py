@@ -183,12 +183,16 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         sequentially). `moves` is a list of
         `{"from_shared_ids": [<source ids>], "to_shared_id": <target id>}`
         dicts. Returns a list of
-        `{"to_shared_id": ..., "moved": N, "failed": M}` in input order. Each
-        `to_shared_id` may appear in at most ONE move per call (a duplicated
-        target raises ValueError: concurrent uploads to the same entity race
-        its row and drop files). Batch a multi-group merge's moves into ONE
-        call; best-effort like `move_files_to_entity` (a failed fetch/upload
-        counts as `failed`, never crashes the run).
+        `{"to_shared_id": ..., "moved": N, "failed": M, "skipped": K}` in
+        input order. Each `to_shared_id` may appear in at most ONE move per call
+        (a duplicated target raises ValueError: concurrent uploads to the same
+        entity race its row and drop files). A file whose BYTES are already on
+        the target (the same PDF/HTML re-imported per duplicate entity) is
+        SKIPPED as a duplicate, not re-uploaded — merging duplicate entities
+        must not multiply their shared files; a same-named but different file
+        still uploads. Batch a multi-group merge's moves into ONE call;
+        best-effort like `move_files_to_entity` (a failed fetch/upload counts
+        as `failed`, never crashes the run).
 
   Rules:
   - Same script runs unchanged in validation and dry-run: these names are
@@ -220,7 +224,10 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Copy each source entity's UPLOADED files (documents + uploaded attachments)
       to the target entity by re-uploading their bytes. Use this for MERGE tasks so
       the sources' uploaded files are not lost when the sources are deleted.
-      Returns a dict {"moved": N, "failed": M}. For MANY targets in one pass
+      Returns a dict {"moved": N, "failed": M, "skipped": K}. A file whose BYTES
+      are already on the target is SKIPPED as a duplicate (counted in
+      `skipped`), not re-uploaded — merging duplicate entities must not
+      multiply their shared files. For MANY targets in one pass
       (multi-group merges) use `move_files_to_entity_parallel` (see PARALLEL
       BULK HELPERS). URL attachments are NOT moved by
       this helper (they have no stored bytes) - see MERGE TASKS for that gap. In
@@ -439,7 +446,7 @@ composition of the bound helpers - NO new capability is needed beyond
    partial update.)
 5. Delete the sources with `delete_entities([<source ids>])`.
 6. Set `result` to a concise summary (e.g. "merged N entities titled X into
-   target <id>; moved M files; deleted N-1 sources").
+   target <id>; moved M files, skipped K duplicates; deleted N-1 sources").
 
 ORDER MATTERS: update target metadata -> move files -> delete sources. Do not
 move files after a later target update (unnecessary) and never delete a source
@@ -474,8 +481,9 @@ This is the agency loop - you discover the scope, the script does the rest.
    files stay sequential) -> `delete_entities(all_source_ids)`.
    Never delete a source before its group's move completed.
 4. Set `result` to a per-template, per-group summary (e.g. "merged 3 templates:
-   Judgment 2 groups (5->2), Report 1 group (3->1); moved M files (sum the
-   per-move `moved` counts); deleted N sources; skipped K singles").
+   Judgment 2 groups (5->2), Report 1 group (3->1); moved M files, skipped D
+   duplicate files (sum the per-move `moved`/`skipped` counts); deleted N
+   sources; skipped K singles").
 DUMMY SPEC for a multi-group merge: span the templates the script loops over,
 and create >=2 title groups per template (each >=2 dummies sharing a title, plus
 optionally a singleton to prove the size-1 skip). The dummy `by_template` filters
