@@ -6,8 +6,9 @@ existing convention (``test_script_exec_namespace.py``) — plus a minimal
 in-file intercept stand-in for the real namespace's write path (the same
 ``_Decorate`` precedent that file established). What is pinned:
 
-- every namespace binds the same 5 parallel names, so the SAME generated
-  script runs in dummy / dry-run / real mode;
+- every namespace binds the same parallel names (the 5 here, plus the
+  parallel file-move name pinned in ``test_parallel_move_files_helper.py``),
+  so the SAME generated script runs in dummy / dry-run / real mode;
 - dummy + dry-run write names ALIAS their sequential twins (identical
   behavior by construction);
 - unwired parallel read helpers fail LOUDLY (RuntimeError), like the

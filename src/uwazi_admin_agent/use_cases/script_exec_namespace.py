@@ -59,7 +59,12 @@ from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_t
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
-from uwazi_admin_agent.use_cases.parallel_script_helpers import build_parallel_read_helpers, build_parallel_write_helpers
+from uwazi_admin_agent.use_cases.parallel_script_helpers import (
+    assert_unique_move_targets,
+    build_parallel_move_files_helper,
+    build_parallel_read_helpers,
+    build_parallel_write_helpers,
+)
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
@@ -454,6 +459,28 @@ def _move_files_noop_scoped(scope: set[str]) -> Any:
     return move_files_to_entity
 
 
+def _move_files_noop_parallel_scoped(scope: set[str]) -> Any:
+    """Build the dummy-scoped no-op ``move_files_to_entity_parallel``.
+
+    Mirrors ``_move_files_noop_scoped`` for the moves-list contract: dummies
+    carry no uploaded files, so the parallel move is a no-op in validation.
+    It keeps the real helper's two up-front guards so the identical script
+    fails identically in every mode: :func:`assert_unique_move_targets`
+    (the same-row lost-file race guard) and the scope assertion over every
+    move's ``from`` + ``to`` ids (defense-in-depth). Returns one ``moved=0``
+    summary per move, in input order — the real helper's result shape.
+    """
+
+    def move_files_to_entity_parallel(moves: list[dict], language: str | None = None) -> list[dict]:
+        del language  # ignored: dummies carry no files to localize
+        assert_unique_move_targets(moves)
+        ids: list[str] = [sid for move in moves for sid in [*move["from_shared_ids"], move["to_shared_id"]]]
+        assert_ids_in_scope(ids, scope, "move_files_to_entity_parallel")
+        return [{"to_shared_id": move["to_shared_id"], "moved": 0, "failed": 0} for move in moves]
+
+    return move_files_to_entity_parallel
+
+
 def _build_move_files_real_helper(
     entity_repository: EntityRepositoryPort | None,
     file_repository: FileRepositoryPort | None,
@@ -556,8 +583,9 @@ def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str
     Validation runs against a handful of dummies, so the parallel write names
     simply ALIAS the scoped sequential helpers — same scope enforcement, same
     return shapes — and the read names mirror their single-item no-ops as
-    dicts. The identical script therefore runs unchanged in the gate; real
-    parallelism (and the throttle) is exercised only live, like file-move.
+    dicts, while the file-move name mirrors ``_move_files_noop_scoped`` as a
+    per-move list. The identical script therefore runs unchanged in the gate;
+    real parallelism (and the throttle) is exercised only live, like file-move.
     """
     return {
         "update_entities_parallel": scoped["update_entities"],
@@ -565,6 +593,7 @@ def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str
         "create_relationships_parallel": scoped["create_relationships"],
         "get_entity_files_parallel": _dummy_files_parallel(scope),
         "get_file_bytes_parallel": _dummy_bytes_parallel(),
+        "move_files_to_entity_parallel": _move_files_noop_parallel_scoped(scope),
     }
 
 
@@ -942,6 +971,10 @@ def build_real_exec_namespace(
       and the sources as ``deleted`` (their files captured) by ``delete_entities``,
       so the moved files are covered by the existing snapshots on revert. If
       either port is None a stub is bound that raises when the script calls it.
+      Its ``move_files_to_entity_parallel`` sibling (one task per TARGET, the
+      same shared executor/throttle) is not intercept-decorated either, and
+      refuses a duplicated ``to_shared_id`` up front — the same-row race that
+      drops files.
     - The ``*_parallel`` bulk helpers (auto-throttled, up to
       ``THROTTLE_MAX_WORKERS`` workers) share one :class:`ThrottleController`
       for the whole run; ``throttle`` defaults to a fresh controller so bare
@@ -957,6 +990,7 @@ def build_real_exec_namespace(
         **intercept.decorate(crud),
         **build_parallel_write_helpers(entity_api, relationship_api, intercept, tool_cache, default_language, executor),
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
+        **build_parallel_move_files_helper(entity_repository, file_repository, default_language, executor),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
@@ -1086,9 +1120,11 @@ def build_dry_run_namespace(
       appending into ``dry_run_records`` — no I/O at all, so the dry run can
       never mutate Uwazi. The ``*_parallel`` write names alias the same
       recorders (same shapes, recorded exactly like the sequential call),
-      while the ``*_parallel`` READ names are the real auto-throttled
-      helpers — the read pass is where dry-run minutes go, so it gets the
-      same parallelism + throttle the execute pass will use.
+      ``move_files_to_entity_parallel`` records one ``move_files`` op per
+      move (and keeps the real helper's duplicated-target guard), while the
+      ``*_parallel`` READ names are the real auto-throttled helpers — the
+      read pass is where dry-run minutes go, so it gets the same
+      parallelism + throttle the execute pass will use.
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
@@ -1103,6 +1139,7 @@ def build_dry_run_namespace(
         **dry_writes,
         **_dry_run_parallel_write_aliases(dry_writes),
         "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
+        "move_files_to_entity_parallel": _dry_run_move_files_parallel_helper(dry_run_records),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
@@ -1143,6 +1180,36 @@ def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
         return {"moved": len(from_shared_ids), "failed": 0}
 
     return move_files_to_entity
+
+
+def _dry_run_move_files_parallel_helper(records: list[dict[str, Any]]) -> Any:
+    """Dry-run ``move_files_to_entity_parallel``: one record per move, move nothing.
+
+    Mirrors ``_dry_run_move_files_helper`` per move so ``_count_ops`` still
+    counts every would-be move as ``would_rewire``, and keeps the real
+    helper's :func:`assert_unique_move_targets` guard (a rehearsal of a
+    duplicated-target script must fail exactly like the execute pass would).
+    The per-move summaries carry the real helper's result shape, so the SAME
+    script reads either mode's return values unchanged.
+    """
+
+    def move_files_to_entity_parallel(moves: list[dict], language: str | None = None) -> list[dict]:
+        del language
+        assert_unique_move_targets(moves)
+        logger.info("dry-run record: move_files_to_entity_parallel x{} target(s)", len(moves))
+        summaries: list[dict] = []
+        for move in moves:
+            records.append(
+                {
+                    "op": "move_files",
+                    "from_shared_ids": list(move["from_shared_ids"]),
+                    "to_shared_id": move["to_shared_id"],
+                }
+            )
+            summaries.append({"to_shared_id": move["to_shared_id"], "moved": len(move["from_shared_ids"]), "failed": 0})
+        return summaries
+
+    return move_files_to_entity_parallel
 
 
 def _dry_run_query_entities_unwired() -> Any:

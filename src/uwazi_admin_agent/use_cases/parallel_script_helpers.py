@@ -16,15 +16,19 @@ What gets a parallel variant (per-entity HTTP loops inside the port):
   ``create_relationships_parallel`` — chunked port calls;
 - ``get_entity_files_parallel`` / ``get_file_bytes_parallel`` — one fetch
   task per item (the raw repositories block per request, so the tasks run
-  them on their own threads).
+  them on their own threads);
+- ``move_files_to_entity_parallel`` — one task per TARGET (a merge's move
+  step, its wall-clock cost): different targets are different Mongo rows, so
+  their upload streams overlap safely, while ALL of one target's uploads
+  stay sequential inside its task. :func:`assert_unique_move_targets`
+  refuses a duplicated ``to_shared_id`` up front — two tasks writing the
+  SAME row would race it (last save drops the other's file entry: a lost
+  file).
 
 What deliberately does NOT:
 - ``delete_entities`` / publish-status — server-side BULK endpoints already
   (one request for the whole list); per-id traffic would risk limiter
-  complaints for no gain;
-- ``move_files_to_entity`` — every upload appends to the SAME target entity
-  row, and concurrent uploads race that row (lost files). It stays
-  sequential by design.
+  complaints for no gain.
 
 Safety invariants preserved vs. the sequential path:
 - update / rewire: ALL first-touch snapshots of the batch are taken BEFORE
@@ -37,7 +41,11 @@ Safety invariants preserved vs. the sequential path:
   on the script's thread after the pool joins — no new data races;
 - write helpers keep the sequential helpers' exact list-of-dicts return
   shape and input order, so the SAME script runs in dummy / dry-run / real
-  mode (the other namespaces bind these names with identical contracts).
+  mode (the other namespaces bind these names with identical contracts);
+- the parallel file-move keeps the sequential mover's best-effort file
+  semantics (a missing-bytes/rejected upload counts as ``failed`` and never
+  raises) while a hard port error still kills the script BEFORE the merge's
+  deletes — sources keep their files (the slower-but-safe choice).
 
 The write helpers take the :class:`BackupIntercept` typed ``Any`` — the same
 decoupling :func:`build_real_exec_namespace` uses — and reach its private
@@ -59,6 +67,7 @@ from uwazi_admin_agent.configuration import PARALLEL_WRITE_BATCH_SIZE
 from uwazi_admin_agent.domain.batch_outcome import BatchOutcome, BatchVerdict
 from uwazi_admin_agent.domain.batch_split import split_batches
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.snapshot import FileRef
 from uwazi_admin_agent.domain.throttle_policy import classify_mutation_results, is_rate_limit_text, verdict_from_error_text
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
@@ -99,6 +108,18 @@ def build_parallel_read_helpers(
     return {
         "get_entity_files_parallel": _entity_files_parallel(entity_repository, default_language, executor),
         "get_file_bytes_parallel": _file_bytes_parallel(file_repository, executor),
+    }
+
+
+def build_parallel_move_files_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> dict[str, Any]:
+    """Build the parallel file-move helper bound into the real exec namespace."""
+    return {
+        "move_files_to_entity_parallel": _move_files_parallel(entity_repository, file_repository, default_language, executor)
     }
 
 
@@ -155,6 +176,36 @@ def _log_write_batch(helper: str, outcome: BatchOutcome, count: int, started: fl
         outcome.rate_limited_count,
         time.monotonic() - started,
     )
+
+
+def assert_unique_move_targets(moves: list[dict[str, Any]]) -> None:
+    """Refuse two moves into the SAME target entity inside ONE call (lost-file race).
+
+    Uploading a file to a Uwazi entity is a read-modify-write of that entity's
+    Mongo row (load -> append to documents/attachments -> save): two
+    concurrent upload streams into one ``to_shared_id`` race that row and the
+    last save drops the other's file entry — the bytes reach storage but no
+    row ever references them, a lost file. The parallel mover runs one task
+    per target precisely so this cannot happen; a duplicated target inside
+    one call would defeat it, so every namespace's
+    ``move_files_to_entity_parallel`` refuses it up front (the real helper
+    before any task is built, the recorders before any record is appended).
+    Pure: no I/O.
+    """
+    seen: set[Any] = set()
+    duplicated: list[Any] = []
+    for move in moves:
+        to_sid = move.get("to_shared_id")
+        if to_sid in seen and to_sid not in duplicated:
+            duplicated.append(to_sid)
+        seen.add(to_sid)
+    if duplicated:
+        raise ValueError(
+            "move_files_to_entity_parallel: each to_shared_id may appear in at most ONE move per "
+            f"call; duplicated target(s): {duplicated}. Concurrent uploads into the same entity "
+            "race its row and the last save drops the other's file entry - merge those sources "
+            "into one move, or issue one call per target."
+        )
 
 
 # --- write helpers (real mode) --------------------------------------------------
@@ -250,6 +301,124 @@ def _relationships_parallel(
         return dumped
 
     return create_relationships_parallel
+
+
+# --- file-move helper (real mode) ------------------------------------------------
+
+
+def _move_files_parallel(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> Callable[[list[dict], str | None], list[dict]]:
+    """Build the real ``move_files_to_entity_parallel`` (a merge's bulk file-move).
+
+    One task per TARGET entity: uploads into different targets are
+    read-modify-writes of different Mongo rows, so they overlap safely; ALL
+    of one target's uploads stay SEQUENTIAL inside its task (concurrent
+    uploads into one row race it — last save drops the other's file entry —
+    which is why :func:`assert_unique_move_targets` refuses a duplicated
+    target before any task is built). The per-target body mirrors the
+    sequential mover (:func:`_build_move_files_real_helper`) file for file:
+    fetch the source raw -> ``extract_file_refs`` -> fetch bytes -> re-upload,
+    counting soft failures (missing bytes, rejected upload) as ``failed``
+    without raising; a hard port EXCEPTION still propagates so the script
+    dies BEFORE the merge's deletes — the sources keep their files.
+
+    NOT intercept-decorated, like the sequential mover: a merge's target is
+    already snapshotted as ``modified`` by ``update_entities`` and its
+    sources (bytes captured) by ``delete_entities``. Unwired ports -> the
+    read helpers' loud ``RuntimeError`` stub.
+    """
+    if entity_repository is None or file_repository is None:
+        return _unwired_parallel(
+            "move_files_to_entity_parallel",
+            "entity_repository and file_repository",
+            "Wire EntityRepositoryPort and FileRepositoryPort into the runtime/execute use case "
+            "to enable parallel file-move for merges.",
+        )
+
+    def move_files_to_entity_parallel(moves: list[dict], language: str | None = None) -> list[dict]:
+        assert_unique_move_targets(moves)
+        if not moves:
+            return []
+        lang = language or default_language
+        started = time.monotonic()
+        tasks = [_move_target_task(entity_repository, file_repository, move, lang) for move in moves]
+        values, errors = executor.run(tasks)
+        _raise_first_write_error(errors, executor)
+        # A raising task left None at its index — unreachable here (the line
+        # above re-raised it); the filter only satisfies the type checker.
+        results = [r for r in values if r is not None]
+        moved = sum(r["moved"] for r in results)
+        failed = sum(r["failed"] for r in results)
+        # Uploads return only bool, so the move itself can never evidence a
+        # load complaint (transient 429s are absorbed by the per-request
+        # retry layer): every file landed -> CLEAN, any soft failure -> DEGRADED.
+        executor.record(BatchVerdict.CLEAN if failed == 0 else BatchVerdict.DEGRADED)
+        logger.info(
+            "script move_files_to_entity_parallel: {} target(s), {} moved / {} failed ({:.1f}s)",
+            len(results),
+            moved,
+            failed,
+            time.monotonic() - started,
+        )
+        return results
+
+    return move_files_to_entity_parallel
+
+
+def _move_target_task(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    move: dict[str, Any],
+    lang: str,
+) -> Callable[[], dict[str, Any]]:
+    """Bind one (move, lang) pair into a zero-arg task (no late-binding hazards)."""
+
+    def task() -> dict[str, Any]:
+        return _move_files_for_target(entity_repository, file_repository, move, lang)
+
+    return task
+
+
+def _move_files_for_target(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    move: dict[str, Any],
+    lang: str,
+) -> dict[str, Any]:
+    """Move ONE move's source files to its target — sequentially (same-row safety).
+
+    Runs on the task's own worker thread; every port call gets its own
+    ``asyncio.run`` loop (the raw repositories block per request, so they
+    must run on their own thread to overlap at all). The upload order is the
+    sequential mover's: per source, documents first then attachments
+    (``extract_file_refs`` already returns them in that order).
+    """
+    to_sid = move["to_shared_id"]
+    moved = 0
+    failed = 0
+    for from_sid in move["from_shared_ids"]:
+        raw = asyncio.run(entity_repository.get_raw_by_shared_id(from_sid, lang))
+        for ref in extract_file_refs(raw):
+            if _transfer_one_file(file_repository, ref, to_sid, lang):
+                moved += 1
+            else:
+                failed += 1
+    return {"to_shared_id": to_sid, "moved": moved, "failed": failed}
+
+
+def _transfer_one_file(file_repository: FileRepositoryPort, ref: FileRef, to_sid: str, lang: str) -> bool:
+    """Fetch one file's bytes and re-upload them to the target; False = not moved."""
+    data = asyncio.run(file_repository.get_file_bytes(ref.filename))
+    if data is None:
+        return False
+    upload_lang = ref.language or lang
+    if ref.kind == "document":
+        return asyncio.run(file_repository.upload_document(data, to_sid, upload_lang, ref.originalname, ref.content_type))
+    return asyncio.run(file_repository.upload_attachment(data, to_sid, upload_lang, ref.originalname, ref.content_type))
 
 
 # --- read helpers (real mode + dry-run bind the same factories) -------------------
