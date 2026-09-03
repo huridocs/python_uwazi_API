@@ -40,6 +40,7 @@ from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_real_exec_namespace, run_script_sync
+from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
@@ -156,7 +157,14 @@ class ExecuteScriptUseCase:
         return manifest
 
     def _exec(self, script: str, intercept: BackupIntercept, language: str) -> tuple[str | None, str | None]:
-        """Run the script in a worker thread with a dedicated event loop."""
+        """Run the script in a worker thread with a dedicated event loop.
+
+        One :class:`ThrottleController` spans the WHOLE execute pass: every
+        ``*_parallel`` helper call shares it, so a rate-limit complaint in an
+        early update batch backs the read fan-outs later in the same script
+        (and clean streaks climb the allowance back) — the "parallel, but
+        auto-throttle to what Uwazi tolerates" contract.
+        """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         intercept.set_loop(loop)
@@ -170,6 +178,7 @@ class ExecuteScriptUseCase:
                 default_language=language,
                 entity_repository=self._entity_repository,
                 file_repository=self._file_repository,
+                throttle=ThrottleController(),
             )
             return run_script_sync(script, namespace)
         finally:

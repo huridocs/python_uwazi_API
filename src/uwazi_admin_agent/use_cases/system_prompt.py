@@ -151,6 +151,48 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `from_entity_shared_id`, `to_entity_shared_id`, `relationship_type_name`;
       optionally `file_id` and `reference_text`. Returns a list of result dicts.
 
+  PARALLEL BULK HELPERS (auto-throttled — PREFER these for EVERY bulk set)
+  The write helpers above send ONE HTTP REQUEST PER ENTITY, sequentially — a
+  10 000-entity update is ~30 minutes against a remote instance. The
+  `_parallel` variants run the SAME per-entity work on up to 4 concurrent
+  workers that AUTO-THROTTLE: when Uwazi complains about load (rate limiting)
+  the worker count backs off toward 1 by itself, and climbs back toward 4
+  after clean batches. You do NOT manage concurrency, chunking, or retries —
+  pass the WHOLE list in ONE call:
+
+    update_entities_parallel(entities_dicts, language='en')
+        EXACT same contract and return shape as `update_entities` (list of
+        result dicts, input order). Replaces the "chunk in ~50s" loop:
+        build the full update list, then call this ONCE.
+    create_entities_parallel(entities_dicts, language='en')
+        EXACT same contract and return shape as `create_entities`. Use for
+        every bulk create ("create 1000 entities" = one call).
+    create_relationships_parallel(relationships_dicts, language='en')
+        EXACT same contract and return shape as `create_relationships`.
+    get_entity_files_parallel(shared_ids, language=None)
+        Bulk `get_entity_files`: returns a DICT `{shared_id: [file dicts]}`
+        (each value the same list `get_entity_files(sid)` returns; `[]` for
+        entities without uploaded files). SUBSCRIPT the dict:
+        `files = get_entity_files_parallel(ids)[sid]`.
+    get_file_bytes_parallel(filenames)
+        Bulk `get_file_bytes`: returns a DICT `{filename: bytes_or_None}`.
+        Collect all filenames first, then fetch them in ONE call.
+
+  Rules:
+  - Same script runs unchanged in validation and dry-run: these names are
+    bound in every mode with identical shapes.
+  - Do NOT hand-roll a chunked `update_entities` loop when a `_parallel`
+    variant exists — one `_parallel` call replaces it and is faster.
+  - Keep the PLAIN helpers for `delete_entities`, `publish_entities`,
+    `unpublish_entities`, `set_publish_status`, and `move_files_to_entity`:
+    they are single server-side bulk requests already (or deliberately
+    sequential), so no `_parallel` variant exists for them.
+  - Bulk extraction idiom (fetches overlap, parsing stays plain Python):
+        files_by_id = get_entity_files_parallel([d["shared_id"]] for d in dicts)  # WRONG: arg must be a LIST
+        files_by_id = get_entity_files_parallel([d["shared_id"] for d in dicts])  # RIGHT
+        names = [f["filename"] for files in files_by_id.values() for f in files]
+        data_map = get_file_bytes_parallel(names)
+
   run_dry_run_script(python_code)
       Rehearse a candidate script against the REAL entities with ZERO writes:
       `query_entities` / `get_entity_files` / `get_file_bytes` perform REAL
@@ -550,11 +592,17 @@ one-document logic. Use this exact shape:
    (`def` works, `class` does not, everything it calls is bound).
    Pass the entity's `ctx` so the extractor can pick the row/value that belongs
    to THIS entity when the HTML holds rows for several entities.
-2. Per entity: `files = get_entity_files(sid)`; then
-   `html_files = [f for f in files if htmlextract.is_html(f)]`
+2. Per entity: fetch its files with the BULK helper —
+   `files_by_id = get_entity_files_parallel(shared_ids, language)` (ONE call
+   for the whole target set; it returns `{shared_id: [file dicts]}`) — then
+   `html_files = [f for f in files_by_id[sid] if htmlextract.is_html(f)]`
    (`is_html` is the fifth `htmlextract` member: content_type text/html or
-   .html/.htm originalname). Then `data = get_file_bytes(f["filename"])`;
+   .html/.htm originalname). Then
+   `data_map = get_file_bytes_parallel([f["filename"] for f in html_files])`
+   and read `data_map[f["filename"]]`; a missing key counts as missing,
    `None` -> count it as missing and continue (do NOT crash the bulk run).
+   The sequential `get_entity_files` / `get_file_bytes` still work for
+   single-entity fetches; the `_parallel` pair is the bulk-scale form.
 3. Build the per-entity context from the entity dict you already fetched via
    `by_ids` (no extra fetch): `ctx = {"shared_id": d["shared_id"], "title":
    d["title"], "metadata": d["metadata"]}`. Then
@@ -564,7 +612,9 @@ one-document logic. Use this exact shape:
 4. Accumulate update dicts (`shared_id` + `template_name` + `metadata` per
    METADATA WRITE SHAPE - single-value types take a SCALAR; do NOT include
    `title` - update is partial and omitting it preserves the stored title) and
-   call `update_entities(updates, language)` in chunks of ~50.
+   apply them with ONE call: `update_entities_parallel(updates, language)`
+   (auto-throttled; same result shape as `update_entities`). Keep the plain
+   `update_entities` only for tiny non-bulk fixes.
 5. `result` MUST report: entities scanned, files fetched, matched, unmatched,
    missing-files. A low match rate is visible BEFORE execute is run - surface
    it honestly in `GeneratedScript.description` so the operator can re-generate
