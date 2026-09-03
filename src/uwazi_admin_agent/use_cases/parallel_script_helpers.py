@@ -45,7 +45,12 @@ Safety invariants preserved vs. the sequential path:
 - the parallel file-move keeps the sequential mover's best-effort file
   semantics (a missing-bytes/rejected upload counts as ``failed`` and never
   raises) while a hard port error still kills the script BEFORE the merge's
-  deletes — sources keep their files (the slower-but-safe choice).
+  deletes — sources keep their files (the slower-but-safe choice). Both
+  movers share one transfer flow (:mod:`...use_cases.file_transfer`) that
+  also SKIPS a source file whose bytes are already on the target
+  (sha256-confirmed — never name/size alone), so merging N duplicate
+  entities leaves ONE copy of each unique file instead of multiplying it
+  (Uwazi itself never dedupes uploads; see :mod:`...domain.file_dedupe`).
 
 The write helpers take the :class:`BackupIntercept` typed ``Any`` — the same
 decoupling :func:`build_real_exec_namespace` uses — and reach its private
@@ -67,10 +72,10 @@ from uwazi_admin_agent.configuration import PARALLEL_WRITE_BATCH_SIZE
 from uwazi_admin_agent.domain.batch_outcome import BatchOutcome, BatchVerdict
 from uwazi_admin_agent.domain.batch_split import split_batches
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
-from uwazi_admin_agent.domain.snapshot import FileRef
 from uwazi_admin_agent.domain.throttle_policy import classify_mutation_results, is_rate_limit_text, verdict_from_error_text
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
@@ -319,12 +324,13 @@ def _move_files_parallel(
     of one target's uploads stay SEQUENTIAL inside its task (concurrent
     uploads into one row race it — last save drops the other's file entry —
     which is why :func:`assert_unique_move_targets` refuses a duplicated
-    target before any task is built). The per-target body mirrors the
-    sequential mover (:func:`_build_move_files_real_helper`) file for file:
-    fetch the source raw -> ``extract_file_refs`` -> fetch bytes -> re-upload,
-    counting soft failures (missing bytes, rejected upload) as ``failed``
-    without raising; a hard port EXCEPTION still propagates so the script
-    dies BEFORE the merge's deletes — the sources keep their files.
+    target before any task is built). The per-target body is the shared
+    :func:`move_files_for_target` flow: fetch the target raw → build the
+    dedupe index → per source file, fetch bytes → skip when byte-identical
+    content is already on the target → else re-upload, counting soft
+    failures (missing bytes, rejected upload) as ``failed`` without raising;
+    a hard port EXCEPTION still propagates so the script dies BEFORE the
+    merge's deletes — the sources keep their files.
 
     NOT intercept-decorated, like the sequential mover: a merge's target is
     already snapshotted as ``modified`` by ``update_entities`` and its
@@ -353,14 +359,17 @@ def _move_files_parallel(
         results = [r for r in values if r is not None]
         moved = sum(r["moved"] for r in results)
         failed = sum(r["failed"] for r in results)
+        skipped = sum(r["skipped"] for r in results)
         # Uploads return only bool, so the move itself can never evidence a
         # load complaint (transient 429s are absorbed by the per-request
-        # retry layer): every file landed -> CLEAN, any soft failure -> DEGRADED.
+        # retry layer): every file landed or was a duplicate -> CLEAN, any
+        # soft failure -> DEGRADED. A skipped duplicate is not a failure.
         executor.record(BatchVerdict.CLEAN if failed == 0 else BatchVerdict.DEGRADED)
         logger.info(
-            "script move_files_to_entity_parallel: {} target(s), {} moved / {} failed ({:.1f}s)",
+            "script move_files_to_entity_parallel: {} target(s), {} moved / {} skipped / {} failed ({:.1f}s)",
             len(results),
             moved,
+            skipped,
             failed,
             time.monotonic() - started,
         )
@@ -378,47 +387,12 @@ def _move_target_task(
     """Bind one (move, lang) pair into a zero-arg task (no late-binding hazards)."""
 
     def task() -> dict[str, Any]:
-        return _move_files_for_target(entity_repository, file_repository, move, lang)
+        counts = move_files_for_target(
+            entity_repository, file_repository, move["from_shared_ids"], move["to_shared_id"], lang, asyncio.run
+        )
+        return {"to_shared_id": move["to_shared_id"], **counts}
 
     return task
-
-
-def _move_files_for_target(
-    entity_repository: EntityRepositoryPort,
-    file_repository: FileRepositoryPort,
-    move: dict[str, Any],
-    lang: str,
-) -> dict[str, Any]:
-    """Move ONE move's source files to its target — sequentially (same-row safety).
-
-    Runs on the task's own worker thread; every port call gets its own
-    ``asyncio.run`` loop (the raw repositories block per request, so they
-    must run on their own thread to overlap at all). The upload order is the
-    sequential mover's: per source, documents first then attachments
-    (``extract_file_refs`` already returns them in that order).
-    """
-    to_sid = move["to_shared_id"]
-    moved = 0
-    failed = 0
-    for from_sid in move["from_shared_ids"]:
-        raw = asyncio.run(entity_repository.get_raw_by_shared_id(from_sid, lang))
-        for ref in extract_file_refs(raw):
-            if _transfer_one_file(file_repository, ref, to_sid, lang):
-                moved += 1
-            else:
-                failed += 1
-    return {"to_shared_id": to_sid, "moved": moved, "failed": failed}
-
-
-def _transfer_one_file(file_repository: FileRepositoryPort, ref: FileRef, to_sid: str, lang: str) -> bool:
-    """Fetch one file's bytes and re-upload them to the target; False = not moved."""
-    data = asyncio.run(file_repository.get_file_bytes(ref.filename))
-    if data is None:
-        return False
-    upload_lang = ref.language or lang
-    if ref.kind == "document":
-        return asyncio.run(file_repository.upload_document(data, to_sid, upload_lang, ref.originalname, ref.content_type))
-    return asyncio.run(file_repository.upload_attachment(data, to_sid, upload_lang, ref.originalname, ref.content_type))
 
 
 # --- read helpers (real mode + dry-run bind the same factories) -------------------

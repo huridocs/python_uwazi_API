@@ -111,7 +111,7 @@ def test_dry_run_namespace_binds_real_readers_and_dry_writers() -> None:
         {"op": "update", "shared_id": "s1", "template_name": None, "metadata": None, "title": None, "language": None}
     ]
     # move_files_to_entity is a dry recorder too.
-    assert ns["move_files_to_entity"](["a", "b"], "c") == {"moved": 2, "failed": 0}
+    assert ns["move_files_to_entity"](["a", "b"], "c") == {"moved": 2, "failed": 0, "skipped": 0}
     assert ns["_dry_run_records"][-1] == {"op": "move_files", "from_shared_ids": ["a", "b"], "to_shared_id": "c"}
     # Same stdlib + SAFE_BUILTINS contract as the other namespaces.
     from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS

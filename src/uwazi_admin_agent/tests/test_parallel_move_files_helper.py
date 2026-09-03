@@ -15,6 +15,9 @@ precedent); the real mover is driven against tiny REAL in-memory port classes
   the last save drops the other's file entry (a lost file);
 - per-target results in input order, per-move soft-failure counting, the
   CLEAN/DEGRADED batch verdicts, and the empty-input short-circuit;
+- byte-identical files are SKIPPED, not re-uploaded (per target and within a
+  move) — merging N duplicate entities must leave ONE copy of each unique
+  file, not N (the live multiplication incident);
 - a hard port failure inside a task surfaces as a SCRIPT error: the run
   dies BEFORE the merge's deletes, so the failing source keeps its files.
 """
@@ -142,12 +145,14 @@ def _raw(shared_id: str, *, documents: list | None = None, attachments: list | N
 def _wired_repos() -> tuple[InMemoryEntityRepo, InMemoryFileRepo]:
     s1 = _raw(
         "S1",
-        documents=[{"_id": "d1", "originalname": "a.pdf", "filename": "hashd1"}],
-        attachments=[{"_id": "a1", "originalname": "b.txt", "filename": "hasha1"}],
+        documents=[{"_id": "d1", "originalname": "a.pdf", "filename": "hashd1", "size": 3}],
+        attachments=[{"_id": "a1", "originalname": "b.txt", "filename": "hasha1", "size": 3}],
     )
-    s2 = _raw("S2", attachments=[{"_id": "a2", "originalname": "c.png", "filename": "hasha2"}])
-    s3 = _raw("S3", documents=[{"_id": "d3", "originalname": "z.pdf", "filename": "hashd3"}])
-    repo = InMemoryEntityRepo({"S1": s1, "S2": s2, "S3": s3})
+    s2 = _raw("S2", attachments=[{"_id": "a2", "originalname": "c.png", "filename": "hasha2", "size": 3}])
+    s3 = _raw("S3", documents=[{"_id": "d3", "originalname": "z.pdf", "filename": "hashd3", "size": 4}])
+    # The targets' raws must exist: the mover fetches each target once to build
+    # its duplicate-file index (T1/T2 carry no files here, so nothing dedupes).
+    repo = InMemoryEntityRepo({"S1": s1, "S2": s2, "S3": s3, "T1": _raw("T1"), "T2": _raw("T2")})
     files = InMemoryFileRepo({"hashd1": b"PDF", "hasha1": b"TXT", "hasha2": b"PNG", "hashd3": b"PDF2"})
     return repo, files
 
@@ -215,8 +220,8 @@ def test_dummy_parallel_move_noops_in_scope_in_input_order() -> None:
         {"from_shared_ids": ["S2"], "to_shared_id": "T2"},
     ]
     assert ns["move_files_to_entity_parallel"](moves) == [
-        {"to_shared_id": "T1", "moved": 0, "failed": 0},
-        {"to_shared_id": "T2", "moved": 0, "failed": 0},
+        {"to_shared_id": "T1", "moved": 0, "failed": 0, "skipped": 0},
+        {"to_shared_id": "T2", "moved": 0, "failed": 0, "skipped": 0},
     ]
 
 
@@ -250,8 +255,8 @@ def test_dry_run_parallel_move_records_one_op_per_move() -> None:
     ]
     summaries = ns["move_files_to_entity_parallel"](moves)
     assert summaries == [
-        {"to_shared_id": "T1", "moved": 2, "failed": 0},
-        {"to_shared_id": "T2", "moved": 1, "failed": 0},
+        {"to_shared_id": "T1", "moved": 2, "failed": 0, "skipped": 0},
+        {"to_shared_id": "T2", "moved": 1, "failed": 0, "skipped": 0},
     ]
     assert records == [
         {"op": "move_files", "from_shared_ids": ["S1", "S2"], "to_shared_id": "T1"},
@@ -298,8 +303,8 @@ def test_real_parallel_move_uploads_per_target_in_input_order() -> None:
     ]
     summaries = ns["move_files_to_entity_parallel"](moves)
     assert summaries == [
-        {"to_shared_id": "T1", "moved": 3, "failed": 0},
-        {"to_shared_id": "T2", "moved": 1, "failed": 0},
+        {"to_shared_id": "T1", "moved": 3, "failed": 0, "skipped": 0},
+        {"to_shared_id": "T2", "moved": 1, "failed": 0, "skipped": 0},
     ]
     # Targets run in parallel so their uploads may interleave; each target's
     # own sequence must be the sequential mover's: per source, documents
@@ -314,7 +319,7 @@ def test_real_parallel_move_uploads_per_target_in_input_order() -> None:
 def test_real_parallel_move_counts_soft_failures_and_reports_degraded() -> None:
     s1 = _raw("S1", documents=[{"_id": "d1", "originalname": "a.pdf", "filename": "gone"}])  # no bytes stored
     s2 = _raw("S2", attachments=[{"_id": "a2", "originalname": "c.png", "filename": "hasha2"}])
-    repo = InMemoryEntityRepo({"S1": s1, "S2": s2})
+    repo = InMemoryEntityRepo({"S1": s1, "S2": s2, "T1": _raw("T1"), "T2": _raw("T2")})
     files = InMemoryFileRepo({"hasha2": b"PNG"}, fail_uploads=True)  # fetch ok, upload rejected
     throttle = ThrottleController()
     ns = _real_namespace(repo, files, throttle)
@@ -324,8 +329,8 @@ def test_real_parallel_move_counts_soft_failures_and_reports_degraded() -> None:
     ]
     summaries = ns["move_files_to_entity_parallel"](moves)
     assert summaries == [
-        {"to_shared_id": "T1", "moved": 0, "failed": 1},
-        {"to_shared_id": "T2", "moved": 0, "failed": 1},
+        {"to_shared_id": "T1", "moved": 0, "failed": 1, "skipped": 0},
+        {"to_shared_id": "T2", "moved": 0, "failed": 1, "skipped": 0},
     ]
     # DEGRADED resets the streak but never touches the worker allowance.
     snapshot = throttle.snapshot()
@@ -360,7 +365,7 @@ def test_real_task_failure_surfaces_as_a_script_error() -> None:
     """A hard port EXCEPTION inside a task (not a soft None/False failure) must
     kill the script: the run dies BEFORE the merge's deletes, so the failing
     source keeps its files (the slower-but-safe choice)."""
-    repo = InMemoryEntityRepo({"S1": _raw("S1")}, explode_on="BAD")
+    repo = InMemoryEntityRepo({"S1": _raw("S1"), "T1": _raw("T1"), "T2": _raw("T2")}, explode_on="BAD")
     files = InMemoryFileRepo({})
     ns = _real_namespace(repo, files)
     code = """
@@ -375,6 +380,55 @@ result = "never-reached"
     assert result is None
     assert error is not None
     assert "RuntimeError: fetch failed for BAD" in error
+
+
+# --- real mode: byte-identical duplicates are skipped, not multiplied ---------
+
+
+def test_real_parallel_move_skips_byte_identical_copies_within_a_move() -> None:
+    """THE multiplication bug, parallel form: a group's sources carry
+    byte-identical copies of the same files; only ONE copy of each unique file
+    may land on the target (the rest are counted as `skipped`)."""
+    s1 = _raw(
+        "S1",
+        documents=[{"_id": "d1", "originalname": "a.pdf", "filename": "src1", "size": 3}],
+        attachments=[{"_id": "h1", "originalname": "doc.html", "filename": "src2", "size": 4}],
+    )
+    s2 = _raw(
+        "S2",
+        documents=[{"_id": "d2", "originalname": "a.pdf", "filename": "src3", "size": 3}],
+        attachments=[{"_id": "h2", "originalname": "doc.html", "filename": "src4", "size": 4}],
+    )
+    s3 = _raw("S3", documents=[{"_id": "d3", "originalname": "a.pdf", "filename": "src5", "size": 3}])
+    repo = InMemoryEntityRepo({"S1": s1, "S2": s2, "S3": s3, "T1": _raw("T1")})
+    files = InMemoryFileRepo({"src1": b"PDF", "src2": b"HTML", "src3": b"PDF", "src4": b"HTML", "src5": b"PDF"})
+    ns = _real_namespace(repo, files)
+
+    summaries = ns["move_files_to_entity_parallel"]([{"from_shared_ids": ["S1", "S2", "S3"], "to_shared_id": "T1"}])
+
+    assert summaries == [{"to_shared_id": "T1", "moved": 2, "failed": 0, "skipped": 3}]
+    assert [u[3] for u in files.uploads] == ["a.pdf", "doc.html"]  # ONE of each unique file
+
+
+def test_real_parallel_move_skips_a_file_the_target_already_has() -> None:
+    """Each target's dedupe index is built from its own raw: a file byte-identical
+    to one already on THAT target is skipped there — and still uploads to a
+    different target that lacks it (per-target isolation)."""
+    s1 = _raw("S1", documents=[{"_id": "d1", "originalname": "a.pdf", "filename": "src1", "size": 3}])
+    t1 = _raw("T1", documents=[{"_id": "t1", "originalname": "a.pdf", "filename": "tgt1", "size": 3}])
+    repo = InMemoryEntityRepo({"S1": s1, "T1": t1, "T2": _raw("T2")})
+    files = InMemoryFileRepo({"src1": b"PDF", "tgt1": b"PDF"})
+    ns = _real_namespace(repo, files)
+
+    summaries = ns["move_files_to_entity_parallel"](
+        [{"from_shared_ids": ["S1"], "to_shared_id": "T1"}, {"from_shared_ids": ["S1"], "to_shared_id": "T2"}]
+    )
+
+    assert summaries == [
+        {"to_shared_id": "T1", "moved": 0, "failed": 0, "skipped": 1},  # target already has it
+        {"to_shared_id": "T2", "moved": 1, "failed": 0, "skipped": 0},  # T2 did not
+    ]
+    assert [u[1] for u in files.uploads] == ["T2"]
 
 
 # --- empty input short-circuits in every mode ---------------------------------

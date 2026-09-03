@@ -145,6 +145,7 @@ def _ref_from_entry(entry: Any, *, kind: Literal["document", "attachment"], enti
     filename_str = filename if isinstance(filename, str) and filename else file_id
     content_type = _DOCUMENT_CONTENT_TYPE if kind == "document" else _content_type_for(originalname)
     language = entity_language if isinstance(entity_language, str) and entity_language else None
+    size = entry.get("size")
     return FileRef(
         file_id=file_id,
         kind=kind,
@@ -152,6 +153,7 @@ def _ref_from_entry(entry: Any, *, kind: Literal["document", "attachment"], enti
         originalname=originalname,
         language=language,
         content_type=content_type,
+        size=size if isinstance(size, int) else None,
     )
 
 
