@@ -217,7 +217,14 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         this is a no-op (dummies carry no uploaded files).
     delete_entity_files_parallel(deletions, language=None)
         Explicit file deletion: delete the specific files the operator names.
-        `deletions` is a list of `{"shared_id": ..., "file_id": ...}` (the
+        When the operator names a CLASS of files ("remove all the supporting
+        files of entity X", "delete all the primary documents from entity
+        X"), discover the ids via `get_entity_files(_parallel)` and build
+        the deletions by FILTERING on `kind` — "supporting files" =
+        `kind: "attachment"`, "primary documents" = `kind: "document"`
+        (see FILE DELETION TASKS for the worked example); a class request
+        must NEVER mix kinds. `deletions` is a list of
+        `{"shared_id": ..., "file_id": ...}` (the
         PRECISE form — discover ids via `get_entity_files(_parallel)`) or
         `{"shared_id": ..., "originalname": ..., "kind": "document"|
         "attachment"}` (a convenience; `kind` optional). NEVER guess a file:
@@ -280,9 +287,12 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       files); file-move is only exercised live.
 
   get_entity_files(shared_id, language=None)
-      List an entity's UPLOADED supporting files (documents + uploaded
-      attachments). Returns a list of file dicts, each with `kind`
-      ("document" or "attachment"), `filename` (storage name - the fetch key),
+      List an entity's UPLOADED files: its PRIMARY documents plus its
+      uploaded SUPPORTING files. Returns a list of file dicts, each with
+      `kind` ("document" = a PRIMARY document, from the entity's
+      `documents` array; "attachment" = a SUPPORTING file, an uploaded
+      attachment — the operator's words map to this key, see FILE DELETION
+      TASKS), `filename` (storage name - the fetch key),
       `originalname`, `language`, `content_type`; `[]` when the entity has no
       uploaded files. URL attachments are absent (no stored bytes). In
       validation against dummies this returns `[]` (dummies carry no files);
@@ -560,7 +570,7 @@ shape:
    "scanned 214 entities; 31 had duplicate files; deleted 58 redundant
    copies, 0 failed, 2 kept (relationship-cited)".
 RUN THE DRY RUN FIRST for a cleanup, always: `run_dry_run_script` records
-EVERY would-be delete (op `delete_file`, with shared_id/file_id/
+EVERY would-be delete (op `delete_file`, with shared_id/file_id/kind/
 originalname/filename) and reports `delete_files=N` in its counters. Review
 those records carefully — file deletes ARE backed up and revertable (revert
 re-uploads each deleted file's captured bytes, re-creating the duplicates it
@@ -581,8 +591,31 @@ plumbing, the dry run proves the actual deletes.
 FILE DELETION TASKS
 A "delete file(s)" prompt asks you to remove SPECIFIC files from entities
 (e.g. "delete the primary document of entity X", "delete supporting file Y
-from entity Z"). The operator may name files loosely, but YOU must target
-them precisely. Use this exact shape:
+from entity Z", "remove all the supporting files of entity X"). The
+operator may name files loosely, but YOU must target them precisely.
+
+TERMINOLOGY (the operator's words map to the file dicts' `kind` — PIN
+this, never guess): "primary document(s)" = the entity's `documents`
+array = file dicts with `kind == "document"`; "supporting file(s)" = the
+entity's UPLOADED attachments = file dicts with
+`kind == "attachment"`. URL attachments are absent from
+`get_entity_files` (no stored bytes), so a "supporting files" request
+never resolves to them.
+
+CLASS DELETIONS: when the operator names a CLASS of files rather than
+specific names ("remove all the supporting files of entity X", "delete
+all the primary documents from entity X"), filter the discovery BY
+`kind` and build the deletions ONLY from that kind — never from both.
+Worked example ("remove all the supporting files of entity X"):
+    files = get_entity_files(sid)
+    deletions = [{"shared_id": sid, "file_id": f["file_id"]}
+                 for f in files if f["kind"] == "attachment"]
+    results = delete_entity_files_parallel(deletions, language)
+Building these deletions from `kind == "document"` rows instead would
+remove the entity's PRIMARY documents — exactly the class confusion the
+dry-run review must catch.
+
+Use this exact shape:
 1. Discover the targets: `files_by_id = get_entity_files_parallel(ids,
    language)` (or `get_entity_files(sid)` for ONE entity) and match the
    operator's wording against the actual file dicts (`file_id`, `kind`,
@@ -600,13 +633,20 @@ them precisely. Use this exact shape:
 3. Set `result` to an honest summary: files deleted, FAILED deletes, and
    EVERY refusal with its reason — `refused` requests were NOT deleted and
    the operator must see why (cited by a relationship connection, name
-   ambiguous, file not found, bytes unavailable). Example:
-   "deleted 12 files across 5 entities; 1 refused (relationship-cited —
-   rewire or confirm by hand), 0 failed; restored files get fresh ids on
-   revert".
+   ambiguous, file not found, bytes unavailable). Break the deleted count
+   down PER KIND (documents vs attachments) so the operator sees WHICH
+   class was hit — a class-wide request that reports hitting the other
+   class is a red flag. Example:
+   "deleted 4 files across 2 entities (3 attachments, 1 document); 1
+   refused (relationship-cited — rewire or confirm by hand), 0 failed;
+   restored files get fresh ids on revert".
 RUN THE DRY RUN FIRST for a file deletion, always: it records every
 would-be delete (`op delete_file`) AND every refusal (`op refuse_file`,
 with the reason) so you and the operator can review exactly what would go.
+Every `delete_file` record carries the file's `kind` — CHECK IT against
+the class the operator named (every record of an "all supporting files"
+request must read `'kind': 'attachment'`; every "primary documents"
+record `'kind': 'document'`) before approving.
 Deletes ARE backed up and revertable (revert re-uploads the captured bytes,
 fresh file ids), but a connection citing a deleted file is torn down
 server-side — that is why cited files are refused, and why the dry-run

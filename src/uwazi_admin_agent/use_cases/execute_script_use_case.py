@@ -8,6 +8,13 @@ raw before-state into :class:`FilesystemBackupStore` + :class:`MigrationManifest
 revert use case can restore exactly.
 
 Phase 6 productionizes safety on top of the Phase-4 flow:
+- the **state gate** (:func:`decide_execute_gate`) runs first: a run in an
+  APPLIED-but-not-reverted state with a live touch set (``EXECUTED`` /
+  ``VERIFIED``) is refused before ANYTHING is cleared — a refused execute
+  leaves the run exactly as revertable as before the attempt — and a
+  ``FAILED`` / ``GENERATION_FAILED`` run is refused too; on ``allow`` with
+  ``needs_reset`` (the ``REVERTED`` -> re-execute cycle) the touch set + the
+  run's backups are cleared so the fresh pass starts clean;
 - the **max-entities cap** is enforced mid-script (the intercept raises
   :class:`CapExceededError` after each op that grows the touch set);
 - an **on-error policy** (``stop`` vs ``stop-and-revert``) decides what happens
@@ -18,7 +25,9 @@ Phase 6 productionizes safety on top of the Phase-4 flow:
 
 Mirrors :class:`DummyEntityHarness._run_script`'s worker-thread pattern (a
 dedicated event loop for the sync CRUD helpers' ``run_until_complete`` calls).
-Not unit-tested (needs ports); validated via the simulation run.
+The gate + reset/refuse ordering is unit-tested with real in-memory ports in
+``tests/test_execute_use_case_gate.py``; the live-HTTP flow is validated via
+the simulation run.
 """
 
 import asyncio

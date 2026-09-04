@@ -612,6 +612,52 @@ def test_prompt_has_file_deletion_tasks_recipe() -> None:
     assert "honest summary: files deleted, FAILED deletes, and" in SYSTEM_PROMPT
 
 
+def test_prompt_pins_file_kind_terminology_mapping() -> None:
+    """The live "supporting files" incident (an "all supporting files" prompt
+    deleted primary + supporting): the prompt must PIN the operator's words to
+    the file dicts' `kind` — "primary document(s)" = the documents array =
+    kind "document"; "supporting file(s)" = uploaded attachments = kind
+    "attachment" — in both the get_entity_files declaration and FILE DELETION
+    TASKS, so a class-naming prompt can never target the wrong kind."""
+    assert '"primary document(s)" = the entity\'s `documents`' in SYSTEM_PROMPT
+    assert '`kind == "document"`' in SYSTEM_PROMPT
+    assert "entity's UPLOADED attachments = file dicts with" in SYSTEM_PROMPT
+    assert '`kind == "attachment"`' in SYSTEM_PROMPT
+    assert '"document" = a PRIMARY document' in SYSTEM_PROMPT  # get_entity_files declaration
+    assert '"attachment" = a SUPPORTING file' in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_class_deletion_by_kind_filter() -> None:
+    """When the operator names a CLASS ("remove all the supporting files of
+    entity X"), the script must filter the discovery BY kind and build the
+    deletions ONLY from that kind — the worked example pins the exact
+    comprehension the incident prompt needed, and the red-flag sentence says
+    what the confusion looks like."""
+    assert "CLASS DELETIONS" in SYSTEM_PROMPT
+    assert "filter the discovery BY\n`kind`" in SYSTEM_PROMPT
+    assert 'for f in files if f["kind"] == "attachment"' in SYSTEM_PROMPT
+    assert "must NEVER mix kinds" in SYSTEM_PROMPT
+    assert "exactly the class confusion the" in SYSTEM_PROMPT
+
+
+def test_prompt_requires_per_kind_result_breakdown() -> None:
+    """The result summary must break the deleted count down PER KIND so the
+    operator sees WHICH class was hit — the reviewability backstop that would
+    have exposed the "supporting files" run deleting documents."""
+    assert "down PER KIND (documents vs attachments)" in SYSTEM_PROMPT
+    assert "(3 attachments, 1 document)" in SYSTEM_PROMPT
+
+
+def test_prompt_dry_run_records_carry_kind_for_review() -> None:
+    """Every dry-run delete_file record carries the file's `kind` (the additive
+    recorder field), and the prompt must tell the script author to CHECK it
+    against the named class before approving — the review step that catches a
+    kind confusion before anything is deleted."""
+    assert "Every `delete_file` record carries the file's `kind`" in SYSTEM_PROMPT
+    assert "must read `'kind': 'attachment'`" in SYSTEM_PROMPT
+    assert "shared_id/file_id/kind/" in SYSTEM_PROMPT  # the CLEANUP field list carries it too
+
+
 def test_prompt_has_cleanup_tasks_recipe() -> None:
     """CLEANUP TASKS must exist with the discover-then-one-call shape:
     query_entities_full collects all_ids, ONE dedupe_entity_files_parallel

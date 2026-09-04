@@ -298,7 +298,8 @@ def test_dummy_dedupe_refuses_a_duplicated_shared_id() -> None:
 
 def test_dry_run_dedupe_records_would_be_deletes_not_kept_copies() -> None:
     """The audit trail: one delete_file record per WOULD-BE delete (with
-    shared_id/file_id/originalname/filename for review), none for the keeper,
+    shared_id/file_id/kind/originalname/filename for review — `kind` so the
+    operator can check which class each delete hits), none for the keeper,
     the English original, or the connection-cited copy that is kept."""
     records: list = []
     repo, files = _incident_repos()
@@ -309,8 +310,22 @@ def test_dry_run_dedupe_records_would_be_deletes_not_kept_copies() -> None:
         {"shared_id": "E2", "duplicates": 0, "deleted": 0, "failed": 0, "kept_cited": 0},
     ]
     assert records == [
-        {"op": "delete_file", "shared_id": "E1", "file_id": "d2", "originalname": "a.pdf", "filename": "f2"},
-        {"op": "delete_file", "shared_id": "E1", "file_id": "h2", "originalname": "doc.html", "filename": "g2"},
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "d2",
+            "kind": "document",
+            "originalname": "a.pdf",
+            "filename": "f2",
+        },
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "h2",
+            "kind": "attachment",
+            "originalname": "doc.html",
+            "filename": "g2",
+        },
     ]
     assert files.deletes == []  # the dry run never deletes
 
@@ -347,8 +362,22 @@ def test_count_ops_and_report_surface_would_delete_files() -> None:
     would_delete entities), and _format_result renders it for review."""
     records = [
         {"op": "delete", "shared_id": "E9"},
-        {"op": "delete_file", "shared_id": "E1", "file_id": "d2", "originalname": "a.pdf", "filename": "f2"},
-        {"op": "delete_file", "shared_id": "E1", "file_id": "h2", "originalname": "doc.html", "filename": "g2"},
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "d2",
+            "kind": "document",
+            "originalname": "a.pdf",
+            "filename": "f2",
+        },
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "h2",
+            "kind": "attachment",
+            "originalname": "doc.html",
+            "filename": "g2",
+        },
     ]
     counts = _count_ops(records)
     assert counts["delete"] == 1
