@@ -105,9 +105,13 @@ DEFAULT_ON_ERROR_POLICY: str = "stop"
 #
 # File bytes are immutable per Uwazi storage filename (minted fresh on every
 # upload — app/api/files/filesystem.ts — and never rewritten), so they cache
-# forever. Entity raws are mutable (agent writes + direct human edits), so
-# they carry a TTL plus write-path invalidation (CachedEntityRepository on
-# save/delete; BackupIntercept for sandbox CRUD writes). Set
+# forever EXCEPT that our own file deletes evict the deleted files' entries
+# (the delete helpers own the eviction; it is lossless — the backup store
+# captured the bytes before the delete). Entity raws are mutable (agent
+# writes + direct human edits), so they carry a TTL plus write-path
+# invalidation (CachedEntityRepository on save/delete; BackupIntercept for
+# sandbox CRUD writes AND files-collection mutations — deletes + revert
+# re-uploads; VerifyRevertUseCase refetches fresh). Set
 # UWAZI_ADMIN_FILE_CACHE=0 to bypass the cache entirely for debugging.
 FILE_CACHE_ENABLED: bool = True
 FILE_CACHE_DIR: Path = DATA_DIR / "file_cache"

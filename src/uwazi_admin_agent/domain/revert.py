@@ -3,6 +3,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.relationship_restore import (
     InboundRef,
@@ -106,11 +107,33 @@ class ReapplyRelationshipRefsAction(BaseModel):
     inbound_targets: list[InboundRef] = Field(default_factory=list)
 
 
+class RestoreDeletedFilesAction(BaseModel):
+    """Re-upload the run's deleted FILE rows (explicit deletes + dedupe cleanups).
+
+    Uwazi mints a fresh ``_id`` + storage filename on every upload, so the
+    restore is by CONTENT, not identity: each record's captured bytes are
+    loaded from the backup store (keyed ``(run_id, shared_id, file_id)``) and
+    re-uploaded to the target ``shared_id`` — the entity's CURRENT sharedId,
+    or its re-created NEW sharedId when the same run also deleted the entity
+    (which is why this action runs AFTER every ``RecreateEntityAction``).
+    Documents are ordered before attachments (mirroring
+    :func:`build_file_restore_actions` so the primary PDF lands first).
+    Re-uploading a ``dedupe``-source delete RE-CREATES a duplicate copy — the
+    correct undo of a dedupe cleanup, and the revert summary says so.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["restore_deleted_files"] = "restore_deleted_files"
+    files: list[DeletedFile] = Field(default_factory=list)
+
+
 RevertAction: TypeAlias = Annotated[
     RestoreRelationshipAction
     | RestoreEntityAction
     | RecreateEntityAction
     | ReapplyRelationshipRefsAction
+    | RestoreDeletedFilesAction
     | DeleteEntityAction,
     Field(discriminator="kind"),
 ]
@@ -136,7 +159,13 @@ def build_revert_actions(
        that referenced a deleted entity. Hubs to still-existing entities that
        were NOT cascade-stripped (the deleted entity's own outgoing refs) are
        auto-restored by the create path and not re-applied here.
-    5. Delete created entities — **last**, so references held by restored
+    5. Re-upload the run's deleted FILE rows (:class:`RestoreDeletedFilesAction`)
+       — after the re-creates + relationship re-apply, because a file whose
+       entity was also deleted must land on the NEW sharedId (minted by step 3),
+       and file rows are orthogonal to entity raws (a file re-upload never
+       interferes with a relationship re-save). Still-existing entities keep
+       their sharedId. Best-effort per file, like every file restore.
+    6. Delete created entities — **last**, so references held by restored
        entities are valid until every created entity is removed.
 
     Pure: touches no filesystem or network. ``load_snapshot`` is the injected
@@ -183,6 +212,14 @@ def build_revert_actions(
                 inbound_targets=inbound_targets,
             )
         )
+
+    if manifest.deleted_files:
+        # Documents first (the primary PDF lands before attachments), then
+        # uploaded attachments — the same order as build_file_restore_actions.
+        # sorted() is stable, so the manifest's insertion order survives within
+        # each kind.
+        ordered = sorted(manifest.deleted_files, key=lambda f: 0 if f.kind == "document" else 1)
+        actions.append(RestoreDeletedFilesAction(files=list(ordered)))
 
     for created in manifest.created:
         actions.append(DeleteEntityAction(shared_id=created.shared_id))

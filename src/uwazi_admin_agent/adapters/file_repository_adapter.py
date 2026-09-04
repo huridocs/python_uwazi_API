@@ -55,3 +55,13 @@ class UwaziFileRepository(FileRepositoryPort):
         if not ok:
             logger.warning("attachment upload failed sharedId={} title={}", shared_id, title)
         return ok
+
+    @override
+    async def delete_file(self, file_id: str) -> bool:
+        # Delegates to uwazi_api's existing DELETE /api/files?_id=... call. The
+        # server tears the file row + bytes AND the connections citing the file
+        # (see the port's docstring); the caller decides what is safe to delete.
+        ok = self._repo.delete_file(file_id)
+        if not ok:
+            logger.warning("file delete failed file_id={}", file_id)
+        return ok

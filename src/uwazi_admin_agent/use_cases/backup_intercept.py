@@ -18,6 +18,12 @@ only place that learns which entities a script mutated. Every intercepted
 mutating op drops the affected entities' cached raws via
 :class:`CacheInvalidationPort` right AFTER the underlying write (a failed
 write changes nothing and invalidates nothing), keeping later reads honest.
+File-row mutations ride the same hook: file rows are not entity rows (a
+raw's ``documents``/``attachments`` are a runtime JOIN from the files
+collection by sharedId), so a file DELETE is invisible to the entity-row
+write paths — ``_record_deleted_files`` is the seam that invalidates the
+affected entities' cached raws and evicts the deleted files' cached bytes
+(the bytes are already in the backup store, so eviction is lossless).
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from uwazi_admin_agent.domain.backup_decision import (
     populate_manifest,
 )
 from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
+from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
@@ -338,6 +345,60 @@ class BackupIntercept:
         """The set of shared_ids currently in manifest.created."""
         return {e.shared_id for e in self._manifest.created}
 
+    def _save_file_backup(self, shared_id: str, file_id: str, data: bytes) -> None:
+        """Persist one to-be-deleted file's bytes BEFORE the delete call.
+
+        The deletion core's revert precondition: called on the WORKER thread
+        with BYTES IN HAND (store writes are sync filesystem I/O — the worker
+        cannot borrow the script's event loop), keyed
+        ``(run_id, shared_id, file_id)`` exactly like the delete-path capture.
+        The bytes of refused/soft-failed targets stay in the store as harmless
+        orphans (``clear_run`` wipes them on re-execute). File rows are not
+        entity writes, so NO entity snapshot is taken here — the entity raw
+        is untouched by a file delete. The CACHE consequences (raw + byte
+        eviction) are owned by :meth:`_record_deleted_files`, which runs only
+        for the deletes that actually succeeded.
+        """
+        self._backup_store.save_file_bytes(self._run_id, shared_id, file_id, data)
+
+    def _record_deleted_files(self, records: list[DeletedFile]) -> None:
+        """Record successful file-deletes on the manifest + invalidate caches (script thread).
+
+        Called by the bound file-deletion helpers AFTER the deletion batch
+        joins — manifest writes never race the worker tasks (the same
+        invariant the write helpers keep) — with one :class:`DeletedFile` per
+        delete that SUCCEEDED (a soft-``False`` delete left the file in place;
+        recording it would make revert re-upload a copy that never went away,
+        a duplicate). Then the caches are dropped so the files-collection
+        mutation is visible to the very next read: the affected entities'
+        cached raws (all language rows — the JOIN view is shared across
+        locales) and the deleted files' cached bytes (a stale raw's ghost ref
+        plus its still-cached bytes would let a re-run re-attempt the finished
+        delete). Cache eviction is lossless by construction — the cache is a
+        read-through mirror, the truth is Uwazi + this run's backup store
+        (the bytes were persisted BEFORE each delete), and entries repopulate
+        lazily on the next read.
+
+        Invalidation runs BEFORE the cap check (distinct entities — see
+        :func:`touch_set_count`) and any hard-error re-raise (the helpers call
+        this before ``_raise_first_write_error``), so a partial or
+        cap-tripping batch leaves its APPLIED deletes recorded AND
+        cache-fresh — revertable and re-runnable. The ``delete_file`` audit
+        record still closes the method.
+        """
+        if not records:
+            return
+        self._manifest.deleted_files.extend(records)
+        self._invalidate(sorted({r.shared_id for r in records}))
+        self._invalidate_file_bytes([r.filename for r in records])
+        self._enforce_cap()
+        self._emit("delete_file", sorted({r.shared_id for r in records}))
+        logger.debug(
+            "backup intercept: recorded {} deleted file(s) on {} entity(ies)",
+            len(records),
+            len({r.shared_id for r in records}),
+        )
+
     def _invalidate(self, shared_ids: list[str]) -> None:
         """Drop cached raws for ``shared_ids`` (no-op without a wired cache control).
 
@@ -347,3 +408,15 @@ class BackupIntercept:
         if self._cache_control is None or not shared_ids:
             return
         self._cache_control.invalidate_entities(shared_ids)
+
+    def _invalidate_file_bytes(self, filenames: list[str]) -> None:
+        """Evict cached bytes of deleted files (no-op without a cache control).
+
+        Only the delete seam calls this, and only for deletes that SUCCEEDED
+        (their bytes are already in the run's backup store — eviction is
+        lossless; a soft-failed delete left its file in place, so its cached
+        bytes stay valid).
+        """
+        if self._cache_control is None or not filenames:
+            return
+        self._cache_control.invalidate_files(filenames)

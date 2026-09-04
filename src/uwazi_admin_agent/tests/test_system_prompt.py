@@ -531,3 +531,103 @@ def test_prompt_multi_group_merge_batches_the_three_bulk_calls() -> None:
     assert "move_files_to_entity_parallel(all_moves, language)" in SYSTEM_PROMPT
     assert "delete_entities(all_source_ids)" in SYSTEM_PROMPT
     assert "Never delete a source before its group's move completed." in SYSTEM_PROMPT
+
+
+def test_prompt_declares_the_dedupe_files_helper() -> None:
+    """The cleanup helper must be declared with its shared_ids contract, the
+    per-entity result shape (duplicates/deleted/failed/kept_cited), and the
+    one-entity-per-call ValueError guard — mirroring the move helper's
+    declaration style so bulk cleanup scripts batch into ONE call."""
+    assert "dedupe_entity_files_parallel(shared_ids, language=None)" in SYSTEM_PROMPT
+    assert '{"shared_id": ..., "duplicates": N, "deleted": M,' in SYSTEM_PROMPT
+    assert '"kept_cited": J}' in SYSTEM_PROMPT
+    assert "at most ONCE per call" in SYSTEM_PROMPT
+    assert "duplicated id raises ValueError" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_dedupe_kind_separation_and_keep_first() -> None:
+    """Documents and attachments must dedupe SEPARATELY (same bytes in the
+    document slot vs. an attachment slot are different rows), and the keeper
+    is the FIRST copy in the raw order — the pinned keep-rule."""
+    assert "Documents and attachments dedupe" in SYSTEM_PROMPT
+    assert "the FIRST copy in the entity's raw order is the" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_dedupe_never_deletes_unconfirmable_or_last_copies() -> None:
+    """The no-loss contract: only byte-identical duplicates are deleted; a
+    same-named but different file is KEPT, unfetchable bytes are KEPT, and
+    every delete leaves a byte-identical survivor on the same entity."""
+    assert "Only byte-identical duplicates are ever deleted" in SYSTEM_PROMPT
+    assert "a file whose bytes cannot be fetched is" in SYSTEM_PROMPT
+    assert "every delete leaves a byte-identical survivor on" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_cleanup_keeps_cited_copies() -> None:
+    """Uwazi tears down connections citing a deleted file (files.delete →
+    connections.delete); the prompt must teach that a relationship-cited
+    duplicate is NEVER deleted but kept and counted — a leftover duplicate is
+    cosmetic, a torn-down reference is a loss."""
+    assert "A copy that one of the entity's relationships cites is" in SYSTEM_PROMPT
+    assert "counted in `kept_cited`" in SYSTEM_PROMPT
+    assert "operator may need to rewire those by hand" in SYSTEM_PROMPT
+
+
+def test_prompt_declares_file_deletes_backed_up_and_revertable() -> None:
+    """File deletes are now backed up (bytes persisted BEFORE the delete call)
+    and revertable (revert re-uploads the captured bytes) — the prompt must
+    say so, keep the dry-run-first review (the V2 text-reference residual
+    is what it still guards), and be honest that a reverted cleanup
+    RE-CREATES its duplicates."""
+    assert "REVERTABLE: every delete's bytes are backed up BEFORE the delete" in SYSTEM_PROMPT
+    assert "revert re-uploads them" in SYSTEM_PROMPT
+    assert "RUN THE DRY RUN FIRST for a cleanup, always" in SYSTEM_PROMPT
+    assert "op `delete_file`" in SYSTEM_PROMPT
+    assert "reports `delete_files=N` in its counters" in SYSTEM_PROMPT
+    assert "publish/unpublish/rewire/delete-files)" in SYSTEM_PROMPT
+
+
+def test_prompt_declares_the_explicit_file_deletion_helper() -> None:
+    """The explicit deletion helper must be declared with its deletions
+    contract (precise file_id form + name convenience), the per-entity
+    result shape (requested/deleted/failed/refused/refusals), the cited
+    refusal, and the ambiguity refusal with candidates — never a guess."""
+    assert "delete_entity_files_parallel(deletions, language=None)" in SYSTEM_PROMPT
+    assert '{"shared_id": ..., "file_id": ...}' in SYSTEM_PROMPT
+    assert '"refused": J' in SYSTEM_PROMPT
+    assert "REFUSED by default" in SYSTEM_PROMPT
+    assert "REFUSED with the candidate file ids" in SYSTEM_PROMPT
+
+
+def test_prompt_has_file_deletion_tasks_recipe() -> None:
+    """FILE DELETION TASKS must exist and pin the no-guessing workflow:
+    discover via get_entity_files(_parallel), build explicit file_id
+    deletions, ONE delete call, and an honest result reporting failures AND
+    refusals — plus the dry-run-first review of delete_file + refuse_file
+    records."""
+    assert "FILE DELETION TASKS" in SYSTEM_PROMPT
+    assert 'NEVER guess which file is "the primary document"' in SYSTEM_PROMPT
+    assert "FOUR same-named document rows" in SYSTEM_PROMPT
+    assert "delete_entity_files_parallel(\n   deletions, language)" in SYSTEM_PROMPT
+    assert "op refuse_file" in SYSTEM_PROMPT
+    assert "honest summary: files deleted, FAILED deletes, and" in SYSTEM_PROMPT
+
+
+def test_prompt_has_cleanup_tasks_recipe() -> None:
+    """CLEANUP TASKS must exist with the discover-then-one-call shape:
+    query_entities_full collects all_ids, ONE dedupe_entity_files_parallel
+    call cleans them, and result reports kept/deleted per the counters — no
+    hand-rolled duplicate detection in the script (the helper decides by
+    exact bytes)."""
+    assert "CLEANUP TASKS" in SYSTEM_PROMPT
+    assert "dedupe_entity_files_parallel(all_ids," in SYSTEM_PROMPT
+    assert "the helper decides per entity by exact bytes" in SYSTEM_PROMPT
+    assert "clean entity is a safe no-op for it" in SYSTEM_PROMPT
+    assert "deleted 58 redundant" in SYSTEM_PROMPT  # the honest-summary example
+
+
+def test_prompt_flags_v2_text_reference_residual_risk() -> None:
+    """V2 text references to a deleted duplicate are torn down with it and are
+    not visible to the script — the residual risk the dry-run review covers;
+    the limitation must stay pinned so it is not silently dropped."""
+    assert "V2 text references to a" in SYSTEM_PROMPT
+    assert "NOT visible to the script" in SYSTEM_PROMPT

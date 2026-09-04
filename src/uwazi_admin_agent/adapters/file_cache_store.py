@@ -10,14 +10,19 @@ namespacing is applied by :func:`uwazi_admin_agent.drivers.runtime.build_file_ca
 Two freshness regimes (see :mod:`uwazi_admin_agent.domain.file_cache`):
 
 - File bytes are immutable per storage filename (Uwazi mints a fresh name per
-  upload and only ever deletes files), so byte entries never expire and are
-  never invalidated — a hit is always the true content.
+  upload and never rewrites it), so byte entries never expire. They are
+  EVICTED when our own code deletes the owning file row (the delete helpers
+  call :meth:`invalidate_files` — the bytes are already in the run's backup
+  store, so eviction is lossless); a file deleted by someone else (a human
+  in the Uwazi UI) can still ghost data-correctly until the entity-raw TTL
+  refreshes the JOIN view.
 - Entity raws are mutable, so each entry wraps the raw with its capture time
   and expires via ``ttl_seconds`` (``<= 0`` disables raw caching entirely).
   Our OWN writes invalidate immediately through
   :class:`~uwazi_admin_agent.ports.cache_invalidation_port.CacheInvalidationPort`
   (the raw-repository decorator on save/delete; :class:`BackupIntercept` for
-  sandbox CRUD writes); direct human edits are bounded by the TTL alone.
+  sandbox CRUD writes and files-collection mutations — deletes AND revert
+  re-uploads); direct human edits are bounded by the TTL alone.
 
 Concurrency: every write is atomic (temp file + ``os.replace``), every read
 treats any OSError as a miss, and there are no cross-process locks —
@@ -139,6 +144,24 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         invalidated = sum(1 for sid in shared_ids if self._rm_dir(self._entities_dir / safe_cache_name(sid)))
         if invalidated:
             self._bump(invalidations=invalidated)
+
+    @override
+    def invalidate_files(self, filenames: Sequence[str]) -> None:
+        """Drop the cached bytes of each storage filename (best-effort, race-tolerant).
+
+        Mirrors :meth:`invalidate_entities`: unknown names are a true no-op
+        (never counted), eviction is lossless by construction (the delete
+        helpers persist the bytes to the run's backup store BEFORE the delete
+        call, and entries repopulate lazily on the next read), so a race that
+        double-deletes at worst leaves a harmless miss.
+        """
+        evicted = 0
+        for name in filenames:
+            path = self._files_dir / safe_cache_name(name)
+            if path.is_file() and self._unlink(path):
+                evicted += 1
+        if evicted:
+            self._bump(invalidations=evicted)
 
     # --- stats (run-boundary observability) --------------------------------------
 

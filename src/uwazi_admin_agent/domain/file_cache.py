@@ -10,6 +10,10 @@ later task. Two very different freshness regimes apply:
   (``app/api/files/filesystem.ts::generateFileName``), never rewrites a stored
   filename, and tears the bytes down with the owning entity — so a cached
   entry can never hold WRONG bytes, only bytes the server would now 404.
+  Our own deletes EVICT the deleted files' entries
+  (:class:`~uwazi_admin_agent.ports.cache_invalidation_port.CacheInvalidationPort`
+  — the delete helpers own the eviction, and it is lossless: the backup store
+  captured the bytes before the delete).
 - **Entity raws are mutable** (the agent writes them at execute/revert time and
   humans edit Uwazi directly), so raw entries carry a capture time and expire
   via ``ENTITY_CACHE_TTL_SECONDS``, plus explicit write-path invalidation

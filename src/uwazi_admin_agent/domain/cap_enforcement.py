@@ -6,11 +6,19 @@ the running touch-set size *after* each mutating op; if it exceeds
 :data:`MAX_ENTITIES_PER_RUN` the intercept raises :class:`CapExceededError`
 mid-script, which surfaces as a script error and triggers the on-error policy.
 
-The touch set is the disjoint union of ``manifest.modified`` +
-``manifest.deleted`` + ``manifest.created``. Rewired from-entities are added to
+The touch set is the set of DISTINCT entities the run has touched: the
+union of ``manifest.modified`` + ``manifest.deleted`` + ``manifest.created``
+plus the entities whose FILE rows the run deleted
+(``manifest.deleted_files`` counts by DISTINCT ENTITY, not by file — one
+entity losing three duplicate copies is one touched entity, the same
+resource a CRUD op would touch). Rewired from-entities are added to
 ``modified`` by the intercept (see :func:`decide_backup` for
 ``create_relationships``), so they are already counted there — no double-count.
-Pure: no I/O; the unit-test target named by the Phase 6 DoD ("cap enforcement").
+The three entity lists are disjoint by construction (first-touch semantics +
+created-set tracking in :func:`decide_backup`), so the union's size equals
+the historical plain sum for entity-only runs — file-only runs are the only
+ones that grow it. Pure: no I/O; the unit-test target named by the Phase 6 DoD
+("cap enforcement").
 """
 
 from __future__ import annotations
@@ -22,14 +30,24 @@ class CapExceededError(RuntimeError):
     """The run's touch set exceeded the configured max-entities cap."""
 
 
+def touched_entity_ids(manifest: MigrationManifest) -> set[str]:
+    """The DISTINCT shared ids the run has touched (entity writes + file deletes)."""
+    touched = {e.shared_id for e in manifest.modified}
+    touched |= {e.shared_id for e in manifest.deleted}
+    touched |= {e.shared_id for e in manifest.created}
+    touched |= {f.shared_id for f in manifest.deleted_files}
+    return touched
+
+
 def touch_set_count(manifest: MigrationManifest) -> int:
     """Return the number of distinct entities the run has touched so far.
 
-    The three manifest categories are disjoint by construction (first-touch
-    semantics + created-set tracking in :func:`decide_backup`), so a plain sum
-    is the count — no dedup needed.
+    DISTINCT ENTITIES, not files: a run that deletes files from an entity it
+    never otherwise touched adds ONE to the count no matter how many file
+    rows went away (the cap bounds blast radius per entity, and the three
+    entity lists' disjointness makes the union exact).
     """
-    return len(manifest.modified) + len(manifest.deleted) + len(manifest.created)
+    return len(touched_entity_ids(manifest))
 
 
 def enforce_cap(manifest: MigrationManifest, cap: int) -> None:

@@ -209,4 +209,12 @@ class ExecuteScriptUseCase:
     @staticmethod
     def _has_touch_set(manifest: MigrationManifest) -> bool:
         """True if the manifest already carries any touch-set entries."""
-        return any((manifest.modified, manifest.deleted, manifest.created, manifest.rewired))
+        return any(
+            (
+                manifest.modified,
+                manifest.deleted,
+                manifest.created,
+                manifest.rewired,
+                manifest.deleted_files,
+            )
+        )

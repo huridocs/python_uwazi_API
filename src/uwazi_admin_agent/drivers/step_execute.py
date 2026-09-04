@@ -76,7 +76,8 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
     print(f"execute: run={run_name} status={result.status.value}")
     print(
         f"  modified={len(result.modified)} deleted={len(result.deleted)} "
-        f"created={len(result.created)} rewired={len(result.rewired)}"
+        f"created={len(result.created)} rewired={len(result.rewired)} "
+        f"deleted_files={len(result.deleted_files)}"
     )
     if runtime.file_cache is not None:
         # Same window the use case just logged — the snapshot is non-destructive.

@@ -77,7 +77,8 @@ def _format_result(report: object, attempt: int, limit: int) -> str:
     parts.append(
         "## Would-be writes\n"
         f"  update={report.would_update} create={report.would_create} delete={report.would_delete} "
-        f"publish={report.would_publish} unpublish={report.would_unpublish} rewire={report.would_rewire}"
+        f"publish={report.would_publish} unpublish={report.would_unpublish} rewire={report.would_rewire} "
+        f"delete_files={report.would_delete_files}"
     )
 
     if report.cache_stats is not None:
@@ -97,7 +98,12 @@ def _format_result(report: object, attempt: int, limit: int) -> str:
             parts.append(f"  ... and {len(report.records) - len(shown)} more")
 
     if report.passed:
-        if report.would_update == 0 and report.would_create == 0 and report.would_delete == 0:
+        if (
+            report.would_update == 0
+            and report.would_create == 0
+            and report.would_delete == 0
+            and report.would_delete_files == 0
+        ):
             parts.append(
                 "## No-op warning\n"
                 "  The dry run recorded 0 writes. On a prompt that asks for a change this\n"

@@ -202,10 +202,19 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         audit_log=audit_log,
         file_repository=file_repository,
         template_property_lookup=template_property_lookup,
+        # Re-upload targets' cached raws are dropped after the file restores
+        # (a re-upload mutates the files collection, not the entity row).
+        cache_control=file_cache,
     )
     verify_use_case = VerifyRevertUseCase(
         entity_repository=entity_repository,
         backup_store=backup_store,
+        # Deleted-file restores are verified by CONTENT (sha256 of the restored
+        # bytes vs the captured bytes), which needs byte fetches.
+        file_repository=file_repository,
+        # Invalidate-then-refetch: verification never reads through a cache
+        # entry our own writes could have made stale.
+        cache_control=file_cache,
     )
 
     return Runtime(

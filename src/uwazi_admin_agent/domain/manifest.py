@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 
 
@@ -40,7 +41,9 @@ class MigrationManifest(BaseModel):
     LLM generates a script, not a declarative plan), plus the entities
     ``modified`` and relationships ``rewired``, plus entities ``created`` and
     ``deleted`` by the script (Phase 4 — scripts can create/delete, unlike v1's
-    ops). Kept mutable because run status updates over the lifecycle.
+    ops), plus the ``deleted_files`` the run deleted (file rows are not entity
+    writes, so they get their own revert section — see :class:`DeletedFile`).
+    Kept mutable because run status updates over the lifecycle.
     """
 
     run_id: str = Field(description="Unique run identifier.")
@@ -62,6 +65,16 @@ class MigrationManifest(BaseModel):
     deleted: list[EntityIdentity] = Field(
         default_factory=list,
         description="Entities that existed pre-run and were deleted by the script (revert = restore from snapshot).",
+    )
+    deleted_files: list[DeletedFile] = Field(
+        default_factory=list,
+        description=(
+            "FILE rows the run deleted (dedupe cleanup or explicit deletion), with the "
+            "metadata revert needs to re-upload each one's captured bytes. File deletes "
+            "are not entity writes, so they cannot ride a snapshot; this is their own "
+            "revert section (populated on the script thread after the deletion batch "
+            "joins, successful deletes only)."
+        ),
     )
     status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
     last_executed_at: datetime | None = Field(
@@ -93,3 +106,4 @@ class MigrationManifest(BaseModel):
         self.rewired = []
         self.created = []
         self.deleted = []
+        self.deleted_files = []

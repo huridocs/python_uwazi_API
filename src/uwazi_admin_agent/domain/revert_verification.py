@@ -40,6 +40,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.deleted_file import to_file_ref
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.relationship_restore import (
     CapturedHub,
@@ -52,6 +53,23 @@ from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, IDENTITY_FIELDS, PLATFORM_MANAGED_FIELDS
 
 MismatchKind = Literal["entity", "relationship", "created"]
+
+# The file kind literals every file-gap check emits (typed so the builders
+# construct :class:`FileGap` with the exact Literal, not a widened str).
+_FileKind = Literal["document", "attachment"]
+
+# One file's content signature for the deleted-file restore check:
+# (kind, originalname, sha256|None). The digest is None when the bytes could
+# not be fetched (expected: backup-store load failure; actual: a live fetch
+# failure) — a None digest is a WILDCARD in the match: an unverifiable side
+# must not emit a false gap (the same bias as :func:`_file_signature`'s
+# language exclusion).
+FileContentSignature = tuple[_FileKind, str, str | None]
+
+
+def _records_for(manifest: MigrationManifest, shared_id: str) -> list[Any]:
+    """The run's deleted-file records for one entity (manifest order kept)."""
+    return [r for r in manifest.deleted_files if r.shared_id == shared_id]
 
 
 def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -209,6 +227,7 @@ def verify_revert(
     manifest: MigrationManifest,
     snapshots: dict[str, EntitySnapshot],
     current_raws: dict[str, dict[str, Any] | None],
+    deleted_file_gaps: list[FileGap] | None = None,
 ) -> RevertVerificationResult:
     """Pure: compare post-revert current raws against snapshots + before-states.
 
@@ -219,9 +238,17 @@ def verify_revert(
     never restored). For modified/deleted entities a missing snapshot is a
     loud error — it propagates (no silent skip), matching ``build_revert_actions``.
     matches ``build_revert_actions``.
+
+    ``deleted_file_gaps`` are pre-computed by the caller (the use case) for the
+    run's ``manifest.deleted_files`` restores: Uwazi mints a fresh ``_id`` +
+    storage filename on every re-upload, so raw equality CANNOT verify a file
+    restore — the check compares per entity the multiset of
+    (kind, originalname, sha256) signatures (:func:`build_deleted_file_gaps`),
+    which needs byte I/O and therefore lives outside this pure function. They
+    fold into the same ``file_gaps`` list the delete-recreate check emits.
     """
     mismatches: list[VerificationMismatch] = []
-    file_gaps: list[FileGap] = []
+    file_gaps: list[FileGap] = list(deleted_file_gaps or [])
     relationship_gaps: list[RelationshipGap] = []
     checked = 0
 
@@ -259,13 +286,20 @@ def verify_revert(
             mismatches.append(
                 VerificationMismatch(shared_id=deleted.shared_id, kind="entity", expected=snap.raw, actual=actual)
             )
-        # File-restore gap check: compare the snapshot's captured files against
-        # the re-created entity's documents/attachments by originalname+kind (file
-        # identity is re-minted, so compare by data). A None actual (re-create
-        # failed) has no file set to compare — the entity mismatch above already
-        # flags it.
-        if actual is not None and snap.files:
-            file_gaps.extend(build_file_gaps(deleted.shared_id, snap.files, actual))
+        # File-restore gap check: compare the snapshot's captured files PLUS
+        # this entity's run-deleted file records (the FULL pre-delete set — the
+        # recreate's file restore brings the captured files back, and
+        # RestoreDeletedFilesAction brings the earlier deletes back; merging
+        # them prevents the restored deletes from surfacing as false ``extra``
+        # gaps) against the re-created entity's documents/attachments by
+        # originalname+kind (file identity is re-minted, so compare by data). A
+        # None actual (re-create failed) has no file set to compare — the entity
+        # mismatch above already flags it.
+        if actual is not None:
+            records = _records_for(manifest, deleted.shared_id)
+            expected_refs = [*(snap.files or []), *[to_file_ref(r) for r in records]]
+            if expected_refs:
+                file_gaps.extend(build_file_gaps(deleted.shared_id, expected_refs, actual))
 
     for rewired in manifest.rewired:
         sid = rewired.entity.shared_id
@@ -378,6 +412,83 @@ def build_file_gaps(
         if (act_name, act_kind) not in expected:
             gaps.append(FileGap(shared_id=shared_id, gap="extra", originalname=act_name, kind=act_kind))
     return gaps
+
+
+# --- deleted-file restore gap check (explicit deletes + dedupe cleanups) -------
+
+
+def build_deleted_file_gaps(
+    shared_id: str,
+    expected: list[FileContentSignature],
+    actual: list[FileContentSignature],
+) -> list[FileGap]:
+    """Pure: every run-deleted file must be BACK on the entity, by content.
+
+    A CONTAINMENT check, not multiset equality: reverting a dedupe cleanup
+    intentionally RE-CREATES duplicate copies (the correct undo), so
+    unexpected extra copies are not gaps — only missing content is. Uwazi
+    mints a fresh ``_id`` + storage filename on every re-upload, so the match
+    is by ``(kind, originalname, sha256)`` within each name group, never
+    identity. A ``None`` digest (bytes unavailable on that side) is a
+    wildcard: known-digest expectations match same-digest actuals first,
+    then wildcards (a fetch failure must not fabricate a gap), and
+    None-digest expectations match whatever remains. Emits one ``missing``
+    gap per expected file that found no actual. Pure: no I/O.
+    """
+    gaps: list[FileGap] = []
+    for key, exp_digests, act_digests in _zip_signature_groups(expected, actual):
+        gaps.extend(_missing_for_group(shared_id, key, exp_digests, act_digests))
+    return gaps
+
+
+def _zip_signature_groups(
+    expected: list[FileContentSignature], actual: list[FileContentSignature]
+) -> list[tuple[tuple[_FileKind, str], list[str | None], list[str | None]]]:
+    """Join both signature lists' (kind, originalname) groups, deterministically."""
+    keys = sorted({(kind, name) for kind, name, _ in (*expected, *actual)})
+    exp_groups = _group_by_name(expected)
+    act_groups = _group_by_name(actual)
+    return [(key, exp_groups.get(key, []), act_groups.get(key, [])) for key in keys]
+
+
+def _missing_for_group(
+    shared_id: str, key: tuple[_FileKind, str], exp: list[str | None], act: list[str | None]
+) -> list[FileGap]:
+    """The missing gaps for one (kind, originalname) group (containment).
+
+    Known-digest expectations consume same-digest actuals first, then a
+    wildcard (a fetch failure must not fabricate a gap); None-digest
+    expectations consume whatever remains. An expectation with nothing left
+    to match is a REAL gap — the content did not come back.
+    """
+    known_actuals: list[str] = [d for d in act if d is not None]
+    wildcards = act.count(None)
+    gaps: list[FileGap] = []
+    for digest in _known_first(exp):
+        if digest is not None and digest in known_actuals:
+            known_actuals.remove(digest)
+        elif digest is not None and wildcards:
+            wildcards -= 1  # an unverifiable actual stands in - no false gap
+        elif digest is None and known_actuals:
+            known_actuals.pop()
+        elif digest is None and wildcards:
+            wildcards -= 1
+        else:
+            gaps.append(FileGap(shared_id=shared_id, gap="missing", originalname=key[1], kind=key[0]))
+    return gaps
+
+
+def _known_first(exp: list[str | None]) -> list[str | None]:
+    """Order a group's expectations: known digests first, wildcards last."""
+    return [d for d in exp if d is not None] + [None] * exp.count(None)
+
+
+def _group_by_name(signatures: list[FileContentSignature]) -> dict[tuple[str, str], list[str | None]]:
+    """Group content signatures by (kind, originalname), digests per group."""
+    groups: dict[tuple[str, str], list[str | None]] = {}
+    for kind, originalname, digest in signatures:
+        groups.setdefault((kind, originalname), []).append(digest)
+    return groups
 
 
 # --- mutual-relationship-restore gap check ----------------------------------

@@ -2,18 +2,28 @@
 
 The production revert path: load the persisted manifest, call the pure
 :func:`build_revert_actions` to get the ordered action list, and execute each
-action via :class:`EntityRepositoryPort` (``save_raw`` for entity/relationship
+the :class:`EntityRepositoryPort` (``save_raw`` for entity/relationship
 restores, ``create_raw`` for deleted-entity re-creates, ``delete_by_shared_id``
-for created-entity deletions) + :class:`TemplatePropertyLookupPort` (resolves
+for created-entity deletions) + :class:`FileRepositoryPort` (deleted-file
+re-uploads) + :class:`TemplatePropertyLookupPort` (resolves
 the property name for inbound-ref restore on still-existing entities). The
 ordering (rewired relationships → modified → deleted re-creates → relationship
-ref re-apply → delete-created-last) is guaranteed by the builder; this use
-case is a thin orchestrator.
+ref re-apply → deleted-file re-uploads → delete-created-last) is guaranteed by the
+builder; this use case is a thin orchestrator.
 
 Phase 6 adds an **audit record** per revert action (step=REVERT) so the run's
 audit log records the restore alongside the execute writes that produced it.
 Optional injection keeps existing tests green; the runtime always wires a real
 log.
+
+The optional ``cache_control`` port (the runtime wires the shared cache)
+makes revert cache-resilient: a re-upload mutates the FILES collection (a
+raw's documents/attachments are a runtime JOIN by sharedId, not entity-row
+state), so nothing on the entity-row write paths invalidates it — this use
+case drops the re-upload targets' cached raws itself after the uploads
+(lossless by construction: the cache is a read-through mirror and entries
+repopulate lazily; ``None`` = cache disabled = no-op, the existing
+convention).
 
 Testable with an in-memory repo + in-memory backup store (the DoD's "with an
 in-memory repo").
@@ -36,6 +46,7 @@ from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
     ReapplyRelationshipRefsAction,
     RecreateEntityAction,
+    RestoreDeletedFilesAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
@@ -43,6 +54,7 @@ from uwazi_admin_agent.domain.revert import (
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
+from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.template_property_port import TemplatePropertyLookupPort
@@ -58,12 +70,14 @@ class RevertRunUseCase:
         audit_log: AuditLogPort | None = None,
         file_repository: FileRepositoryPort | None = None,
         template_property_lookup: TemplatePropertyLookupPort | None = None,
+        cache_control: CacheInvalidationPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
         self._audit_log: AuditLogPort | None = audit_log
         self._file_repository: FileRepositoryPort | None = file_repository
         self._template_property_lookup: TemplatePropertyLookupPort | None = template_property_lookup
+        self._cache_control: CacheInvalidationPort | None = cache_control
 
     async def revert(self, run_id: str) -> None:
         """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones.
@@ -101,12 +115,13 @@ class RevertRunUseCase:
         self._backup_store.update_status(run_id, RunStatus.REVERTED)
         self._emit_run(AuditOutcome.SUCCESS, run_id)
         logger.info(
-            "revert done run={} actions={} modified={} deleted={} created={}",
+            "revert done run={} actions={} modified={} deleted={} created={} deleted_files={}",
             run_id,
             len(actions),
             len(manifest.modified),
             len(manifest.deleted),
             len(manifest.created),
+            len(manifest.deleted_files),
         )
 
     async def _execute_action(self, action: Any, run_id: str, manifest: Any) -> None:
@@ -120,6 +135,8 @@ class RevertRunUseCase:
         elif isinstance(action, RecreateEntityAction):
             new_shared_id = await self._create_deleted_entity(action, run_id, manifest)
             await self._restore_files(action.snapshot, new_shared_id, run_id)
+        elif isinstance(action, RestoreDeletedFilesAction):
+            await self._restore_deleted_files(action, run_id, manifest)
         elif isinstance(action, ReapplyRelationshipRefsAction):
             await self._reapply_relationship_refs(action, run_id, manifest)
         elif isinstance(action, DeleteEntityAction):
@@ -344,15 +361,92 @@ class RevertRunUseCase:
             else:
                 self._emit_file(run_id, new_shared_id, failed=True, detail=act.originalname)
                 logger.warning("revert: file upload failed sharedId={} originalname={}", new_shared_id, act.originalname)
+        # The re-uploads mutated the target's files collection — drop its cached
+        # raw (belt-and-suspenders: the recreate's create_raw had nothing cached
+        # under the fresh sharedId, but uploads alone would leave a stale entry).
+        self._invalidate([new_shared_id])
 
     async def _upload_one(self, action: Any, data: bytes, new_shared_id: str) -> bool:
         """Dispatch one file-restore action to the file repository."""
+        assert self._file_repository is not None  # guarded by _restore_files
         language = action.language
         title = action.originalname
         content_type = action.content_type
         if action.kind == "upload_document":
             return await self._file_repository.upload_document(data, new_shared_id, language, title, content_type)
         return await self._file_repository.upload_attachment(data, new_shared_id, language, title, content_type)
+
+    async def _restore_deleted_files(self, action: RestoreDeletedFilesAction, run_id: str, manifest: Any) -> None:
+        """Re-upload every run-deleted file row (explicit + dedupe deletions).
+
+        Target: the entity's CURRENT sharedId — or its re-created NEW sharedId
+        when the same run also deleted the entity (``manifest.deleted``'
+        ``restored_shared_id``, minted by the ``RecreateEntityAction`` that
+        already ran — file re-uploads and entity raw restores are orthogonal,
+        which is why file rows could not ride the entity snapshots in the
+        first place). Best-effort per file, like ``_restore_files``: a failed
+        load/upload is logged + audited as ``restore_file_failed`` but never
+        aborts the revert — the gap surfaces in post-revert verification.
+        Re-uploading a dedupe-source delete re-creates a duplicate copy (the
+        correct undo of a dedupe cleanup); the driver's revert summary says
+        so plainly via the record's ``source``.
+        """
+        if self._file_repository is None or not action.files:
+            return
+        id_map = {e.shared_id: e.restored_shared_id for e in manifest.deleted if e.restored_shared_id}
+        targets: set[str] = set()
+        for record in action.files:
+            target = id_map.get(record.shared_id, record.shared_id)
+            targets.add(target)
+            try:
+                data = self._backup_store.load_file_bytes(run_id, record.shared_id, record.file_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort; missing bytes must not abort revert
+                self._emit_file(run_id, target, failed=True, detail=f"load bytes: {exc}")
+                logger.warning(
+                    "revert: deleted-file bytes missing run={} old={} fileId={}: {}",
+                    run_id,
+                    record.shared_id,
+                    record.file_id,
+                    exc,
+                )
+                continue
+            ok = await self._upload_deleted_file(record, data, target)
+            if ok:
+                self._emit_file(run_id, target, failed=False)
+                logger.debug("revert: re-uploaded deleted file sharedId={} originalname={}", target, record.originalname)
+            else:
+                self._emit_file(run_id, target, failed=True, detail=record.originalname)
+                logger.warning("revert: deleted-file upload failed sharedId={} originalname={}", target, record.originalname)
+        # The re-uploads mutated each target's files collection (a runtime JOIN,
+        # not entity-row state) — drop the targets' cached raws so the next
+        # read sees the restored files. Uniform over successes and failures
+        # (lossless either way); re-created entities' fresh sharedIds have
+        # nothing cached, so invalidating them is a harmless no-op.
+        self._invalidate(sorted(targets))
+
+    async def _upload_deleted_file(self, record: Any, data: bytes, target: str) -> bool:
+        """Dispatch one deleted-file re-upload to the right endpoint.
+
+        Mirrors :meth:`_upload_one` but keys on :class:`DeletedFile`'s
+        ``document``/``attachment`` literals (``_upload_one`` expects
+        :class:`FileRestoreAction`'s ``upload_document``/``upload_attachment``
+        literals — reusing it would silently route every document to the
+        attachment endpoint).
+        """
+        assert self._file_repository is not None  # guarded by _restore_deleted_files
+        if record.kind == "document":
+            return await self._file_repository.upload_document(
+                data, target, record.language, record.originalname, record.content_type
+            )
+        return await self._file_repository.upload_attachment(
+            data, target, record.language, record.originalname, record.content_type
+        )
+
+    def _invalidate(self, shared_ids: list[str]) -> None:
+        """Drop cached raws for ``shared_ids`` (no-op without a wired cache control)."""
+        if self._cache_control is None or not shared_ids:
+            return
+        self._cache_control.invalidate_entities(shared_ids)
 
     def _emit_file(self, run_id: str, shared_id: str, *, failed: bool, detail: str | None = None) -> None:
         """Append one file-restore audit record (no-op if no audit log)."""

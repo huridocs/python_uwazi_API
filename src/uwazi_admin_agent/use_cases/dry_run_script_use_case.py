@@ -42,6 +42,14 @@ class DryRunReport(BaseModel):
     would_publish: int
     would_unpublish: int
     would_rewire: int
+    would_delete_files: int = Field(
+        default=0,
+        description=(
+            "Would-be FILE-row deletes from dedupe_entity_files_parallel. Distinct from "
+            "would_delete (entities): file deletes are not revertable, so each recorded "
+            "op (op=delete_file) is an operator-review item, not just a counter."
+        ),
+    )
     records: list[dict[str, Any]]  # full per-op records; capped in rendering, not storage
     samples: list[dict[str, Any]] = Field(
         default_factory=list, description="First N would-be-update records, trimmed for LLM reading."
@@ -135,6 +143,7 @@ class DryRunScriptUseCase:
             would_publish=counts["publish"],
             would_unpublish=counts["publish:False"],
             would_rewire=counts["move_files"] + counts["create_relationships"],
+            would_delete_files=counts["delete_file"],
             records=records,
             samples=_update_samples(records),
         )
@@ -145,7 +154,9 @@ def _count_ops(records: list[dict[str, Any]]) -> dict[str, int]:
 
     ``set_publish_status`` records carry ``published``; ``publish`` /
     ``unpublish`` are counted as-is. The ``move_files`` + ``create_relationships``
-    pair is reported together as ``would_rewire`` (merge/relationship rewiring).
+    pair is reported together as ``would_rewire`` (merge/relationship rewiring),
+    while ``delete_file`` (the dedupe cleanup's would-be FILE deletes) is its own
+    counter — entity deletes and file deletes are different review items.
     """
     counts: dict[str, int] = {}
     for r in records:
@@ -159,7 +170,16 @@ def _count_ops(records: list[dict[str, Any]]) -> dict[str, int]:
         else:
             key = op
         counts[key] = counts.get(key, 0) + 1
-    for fallback in ("create", "update", "delete", "publish", "publish:False", "move_files", "create_relationships"):
+    for fallback in (
+        "create",
+        "update",
+        "delete",
+        "publish",
+        "publish:False",
+        "move_files",
+        "create_relationships",
+        "delete_file",
+    ):
         counts.setdefault(fallback, 0)
     return counts
 

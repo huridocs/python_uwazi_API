@@ -44,8 +44,17 @@ async def _run_revert_async(run_name: str) -> int:
     print(f"revert: run={run_name} status={manifest.status.value}")
     print(
         f"  modified={len(manifest.modified)} deleted={len(manifest.deleted)} "
-        f"created={len(manifest.created)} rewired={len(manifest.rewired)}"
+        f"created={len(manifest.created)} rewired={len(manifest.rewired)} "
+        f"deleted_files={len(manifest.deleted_files)}"
     )
+    if manifest.deleted_files:
+        deduped = sum(1 for r in manifest.deleted_files if r.source == "dedupe")
+        note = (
+            "re-created its duplicate copies (correct undo of a dedupe cleanup; fresh file ids)"
+            if deduped
+            else "(fresh file ids; old storage URLs stay dead)"
+        )
+        print(f"  restored {len(manifest.deleted_files)} deleted file(s) by re-upload {note}")
 
     reverted = manifest.status.value == "reverted"
     if not reverted:
