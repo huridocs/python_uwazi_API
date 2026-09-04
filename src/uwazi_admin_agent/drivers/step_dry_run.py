@@ -53,7 +53,8 @@ async def _run_dry_run_async(run_name: str) -> int:
     print(
         f"  would-update={report.would_update} would-create={report.would_create} "
         f"would-delete={report.would_delete} would-publish={report.would_publish} "
-        f"would-unpublish={report.would_unpublish} would-rewire={report.would_rewire}"
+        f"would-unpublish={report.would_unpublish} would-rewire={report.would_rewire} "
+        f"would-delete-files={report.would_delete_files}"
     )
     if report.cache_stats is not None:
         print(f"  cache: {format_cache_stats(report.cache_stats)}")

@@ -65,6 +65,13 @@ class _InMemoryFileRepo(FileRepositoryPort):
         self.uploads.append(("attachment", data, shared_id, language, title, content_type))
         return True
 
+    @override
+    async def delete_file(self, file_id: str) -> bool:
+        # The cache test suite never deletes files; the port grew the method for
+        # the duplicate-file cleanup, so the in-memory repo records and accepts.
+        self.uploads.append(("delete", b"", file_id, None, "", ""))
+        return True
+
 
 class _InMemoryEntityRepo(EntityRepositoryPort):
     """A dict-backed EntityRepositoryPort that counts its calls."""
@@ -251,6 +258,23 @@ def test_invalidate_entities_drops_all_languages_of_the_sid(tmp_path: Path) -> N
     assert store.get_raw("A", "es") is None
     assert store.get_raw("B", "en") == {"title": "b-en"}  # untouched
     assert store.snapshot_stats().invalidations == 1
+
+
+def test_invalidate_files_drops_only_the_named_bytes(tmp_path: Path) -> None:
+    """The delete-path eviction: a deleted file's cached bytes must not survive
+    its delete (a stale raw's ghost ref could otherwise re-confirm identity);
+    the OTHER files' bytes and every raw entry stay untouched."""
+    store = _store(tmp_path)
+    store.put_file_bytes("f1", b"ONE")
+    store.put_file_bytes("f2", b"TWO")
+    store.put_raw("A", "en", {"title": "a"})
+
+    store.invalidate_files(["f2", "missing"])
+
+    assert store.get_file_bytes("f2") is None
+    assert store.get_file_bytes("f1") == b"ONE"
+    assert store.get_raw("A", "en") == {"title": "a"}  # raws untouched
+    assert store.snapshot_stats().invalidations == 1  # only the evicted file counted
 
 
 def test_caches_are_namespaced_per_instance_root(tmp_path: Path) -> None:

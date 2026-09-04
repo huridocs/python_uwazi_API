@@ -182,6 +182,13 @@ class InMemoryFileRepository(FileRepositoryPort):
         self.uploads.append(("attachment", shared_id, title, content_type))
         return True
 
+    @override
+    async def delete_file(self, file_id: str) -> bool:
+        # Revert never deletes file rows; the port grew the method for the
+        # duplicate-file cleanup, so the in-memory repo accepts and records.
+        self.uploads.append(("delete", "", file_id, ""))
+        return True
+
 
 class InMemoryTemplatePropertyLookup(TemplatePropertyLookupPort):
     """Resolves a relationship property name from a literal ``(template, type)`` map.

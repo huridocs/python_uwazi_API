@@ -54,6 +54,7 @@ class InMemoryFileRepo(FileRepositoryPort):
         self._bytes = bytes_store
         self._fail = fail_uploads
         self.uploads: list[tuple[str, str, str | None, str, str]] = []  # kind, to_sid, lang, title, content_type
+        self.deletes: list[str] = []  # file_ids delete_file was called with
 
     @override
     async def get_file_bytes(self, filename: str) -> bytes | None:
@@ -72,6 +73,11 @@ class InMemoryFileRepo(FileRepositoryPort):
     ) -> bool:
         self.uploads.append(("attachment", shared_id, language, title, content_type))
         return not self._fail
+
+    @override
+    async def delete_file(self, file_id: str) -> bool:
+        self.deletes.append(file_id)
+        return True
 
 
 def _raw(shared_id: str, *, documents: list | None = None, attachments: list | None = None) -> dict[str, Any]:

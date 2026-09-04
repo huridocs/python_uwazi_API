@@ -23,7 +23,32 @@ What gets a parallel variant (per-entity HTTP loops inside the port):
   stay sequential inside its task. :func:`assert_unique_move_targets`
   refuses a duplicated ``to_shared_id`` up front — two tasks writing the
   SAME row would race it (last save drops the other's file entry: a lost
-  file).
+  file);
+- ``dedupe_entity_files_parallel`` — one task per ENTITY (the post-merge
+  duplicate-file cleanup): each task fetches only its own entity's raw +
+  file bytes, so tasks touch disjoint file rows. :func:`assert_unique_shared_ids`
+  refuses a duplicated shared_id up front — two tasks on one entity would
+  race the SAME duplicate file rows (one wins, the other's delete returns
+  False and is miscounted as ``failed``).
+- ``delete_entity_files_parallel`` — the EXPLICIT deletion helper (the
+  operator names the files): one task per DISTINCT entity (its requests
+  resolve + delete sequentially inside the task),
+  :func:`assert_unique_deletion_requests` refuses a duplicated request up
+  front, and ambiguous name-based requests are refused with their candidate
+  ids rather than guessed. Connection-cited copies are refused + reported
+  (the same no-loss bias as the dedupe nominator).
+
+Both file-deletion nominators share ONE core
+(:mod:`...use_cases.file_deletion`): every delete's bytes are persisted
+BEFORE the delete call (bytes in hand — store writes are sync filesystem
+I/O the worker thread can make), and each batch's SUCCESSFUL deletes are
+recorded on the manifest (``deleted_files``) on the script thread after the
+pool joins — BEFORE any hard error is re-raised, so a partial batch stays
+revertable — which is what makes both helpers REVERTABLE (revert re-uploads
+the captured bytes; a dedupe revert re-creates its duplicates, the correct
+undo). The recording seam also drops the caches (affected entities' raws +
+deleted files' bytes), keeping the files-collection mutation visible to the
+very next read.
 
 What deliberately does NOT:
 - ``delete_entities`` / publish-status — server-side BULK endpoints already
@@ -37,8 +62,9 @@ Safety invariants preserved vs. the sequential path:
   crash still has every snapshot);
 - create records new shared_ids after the batch, exactly like the sequential
   intercept;
-- the cap, audit records, cache invalidation, and manifest writes all run
-  on the script's thread after the pool joins — no new data races;
+- the cap, audit records, cache invalidation (raws AND deleted files'
+  bytes), and manifest writes all run on the script's thread after the pool
+  joins — no new data races;
 - write helpers keep the sequential helpers' exact list-of-dicts return
   shape and input order, so the SAME script runs in dummy / dry-run / real
   mode (the other namespaces bind these names with identical contracts);
@@ -50,7 +76,16 @@ Safety invariants preserved vs. the sequential path:
   also SKIPS a source file whose bytes are already on the target
   (sha256-confirmed — never name/size alone), so merging N duplicate
   entities leaves ONE copy of each unique file instead of multiplying it
-  (Uwazi itself never dedupes uploads; see :mod:`...domain.file_dedupe`).
+  (Uwazi itself never dedupes uploads; see :mod:`...domain.file_dedupe`);
+- the parallel file-cleanup keeps the same semantics for its DELETES: a
+  server-refused delete (bool ``False``) counts as ``failed`` and never
+  raises, while a hard port error kills the script before any further
+  deletes (after the batch's successful deletes were recorded — see above).
+  It deletes ONLY byte-identical duplicates (a survivor stays on the same
+  entity, same kind slot) and never a copy a connection cites — see
+  :mod:`...domain.file_cleanup`; the explicit deletion helper keeps the
+  same soft/hard error split with refusal reporting instead of dedupe's
+  safety-by-construction.
 
 The write helpers take the :class:`BackupIntercept` typed ``Any`` — the same
 decoupling :func:`build_real_exec_namespace` uses — and reach its private
@@ -71,10 +106,20 @@ from loguru import logger
 from uwazi_admin_agent.configuration import PARALLEL_WRITE_BATCH_SIZE
 from uwazi_admin_agent.domain.batch_outcome import BatchOutcome, BatchVerdict
 from uwazi_admin_agent.domain.batch_split import split_batches
+from uwazi_admin_agent.domain.deleted_file import DeleteSource, to_deleted_file
+from uwazi_admin_agent.domain.file_deletion import (
+    assert_unique_deletion_requests,
+    group_deletions_by_entity,
+)
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.throttle_policy import classify_mutation_results, is_rate_limit_text, verdict_from_error_text
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.use_cases.file_deletion import (
+    cleanup_plan_with_bytes,
+    delete_files_with_backup,
+    plan_explicit_deletions,
+)
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_agent.domain.agent_entity import AgentEntity
@@ -128,7 +173,67 @@ def build_parallel_move_files_helper(
     }
 
 
+def build_parallel_file_cleanup_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    intercept: Any,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> dict[str, Any]:
+    """Build the parallel duplicate-file-cleanup helper bound into the real namespace."""
+    return {
+        "dedupe_entity_files_parallel": _dedupe_files_parallel(
+            entity_repository, file_repository, intercept, default_language, executor
+        )
+    }
+
+
+def build_parallel_file_delete_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    intercept: Any,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> dict[str, Any]:
+    """Build the parallel explicit-file-deletion helper bound into the real namespace."""
+    return {
+        "delete_entity_files_parallel": _delete_files_parallel(
+            entity_repository, file_repository, intercept, default_language, executor
+        )
+    }
+
+
+def build_parallel_file_cleanup_dry_run_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the dry-run ``dedupe_entity_files_parallel`` (real reads, recorded deletes)."""
+    return {
+        "dedupe_entity_files_parallel": _dedupe_files_dry_run(
+            entity_repository, file_repository, default_language, executor, records
+        )
+    }
+
+
 # --- shared plumbing -----------------------------------------------------------
+
+
+def build_parallel_file_delete_dry_run_helper(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the dry-run ``delete_entity_files_parallel`` (real reads, recorded deletes)."""
+    return {
+        "delete_entity_files_parallel": _delete_files_dry_run(
+            entity_repository, file_repository, default_language, executor, records
+        )
+    }
 
 
 def _port_task(method: Callable[..., Any], /, *args: Any) -> Callable[[], Any]:
@@ -210,6 +315,30 @@ def assert_unique_move_targets(moves: list[dict[str, Any]]) -> None:
             f"call; duplicated target(s): {duplicated}. Concurrent uploads into the same entity "
             "race its row and the last save drops the other's file entry - merge those sources "
             "into one move, or issue one call per target."
+        )
+
+
+def assert_unique_shared_ids(shared_ids: list[str], helper: str) -> None:
+    """Refuse the same entity twice inside ONE cleanup call (double-delete race).
+
+    Two cleanup tasks on the same entity would fetch the same raw, compute
+    the same duplicate groups, and race to delete the same file rows: one
+    task's delete wins, the other's comes back ``False`` (the file is already
+    gone) and is miscounted as ``failed``. Every namespace's dedupe helper
+    refuses it up front so the identical script fails identically in
+    validation, dry-run, and execute. Pure: no I/O.
+    """
+    seen: set[str] = set()
+    duplicated: list[str] = []
+    for sid in shared_ids:
+        if sid in seen and sid not in duplicated:
+            duplicated.append(sid)
+        seen.add(sid)
+    if duplicated:
+        raise ValueError(
+            f"{helper}: each shared_id may appear at most once per call; duplicated: {duplicated}. "
+            "Two cleanup tasks on one entity race the same duplicate file rows - pass each "
+            "entity once."
         )
 
 
@@ -391,6 +520,416 @@ def _move_target_task(
             entity_repository, file_repository, move["from_shared_ids"], move["to_shared_id"], lang, asyncio.run
         )
         return {"to_shared_id": move["to_shared_id"], **counts}
+
+    return task
+
+
+# --- duplicate-file cleanup helper (real mode) -----------------------------------
+
+
+def _dedupe_files_parallel(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    intercept: Any,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> Callable[[list[str], str | None], list[dict]]:
+    """Build the real ``dedupe_entity_files_parallel`` (per-entity file cleanup).
+
+    One task per entity: fetch its raw, then the file ids its connections
+    cite, then its uploaded-file refs, then each ref's bytes; group by
+    (kind, sha256); delete every redundant copy beyond each group's first,
+    EXCEPT copies a connection cites (kept, counted as ``kept_cited`` —
+    Uwazi tears down connections citing a deleted file). Only byte-identical
+    duplicates are deleted, so a survivor always remains on the same entity;
+    unfetchable bytes are identity-unconfirmed and never deleted.
+
+    REVERTABLE (the shared core makes it so): every delete's bytes are
+    persisted BEFORE the delete call (dedupe already held them for hashing —
+    zero extra GETs), and the SUCCESSFUL deletes are recorded on the manifest
+    (``deleted_files``) on the script thread after the batch joins — so
+    revert re-uploads them. Reverting a dedupe cleanup RE-CREATES the
+    duplicates (the correct undo — the revert summary says so).
+
+    Deletes return only bool, so the batch can never evidence a load complaint
+    itself: all refused deletes are soft ``failed`` counts → DEGRADED, else
+    CLEAN (no invented RATE_LIMITED). A hard port EXCEPTION kills the script
+    loudly (the ``_raise_first_write_error`` pattern) BEFORE any further
+    deletes — AFTER the successful deletes were recorded (a partial batch
+    stays revertable). Unwired ports → the read helpers' loud ``RuntimeError``
+    stub.
+    """
+    if entity_repository is None or file_repository is None:
+        return _unwired_parallel(
+            "dedupe_entity_files_parallel",
+            "entity_repository and file_repository",
+            "Wire EntityRepositoryPort and FileRepositoryPort into the runtime/execute use case "
+            "to enable duplicate-file cleanup.",
+        )
+
+    def dedupe_entity_files_parallel(shared_ids: list[str], language: str | None = None) -> list[dict]:
+        assert_unique_shared_ids(shared_ids, "dedupe_entity_files_parallel")
+        if not shared_ids:
+            return []
+        lang = language or default_language
+        started = time.monotonic()
+        # Per-task applied-delete accumulators, created HERE (script thread): a
+        # task that raises mid-deletes still leaves its successful deletes in
+        # its accumulator, so recording below (which runs BEFORE the re-raise)
+        # never orphans them.
+        applied: dict[str, list[Any]] = {sid: [] for sid in shared_ids}
+        tasks = [
+            _dedupe_cleanup_task(entity_repository, file_repository, intercept, sid, applied[sid], lang)
+            for sid in shared_ids
+        ]
+        values, errors = executor.run(tasks)
+        _record_applied_deletes(intercept, applied, "dedupe")  # BEFORE raising: partial batches stay revertable
+        _raise_first_write_error(errors, executor)
+        # A raising task left None at its index — unreachable here (the line
+        # above re-raised it); the filter only satisfies the type checker.
+        results = [r for r in values if r is not None]
+        failed = sum(r["failed"] for r in results)
+        executor.record(BatchVerdict.CLEAN if failed == 0 else BatchVerdict.DEGRADED)
+        logger.info(
+            "script dedupe_entity_files_parallel: {} entities, {} duplicates / {} deleted / "
+            "{} failed / {} kept-cited ({:.1f}s)",
+            len(results),
+            sum(r["duplicates"] for r in results),
+            sum(r["deleted"] for r in results),
+            failed,
+            sum(r["kept_cited"] for r in results),
+            time.monotonic() - started,
+        )
+        return results
+
+    return dedupe_entity_files_parallel
+
+
+def _dedupe_cleanup_task(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    intercept: Any,
+    shared_id: str,
+    applied: list[Any],
+    lang: str,
+) -> Callable[[], dict[str, Any]]:
+    """Bind one (entity, lang) pair into a zero-arg task (no late-binding hazards)."""
+
+    def task() -> dict[str, Any]:
+        plan, bytes_by_id = cleanup_plan_with_bytes(entity_repository, file_repository, shared_id, lang, asyncio.run)
+        ref_bytes = [(ref, bytes_by_id[ref.file_id]) for ref in plan.to_delete]
+        outcomes = delete_files_with_backup(
+            file_repository, intercept._save_file_backup, shared_id, ref_bytes, asyncio.run, applied
+        )
+        deleted = sum(1 for _, ok in outcomes if ok)
+        return {
+            "shared_id": shared_id,
+            "duplicates": len(plan.to_delete) + len(plan.kept_cited),
+            "deleted": deleted,
+            "failed": len(outcomes) - deleted,
+            "kept_cited": len(plan.kept_cited),
+        }
+
+    return task
+
+
+def _record_applied_deletes(intercept: Any, applied: dict[str, list[Any]], source: DeleteSource) -> None:
+    """Record the batch's SUCCESSFUL deletes on the manifest (script thread).
+
+    Runs on the script thread after the pool joins (manifest writes never race
+    worker tasks) and — crucially — BEFORE :func:`_raise_first_write_error`:
+    a hard port error mid-batch must not orphan the deletes that already
+    applied, or their persisted backups would be unreferenced and unrevertable.
+    A soft ``False`` delete left its file in place, so it never entered its
+    accumulator (revert would re-upload a copy that never went away). The
+    intercept's recording seam ALSO drops the caches (the affected entities'
+    raws + the deleted files' bytes), so the same ordering guarantee covers
+    freshness: a partial batch stays revertable AND cache-honest.
+    """
+    records = [to_deleted_file(shared_id, ref, source) for shared_id, refs in applied.items() for ref in refs]
+    intercept._record_deleted_files(records)
+
+
+# --- duplicate-file cleanup helper (dry-run: real reads, recorded deletes) ------
+
+
+def _dedupe_files_dry_run(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+    records: list[dict[str, Any]],
+) -> Callable[[list[str], str | None], list[dict]]:
+    """Build the dry-run ``dedupe_entity_files_parallel``.
+
+    The discovery is the REAL one (live raws + file bytes through the shared
+    executor, retried once per task like the other dry-run bulk readers — the
+    rehearsal sees the true duplicate groups), but instead of deleting, ONE
+    ``delete_file`` record per would-be delete is appended for the operator's
+    review (op, shared_id, file_id, originalname, filename — the audit trail
+    for an operation whose undo is a re-upload, so every record is a
+    reviewable target). Returns the same per-entity shape as the real
+    helper, with ``deleted`` carrying the WOULD-BE count (exactly like the
+    dry-run move recorder's ``moved``).
+    """
+    if entity_repository is None or file_repository is None:
+        return _unwired_parallel(
+            "dedupe_entity_files_parallel",
+            "entity_repository and file_repository",
+            "Wire EntityRepositoryPort and FileRepositoryPort into the runtime to rehearse "
+            "duplicate-file cleanup against real entities.",
+        )
+
+    def dedupe_entity_files_parallel(shared_ids: list[str], language: str | None = None) -> list[dict]:
+        assert_unique_shared_ids(shared_ids, "dedupe_entity_files_parallel")
+        if not shared_ids:
+            return []
+        lang = language or default_language
+        started = time.monotonic()
+        tasks = [_dedupe_dry_run_task(entity_repository, file_repository, records, sid, lang) for sid in shared_ids]
+        values, complaints = _run_reads_with_retry(tasks, executor)
+        logger.info(
+            "dry-run record: dedupe_entity_files_parallel x{} entities, {} would-be delete(s), {} complaint(s) ({:.1f}s)",
+            len(shared_ids),
+            sum(r["deleted"] for r in values),
+            len(complaints),
+            time.monotonic() - started,
+        )
+        return values
+
+    return dedupe_entity_files_parallel
+
+
+def _dedupe_dry_run_task(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    records: list[dict[str, Any]],
+    shared_id: str,
+    lang: str,
+) -> Callable[[], dict[str, Any]]:
+    """Bind one (entity, lang) dry-run discovery into a zero-arg task.
+
+    Records are appended only AFTER the discovery succeeded, so a failed
+    task's retry cannot double-append (the reads are idempotent).
+    """
+
+    def task() -> dict[str, Any]:
+        plan, _bytes = cleanup_plan_with_bytes(entity_repository, file_repository, shared_id, lang, asyncio.run)
+        for ref in plan.to_delete:
+            records.append(
+                {
+                    "op": "delete_file",
+                    "shared_id": shared_id,
+                    "file_id": ref.file_id,
+                    "originalname": ref.originalname,
+                    "filename": ref.filename,
+                }
+            )
+        return {
+            "shared_id": shared_id,
+            "duplicates": len(plan.to_delete) + len(plan.kept_cited),
+            "deleted": len(plan.to_delete),
+            "failed": 0,
+            "kept_cited": len(plan.kept_cited),
+        }
+
+    return task
+
+
+# --- explicit file-deletion helper (real mode) -----------------------------------
+
+
+def _delete_files_parallel(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    intercept: Any,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> Callable[[list[dict], str | None], list[dict]]:
+    """Build the real ``delete_entity_files_parallel`` (explicit file deletion).
+
+    One task per DISTINCT entity (its requests resolved + deleted sequentially
+    inside the task — same-row safety; :func:`assert_unique_deletion_requests`
+    refuses a duplicated request up front). Per entity: fetch the raw, resolve
+    the requests (``file_id`` precisely, or ``originalname``+optional ``kind``
+    with an AMBIGUITY refusal that lists the candidates — never a guess),
+    refuse connection-cited copies (no-loss default, no force flag), fetch
+    each target's bytes, then run the shared core: persist bytes BEFORE the
+    delete call, delete, best-effort. REVERTABLE by construction — the
+    manifest records every successful delete for re-upload on revert.
+
+    Soft refusals are honest no-ops reported in ``refusals`` (they are not
+    load complaints — the verdict keys on ``failed`` only, never
+    RATE_LIMITED); soft ``False`` deletes count as ``failed``; a hard port
+    EXCEPTION kills the script loudly AFTER the batch's applied deletes were
+    recorded. Unwired ports → the read helpers' loud ``RuntimeError`` stub.
+    """
+    if entity_repository is None or file_repository is None:
+        return _unwired_parallel(
+            "delete_entity_files_parallel",
+            "entity_repository and file_repository",
+            "Wire EntityRepositoryPort and FileRepositoryPort into the runtime/execute use case "
+            "to enable explicit file deletion.",
+        )
+
+    def delete_entity_files_parallel(deletions: list[dict], language: str | None = None) -> list[dict]:
+        assert_unique_deletion_requests(deletions)
+        if not deletions:
+            return []
+        lang = language or default_language
+        started = time.monotonic()
+        grouped = group_deletions_by_entity(deletions)
+        applied: dict[str, list[Any]] = {sid: [] for sid, _ in grouped}
+        tasks = [
+            _file_delete_task(entity_repository, file_repository, intercept, sid, requests, applied[sid], lang)
+            for sid, requests in grouped
+        ]
+        values, errors = executor.run(tasks)
+        _record_applied_deletes(intercept, applied, "explicit")
+        _raise_first_write_error(errors, executor)
+        # A raising task left None at its index — unreachable here (the line
+        # above re-raised it); the filter only satisfies the type checker.
+        results = [r for r in values if r is not None]
+        failed = sum(r["failed"] for r in results)
+        executor.record(BatchVerdict.CLEAN if failed == 0 else BatchVerdict.DEGRADED)
+        logger.info(
+            "script delete_entity_files_parallel: {} entities, {} requested / {} deleted / {} failed / {} refused ({:.1f}s)",
+            len(results),
+            sum(r["requested"] for r in results),
+            sum(r["deleted"] for r in results),
+            failed,
+            sum(r["refused"] for r in results),
+            time.monotonic() - started,
+        )
+        return results
+
+    return delete_entity_files_parallel
+
+
+def _file_delete_task(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    intercept: Any,
+    shared_id: str,
+    deletions: list[dict],
+    applied: list[Any],
+    lang: str,
+) -> Callable[[], dict[str, Any]]:
+    """Bind one (entity, requests, lang) into a zero-arg task (no late-binding hazards)."""
+
+    def task() -> dict[str, Any]:
+        resolved, bytes_by_id = plan_explicit_deletions(
+            entity_repository, file_repository, shared_id, lang, deletions, asyncio.run
+        )
+        ref_bytes = [(ref, bytes_by_id[ref.file_id]) for ref in resolved.targets]
+        outcomes = delete_files_with_backup(
+            file_repository, intercept._save_file_backup, shared_id, ref_bytes, asyncio.run, applied
+        )
+        deleted = sum(1 for _, ok in outcomes if ok)
+        refusals = [r.model_dump() for r in resolved.refusals]
+        return {
+            "shared_id": shared_id,
+            "requested": len(deletions),
+            "deleted": deleted,
+            "failed": len(outcomes) - deleted,
+            "refused": len(refusals),
+            "refusals": refusals,
+        }
+
+    return task
+
+
+# --- explicit file-deletion helper (dry-run: real reads, recorded deletes) ------
+
+
+def _delete_files_dry_run(
+    entity_repository: EntityRepositoryPort | None,
+    file_repository: FileRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+    records: list[dict[str, Any]],
+) -> Callable[[list[dict], str | None], list[dict]]:
+    """Build the dry-run ``delete_entity_files_parallel``.
+
+    The discovery is the REAL one (live raws + target-byte fetches through the
+    shared executor, retried once per task like the other dry-run bulk readers
+    — the rehearsal sees the true refusals, including ``unavailable`` targets
+    whose bytes cannot be backed up), but instead of deleting it appends ONE
+    ``delete_file`` record per would-be delete (the same shape the dedupe
+    rehearsal records, so the report's ``delete_files=N`` counter covers both)
+    and ONE ``refuse_file`` record per refusal (reason + candidates) — the
+    operator's review copy. Returns the same per-entity shape as the real
+    helper, with ``deleted`` carrying the WOULD-BE count.
+    """
+    if entity_repository is None or file_repository is None:
+        return _unwired_parallel(
+            "delete_entity_files_parallel",
+            "entity_repository and file_repository",
+            "Wire EntityRepositoryPort and FileRepositoryPort into the runtime to rehearse "
+            "explicit file deletion against real entities.",
+        )
+
+    def delete_entity_files_parallel(deletions: list[dict], language: str | None = None) -> list[dict]:
+        assert_unique_deletion_requests(deletions)
+        if not deletions:
+            return []
+        lang = language or default_language
+        started = time.monotonic()
+        grouped = group_deletions_by_entity(deletions)
+        tasks = [
+            _file_delete_dry_run_task(entity_repository, file_repository, records, sid, requests, lang)
+            for sid, requests in grouped
+        ]
+        values, complaints = _run_reads_with_retry(tasks, executor)
+        logger.info(
+            "dry-run record: delete_entity_files_parallel x{} entities, {} would-be delete(s), {} refusal(s) ({:.1f}s)",
+            len(grouped),
+            sum(r["deleted"] for r in values),
+            sum(r["refused"] for r in values),
+            len(complaints),
+            time.monotonic() - started,
+        )
+        return values
+
+    return delete_entity_files_parallel
+
+
+def _file_delete_dry_run_task(
+    entity_repository: EntityRepositoryPort,
+    file_repository: FileRepositoryPort,
+    records: list[dict[str, Any]],
+    shared_id: str,
+    deletions: list[dict],
+    lang: str,
+) -> Callable[[], dict[str, Any]]:
+    """Bind one (entity, requests, lang) dry-run discovery into a zero-arg task.
+
+    Records are appended only AFTER the discovery succeeded, so a failed
+    task's retry cannot double-append (the reads are idempotent).
+    """
+
+    def task() -> dict[str, Any]:
+        resolved, _ = plan_explicit_deletions(entity_repository, file_repository, shared_id, lang, deletions, asyncio.run)
+        for ref in resolved.targets:
+            records.append(
+                {
+                    "op": "delete_file",
+                    "shared_id": shared_id,
+                    "file_id": ref.file_id,
+                    "originalname": ref.originalname,
+                    "filename": ref.filename,
+                }
+            )
+        for refusal in resolved.refusals:
+            records.append({"op": "refuse_file", **refusal.model_dump()})
+        return {
+            "shared_id": shared_id,
+            "requested": len(deletions),
+            "deleted": len(resolved.targets),
+            "failed": 0,
+            "refused": len(resolved.refusals),
+            "refusals": [r.model_dump() for r in resolved.refusals],
+        }
 
     return task
 

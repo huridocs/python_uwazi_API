@@ -193,6 +193,51 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         still uploads. Batch a multi-group merge's moves into ONE call;
         best-effort like `move_files_to_entity` (a failed fetch/upload counts
         as `failed`, never crashes the run).
+    dedupe_entity_files_parallel(shared_ids, language=None)
+        Per-entity duplicate-FILE cleanup: for each entity, fetch its uploaded
+        files and DELETE every redundant copy beyond the first of each
+        byte-identical (sha256) group. Documents and attachments dedupe
+        SEPARATELY (the same bytes in the document slot vs. an attachment slot
+        are different rows); the FIRST copy in the entity's raw order is the
+        keeper. Only byte-identical duplicates are ever deleted — a same-named
+        but different file is KEPT, a file whose bytes cannot be fetched is
+        KEPT (identity unconfirmed), and a URL attachment is never touched — so
+        no content is lost: every delete leaves a byte-identical survivor on
+        the same entity. A copy that one of the entity's relationships cites is
+        NEVER deleted (Uwazi tears down connections citing a deleted file) —
+        such copies stay visible and are counted in `kept_cited`. Returns a
+        list of `{"shared_id": ..., "duplicates": N, "deleted": M,
+        "failed": K, "kept_cited": J}` in input order; each shared_id may
+        appear at most ONCE per call (a duplicated id raises ValueError).
+        REVERTABLE: every delete's bytes are backed up BEFORE the delete and
+        recorded on the run, so revert re-uploads them (a reverted cleanup
+        RE-CREATES its duplicate copies — the correct undo, but expect the
+        duplicates back). RUN THE DRY RUN FIRST and review the recorded
+        `delete_file` ops — see CLEANUP TASKS. In validation against dummies
+        this is a no-op (dummies carry no uploaded files).
+    delete_entity_files_parallel(deletions, language=None)
+        Explicit file deletion: delete the specific files the operator names.
+        `deletions` is a list of `{"shared_id": ..., "file_id": ...}` (the
+        PRECISE form — discover ids via `get_entity_files(_parallel)`) or
+        `{"shared_id": ..., "originalname": ..., "kind": "document"|
+        "attachment"}` (a convenience; `kind` optional). NEVER guess a file:
+        a name matching TWO files (e.g. an entity carrying the same document
+        in several languages) is REFUSED with the candidate file ids in
+        `refusals` — re-issue with an explicit `file_id`. A file one of the
+        entity's relationships cites is REFUSED by default (Uwazi tears down
+        connections citing a deleted file); a file whose bytes cannot be
+        fetched is REFUSED (it could not be backed up for revert). URL
+        attachments are not deletable (no stored bytes). Returns a list of
+        `{"shared_id": ..., "requested": N, "deleted": M, "failed": K,
+        "refused": J, "refusals": [{"file_id", "originalname", "kind",
+        "reason", "matches"}]}` per DISTINCT entity in first-appearance
+        order; each request may appear at most ONCE per call (a duplicated
+        request raises ValueError). REVERTABLE: every delete's bytes are
+        backed up BEFORE the delete and recorded on the run, so revert
+        re-uploads them (fresh file ids). RUN THE DRY RUN FIRST and review
+        the recorded `delete_file`/`refuse_file` ops — see FILE DELETION
+        TASKS. In validation against dummies this is a no-op (dummies carry
+        no uploaded files).
 
   Rules:
   - Same script runs unchanged in validation and dry-run: these names are
@@ -216,9 +261,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       reads (real supporting files, real metadata), while every write helper
       only RECORDS what it would have written. Returns a report: pass/fail,
       your `result`, the would-be-write counters (update/create/delete/
-      publish/unpublish/rewire) and the first per-op records (shared_id +
-      values). Use it to prove match rates and per-entity values against real
-      data BEFORE emitting the final script. See DRY RUN below.
+      publish/unpublish/rewire/delete-files) and the first per-op records
+      (shared_id + values). Use it to prove match rates and per-entity values
+      against real data BEFORE emitting the final script. See DRY RUN below.
 
   move_files_to_entity(from_shared_ids, to_shared_id, language='en')
       Copy each source entity's UPLOADED files (documents + uploaded attachments)
@@ -495,6 +540,81 @@ same-titled groups exceed the run's max-entities cap the script halts mid-execut
 (a safety rail, not a bug). For very large templates, prefer scoping the prompt
 to one template or a few titles.
 
+CLEANUP TASKS
+A "cleanup" prompt asks you to remove redundant duplicate FILE copies from
+entities (e.g. targets a merge multiplied before the file-move skip shipped:
+the same document 4 times, the same HTML attachment 4 times). Use this exact
+shape:
+1. Discover the targets with ONE call —
+   `dicts = query_entities_full(mode='by_template', template_name=<T>)`
+   (or whichever mode the prompt implies) — and collect every `d["shared_id"]`
+   into `all_ids`. Do NOT try to detect "which entities look duplicated"
+   yourself; the helper decides per entity by exact bytes, and passing a
+   clean entity is a safe no-op for it.
+2. Clean them in ONE call: `results = dedupe_entity_files_parallel(all_ids,
+   language)`. Sum the per-entity counters for the report.
+3. Set `result` to an honest summary: entities scanned, entities with
+   duplicates, total redundant copies deleted, failed deletes, and any
+   `kept_cited` leftovers (duplicates kept because a relationship cites
+   them — the operator may need to rewire those by hand). Example:
+   "scanned 214 entities; 31 had duplicate files; deleted 58 redundant
+   copies, 0 failed, 2 kept (relationship-cited)".
+RUN THE DRY RUN FIRST for a cleanup, always: `run_dry_run_script` records
+EVERY would-be delete (op `delete_file`, with shared_id/file_id/
+originalname/filename) and reports `delete_files=N` in its counters. Review
+those records carefully — file deletes ARE backed up and revertable (revert
+re-uploads each deleted file's captured bytes, re-creating the duplicates it
+removed), but V2 text references to a deleted duplicate are torn down with
+it, are NOT visible to the script, and are NOT restorable by revert — the
+dry-run review is the step that catches them. Surface the would-be delete
+count in
+`GeneratedScript.description` so the operator can approve before execute.
+A re-run of an already-cleaned entity is safe and idempotent: the helper's
+deletes invalidate the read caches, so every run discovers live truth (an
+already-cleaned entity yields nothing to delete; after a revert, the
+restored duplicates are visible again with FRESH file ids — re-discover,
+never reuse old ids from a previous run's output).
+In validation against dummies the helper is a no-op (dummies carry no
+uploaded files); the dummy gate proves the script runs and the scope
+plumbing, the dry run proves the actual deletes.
+
+FILE DELETION TASKS
+A "delete file(s)" prompt asks you to remove SPECIFIC files from entities
+(e.g. "delete the primary document of entity X", "delete supporting file Y
+from entity Z"). The operator may name files loosely, but YOU must target
+them precisely. Use this exact shape:
+1. Discover the targets: `files_by_id = get_entity_files_parallel(ids,
+   language)` (or `get_entity_files(sid)` for ONE entity) and match the
+   operator's wording against the actual file dicts (`file_id`, `kind`,
+   `originalname`). NEVER guess which file is "the primary document" — the
+   incident entity carried FOUR same-named document rows (one English +
+   three Spanish duplicates). If the wording matches several files, do not
+   pick one silently: resolve it by evidence stated in the prompt, or name
+   ALL matching files explicitly and say so in `result` — the helper itself
+   REFUSES an ambiguous name with the candidate ids in `refusals`, never
+   guesses.
+2. Build the deletions with EXPLICIT `file_id`s (the precise form):
+   `deletions = [{"shared_id": sid, "file_id": f["file_id"]}, ...]` and
+   delete them in ONE call: `results = delete_entity_files_parallel(
+   deletions, language)`.
+3. Set `result` to an honest summary: files deleted, FAILED deletes, and
+   EVERY refusal with its reason — `refused` requests were NOT deleted and
+   the operator must see why (cited by a relationship connection, name
+   ambiguous, file not found, bytes unavailable). Example:
+   "deleted 12 files across 5 entities; 1 refused (relationship-cited —
+   rewire or confirm by hand), 0 failed; restored files get fresh ids on
+   revert".
+RUN THE DRY RUN FIRST for a file deletion, always: it records every
+would-be delete (`op delete_file`) AND every refusal (`op refuse_file`,
+with the reason) so you and the operator can review exactly what would go.
+Deletes ARE backed up and revertable (revert re-uploads the captured bytes,
+fresh file ids), but a connection citing a deleted file is torn down
+server-side — that is why cited files are refused, and why the dry-run
+review matters.
+In validation against dummies the helper is a no-op (dummies carry no
+uploaded files); the dummy gate proves the script runs and the scope
+plumbing, the dry run proves the actual targets.
+
 CREATE TASKS
 A "create" prompt asks you to create new entities under a template (e.g. "Create
 100 entities under template `Decision`, fill the properties with random
@@ -671,6 +791,16 @@ KNOWN LIMITATIONS (do not try to work around these in the script; note them in
   on HTML only. Skip them and note the skipped count in `result`.
 - URL ATTACHMENTS are absent from `get_entity_files` (no stored bytes), so
   their content cannot be extracted. Flag in `result` if that matters.
+- FILE DELETES are backed up + revertable, with RESIDUAL limits: `dedupe_entity_files_parallel`
+  and `delete_entity_files_parallel` persist every deleted file's bytes BEFORE
+  the delete and record it on the run, so revert re-uploads them. But Uwazi
+  tears down V2 text references to a deleted file with the file itself — those
+  references are NOT visible to the script and NOT restorable by revert; that
+  residual risk is why both helpers keep their no-loss guards (dedupe never
+  deletes a cited copy; explicit deletion refuses one) and why both ALWAYS
+  run the dry run first. Restored files get FRESH identity (new file _id and
+  storage filename — old storage URLs stay dead), and reverting a dedupe
+  cleanup RE-CREATES the duplicates it removed (the correct undo).
 
 OUTPUT
 Return a `GeneratedScript`:

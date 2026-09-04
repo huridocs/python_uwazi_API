@@ -54,6 +54,7 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.file_deletion import group_deletions_by_entity
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -61,7 +62,13 @@ from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
+    assert_unique_deletion_requests,
     assert_unique_move_targets,
+    assert_unique_shared_ids,
+    build_parallel_file_cleanup_dry_run_helper,
+    build_parallel_file_cleanup_helper,
+    build_parallel_file_delete_dry_run_helper,
+    build_parallel_file_delete_helper,
     build_parallel_move_files_helper,
     build_parallel_read_helpers,
     build_parallel_write_helpers,
@@ -482,6 +489,55 @@ def _move_files_noop_parallel_scoped(scope: set[str]) -> Any:
     return move_files_to_entity_parallel
 
 
+def _dedupe_files_noop_parallel_scoped(scope: set[str]) -> Any:
+    """Build the dummy-scoped no-op ``dedupe_entity_files_parallel``.
+
+    Dummies are created via ``create_entities`` (no uploaded files), so
+    duplicate-file cleanup is a no-op in validation: the helper keeps the
+    real helper's two up-front guards so the identical script fails
+    identically in every mode — :func:`assert_unique_shared_ids` (the
+    double-delete race guard) and the scope assertion over every shared_id
+    (defense-in-depth) — and returns one zero-count summary per entity, in
+    input order: the real helper's result shape. The real cleanup logic is
+    exercised only live (file ops cannot be gate-validated on dummies — the
+    same documented limitation as the file-move helpers).
+    """
+
+    def dedupe_entity_files_parallel(shared_ids: list[str], language: str | None = None) -> list[dict]:
+        del language  # ignored: dummies carry no files to localize
+        assert_unique_shared_ids(shared_ids, "dedupe_entity_files_parallel")
+        assert_ids_in_scope(list(shared_ids), scope, "dedupe_entity_files_parallel")
+        return [{"shared_id": sid, "duplicates": 0, "deleted": 0, "failed": 0, "kept_cited": 0} for sid in shared_ids]
+
+    return dedupe_entity_files_parallel
+
+
+def _delete_files_noop_parallel_scoped(scope: set[str]) -> Any:
+    """Build the dummy-scoped no-op ``delete_entity_files_parallel``.
+
+    Dummies carry no uploaded files, so explicit deletion is a no-op in
+    validation. The helper keeps the real helper's up-front guards so the
+    identical script fails identically in every mode —
+    :func:`assert_unique_deletion_requests` (the duplicated-request race
+    guard), :func:`group_deletions_by_entity` (which also validates every
+    request names a shared_id), and the scope assertion over every entity
+    (defense-in-depth) — and returns one zero-count summary per DISTINCT
+    entity, in first-appearance order: the real helper's result shape.
+    """
+
+    def delete_entity_files_parallel(deletions: list[dict], language: str | None = None) -> list[dict]:
+        del language  # ignored: dummies carry no files to localize
+        assert_unique_deletion_requests(deletions)
+        grouped = group_deletions_by_entity(deletions)
+        assert_ids_in_scope([sid for sid, _ in grouped], scope, "delete_entity_files_parallel")
+        return [
+            {"shared_id": sid, "requested": len(requests), "deleted": 0, "failed": 0, "refused": 0, "refusals": []}
+            for sid, requests in grouped
+        ]
+
+    return delete_entity_files_parallel
+
+
 def _build_move_files_real_helper(
     entity_repository: EntityRepositoryPort | None,
     file_repository: FileRepositoryPort | None,
@@ -573,8 +629,11 @@ def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str
     simply ALIAS the scoped sequential helpers — same scope enforcement, same
     return shapes — and the read names mirror their single-item no-ops as
     dicts, while the file-move name mirrors ``_move_files_noop_scoped`` as a
-    per-move list. The identical script therefore runs unchanged in the gate;
-    real parallelism (and the throttle) is exercised only live, like file-move.
+    per-move list, the dedupe name mirrors
+    ``_dedupe_files_noop_parallel_scoped`` as a per-entity list, and the
+    explicit-deletion name mirrors ``_delete_files_noop_parallel_scoped``.
+    The identical script therefore runs unchanged in the gate; real
+    parallelism (and the throttle) is exercised only live, like file-move.
     """
     return {
         "update_entities_parallel": scoped["update_entities"],
@@ -583,6 +642,8 @@ def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str
         "get_entity_files_parallel": _dummy_files_parallel(scope),
         "get_file_bytes_parallel": _dummy_bytes_parallel(),
         "move_files_to_entity_parallel": _move_files_noop_parallel_scoped(scope),
+        "dedupe_entity_files_parallel": _dedupe_files_noop_parallel_scoped(scope),
+        "delete_entity_files_parallel": _delete_files_noop_parallel_scoped(scope),
     }
 
 
@@ -964,6 +1025,17 @@ def build_real_exec_namespace(
       same shared executor/throttle) is not intercept-decorated either, and
       refuses a duplicated ``to_shared_id`` up front — the same-row race that
       drops files.
+    - ``dedupe_entity_files_parallel`` (post-merge cleanup) and
+      ``delete_entity_files_parallel`` (explicit deletion) likewise are NOT
+      intercept-decorated — file deletes are not entity writes, so they ride
+      their OWN manifest section (``deleted_files``) instead of a snapshot:
+      the shared deletion core persists each file's bytes BEFORE the delete
+      call and the helpers record the successful deletes after the batch
+      joins, which is what makes both REVERTABLE (revert re-uploads the
+      captured bytes; a dedupe revert re-creates its duplicates — the correct
+      undo). The dedupe nominator only ever deletes byte-identical duplicates
+      (never a connection-cited copy); the explicit nominator refuses +
+      reports cited, ambiguous, and unbackable targets.
     - The ``*_parallel`` bulk helpers (auto-throttled, up to
       ``THROTTLE_MAX_WORKERS`` workers) share one :class:`ThrottleController`
       for the whole run; ``throttle`` defaults to a fresh controller so bare
@@ -980,6 +1052,8 @@ def build_real_exec_namespace(
         **build_parallel_write_helpers(entity_api, relationship_api, intercept, tool_cache, default_language, executor),
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
         **build_parallel_move_files_helper(entity_repository, file_repository, default_language, executor),
+        **build_parallel_file_cleanup_helper(entity_repository, file_repository, intercept, default_language, executor),
+        **build_parallel_file_delete_helper(entity_repository, file_repository, intercept, default_language, executor),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
@@ -1114,6 +1188,13 @@ def build_dry_run_namespace(
       ``*_parallel`` READ names are the real auto-throttled helpers — the
       read pass is where dry-run minutes go, so it gets the same
       parallelism + throttle the execute pass will use.
+      ``dedupe_entity_files_parallel`` and ``delete_entity_files_parallel``
+      are the hybrids their safety role demands: REAL discovery reads (so
+      the rehearsal sees the true duplicate groups / refusals) with pure
+      recording — one ``delete_file`` op per would-be delete (plus a
+      ``refuse_file`` op per explicit-deletion refusal, reason included) —
+      the operator's review copy for operations whose undo is a re-upload,
+      not an un-record.
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
@@ -1129,6 +1210,12 @@ def build_dry_run_namespace(
         **_dry_run_parallel_write_aliases(dry_writes),
         "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
         "move_files_to_entity_parallel": _dry_run_move_files_parallel_helper(dry_run_records),
+        **build_parallel_file_cleanup_dry_run_helper(
+            entity_repository, file_repository, default_language, executor, dry_run_records
+        ),
+        **build_parallel_file_delete_dry_run_helper(
+            entity_repository, file_repository, default_language, executor, dry_run_records
+        ),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),

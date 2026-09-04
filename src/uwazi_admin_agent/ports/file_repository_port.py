@@ -43,3 +43,26 @@ class FileRepositoryPort(ABC):
         Returns ``True`` on success, ``False`` on a Uwazi error/network failure.
         """
         ...
+
+    @abstractmethod
+    async def delete_file(self, file_id: str) -> bool:
+        """Delete ONE file row by its ``_id`` (``DELETE /api/files?_id=...``).
+
+        Returns ``True`` on success, ``False`` on a Uwazi error (e.g. the file is
+        already gone) or a network failure — best-effort, like the uploads.
+
+        SERVER-SIDE SIDE EFFECTS (Uwazi's FileDelete use case → FilesService.delete):
+        the file row is removed, its stored bytes are torn down (async job), and
+        every relationship connection citing the file is torn down too
+        (``relV1DS.deleteByFiles``), as are V2 text references to it. Callers that
+        only delete a byte-identical DUPLICATE (a second copy of content that
+        stays on the same entity) lose no content — but any connection citing
+        the deleted copy specifically is destroyed with it, so callers must
+        keep connection-cited copies (see ``domain/file_cleanup.py``).
+
+        NOT REVERTABLE by the agent's backup/revert machinery: file rows are not
+        entity-row writes, so ``BackupIntercept`` cannot snapshot or restore
+        them. Uwazi's own activity log (global ``activitylogMiddleware``) still
+        records each delete for audit.
+        """
+        ...
