@@ -666,11 +666,12 @@ def _dedupe_files_dry_run(
     executor, retried once per task like the other dry-run bulk readers — the
     rehearsal sees the true duplicate groups), but instead of deleting, ONE
     ``delete_file`` record per would-be delete is appended for the operator's
-    review (op, shared_id, file_id, originalname, filename — the audit trail
-    for an operation whose undo is a re-upload, so every record is a
-    reviewable target). Returns the same per-entity shape as the real
-    helper, with ``deleted`` carrying the WOULD-BE count (exactly like the
-    dry-run move recorder's ``moved``).
+    review (op, shared_id, file_id, kind, originalname, filename — the audit
+    trail for an operation whose undo is a re-upload, so every record is a
+    reviewable target; ``kind`` lets the operator check WHICH class of file
+    (document vs attachment) each delete hits). Returns the same per-entity
+    shape as the real helper, with ``deleted`` carrying the WOULD-BE count
+    (exactly like the dry-run move recorder's ``moved``).
     """
     if entity_repository is None or file_repository is None:
         return _unwired_parallel(
@@ -721,6 +722,7 @@ def _dedupe_dry_run_task(
                     "op": "delete_file",
                     "shared_id": shared_id,
                     "file_id": ref.file_id,
+                    "kind": ref.kind,
                     "originalname": ref.originalname,
                     "filename": ref.filename,
                 }
@@ -856,8 +858,11 @@ def _delete_files_dry_run(
     — the rehearsal sees the true refusals, including ``unavailable`` targets
     whose bytes cannot be backed up), but instead of deleting it appends ONE
     ``delete_file`` record per would-be delete (the same shape the dedupe
-    rehearsal records, so the report's ``delete_files=N`` counter covers both)
-    and ONE ``refuse_file`` record per refusal (reason + candidates) — the
+    rehearsal records, so the report's ``delete_files=N`` counter covers both;
+    ``kind`` on every record lets the operator check the class of file each
+    delete hits — the "supporting files" prompt that actually targeted the
+    primary documents is exactly what this key must catch) and ONE
+    ``refuse_file`` record per refusal (reason + candidates) — the
     operator's review copy. Returns the same per-entity shape as the real
     helper, with ``deleted`` carrying the WOULD-BE count.
     """
@@ -916,6 +921,7 @@ def _file_delete_dry_run_task(
                     "op": "delete_file",
                     "shared_id": shared_id,
                     "file_id": ref.file_id,
+                    "kind": ref.kind,
                     "originalname": ref.originalname,
                     "filename": ref.filename,
                 }

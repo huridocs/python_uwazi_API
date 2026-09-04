@@ -339,8 +339,22 @@ def test_dry_run_records_would_be_deletes_and_refusals() -> None:
         }
     ]
     assert records == [
-        {"op": "delete_file", "shared_id": "E1", "file_id": "d2", "originalname": "a.pdf", "filename": "f2"},
-        {"op": "delete_file", "shared_id": "E1", "file_id": "d4", "originalname": "a.pdf", "filename": "f4"},
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "d2",
+            "kind": "document",
+            "originalname": "a.pdf",
+            "filename": "f2",
+        },
+        {
+            "op": "delete_file",
+            "shared_id": "E1",
+            "file_id": "d4",
+            "kind": "document",
+            "originalname": "a.pdf",
+            "filename": "f4",
+        },
         {
             "op": "refuse_file",
             "shared_id": "E1",
