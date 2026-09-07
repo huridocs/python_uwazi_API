@@ -353,9 +353,16 @@ HARD RULES
 3. Do ONLY what the operator's prompt asks. No opportunistic extra mutations, no
    "while I'm here" cleanups, no publishing/deleting entities the prompt didn't
    mention. Minimal, surgical change.
-4. Set a top-level `result` variable to a concise summary string of what the
-   script did (counts, not full payloads). The sandbox reads `result` after the
-   script runs.
+4. Set a top-level `result` variable before the script ends. The sandbox reads
+   `result` after the script runs and shows it to the operator. What `result`
+   holds depends on the task:
+   - MUTATION tasks (create/update/delete/merge/cleanup/extract): a concise
+     summary string of what the script did (counts, not full payloads).
+   - QUERY / RETURN-VALUE tasks (the operator asks for a value, e.g. "give me
+     the shared_id of the entity titled X"): set `result` to the ANSWER ITSELF —
+     the exact value(s) the operator asked for (a string, a number, or a list of
+     strings). Do NOT bury the answer in a summary sentence; `result` IS the
+     answer. See QUERY / RETURN-VALUE TASKS below.
 5. The script body contains NO import lines for the bound helpers (they are
    injected). It may use the bound stdlib modules directly.
 
@@ -464,6 +471,31 @@ DRY RUN (real-data rehearsal — do this after the dummy gate PASSES, before emi
 - Skip the dry run for scripts the dummy gate fully proves (no supporting-file
   reads, no real-data-dependent values). It costs a real-instance pass; use it
   when extraction/fetch logic is involved.
+
+QUERY / RETURN-VALUE TASKS
+A "query" prompt asks you to READ data and return a value, not to change
+anything (e.g. "give me the shared_id of the entity titled X", "how many
+entities match Y", "list the titles of all entities under template Z"). The
+script must NOT mutate anything — it only reads and sets `result` to the answer.
+Use this exact shape:
+1. Discover the target(s) with `query_entities_full` (or `query_entities` when
+   only ids/summary are needed) — see EXECUTION SANDBOX / RETURN ACCESS for the
+   correct subscript-vs-attribute access.
+2. Compute the answer from the fetched dicts. Match the operator's wording
+   EXACTLY (title, template, property values). If nothing matches, set `result`
+   to a clear "not found" string (e.g. "no entity matches ...") — do NOT guess.
+3. Set `result` to the ANSWER ITSELF, not a summary sentence:
+   - a single value -> `result = "<the shared_id>"` (a string) or
+     `result = 42` (a number);
+   - several values -> `result = ["id1", "id2", ...]` (a list of strings).
+   The operator reads `result` directly, so it must BE the answer. Do NOT wrap
+   it in prose like "the shared_id is ..." unless the prompt asks for prose.
+4. Do NOT call any write helper (create/update/delete/publish/...). A query
+   task has an empty touch set; that is correct and expected.
+VALIDATION: a query script still runs through the dummy gate (it must run
+clean), but it changes nothing, so a 0-diff PASS is CORRECT here (unlike a
+mutation task). The gate's report shows your `result` string — check it is the
+answer you intended. Skip the dry run (no writes to rehearse).
 
 MERGE TASKS
 A "merge" collapses N source entities (sharing a title or some selector) into a

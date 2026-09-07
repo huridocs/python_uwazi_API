@@ -30,6 +30,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_execution_history,
     get_run,
     get_run_audit,
+    get_run_results,
     list_runs,
     rename_run,
     revert_run,
@@ -308,8 +309,8 @@ def _build_row_menu() -> None:
     table; the selected run's id travels through ``app.storage.client``. The
     menu is shown by replaying the row click on an off-screen anchor with the
     recorded coordinates, so Quasar positions it at the cursor
-    (``touch-position``). The three conditional items (Show script / Retry / Error
-    details) are toggled per selection in ``_on_rowmenu``.
+    (``touch-position``). The four conditional items (Show script / Show results /
+    Retry / Error details) are toggled per selection in ``_on_rowmenu``.
     """
     with ui.button(icon="more_vert").props("flat dense").classes("fixed top-[-100px] left-[-100px]") as anchor:
         # Raw ``q-menu`` element: ``ui.menu`` refuses the ``touch-position`` prop,
@@ -324,15 +325,18 @@ def _build_row_menu() -> None:
             ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
             ui.menu_item("History", lambda: _row_menu_action(_history_dialog))
             script_item = ui.menu_item("Show script", lambda: _row_menu_action(_script_dialog))
+            results_item = ui.menu_item("Show results", lambda: _row_menu_action(_results_dialog))
             ui.menu_item("Delete", lambda: _row_menu_action(_delete_dialog)).classes("text-negative")
     retry_item.set_visibility(False)
     errors_item.set_visibility(False)
     script_item.set_visibility(False)
+    results_item.set_visibility(False)
     context.client._row_menu = menu  # noqa: SLF001 — per-client handle
     context.client._row_menu_anchor = anchor  # noqa: SLF001
     context.client._row_menu_retry = retry_item  # noqa: SLF001
     context.client._row_menu_errors = errors_item  # noqa: SLF001
     context.client._row_menu_script = script_item  # noqa: SLF001
+    context.client._row_menu_results = results_item  # noqa: SLF001
 
 
 def _row_menu_action(action: Any) -> None:
@@ -429,16 +433,19 @@ def _on_rowmenu(e: Any) -> None:
     show_retry = False
     show_errors = False
     show_script = False
+    show_results = False
     try:
         detail = get_run(run_id)
         show_retry = detail.status.value == "generation_failed"
         show_errors = bool(detail.error)
         show_script = bool(detail.script)
+        show_results = detail.status.value in ("executed", "verified", "failed", "reverted")
     except Exception:  # noqa: BLE001 — a missing run just hides the conditional items
         pass
     context.client._row_menu_retry.set_visibility(show_retry)  # noqa: SLF001
     context.client._row_menu_errors.set_visibility(show_errors)  # noqa: SLF001
     context.client._row_menu_script.set_visibility(show_script)  # noqa: SLF001
+    context.client._row_menu_results.set_visibility(show_results)  # noqa: SLF001
 
     anchor = context.client._row_menu_anchor  # noqa: SLF001
     client_x = int(click.get("clientX", 0) or 0)
@@ -690,6 +697,132 @@ def _script_dialog(run_id: str) -> None:
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label(f"Generated script — {run_id}").classes("text-h6")
                 ui.code(detail.script, language="python").classes("w-full grow").style("min-height: 0")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+    dialog.open()
+
+
+def _format_value(value: Any) -> str:
+    """Render an arbitrary manifest value (e.g. a rewired 'before' state) as text."""
+    if value is None:
+        return "—"
+    text = str(value)
+    return text if len(text) <= 200 else text[:200] + "…"
+
+
+def _entity_section(title: str, entities: list[Any], include_restored: bool = False) -> None:
+    """Render one touch-set section (modified/created/deleted) as a table, if non-empty."""
+    if not entities:
+        return
+    ui.label(title).classes("text-subtitle1 q-mt-md")
+    columns = [
+        {"name": "shared_id", "label": "Shared ID", "field": "shared_id", "align": "left", "sortable": True},
+        {"name": "internal_id", "label": "Internal ID", "field": "internal_id", "align": "left", "sortable": True},
+        {"name": "language", "label": "Language", "field": "language", "align": "left", "sortable": True},
+    ]
+    if include_restored:
+        columns.append(
+            {
+                "name": "restored_shared_id",
+                "label": "Restored shared ID",
+                "field": "restored_shared_id",
+                "align": "left",
+                "sortable": False,
+            }
+        )
+    rows = []
+    for e in entities:
+        row = {
+            "shared_id": e.shared_id,
+            "internal_id": e.internal_id or "—",
+            "language": e.language or "—",
+        }
+        if include_restored:
+            row["restored_shared_id"] = e.restored_shared_id or "—"
+        rows.append(row)
+    ui.table(rows=rows, columns=columns, row_key="shared_id", pagination={"rowsPerPage": 0}).classes("w-full")
+
+
+def _rewired_section(rewired: list[Any]) -> None:
+    """Render the rewired-relationships touch-set as a table, if non-empty."""
+    if not rewired:
+        return
+    ui.label("Rewired relationships").classes("text-subtitle1 q-mt-md")
+    columns = [
+        {"name": "entity", "label": "Entity", "field": "entity", "align": "left", "sortable": True},
+        {"name": "property", "label": "Property", "field": "property", "align": "left", "sortable": True},
+        {"name": "before", "label": "Before", "field": "before", "align": "left", "sortable": False},
+    ]
+    rows = [{"entity": r.entity.shared_id, "property": r.property_name, "before": _format_value(r.before)} for r in rewired]
+    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+
+
+def _files_section(files: list[Any]) -> None:
+    """Render the deleted-files touch-set as a table, if non-empty."""
+    if not files:
+        return
+    ui.label("Deleted files").classes("text-subtitle1 q-mt-md")
+    columns = [
+        {"name": "shared_id", "label": "Entity", "field": "shared_id", "align": "left", "sortable": True},
+        {"name": "originalname", "label": "File", "field": "originalname", "align": "left", "sortable": True},
+        {"name": "kind", "label": "Kind", "field": "kind", "align": "left", "sortable": True},
+        {"name": "source", "label": "Source", "field": "source", "align": "left", "sortable": True},
+    ]
+    rows = [{"shared_id": f.shared_id, "originalname": f.originalname, "kind": f.kind, "source": f.source} for f in files]
+    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+
+
+def _results_dialog(run_id: str) -> None:
+    """Modal: the run's execution results — its `result` value and touch-set.
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it — same pattern as ``_script_dialog``. Reads
+    the manifest's touch-set via ``get_run_results``; a run with no touch-set
+    (never executed) shows an empty state. The script's `result` value (the
+    answer for a query task, or the summary for a mutation task) is shown first.
+
+    The dialog is maximized (top to bottom): the result + summary + section
+    tables fill the space between a pinned title and a pinned footer, scrolling
+    internally so the Close button is always visible.
+    """
+    try:
+        results = get_run_results(run_id)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        return
+
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+            dialog.props("maximized")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label(f"Run results — {run_id}").classes("text-h6")
+                with ui.column().classes("w-full grow").style("overflow-y: auto"):
+                    if results.result is not None:
+                        ui.label("Result").classes("text-subtitle1 text-grey-7")
+                        ui.textarea(value=results.result).classes("w-full font-mono").props(
+                            "readonly outlined autogrow"
+                        ).style("min-height: 60px")
+                        ui.separator()
+                    counts = [
+                        ("Modified", len(results.modified)),
+                        ("Created", len(results.created)),
+                        ("Deleted", len(results.deleted)),
+                        ("Rewired", len(results.rewired)),
+                        ("Files deleted", len(results.deleted_files)),
+                    ]
+                    with ui.row().classes("w-full q-mb-md gap-md"):
+                        for label, count in counts:
+                            with ui.column().classes("items-center"):
+                                ui.label(str(count)).classes("text-h5")
+                                ui.label(label).classes("text-caption text-grey-7")
+                    if not any(c for _, c in counts) and results.result is None:
+                        ui.label("No results recorded on this run.").classes("text-grey-7 q-pa-md")
+                    _entity_section("Modified entities", results.modified)
+                    _entity_section("Created entities", results.created)
+                    _entity_section("Deleted entities", results.deleted, include_restored=True)
+                    _rewired_section(results.rewired)
+                    _files_section(results.deleted_files)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", icon="close", on_click=dialog.close).props("flat")
     dialog.open()
