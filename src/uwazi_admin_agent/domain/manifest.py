@@ -93,6 +93,14 @@ class MigrationManifest(BaseModel):
         default=None,
         description="Which step failed: 'generate' | 'execute' | 'revert' | 'verify'.",
     )
+    result: str | None = Field(
+        default=None,
+        description=(
+            "The script's `result` variable (stringified) captured after execution. "
+            "For a query/return-value task this is the answer the operator asked for; "
+            "for a mutation task it is the script's summary string. None until the run executes."
+        ),
+    )
 
     def reset_touch_set(self) -> None:
         """Clear the touch-set lists in place (re-execute entry point).
@@ -107,3 +115,4 @@ class MigrationManifest(BaseModel):
         self.created = []
         self.deleted = []
         self.deleted_files = []
+        self.result = None

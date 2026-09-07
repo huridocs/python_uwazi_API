@@ -131,6 +131,7 @@ class ExecuteScriptUseCase:
 
         _result, error = await asyncio.to_thread(self._exec, script, intercept, language)
         manifest = intercept.manifest
+        manifest.result = _result
         self._log_cache_stats(run_id)
 
         if error:

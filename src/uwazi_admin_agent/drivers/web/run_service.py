@@ -27,9 +27,11 @@ from uwazi_admin_agent.configuration import (
     RUNS_PATH,
 )
 from uwazi_admin_agent.domain.audit_record import AuditRecord
-from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
+from uwazi_admin_agent.domain.deleted_file import DeletedFile
+from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
+from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_runtime
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
@@ -82,6 +84,27 @@ class ExecutionEvent:
     type: str  # "execute" | "revert"
     outcome: str  # "success" | "failure"
     detail: str | None
+
+
+@dataclass(frozen=True)
+class RunResults:
+    """The touch-set a run produced: which entities/files it changed.
+
+    Unlike :class:`RunDetail` (which reports counts for the table), this carries
+    the full identity lists from the manifest so the UI can show exactly which
+    entities were modified/created/deleted, which relationships were rewired,
+    and which files were deleted. It also carries the script's ``result`` value
+    (the answer for a query task, or the summary for a mutation task).
+    """
+
+    run_id: str
+    status: RunStatus
+    result: str | None
+    modified: list[EntityIdentity]
+    created: list[EntityIdentity]
+    deleted: list[EntityIdentity]
+    rewired: list[RewiredRelationship]
+    deleted_files: list[DeletedFile]
 
 
 def _touch_counts(manifest: MigrationManifest) -> tuple[int, int, int, int]:
@@ -147,6 +170,26 @@ def get_run(run_id: str) -> RunDetail:
 def get_run_audit(run_id: str) -> list[AuditRecord]:
     """Return a run's full audit trail (empty when the run has no audit log)."""
     return build_audit_log().load(run_id)
+
+
+def get_run_results(run_id: str) -> RunResults:
+    """Return a run's touch-set (the entities/files it changed).
+
+    Reads the manifest directly (not the count-reduced :func:`get_run`) so a
+    reverted run still shows its full touch-set — the manifest keeps the lists
+    for post-revert verification even though the table counts read as 0.
+    """
+    manifest = build_backup_store().load_manifest(run_id)
+    return RunResults(
+        run_id=manifest.run_id,
+        status=manifest.status,
+        result=manifest.result,
+        modified=manifest.modified,
+        created=manifest.created,
+        deleted=manifest.deleted,
+        rewired=manifest.rewired,
+        deleted_files=manifest.deleted_files,
+    )
 
 
 def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
@@ -340,6 +383,7 @@ __all__ = [
     "GenerateError",
     "RevertVerificationError",
     "RunDetail",
+    "RunResults",
     "RunSummary",
     "create_and_generate",
     "delete_run",
@@ -347,6 +391,7 @@ __all__ = [
     "execute_run",
     "get_run",
     "get_run_audit",
+    "get_run_results",
     "list_runs",
     "revert_run",
 ]
