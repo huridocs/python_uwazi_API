@@ -10,6 +10,7 @@ No business logic: this is a driver that wires adapters to use cases, matching
 the ``drivers/`` layer convention.
 """
 
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelation
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
-from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_runtime
+from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
@@ -341,6 +342,23 @@ def delete_run(run_id: str) -> None:
     build_backup_store().delete_run(run_id)
 
 
+def clear_cache() -> int:
+    """Clear the persistent file/entity cache for the configured instance.
+
+    Returns the number of entries removed (0 when the cache is disabled or
+    empty). Forces the next read to re-fetch server truth after direct human
+    edits in Uwazi, which bypass write-path invalidation and are otherwise
+    bounded only by the raw TTL.
+    """
+    url = os.environ.get("UWAZI_URL")
+    if not url:
+        return 0
+    cache = build_file_cache(url)
+    if cache is None:
+        return 0
+    return cache.clear()
+
+
 def rename_run(old_id: str, new_id: str) -> None:
     """Rename a run end-to-end.
 
@@ -393,6 +411,7 @@ __all__ = [
     "RunResults",
     "RunSummary",
     "create_and_generate",
+    "clear_cache",
     "delete_run",
     "rename_run",
     "execute_run",

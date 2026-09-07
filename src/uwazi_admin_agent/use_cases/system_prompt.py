@@ -331,10 +331,19 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `documents` array; "attachment" = a SUPPORTING file, an uploaded
       attachment — the operator's words map to this key, see FILE DELETION
       TASKS), `filename` (storage name - the fetch key),
-      `originalname`, `language`, `content_type`; `[]` when the entity has no
-      uploaded files. URL attachments are absent (no stored bytes). In
-      validation against dummies this returns `[]` (dummies carry no files);
-      the fetch path is only exercised live.
+      `originalname`, `language`, `file_language`, `content_type`; `[]` when
+      the entity has no uploaded files. URL attachments are absent (no
+      stored bytes). In validation against dummies this returns `[]` (dummies
+      carry no files); the fetch path is only exercised live.
+
+      IMPORTANT — two DIFFERENT language fields:
+        - `language` is the ENTITY ROW language (ISO 639-1, e.g. "en") — the
+          SAME for every file of one entity. Do NOT use it to tell files apart.
+        - `file_language` is the FILE's OWN language (ISO 639-3, e.g. "eng"),
+          as stored on the file row. Two same-named files in DIFFERENT
+          languages are DIFFERENT files, not duplicates: when the operator asks
+          for "the same document in the same language", dedupe by
+          `(originalname, file_language)` — never by `language` alone.
 
   get_file_bytes(filename)
       Fetch one file's raw bytes by its storage `filename` (from

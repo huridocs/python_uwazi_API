@@ -277,6 +277,32 @@ def test_invalidate_files_drops_only_the_named_bytes(tmp_path: Path) -> None:
     assert store.snapshot_stats().invalidations == 1  # only the evicted file counted
 
 
+def test_clear_removes_all_files_and_raws(tmp_path: Path) -> None:
+    """The operator-facing clear: every cached byte + raw is dropped, so the
+    next read re-fetches server truth (the fix for stale results after direct
+    human edits in Uwazi)."""
+    store = _store(tmp_path)
+    store.put_file_bytes("f1", b"ONE")
+    store.put_file_bytes("f2", b"TWO")
+    store.put_raw("A", "en", {"title": "a-en"})
+    store.put_raw("A", "es", {"title": "a-es"})
+    store.put_raw("B", "en", {"title": "b-en"})
+
+    removed = store.clear()
+
+    assert removed == 5
+    assert store.get_file_bytes("f1") is None
+    assert store.get_file_bytes("f2") is None
+    assert store.get_raw("A", "en") is None
+    assert store.get_raw("A", "es") is None
+    assert store.get_raw("B", "en") is None
+
+
+def test_clear_on_empty_cache_returns_zero(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.clear() == 0
+
+
 def test_caches_are_namespaced_per_instance_root(tmp_path: Path) -> None:
     left = _store(tmp_path, root=tmp_path / "left")
     right = _store(tmp_path, root=tmp_path / "right")

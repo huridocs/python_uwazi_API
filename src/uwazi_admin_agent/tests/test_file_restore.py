@@ -37,9 +37,11 @@ def test_extract_file_refs_pulls_documents_and_uploaded_attachments() -> None:
     assert doc.originalname == "report.pdf"
     assert doc.filename == "hash-d1"
     assert doc.language == "en"  # entity row language (ISO 639-1) for the upload cookie
+    assert doc.file_language == "eng"  # the file's OWN language (ISO 639-3), preserved
     assert doc.content_type == "application/pdf"  # documents are always PDF
     assert att.kind == "attachment"
     assert att.originalname == "scan.png"
+    assert att.file_language is None  # attachment entry carried no own language
     assert att.content_type == "image/png"  # derived from the .png extension
 
 
@@ -117,6 +119,39 @@ def test_extract_file_refs_language_falls_back_to_none_when_entity_language_abse
     refs = extract_file_refs(raw)
 
     assert refs[0].language is None
+
+
+def test_extract_file_refs_preserves_file_own_language_distinct_from_entity_language() -> None:
+    """The file's own language (ISO 639-3) is kept separate from the entity row
+    language (ISO 639-1) so read-only queries can tell same-named files in
+    different languages apart."""
+    raw = {
+        "language": "en",
+        "documents": [
+            {"_id": "d1", "originalname": "judgment.pdf", "language": "eng", "type": "document"},
+            {"_id": "d2", "originalname": "judgment.pdf", "language": "spa", "type": "document"},
+        ],
+        "attachments": [],
+    }
+
+    refs = extract_file_refs(raw)
+
+    assert refs[0].language == "en"  # entity row language, same for both
+    assert refs[1].language == "en"
+    assert refs[0].file_language == "eng"  # file's own language differs
+    assert refs[1].file_language == "spa"
+
+
+def test_extract_file_refs_file_language_falls_back_to_none_when_absent() -> None:
+    raw = {
+        "language": "en",
+        "documents": [{"_id": "d1", "originalname": "r.pdf", "type": "document"}],  # no own language
+        "attachments": [],
+    }
+
+    refs = extract_file_refs(raw)
+
+    assert refs[0].file_language is None
 
 
 def test_extract_file_refs_filename_falls_back_to_file_id_when_absent() -> None:

@@ -163,6 +163,23 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         if evicted:
             self._bump(invalidations=evicted)
 
+    def clear(self) -> int:
+        """Remove every cached entry (file bytes + entity raws) for this instance.
+
+        The operator-facing "clear cache" action: human edits made directly in
+        Uwazi bypass write-path invalidation, so clearing forces the next read
+        to re-fetch server truth instead of waiting out the raw TTL. Returns
+        the number of entries removed (0 when the cache is empty).
+        """
+        removed = 0
+        for sub in (self._files_dir, self._entities_dir):
+            if not sub.is_dir():
+                continue
+            for path in sub.rglob("*"):
+                if path.is_file() and self._unlink(path):
+                    removed += 1
+        return removed
+
     # --- stats (run-boundary observability) --------------------------------------
 
     @override
