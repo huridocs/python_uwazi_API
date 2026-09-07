@@ -12,6 +12,7 @@ contains no business logic, matching the ``drivers/`` layer convention.
 
 import asyncio
 import os
+import threading
 from collections import deque
 from typing import Any
 
@@ -68,7 +69,65 @@ _generating_notifications: dict[str, Any] = {}
 # so "running"/"reverting" are UI-only labels tracked here.
 _running_runs: dict[str, str] = {}
 
-# JS expression: true when the row has an in-flight (not yet persisted) op.
+# Global claim state: at most ONE mutating op (execute/revert/generate/rename/
+# delete) may be in flight across ALL connected users. ``_active_op`` holds
+# ``{"run_id": ..., "kind": ..., "label": ...}`` or None; the claim is the
+# server-side serializer the JS-only guards cannot provide.
+_active_op: dict[str, str] | None = None
+_active_op_lock = threading.Lock()
+
+_KIND_LABELS = {
+    "running": "is running",
+    "reverting": "is reverting",
+    "creating": "is generating",
+    "renaming": "is being renamed",
+    "deleting": "is being deleted",
+}
+
+
+def _busy_label() -> str:
+    """Human-readable busy banner text naming the active op, or '' when idle."""
+    op = _active_op
+    if op is None:
+        return ""
+    return f"Task {op['run_id']!r} {_KIND_LABELS.get(op['kind'], op['kind'])}"
+
+
+def _is_busy() -> bool:
+    return _active_op is not None
+
+
+def _try_claim(run_id: str, kind: str) -> bool:
+    """Atomically claim the single in-flight mutating op slot.
+
+    Returns False when another op already holds the claim; on success the
+    table overlay is registered and every client is refreshed so their
+    controls disable immediately.
+    """
+    global _active_op
+    with _active_op_lock:
+        if _active_op is not None:
+            return False
+        _active_op = {"run_id": run_id, "kind": kind}
+        # Rename/delete don't change a run's status; only run-level ops get
+        # the transient status overlay (spinner badge) on their row.
+        if kind in ("running", "reverting", "creating"):
+            _running_runs[run_id] = kind
+    _broadcast_rows()
+    return True
+
+
+def _release_run(run_id: str) -> None:
+    """Release the claim when the finishing op owns it; refresh all clients."""
+    global _active_op
+    with _active_op_lock:
+        if _active_op is None or _active_op["run_id"] != run_id:
+            return
+        _active_op = None
+        _running_runs.pop(run_id, None)
+    _broadcast_rows()
+
+
 _IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
 
 
@@ -86,6 +145,7 @@ def _mark_running(run_id: str, label: str) -> None:
 def _unmark_running(run_id: str) -> None:
     """Clear a run's in-flight status; the persisted status takes over."""
     _running_runs.pop(run_id, None)
+    _broadcast_rows()
 
 
 # JS set-literal string injected into the status badge slot for color lookup.
@@ -188,6 +248,7 @@ def _summary_to_row(run: RunSummary) -> dict[str, Any]:
         "created_count": run.created,
         "rewired": run.rewired,
         "error": bool(run.error),
+        "busy": _is_busy(),
     }
 
 
@@ -204,6 +265,7 @@ def _creating_to_row(name: str) -> dict[str, Any]:
         "created_count": 0,
         "rewired": 0,
         "error": False,
+        "busy": True,
     }
 
 
@@ -277,15 +339,15 @@ def _build_runs_table() -> ui.table:
         f"""
         <q-td :props="props" class="text-no-wrap">
             <q-btn dense flat icon="play_arrow" color="primary"
-                   :disable="{_IN_FLIGHT_JS} || !{_can_execute_js("props.row.status")}"
+                   :disable="props.row.busy || {_IN_FLIGHT_JS} || !{_can_execute_js("props.row.status")}"
                    @click="$parent.$emit('execute', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
-                   :disable="{_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
+                   :disable="props.row.busy || {_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
                    @click="$parent.$emit('rollback', props.row)" />
             <q-btn dense flat icon="info" color="grey-8"
                    @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
-                   :disable="{_IN_FLIGHT_JS}"
+                   :disable="props.row.busy || {_IN_FLIGHT_JS}"
                    @click="$parent.$emit('rowmenu', props.row, $event)" />
         </q-td>
         """,
@@ -348,10 +410,17 @@ def _row_menu_action(action: Any) -> None:
 
 def _rowmenu_retry(run_id: str) -> None:
     """Delete the failed run and restart its generation with the same prompt."""
+    # Claim BEFORE the destructive delete: a busy claim aborts the retry with
+    # no folder removed. The claim is released by _do_generate's finally
+    # (or re-took here implicitly if creation fails — the finally covers it).
+    if not _try_claim(run_id, "creating"):
+        ui.notify(_busy_label(), type="warning")
+        return
     try:
         detail = get_run(run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        _release_run(run_id)
         return
     delete_run(run_id)
     _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
@@ -373,12 +442,24 @@ def _on_info(e: Any) -> None:
 
 
 def _refresh_rows_client() -> None:
-    """Push fresh rows into this client's live table without rebuilding it."""
+    """Push fresh rows + busy state into this client's live page."""
     table = getattr(context.client, "_runs_table", None)
     if table is None or table.is_deleted:
         return
     table.rows = _run_rows()
     table.update()
+    # Busy banner: a per-client label above the card, visible only while some
+    # mutating op is in flight (any user's op — the claim is global).
+    banner = getattr(context.client, "_busy_banner", None)
+    if banner is not None and not banner.is_deleted:
+        label = _busy_label()
+        banner.set_visibility(bool(label))
+        if label:
+            banner.text = label
+    # The per-client New Task button mirrors the busy state.
+    new_task = getattr(context.client, "_new_task_button", None)
+    if new_task is not None and not new_task.is_deleted:
+        new_task.set_enabled(not _is_busy())
 
 
 def _broadcast_rows() -> None:
@@ -390,7 +471,9 @@ def _broadcast_rows() -> None:
 
 def _on_execute(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    _mark_running(run_id, "running")
+    if not _try_claim(run_id, "running"):
+        ui.notify(_busy_label(), type="warning")
+        return
     background_tasks.create(
         _run_async(
             execute_run(run_id, app.storage.user["user"], app.storage.user["password"]),
@@ -483,6 +566,7 @@ async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> 
     finally:
         if run_id is not None:
             _unmark_running(run_id)
+            _release_run(run_id)
         _broadcast_rows()
 
 
@@ -492,6 +576,7 @@ def _confirm_dialog(
     on_confirm: Any,
     success_msg: str,
     run_id: str | None = None,
+    kind: str = "reverting",
 ) -> None:
     """Yes/no confirmation dialog; runs ``on_confirm`` (sync or async) on confirm.
 
@@ -507,7 +592,7 @@ def _confirm_dialog(
                 ui.button(
                     "Confirm",
                     color="negative",
-                    on_click=lambda: _confirm_and_close(dialog, on_confirm, success_msg, run_id),
+                    on_click=lambda: _confirm_and_close(dialog, on_confirm, success_msg, run_id, kind),
                 )
     dialog.open()
 
@@ -837,6 +922,7 @@ def _delete_dialog(run_id: str) -> None:
         lambda: delete_run(run_id),
         success_msg=f"Deleted {run_id}",
         run_id=run_id,
+        kind="deleting",
     )
 
 
@@ -853,12 +939,15 @@ def _rename_confirm(dialog: Any, old_id: str, name_input: Any) -> None:
     if new_id in existing:
         ui.notify(f"A task named {new_id!r} already exists", type="warning")
         return
+    if not _try_claim(new_id, "renaming"):
+        ui.notify(_busy_label(), type="warning")
+        return
     dialog.close()
 
     async def _do() -> None:
         rename_run(old_id, new_id)
 
-    background_tasks.create(_run_async(_do(), f"Renamed {old_id} → {new_id}"), name=f"rename {old_id}")
+    background_tasks.create(_run_async(_do(), f"Renamed {old_id} → {new_id}", new_id), name=f"rename {old_id}")
 
 
 def _logs_dialog() -> None:
@@ -945,22 +1034,37 @@ def _capabilities_dialog() -> None:
         dialog.open()
 
 
-def _confirm_and_close(dialog: Any, on_confirm: Any, success_msg: str, run_id: str | None = None) -> None:
+def _confirm_and_close(
+    dialog: Any, on_confirm: Any, success_msg: str, run_id: str | None = None, kind: str = "reverting"
+) -> None:
     dialog.close()
     # Let the outbox flush the close before the background task starts: the
     # revert/execute run a synchronous Uwazi login first, and blocking the
     # event loop before the flush stalls the modal visibly open.
-    ui.timer(0.05, lambda: _start_confirmed_task(on_confirm, success_msg, run_id), once=True)
+    ui.timer(0.05, lambda: _start_confirmed_task(on_confirm, success_msg, run_id, kind), once=True)
 
 
-def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None = None) -> None:
-    result = on_confirm()
-    if hasattr(result, "__await__"):
+def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None = None, kind: str = "reverting") -> None:
+    # Claim at the actual launch — a failed claim aborts the whole confirm
+    # action with a busy toast and no task (covers the revert path via the
+    # confirm dialog and the sync delete path).
+    if run_id is not None and not _try_claim(run_id, kind):
+        ui.notify(_busy_label(), type="warning")
+        return
+    try:
+        result = on_confirm()
+    except Exception:
+        # A sync op (delete) that raises before its task exists must still
+        # release, or the claim would block every later op until restart.
         if run_id is not None:
-            _mark_running(run_id, "reverting")
+            _release_run(run_id)
+        raise
+    if hasattr(result, "__await__"):
         background_tasks.create(_run_async(result, success_msg, run_id), name=success_msg)
     else:
         ui.notify(success_msg, type="positive")
+        if run_id is not None:
+            _release_run(run_id)
         _broadcast_rows()
 
 
@@ -1056,6 +1160,9 @@ def _start_generation(name: str, prompt: str, user: str, password: str) -> None:
     Shared by the new-task wizard and the retry path on a ``generation_failed``
     run so both produce the identical toast/table/background-task flow.
     """
+    if not _try_claim(name, "creating"):
+        ui.notify(_busy_label(), type="warning")
+        return
     _creating_runs[name] = {"name": name, "prompt": prompt}
     _broadcast_rows()
     _generating_notifications[name] = ui.notification(
@@ -1090,6 +1197,7 @@ async def _do_generate(name: str, prompt: str, user: str, password: str) -> None
         _notify_error("Generation failed", str(exc))
     finally:
         _creating_runs.pop(name, None)
+        _release_run(name)
         notification = _generating_notifications.pop(name, None)
         if notification is not None:
             notification.dismiss()
@@ -1109,7 +1217,8 @@ def _build_page() -> None:
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
             with ui.row().classes("items-center q-ml-md"):
-                ui.button("New Task", icon="add", on_click=_new_task_wizard).props("flat color=secondary")
+                new_task_button = ui.button("New Task", icon="add", on_click=_new_task_wizard).props("flat color=secondary")
+                context.client._new_task_button = new_task_button  # noqa: SLF001 — per-client busy disable
                 with ui.button(icon="menu").props("flat round color=secondary"):
                     with ui.menu():
                         ui.menu_item("Logs", _logs_dialog)
@@ -1118,6 +1227,15 @@ def _build_page() -> None:
                         ui.menu_item("Log out", _logout)
 
     with ui.column().classes("w-full items-center"):
+        # Busy banner: text set/visibility toggled per client by
+        # _refresh_rows_client while any mutating op is in flight.
+        busy_banner = (
+            ui.label("")
+            .classes("w-full max-w-6xl q-px-md q-py-sm text-body1 text-white bg-warning")
+            .style("border-radius: 4px")
+            .set_visibility(False)
+        )
+        context.client._busy_banner = busy_banner  # noqa: SLF001 — per-client busy banner
         with ui.card().classes("w-full max-w-6xl"):
             table = _build_runs_table()
             context.client._runs_table = table  # noqa: SLF001 — per-client handle for in-place refresh
