@@ -10,13 +10,13 @@ No business logic: this is a driver that wires adapters to use cases, matching
 the ``drivers/`` layer convention.
 """
 
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import yaml
 
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
-from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
 from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
 from uwazi_admin_agent.configuration import (
     DEFAULT_ON_ERROR_POLICY,
@@ -236,8 +236,15 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str) 
     RUNS_FILE.parent.mkdir(parents=True, exist_ok=True)
     RUNS_FILE.write_text(yaml.dump({"active_run": name}), encoding="utf-8")
 
-    loader = RunsConfigLoader.default()
-    run_path = loader.load_active_path()
+    # Resolve the run folder directly from the name: resolving through the
+    # RUNS_FILE pointer (load_active_path) is a TOCTOU race — two concurrent
+    # generations would both read whatever pointer was written last and emit
+    # into the WRONG run folder. RUNS_FILE stays written for CLI compatibility.
+    run_path = RUNS_PATH / name
+    run_path.mkdir(parents=True, exist_ok=True)
+    prompt_snapshot = PROMPTS_PATH / f"{name}.yaml"
+    if prompt_snapshot.is_file():
+        shutil.copy2(prompt_snapshot, run_path / prompt_snapshot.name)
 
     runtime = build_runtime(user=user, password=password)
     use_case = GenerateScriptUseCase(

@@ -11,6 +11,8 @@ captured file bytes (delete-revert file restore) are keyed by
 ``(run_id, shared_id, file_id)`` as parallel binary artifacts.
 """
 
+import contextlib
+import os
 import re
 from pathlib import Path
 from typing import override
@@ -78,7 +80,18 @@ class FilesystemBackupStore(BackupStorePort):
         run_dir = self._run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         path = run_dir / "manifest.json"
-        _ = path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        # Write to a same-directory temp file, then atomically rename onto the
+        # manifest: concurrent readers (list_runs polls every manifest each UI
+        # refresh) never see a torn write. Mirrors FileCacheStore._write_atomic.
+        tmp = path.with_name("manifest.json.tmp")
+        try:
+            _ = tmp.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            logger.warning("manifest save failed run={}", run_id)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise
         logger.debug("manifest saved run={}", run_id)
 
     @override
