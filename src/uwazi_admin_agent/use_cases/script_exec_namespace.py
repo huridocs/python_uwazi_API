@@ -77,6 +77,7 @@ from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
+from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_functions
@@ -827,6 +828,32 @@ def build_full_entities_view(result: AgentEntitySearchResult) -> list[dict]:
     return [e.model_dump() for e in result._all_entities]
 
 
+def coerce_search_filters(filters: list | None) -> list[AgentSearchFilter]:
+    """Normalize the ``filters`` argument into a list of :class:`AgentSearchFilter`.
+
+    The bound read helpers accept ``filters`` as either ``AgentSearchFilter``
+    instances or plain dicts — the LLM's natural dict-literal habit (e.g.
+    ``{"property_name": ..., "values": [...]}``). The adapter reads filter
+    fields via attribute access (``f.property_name``), so a raw dict crashes
+    with ``AttributeError``; this helper coerces dicts via
+    ``AgentSearchFilter(**item)`` so both forms work. Anything that is neither
+    a model nor a dict raises :class:`TypeError` with a clear message.
+
+    Pure: the testable seam extracted from :func:`_run_search_mode`.
+    """
+    if not filters:
+        return []
+    coerced: list[AgentSearchFilter] = []
+    for item in filters:
+        if isinstance(item, AgentSearchFilter):
+            coerced.append(item)
+        elif isinstance(item, dict):
+            coerced.append(AgentSearchFilter(**item))
+        else:
+            raise TypeError(f"filter must be an AgentSearchFilter or a dict, got {type(item).__name__}: {item!r}")
+    return coerced
+
+
 def _run_search_mode(
     entity_api: EntityApiPort,
     loop: asyncio.AbstractEventLoop,
@@ -863,12 +890,16 @@ def _run_search_mode(
     elif mode == "by_filter":
         if not template_name:
             return "Error: 'by_filter' mode requires `template_name`."
+        try:
+            coerced_filters = coerce_search_filters(filters)
+        except (TypeError, ValueError) as exc:
+            return f"Error: invalid filters: {exc}"
         logger.info(
-            "script {} by_filter: template={} filters={} limit={}", helper_name, template_name, len(filters or []), limit
+            "script {} by_filter: template={} filters={} limit={}", helper_name, template_name, len(coerced_filters), limit
         )
         result = loop.run_until_complete(
             entity_api.search_entities_by_filter(
-                template_name=template_name, filters=filters or [], language=language, limit=limit, published=published
+                template_name=template_name, filters=coerced_filters, language=language, limit=limit, published=published
             )
         )
     elif mode == "by_template":

@@ -11,9 +11,11 @@ from uwazi_admin_agent.use_cases.script_exec_namespace import (
     assert_ids_in_scope,
     build_exec_namespace,
     build_real_exec_namespace,
+    coerce_search_filters,
     filter_ids_to_scope,
     run_script_sync,
 )
+from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 
 # --- filter_ids_to_scope ----------------------------------------------------
 
@@ -316,3 +318,41 @@ result = e1 + "|" + e2
     result, error = run_script_sync(code, namespace)
     assert error is None
     assert result == "RuntimeError|RuntimeError"
+
+
+# --- coerce_search_filters -----------------------------------------------------
+
+
+def test_coerce_search_filters_accepts_dicts() -> None:
+    """Plain dict filters (the LLM's dict-literal habit) coerce to models."""
+    coerced = coerce_search_filters([{"property_name": "document_type", "values": ["Request for Provisional Measures"]}])
+    assert len(coerced) == 1
+    assert isinstance(coerced[0], AgentSearchFilter)
+    assert coerced[0].property_name == "document_type"
+    assert coerced[0].values == ["Request for Provisional Measures"]
+
+
+def test_coerce_search_filters_passes_models_through() -> None:
+    """Existing AgentSearchFilter instances are returned unchanged."""
+    model = AgentSearchFilter(property_name="document_type", values=["X"])
+    coerced = coerce_search_filters([model])
+    assert coerced == [model]
+
+
+def test_coerce_search_filters_empty_and_none() -> None:
+    """None and empty lists both normalize to an empty list."""
+    assert coerce_search_filters(None) == []
+    assert coerce_search_filters([]) == []
+
+
+def test_coerce_search_filters_rejects_non_dict_non_model() -> None:
+    """A non-dict, non-model item raises TypeError with a clear message."""
+    with pytest.raises(TypeError) as excinfo:
+        coerce_search_filters(["document_type"])
+    assert "str" in str(excinfo.value)
+
+
+def test_coerce_search_filters_rejects_missing_required_field() -> None:
+    """A dict missing the required ``property_name`` fails pydantic validation."""
+    with pytest.raises(ValueError):
+        coerce_search_filters([{"values": ["X"]}])

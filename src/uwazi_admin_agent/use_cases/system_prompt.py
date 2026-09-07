@@ -32,8 +32,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
                  shared_ids=None)
       Discover entities at runtime. `mode` is one of:
         "by_text"     — fuzzy free-text search (set `search_term`; `template_name` optional).
-        "by_filter"   — exact-match on a template's filterable properties
-                        (set `template_name` + `filters`, a list of {name, value} conditions).
+        "by_filter"   — exact-match on a template's filterable (`use_as_filter`)
+                        properties (set `template_name` + `filters` — see FILTER
+                        SHAPE below).
         "by_template" — every entity of one template (set `template_name`).
         "by_ids"      — fetch known entities (set `shared_ids`).
       Returns a search-result object (with a `summary` and `examples`) for the
@@ -75,6 +76,43 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `query_entities` when ids/summary alone suffice (e.g. picking random
       relationship targets), and `by_ids` only for ids that come from
       elsewhere (the operator names them, `create_entities` results).
+
+  FILTER SHAPE (for `by_filter` mode):
+      `filters` is a list of dicts, one per property, combined with AND. Each
+      dict has:
+        - `property_name`: the template property to filter on. It MUST be
+          marked `use_as_filter` on the template (inspect with
+          `get_templates_by_names`; a non-filterable property is rejected).
+        - `values`: for `select`/`multiselect` properties — a list of thesaurus
+          LABELS (never UUIDs). An entity matches if it has ANY of the values.
+        - `date_from` / `date_to`: for `date`/`daterange` properties — inclusive
+          ISO `YYYY-MM-DD` bounds (either or both).
+      Example:
+          filters=[{"property_name": "document_type",
+                    "values": ["Request for Provisional Measures"]}]
+          dicts = query_entities_full(mode="by_filter", template_name="DOCUMENT",
+                                      filters=filters)
+
+  NARROWING THE SEARCH (the 10000-entity cap):
+      `query_entities` and `query_entities_full` cap at `limit=10000` entities
+      per call. `by_template` returns EVERY entity of a template — if the
+      template has MORE than 10000 entities, the result is silently truncated
+      and you will MISS entities (or fail to find the one you want). Do NOT
+      rely on `by_template` for a large template. Instead, narrow the search
+      with `by_filter` (or `by_text` + `template_name`) so the result set is
+      small and complete:
+        - Inspect the template with `get_templates_by_names` to learn its
+          `use_as_filter` properties (and their thesaurus labels via
+          `get_thesauris_by_names`).
+        - INVENT filters from the operator's prompt — and even when the prompt
+          does NOT name a filter, derive one from the template's filterable
+          properties to keep the result set under the cap. E.g. for "give me
+          the shared_id of the entity titled X under template DOCUMENT", do NOT
+          scan every DOCUMENT; filter by the `document_type` (or another
+          `use_as_filter` property) that the title implies, then match the
+          title within that small set.
+        - Prefer `by_filter` (exact, cheap) over `by_text` (fuzzy) when a
+          filterable property captures the intent.
 
   ENTITY SHAPE (CRITICAL - getting this wrong raises `TypeError: unhashable
   type: 'list'/'dict'` and wastes a validation attempt):
@@ -480,7 +518,10 @@ script must NOT mutate anything — it only reads and sets `result` to the answe
 Use this exact shape:
 1. Discover the target(s) with `query_entities_full` (or `query_entities` when
    only ids/summary are needed) — see EXECUTION SANDBOX / RETURN ACCESS for the
-   correct subscript-vs-attribute access.
+   correct subscript-vs-attribute access. NARROW the search with `by_filter`
+   (see NARROWING THE SEARCH): do NOT scan a whole template with `by_template`
+   if it may exceed the 10000-entity cap — filter by the template's
+   `use_as_filter` properties (invented from the prompt if needed) first.
 2. Compute the answer from the fetched dicts. Match the operator's wording
    EXACTLY (title, template, property values). If nothing matches, set `result`
    to a clear "not found" string (e.g. "no entity matches ...") — do NOT guess.
