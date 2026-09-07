@@ -31,6 +31,14 @@ class FileRef(BaseModel):
     language: str | None = Field(
         default=None, description="The entity row language (ISO 639-1) for the upload `locale` cookie."
     )
+    file_language: str | None = Field(
+        default=None,
+        description=(
+            "The file's OWN language as stored on the file row (ISO 639-3, e.g. 'eng'), "
+            "distinct from the entity row language above. Used by read-only queries to tell "
+            "same-named files in different languages apart; not used on restore."
+        ),
+    )
     content_type: str = Field(description="The MIME type for the multipart part Content-Type header.")
     size: int | None = Field(
         default=None,

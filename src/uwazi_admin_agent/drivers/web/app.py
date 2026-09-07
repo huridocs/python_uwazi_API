@@ -25,6 +25,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     GenerateError,
     RevertVerificationError,
     RunSummary,
+    clear_cache,
     create_and_generate,
     delete_run,
     execute_run,
@@ -1034,6 +1035,41 @@ def _capabilities_dialog() -> None:
         dialog.open()
 
 
+def _clear_cache_dialog() -> None:
+    """Confirm + clear the persistent file/entity cache (forces fresh reads).
+
+    Created on the page layout (not inside the refreshable table) so the 5s
+    auto-refresh doesn't destroy it. Clearing drops every cached entity raw and
+    file byte for the configured instance, so the next task re-fetches server
+    truth instead of serving stale copies — the fix for results that don't
+    change after editing entities directly in Uwazi.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+            ui.label("Clear cache").classes("text-h6")
+            ui.label(
+                "Clear the persistent file/entity cache? The next task will "
+                "re-fetch entity data and file bytes from Uwazi instead of "
+                "serving cached copies. Use this after editing entities "
+                "directly in Uwazi so results reflect the latest data."
+            ).classes("text-body1")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+                ui.button("Clear", color="negative", on_click=lambda: _do_clear_cache(dialog))
+    dialog.open()
+
+
+def _do_clear_cache(dialog: Any) -> None:
+    """Run the cache clear and report how many entries were removed."""
+    dialog.close()
+    try:
+        removed = clear_cache()
+    except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
+        ui.notify(f"Failed to clear cache: {exc}", type="negative", multi_line=True)
+        return
+    ui.notify(f"Cache cleared ({removed} entries removed)", type="positive")
+
+
 def _confirm_and_close(
     dialog: Any, on_confirm: Any, success_msg: str, run_id: str | None = None, kind: str = "reverting"
 ) -> None:
@@ -1223,6 +1259,7 @@ def _build_page() -> None:
                     with ui.menu():
                         ui.menu_item("Logs", _logs_dialog)
                         ui.menu_item("Capabilities", _capabilities_dialog)
+                        ui.menu_item("Clear cache", _clear_cache_dialog)
                         ui.separator()
                         ui.menu_item("Log out", _logout)
 
