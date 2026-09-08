@@ -103,10 +103,26 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `query_entities` and `query_entities_full` cap at `limit=10000` entities
       per call. `by_template` returns EVERY entity of a template — if the
       template has MORE than 10000 entities, the result is silently truncated
-      and you will MISS entities (or fail to find the one you want). Do NOT
-      rely on `by_template` for a large template. Instead, narrow the search
-      with `by_filter` (or `by_text` + `template_name`) so the result set is
-      small and complete:
+      and you will MISS entities (or fail to find the one you want).
+
+      FILTER-FIRST RULE: whenever you need to search for entities, ALWAYS try
+      to narrow with `by_filter` (or `by_text` + `template_name`) FIRST. Only
+      fall back to fetching everything (`query_entities_full(mode="by_template",
+      ...)`) when no filter can express the target set. Fetching everything is
+      the LAST resort: it silently drops every entity past the 10000 cap, so it
+      is only safe when you are certain the template has fewer than 10000
+      entities.
+
+      PARTITIONING A LARGE SET: when the target set is larger than the cap, do
+      NOT give up or fetch everything. Partition it with filters into several
+      sub-queries that each fit under 10000, then combine the results. E.g. to
+      touch every DOCUMENT, loop over the `document_type` thesaurus labels (or
+      another `use_as_filter` property) and run one `by_filter` per label (plus
+      `values=["missing"]` for the unset ones); each sub-query stays small and
+      complete, and the union covers the whole template. Use
+      `get_thesauris_by_names` to enumerate the labels to partition by.
+
+      To narrow the search:
         - Inspect the template with `get_templates_by_names` to learn its
           `use_as_filter` properties (and their thesaurus labels via
           `get_thesauris_by_names`).
