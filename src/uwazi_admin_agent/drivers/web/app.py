@@ -273,7 +273,14 @@ def _creating_to_row(name: str) -> dict[str, Any]:
 
 def _columns() -> list[dict[str, Any]]:
     return [
-        {"name": "name", "label": "Run", "field": "name", "align": "left", "sortable": True},
+        {
+            "name": "name",
+            "label": "Task",
+            "field": "name",
+            "align": "left",
+            "sortable": True,
+            "style": "max-width: 260px; white-space: normal; word-break: break-word",
+        },
         {"name": "status", "label": "Status", "field": "status", "align": "left", "sortable": True},
         {"name": "created", "label": "Created", "field": "created", "align": "left", "sortable": True},
         {"name": "last_executed", "label": "Last execution", "field": "last_executed", "align": "left", "sortable": True},
