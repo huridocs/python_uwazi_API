@@ -35,7 +35,7 @@ MAX_LLM_CALLS: int = 70
 # per-call OUTPUT budget; it is independent of ``MAX_LLM_CALLS`` (a per-run REQUEST
 # count), so raising it does not lower the request budget. 32768 comfortably fits a
 # long merge script; it is a ceiling, not a target (shorter outputs cost nothing more).
-LLM_MAX_OUTPUT_TOKENS: int = 65536
+LLM_MAX_OUTPUT_TOKENS: int = 262144
 
 # Hard cap on ``run_validation_script`` calls per generation turn. The system
 # prompt asks the LLM to validate sparingly, but LLMs ignore prose limits and
