@@ -85,6 +85,12 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
           `get_templates_by_names`; a non-filterable property is rejected).
         - `values`: for `select`/`multiselect` properties — a list of thesaurus
           LABELS (never UUIDs). An entity matches if it has ANY of the values.
+          SPECIAL VALUE `"missing"`: matches entities where the property is
+          UNSET (shown as "No Label" in the UI). Use `values=["missing"]` to
+          select exactly the unset entities, or `values=["missing", "label1",
+          ...]` to match unset OR those labels. This is the ONLY way to express
+          "is empty" — there is no other empty operator, so do NOT try to
+          detect unset values by post-filtering a `by_template` scan.
         - `date_from` / `date_to`: for `date`/`daterange` properties — inclusive
           ISO `YYYY-MM-DD` bounds (either or both).
       Example:
@@ -113,6 +119,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
           title within that small set.
         - Prefer `by_filter` (exact, cheap) over `by_text` (fuzzy) when a
           filterable property captures the intent.
+        - To find entities where a `select`/`multiselect` property is UNSET
+          ("No Label"), filter with `values=["missing"]` (see FILTER SHAPE) —
+          do NOT scan the whole template and post-filter in Python.
 
   ENTITY SHAPE (CRITICAL - getting this wrong raises `TypeError: unhashable
   type: 'list'/'dict'` and wastes a validation attempt):
