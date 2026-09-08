@@ -11,6 +11,7 @@ contains no business logic, matching the ``drivers/`` layer convention.
 """
 
 import asyncio
+import json
 import os
 import threading
 from collections import deque
@@ -386,6 +387,7 @@ def _build_row_menu() -> None:
             errors_item = ui.menu_item("Error details", lambda: _row_menu_action(_error_dialog))
             ui.separator()
             ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
+            ui.menu_item("Duplicate", lambda: _row_menu_action(_rowmenu_duplicate))
             ui.menu_item("History", lambda: _row_menu_action(_history_dialog))
             script_item = ui.menu_item("Show script", lambda: _row_menu_action(_script_dialog))
             results_item = ui.menu_item("Show results", lambda: _row_menu_action(_results_dialog))
@@ -425,6 +427,22 @@ def _rowmenu_retry(run_id: str) -> None:
         return
     delete_run(run_id)
     _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
+
+
+def _rowmenu_duplicate(run_id: str) -> None:
+    """Open the new-task wizard prefilled with this run's name + prompt.
+
+    No busy claim: duplicating only opens a dialog; the claim is taken by
+    ``_start_generation`` when the operator presses Generate. A name collision
+    (``"<name> copy"`` already existing) is caught by the wizard's own
+    duplicate-name validation when the operator goes back to edit.
+    """
+    try:
+        detail = get_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
+        return
+    _new_task_wizard(prefill_name=f"{run_id} copy", prefill_prompt=detail.prompt)
 
 
 def _on_history(e: Any) -> None:
@@ -623,6 +641,28 @@ def _rename_dialog(run_id: str) -> None:
     dialog.open()
 
 
+def _copy_to_clipboard(text: str, label: str = "Copy") -> None:
+    """Button that copies ``text`` to the clipboard via the browser API.
+
+    Uses ``navigator.clipboard.writeText`` when available (secure contexts);
+    otherwise falls back to a hidden textarea + ``document.execCommand('copy')``.
+    """
+    payload = json.dumps(text)
+    js = (
+        f"navigator.clipboard ? navigator.clipboard.writeText({payload}) : (() => {{ "
+        f"const el = document.createElement('textarea'); el.value = {payload}; "
+        "el.style.position = 'fixed'; el.style.opacity = '0'; "
+        "document.body.appendChild(el); el.select(); "
+        "document.execCommand('copy'); el.remove(); })()"
+    )
+
+    def _do_copy() -> None:
+        ui.run_javascript(js)
+        ui.notify("Copied to clipboard", type="positive", timeout=1.5)
+
+    ui.button(label, icon="content_copy", on_click=_do_copy).props("flat dense color=grey-7")
+
+
 def _info_dialog(run_id: str) -> None:
     """Modal: the run's name and prompt (plus any recorded error hint).
 
@@ -639,7 +679,9 @@ def _info_dialog(run_id: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").style("overflow-y: auto"):
             ui.label(f"Task — {run_id}").classes("text-h6")
             ui.separator()
-            ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+                _copy_to_clipboard(detail.prompt or "", "Copy prompt")
             ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
                 "min-height: 120px"
             )
@@ -782,6 +824,16 @@ def _script_dialog(run_id: str) -> None:
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label(f"Generated script — {run_id}").classes("text-h6")
+                    _copy_to_clipboard(f"Prompt:\n{detail.prompt or ''}\n\nScript:\n{detail.script}", "Copy all")
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+                    _copy_to_clipboard(detail.prompt or "", "Copy prompt")
+                ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
+                    "min-height: 80px"
+                )
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Script").classes("text-subtitle1 text-grey-7")
+                    _copy_to_clipboard(detail.script, "Copy script")
                 ui.code(detail.script, language="python").classes("w-full grow").style("min-height: 0")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", icon="close", on_click=dialog.close).props("flat")
@@ -977,48 +1029,24 @@ def _logs_dialog() -> None:
         dialog.open()
 
 
-# Markdown shown in the "Capabilities" modal: the task types this service can
-# carry out, each with concrete example prompts. Kept as a literal so the
-# examples stay in sync with the orchestrator's documented capabilities.
-_CAPABILITIES_MARKDOWN = """
-This admin agent orchestrates a Uwazi instance. Describe a task in plain
-language with **New Task**; the agent inspects the instance, then performs the
-change through a generated, revertible migration **run**.
-
-### Read-only / reporting
-- "List all templates and how many entities each has"
-- "Find entities whose title contains 'Annual Report 2024'"
-- "Show the Countries thesaurus and how often each value is used"
-
-### Schema — templates, thesauri, relationship types
-- "Add a `summary` markdown field to the Document template"
-- "Create a thesaurus `Topics` with values Human Rights, Environment, Health"
-- "Rename the relationship type `authored_by` to `author`"
-
-### Entities — create / update / delete (small batches, up to 5)
-- "Create 3 new Person entities from this spreadsheet"
-- "Set the `status` of entity `abc123` to `published`"
-
-### Bulk entity operations (large sets, via the Python agent)
-- "Publish all 2,000 entities in the Films template"
-- "Delete every draft entity created before 2023"
-
-### Relationships
-- "Link entity A to entity B as `author`"
-
-### Pages
-- "Create a page showing a timeline of all books by date added"
-- "Add a public page that lists every Country entity"
-
-### Safety
-Destructive operations (delete, publish/unpublish, schema removal) always require
-an explicit confirmation before they run. Every run can be **reverted** from the
-table, which restores backups and removes created entities.
-"""
+_EXAMPLE_TASKS = [
+    (
+        "Find missing supporting files",
+        "Show entities from template DOCUMENT and Document Status to Adopted that has no supporting files",
+    ),
+    (
+        "Extract data from attachments",
+        "Fill a property from the attached HTML file",
+    ),
+    (
+        "Merge multilingual duplicates",
+        "Merge entities holding same PDF in different languages",
+    ),
+]
 
 
 def _capabilities_dialog() -> None:
-    """Show the service's supported task types with concrete examples.
+    """Show example tasks the service can carry out.
 
     Created on the page layout (not inside the refreshable table) so the 5s
     auto-refresh doesn't destroy it. Mirrors ``_logs_dialog``'s modal layout.
@@ -1027,11 +1055,14 @@ def _capabilities_dialog() -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full"):
             dialog.props("maximized")
             with ui.row().classes("items-center justify-between q-mb-md"):
-                ui.label("Service Capabilities").classes("text-h6")
+                ui.label("Example Tasks").classes("text-h6")
                 ui.button("Close", icon="close", on_click=lambda: dialog.close()).props("flat dense")
             content = ui.column().classes("w-full q-pr-md").style("height: calc(100vh - 120px); overflow-y: auto")
             with content:
-                ui.markdown(_CAPABILITIES_MARKDOWN)
+                for title, prompt in _EXAMPLE_TASKS:
+                    with ui.card().classes("w-full"):
+                        ui.label(title).classes("text-subtitle1 text-bold")
+                        ui.label(prompt).classes("text-body2 text-grey-7")
         dialog.open()
 
 
@@ -1104,25 +1135,33 @@ def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None 
         _broadcast_rows()
 
 
-def _new_task_wizard() -> None:
-    """Multi-step dialog to create + generate a run."""
-    state: dict[str, str] = {"name": "", "prompt": ""}
+def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
+    """Multi-step dialog to create + generate a run.
+
+    ``prefill_name``/``prefill_prompt`` pre-populate the wizard (used by the
+    Duplicate menu action); when a prefill is present the wizard opens
+    directly on the Generate review step.
+    """
+    state: dict[str, str] = {"name": prefill_name, "prompt": prefill_prompt}
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
         with ui.stepper() as stepper:
-            _wizard_step_name(state, stepper, dialog)
-            _wizard_step_prompt(state, stepper, dialog)
+            _wizard_step_name(state, stepper, dialog, prefill=prefill_name)
+            _wizard_step_prompt(state, stepper, dialog, prefill=prefill_prompt)
             _wizard_step_generate(state, dialog, stepper)
         dialog.open()
+        if prefill_name or prefill_prompt:
+            stepper.set_value("generate")
 
 
-def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any) -> None:
+def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any, prefill: str = "") -> None:
     with ui.step(name="name", title="Name", icon="edit"):
         ui.label("Name the run (a new folder will be created under data/runs/).").classes("text-body1 q-mb-md")
         name_input = ui.input(
             "Run name",
             placeholder="e.g. merge-entities-2026",
+            value=prefill,
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
         with ui.row().classes("q-mt-lg w-full justify-end"):
@@ -1143,13 +1182,14 @@ def _wizard_name_next(state: dict[str, str], name_input: Any, stepper: Any) -> N
     stepper.set_value("prompt")
 
 
-def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any) -> None:
+def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any, prefill: str = "") -> None:
     with ui.step(name="prompt", title="Prompt", icon="chat"):
         ui.label("Describe the migration in natural language.").classes("text-body1 q-mb-md")
         prompt_input = (
             ui.textarea(
                 "Prompt",
                 placeholder="e.g. Merge duplicate entities sharing the title 'X'...",
+                value=prefill,
                 validation={"Required": lambda v: bool(v and v.strip())},
             )
             .classes("w-full")

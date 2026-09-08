@@ -212,6 +212,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         (each value the same list `get_entity_files(sid)` returns; `[]` for
         entities without uploaded files). SUBSCRIPT the dict:
         `files = get_entity_files_parallel(ids)[sid]`.
+        Each list MIXES BOTH kinds (`kind: "document"` = the PRIMARY
+        document, `kind: "attachment"` = a SUPPORTING file): a class
+        question ("no supporting files", "has a primary document") MUST
+        filter entries on `kind` — NEVER test list emptiness (an entity
+        with only its primary document still yields a non-empty list).
     get_file_bytes_parallel(filenames)
         Bulk `get_file_bytes`: returns a DICT `{filename: bytes_or_None}`.
         Collect all filenames first, then fetch them in ONE call.
@@ -294,6 +299,10 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
     server-side bulk requests, so no `_parallel` variant exists for them.
     (`move_files_to_entity` stays the SINGLE-target form; its `_parallel`
     sibling batches MANY targets.)
+  - Class-filter idiom (files_by_id MIXES `document` and `attachment`
+    kinds — class questions filter on `kind`, NEVER on emptiness):
+        no_supporting = [d for d in dicts if not files_by_id.get(d["shared_id"])]  # WRONG: true only when the entity has NO files at all; every DOCUMENT entity has a primary document, so genuinely attachment-less entities are dropped
+        no_supporting = [d for d in dicts if not any(f["kind"] == "attachment" for f in files_by_id[d["shared_id"]])]  # RIGHT: filter the kind
   - Bulk extraction idiom (fetches overlap, parsing stays plain Python):
         files_by_id = get_entity_files_parallel([d["shared_id"]] for d in dicts)  # WRONG: arg must be a LIST
         files_by_id = get_entity_files_parallel([d["shared_id"] for d in dicts])  # RIGHT
@@ -336,6 +345,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       stored bytes). In validation against dummies this returns `[]` (dummies
       carry no files); the fetch path is only exercised live.
 
+      The list MIXES BOTH kinds: a class question ("no supporting files",
+      "has a primary document") MUST filter entries on `kind` — NEVER
+      test list emptiness.
       IMPORTANT — two DIFFERENT language fields:
         - `language` is the ENTITY ROW language (ISO 639-1, e.g. "en") — the
           SAME for every file of one entity. Do NOT use it to tell files apart.
@@ -683,6 +695,11 @@ entity's UPLOADED attachments = file dicts with
 `kind == "attachment"`. URL attachments are absent from
 `get_entity_files` (no stored bytes), so a "supporting files" request
 never resolves to them.
+The SAME mapping applies to READ/FILTER tasks, not just deletions: a
+"has/has no supporting files" READ task filters on
+`kind == "attachment"` exactly like the deletion example above — the
+returned file list MIXES both kinds, so never decide a class question
+from list emptiness.
 
 CLASS DELETIONS: when the operator names a CLASS of files rather than
 specific names ("remove all the supporting files of entity X", "delete
