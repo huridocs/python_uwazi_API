@@ -31,10 +31,12 @@ from uwazi_admin_agent.domain.audit_record import AuditRecord
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
+from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
+from uwazi_admin_agent.use_cases.clarify_prompt_use_case import ClarifyPromptUseCase
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
 
@@ -69,6 +71,7 @@ class RunDetail:
     status: RunStatus
     created_at: datetime
     prompt: str
+    validated_prompt: str | None
     script: str
     modified: int
     deleted: int
@@ -159,6 +162,7 @@ def get_run(run_id: str) -> RunDetail:
         status=manifest.status,
         created_at=manifest.created_at,
         prompt=manifest.prompt,
+        validated_prompt=manifest.validated_prompt,
         script=script,
         modified=modified,
         deleted=deleted,
@@ -225,9 +229,22 @@ def get_execution_history(run_id: str, audit_log: AuditLogPort | None = None) ->
     ]
 
 
-async def create_and_generate(name: str, prompt: str, user: str, password: str) -> None:
+async def clarify_prompt(prompt: str, user: str, password: str) -> PromptUnderstanding:
+    """Run the prompt-validation step: restate the prompt + surface ambiguities.
+
+    A lightweight, tool-free LLM call that runs BEFORE generation so the operator
+    can confirm/rephrase. Raises on LLM failure; the caller shows a skip affordance.
+    """
+    runtime = build_runtime(user=user, password=password)
+    use_case = ClarifyPromptUseCase(llm=runtime.llm)
+    return await use_case.execute(prompt)
+
+
+async def create_and_generate(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
     """Write the prompt + active-run pointer, then generate the script + manifest.
 
+    ``prompt`` is the operator's original request; ``validated_prompt`` (when
+    given) is the final, validated prompt actually sent to the generation LLM.
     On failure the manifest is persisted with ``status=GENERATION_FAILED`` (the
     prompt yaml stays on disk for retry) and :class:`GenerateError` is raised
     so the caller shows a short toast; the full detail lives on the manifest.
@@ -254,14 +271,16 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str) 
         entity_repository=runtime.entity_repository,
     )
 
+    final_prompt = validated_prompt or prompt
     try:
-        script = await use_case.execute(prompt)
+        script = await use_case.execute(final_prompt)
         emit_generated_script(script, run_path)
     except Exception as exc:
         manifest = MigrationManifest(
             run_id=name,
             created_at=datetime.now(timezone.utc),
             prompt=prompt,
+            validated_prompt=validated_prompt,
             script="",
             status=RunStatus.GENERATION_FAILED,
             snapshot_dir=str(run_path),
@@ -275,6 +294,7 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str) 
         run_id=name,
         created_at=datetime.now(timezone.utc),
         prompt=prompt,
+        validated_prompt=validated_prompt,
         script=script.python_code,
         status=RunStatus.PLANNED,
         snapshot_dir=str(run_path),
@@ -410,6 +430,7 @@ __all__ = [
     "RunDetail",
     "RunResults",
     "RunSummary",
+    "clarify_prompt",
     "create_and_generate",
     "clear_cache",
     "delete_run",

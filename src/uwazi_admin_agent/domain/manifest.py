@@ -49,6 +49,14 @@ class MigrationManifest(BaseModel):
     run_id: str = Field(description="Unique run identifier.")
     created_at: datetime = Field(description="When the run was created.")
     prompt: str = Field(description="The operator's natural-language request that originated the run.")
+    validated_prompt: str | None = Field(
+        default=None,
+        description=(
+            "The final, validated prompt actually sent to the generation LLM "
+            "(original prompt + resolved clarifications + notes). None when the "
+            "operator skipped validation."
+        ),
+    )
     script: str = Field(description="The generated Python script that was executed.")
     modified: list[EntityIdentity] = Field(
         default_factory=list,

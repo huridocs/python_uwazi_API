@@ -21,11 +21,13 @@ from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.drivers.web.run_service import (
     GenerateError,
     RevertVerificationError,
     RunSummary,
+    clarify_prompt,
     clear_cache,
     create_and_generate,
     delete_run,
@@ -433,7 +435,13 @@ def _rowmenu_retry(run_id: str) -> None:
         _release_run(run_id)
         return
     delete_run(run_id)
-    _start_generation(run_id, detail.prompt, app.storage.user["user"], app.storage.user["password"])
+    _start_generation(
+        run_id,
+        detail.prompt,
+        app.storage.user["user"],
+        app.storage.user["password"],
+        validated_prompt=detail.validated_prompt,
+    )
 
 
 def _rowmenu_duplicate(run_id: str) -> None:
@@ -692,6 +700,14 @@ def _info_dialog(run_id: str) -> None:
             ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
                 "min-height: 120px"
             )
+            if detail.validated_prompt:
+                ui.separator()
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
+                    _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
+                ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                    "readonly outlined autogrow"
+                ).style("min-height: 120px")
             if detail.error:
                 ui.separator()
                 ui.label("Last error").classes("text-subtitle1 text-grey-7")
@@ -830,13 +846,25 @@ def _script_dialog(run_id: str) -> None:
             with ui.column().classes("w-full items-stretch"):
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label(f"Generated script — {run_id}").classes("text-h6")
-                    _copy_to_clipboard(f"Prompt:\n{detail.prompt or ''}\n\nScript:\n{detail.script}", "Copy all")
+                    _copy_to_clipboard(
+                        f"Prompt:\n{detail.prompt or ''}\n\n"
+                        f"Validated prompt:\n{detail.validated_prompt or ''}\n\n"
+                        f"Script:\n{detail.script}",
+                        "Copy all",
+                    )
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label("Prompt").classes("text-subtitle1 text-grey-7")
                     _copy_to_clipboard(detail.prompt or "", "Copy prompt")
                 ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
                     "min-height: 80px"
                 )
+                if detail.validated_prompt:
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
+                        _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
+                    ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                        "readonly outlined autogrow"
+                    ).style("min-height: 80px")
                 with ui.row().classes("w-full items-center justify-between"):
                     ui.label("Script").classes("text-subtitle1 text-grey-7")
                     _copy_to_clipboard(detail.script, "Copy script")
@@ -1146,19 +1174,23 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
 
     ``prefill_name``/``prefill_prompt`` pre-populate the wizard (used by the
     Duplicate menu action); when a prefill is present the wizard opens
-    directly on the Generate review step.
+    directly on the Generate review step (validation is skipped).
     """
-    state: dict[str, str] = {"name": prefill_name, "prompt": prefill_prompt}
+    state: dict[str, Any] = {"name": prefill_name, "prompt": prefill_prompt, "final_prompt": prefill_prompt}
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
         with ui.stepper() as stepper:
+            state["_dialog"] = dialog
+            state["_stepper"] = stepper
             _wizard_step_name(state, stepper, dialog, prefill=prefill_name)
             _wizard_step_prompt(state, stepper, dialog, prefill=prefill_prompt)
+            _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
+            _show_generate_prompt(state)
 
 
 def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any, prefill: str = "") -> None:
@@ -1208,27 +1240,190 @@ def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any, prefil
             ui.button("Next", on_click=lambda: _wizard_prompt_next(state, prompt_input, stepper))
 
 
-def _wizard_prompt_next(state: dict[str, str], prompt_input: Any, stepper: Any) -> None:
+def _wizard_prompt_next(state: dict[str, Any], prompt_input: Any, stepper: Any) -> None:
     value = (prompt_input.value or "").strip()
     if not value:
         ui.notify("Prompt is required", type="warning")
         return
     state["prompt"] = value
-    stepper.set_value("generate")
+    state["final_prompt"] = value
+    state["validated_prompt"] = None
+    state["_validation_done"] = False
+    _render_validate_idle(state, state["_validate_container"])
+    stepper.set_value("validate")
 
 
-def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> None:
+def _wizard_step_validate(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
+    with ui.step(name="validate", title="Validate", icon="help"):
+        container = ui.column().classes("w-full")
+        state["_validate_container"] = container
+        _render_validate_idle(state, container)
+
+
+def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
+    """Show the pre-validation state: a Validate button (validation is opt-in)."""
+    container.clear()
+    with container:
+        ui.label("Ask the LLM what it understood from your prompt before generating.").classes("text-body1 q-mb-md")
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
+            ui.button("Validate", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
+
+
+def _start_validation(state: dict[str, Any]) -> None:
+    """Kick off the prompt-validation LLM call and show a loading state."""
+    container = state["_validate_container"]
+    container.clear()
+    with container:
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.spinner(size="lg")
+            ui.label("Validating prompt — asking the LLM what it understood...").classes("text-body1")
+    background_tasks.create(_do_clarify(state, container), name="clarify prompt")
+
+
+async def _do_clarify(state: dict[str, Any], container: Any) -> None:
+    """Run the clarification LLM call on a worker thread, then render the result."""
+    prompt = state["prompt"]
+    try:
+        understanding = await asyncio.to_thread(
+            asyncio.run,
+            clarify_prompt(prompt, app.storage.user["user"], app.storage.user["password"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _render_validation_error(state, container, exc)
+        return
+    state["understanding"] = understanding
+    _render_validation(state, container)
+
+
+def _render_validation_error(state: dict[str, Any], container: Any, exc: Exception) -> None:
+    """Show a validation failure with a skip affordance (the operator can proceed)."""
+    state["_validation_done"] = True
+    container.clear()
+    with container:
+        ui.label("Validation failed").classes("text-h6 text-negative")
+        ui.label(str(exc)).classes("text-body2 text-red-10 q-mb-md")
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=primary")
+
+
+def _render_validation(state: dict[str, Any], container: Any) -> None:
+    """Render the LLM's understanding: summary + clarifying questions + notes + preview."""
+    state["_validation_done"] = True
+    understanding = state["understanding"]
+    container.clear()
+    with container:
+        ui.label("What the LLM understood").classes("text-subtitle1 text-grey-7")
+        ui.label(understanding.summary).classes("text-body1 q-mb-md")
+
+        answer_widgets: list[dict[str, Any]] = []
+        if understanding.questions:
+            ui.label("Clarifying questions").classes("text-subtitle1 text-grey-7 q-mt-md")
+            for question in understanding.questions:
+                with ui.card().classes("w-full q-mb-sm"):
+                    ui.label(question.question).classes("text-body1 text-weight-medium")
+                    option_checkboxes = [
+                        ui.checkbox(option, on_change=lambda: _refresh_final_prompt(state)) for option in question.options
+                    ]
+                    custom_checkbox = ui.checkbox("Custom answer", on_change=lambda: _refresh_final_prompt(state))
+                    custom_input = ui.input("Your answer", on_change=lambda: _refresh_final_prompt(state)).classes("w-full")
+                    answer_widgets.append(
+                        {
+                            "question": question.question,
+                            "options": list(zip(question.options, option_checkboxes)),
+                            "custom_checkbox": custom_checkbox,
+                            "custom_input": custom_input,
+                        }
+                    )
+        state["_answer_widgets"] = answer_widgets
+
+        ui.label("Additional notes").classes("text-subtitle1 text-grey-7 q-mt-md")
+        notes_input = (
+            ui.textarea("Notes", on_change=lambda: _refresh_final_prompt(state)).classes("w-full").props("autogrow")
+        )
+        state["_notes_input"] = notes_input
+
+        ui.label("Final prompt (sent to the LLM)").classes("text-subtitle1 text-grey-7 q-mt-md")
+        preview = ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
+        state["_preview"] = preview
+
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
+            ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("color=primary")
+
+        _refresh_final_prompt(state)
+
+
+def _collect_answers(state: dict[str, Any]) -> list[QuestionAnswer]:
+    """Read the current checkbox/input values into :class:`QuestionAnswer` objects."""
+    answers: list[QuestionAnswer] = []
+    for widget in state.get("_answer_widgets", []):
+        selected = [option for option, checkbox in widget["options"] if checkbox.value]
+        custom = None
+        if widget["custom_checkbox"].value and (widget["custom_input"].value or "").strip():
+            custom = widget["custom_input"].value.strip()
+        answers.append(QuestionAnswer(question=widget["question"], selected=selected, custom=custom))
+    return answers
+
+
+def _refresh_final_prompt(state: dict[str, Any]) -> None:
+    """Recompute the final prompt from the current answers + notes and update the preview."""
+    notes_input = state.get("_notes_input")
+    notes = (notes_input.value or "") if notes_input is not None else ""
+    final = build_final_prompt(state["prompt"], _collect_answers(state), notes)
+    state["final_prompt"] = final
+    preview = state.get("_preview")
+    if preview is not None:
+        preview.value = final
+
+
+def _wizard_skip(state: dict[str, Any]) -> None:
+    """Proceed to generate with the original prompt (no validation applied)."""
+    state["final_prompt"] = state["prompt"]
+    state["validated_prompt"] = None
+    _show_generate_prompt(state)
+    state["_stepper"].set_value("generate")
+
+
+def _wizard_confirm(state: dict[str, Any]) -> None:
+    """Proceed to generate with the validated (final) prompt."""
+    _refresh_final_prompt(state)
+    state["validated_prompt"] = state["final_prompt"]
+    _show_generate_prompt(state)
+    state["_stepper"].set_value("generate")
+
+
+def _show_generate_prompt(state: dict[str, Any]) -> None:
+    """Update the generate step's prompt display to the current final prompt."""
+    display = state.get("_generate_prompt_display")
+    if display is not None:
+        display.value = state.get("final_prompt") or state.get("prompt") or ""
+
+
+def _wizard_generate_back(state: dict[str, Any]) -> None:
+    """Back from the generate step: to validate (if it ran) or prompt (duplicate path)."""
+    target = "validate" if state.get("_validation_done") else "prompt"
+    state["_stepper"].set_value(target)
+
+
+def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> None:
     with ui.step(name="generate", title="Generate", icon="auto_awesome"):
         ui.label("Review and generate the migration script.").classes("text-body1 q-mb-md")
         ui.label().bind_text_from(state, "name", backward=lambda v: f"Run: {v}").classes("text-h6")
-        ui.label().bind_text_from(
-            state,
-            "prompt",
-            backward=lambda v: f"Prompt: {v[:120]}{'...' if len(v) > 120 else ''}",
-        ).classes("text-body1")
+        ui.label("Final prompt (sent to the LLM)").classes("text-subtitle1 text-grey-7 q-mt-md")
+        prompt_display = (
+            ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
+        )
+        state["_generate_prompt_display"] = prompt_display
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: stepper.set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_generate_back(state)).props("color=grey-7 flat")
             ui.button(
                 "Generate",
                 icon="auto_awesome",
@@ -1236,7 +1431,7 @@ def _wizard_step_generate(state: dict[str, str], dialog: Any, stepper: Any) -> N
             )
 
 
-def _start_generation(name: str, prompt: str, user: str, password: str) -> None:
+def _start_generation(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
     """Register the in-flight placeholder + notification and launch generation.
 
     Shared by the new-task wizard and the retry path on a ``generation_failed``
@@ -1254,26 +1449,32 @@ def _start_generation(name: str, prompt: str, user: str, password: str) -> None:
         timeout=None,
     )
     background_tasks.create(
-        _do_generate(name, prompt, user, password),
+        _do_generate(name, prompt, user, password, validated_prompt),
         name=f"generate {name}",
     )
 
 
-def _wizard_generate(state: dict[str, str], dialog: Any) -> None:
+def _wizard_generate(state: dict[str, Any], dialog: Any) -> None:
     name = state.get("name", "")
     prompt = state.get("prompt", "")
     if not name or not prompt:
         ui.notify("Name and prompt are required", type="warning")
         return
     dialog.close()
-    _start_generation(name, prompt, app.storage.user["user"], app.storage.user["password"])
+    _start_generation(
+        name,
+        prompt,
+        app.storage.user["user"],
+        app.storage.user["password"],
+        validated_prompt=state.get("validated_prompt"),
+    )
 
 
-async def _do_generate(name: str, prompt: str, user: str, password: str) -> None:
+async def _do_generate(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
     # create_and_generate does synchronous Uwazi HTTP + LLM calls; run it on a
     # worker thread so the event loop stays free to serve the UI and websocket.
     try:
-        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password))
+        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password, validated_prompt))
         _broadcast_notify(f"Run {name!r} created and generated", type="positive")
     except Exception as exc:  # noqa: BLE001
         _notify_error("Generation failed", str(exc))
