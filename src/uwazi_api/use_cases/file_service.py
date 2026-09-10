@@ -3,9 +3,12 @@ from pathlib import Path
 from typing import Optional
 
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
+from uwazi_api.domain.exceptions import SegmentationNotFoundError
 from uwazi_api.domain.FileType import FileType
+from uwazi_api.domain.segmentation import Segmentation
 from uwazi_api.use_cases.repositories.entity_repository import EntityRepository
 from uwazi_api.use_cases.repositories.file_repository import FileRepository
+from uwazi_api.use_cases.repositories.segmentation_repository import SegmentationRepository
 
 
 class FileService:
@@ -13,9 +16,11 @@ class FileService:
         self,
         file_repository: "FileRepository",
         entity_repository: "EntityRepository",
+        segmentation_repository: "SegmentationRepository",
     ):
         self.file_repo = file_repository
         self.entity_repo = entity_repository
+        self.segmentation_repo = segmentation_repository
 
     # --- Orchestration methods ---
 
@@ -29,6 +34,17 @@ class FileService:
         if not docs:
             return None
         return self.file_repo.get_document_by_file_name(docs[0].filename)
+
+    def get_segmentation(self, shared_id: str, language: str) -> Segmentation:
+        entity = self.entity_repo.get_one(shared_id, language)
+        mapping = LANGUAGE_TO_FILE_LANGUAGE
+        if language not in mapping:
+            raise SegmentationNotFoundError(f"Unsupported language {language}")
+        file_language = mapping[language]
+        docs = [d for d in entity.documents if d.language == file_language]
+        if not docs:
+            raise SegmentationNotFoundError(f"Entity {shared_id} has no document for language {language}")
+        return self.segmentation_repo.get_by_file_id(docs[0].id)
 
     def save_document_to_path(self, shared_id: str, languages: list[str], path: str) -> None:
         if not os.path.exists(path):
@@ -45,6 +61,9 @@ class FileService:
 
     def get_document_by_file_name(self, file_name: str) -> Optional[bytes]:
         return self.file_repo.get_document_by_file_name(file_name)
+
+    def get_segmentation_by_file_id(self, file_id: str) -> Segmentation:
+        return self.segmentation_repo.get_by_file_id(file_id)
 
     def upload_file(self, pdf_file_path: str, share_id: str, language: str, title: str) -> bool:
         return self.file_repo.upload_file(pdf_file_path, share_id, language, title)
