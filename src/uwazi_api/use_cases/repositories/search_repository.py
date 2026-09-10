@@ -8,6 +8,7 @@ from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
+from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
@@ -175,12 +176,14 @@ class SearchRepository:
         name_to_id = {}
         valid_ids = set()
         for v in thesauri.values:
-            name_to_id[v.label] = v.id
-            valid_ids.add(v.id)
             if v.values:
                 for child in v.values:
                     name_to_id[child.label] = child.id
+                    name_to_id[qualify_label(v.label, child.label)] = child.id
                     valid_ids.add(child.id)
+            else:
+                name_to_id[v.label] = v.id
+                valid_ids.add(v.id)
         filter_value.values = [
             name_to_id[name] if name != "missing" else name
             for name in filter_value.values
