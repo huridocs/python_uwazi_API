@@ -10,6 +10,7 @@ from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.template import Template
+from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 
@@ -222,12 +223,14 @@ class EntityMapper:
                 break
         return value
 
-    def _find_label_in_values(self, values: list, target_id: str) -> Optional[str]:
+    def _find_label_in_values(self, values: list, target_id: str, parent_label: Optional[str] = None) -> Optional[str]:
         for v in values:
             if v.id == target_id:
+                if parent_label:
+                    return qualify_label(parent_label, v.label)
                 return v.label
             if v.values:
-                found = self._find_label_in_values(v.values, target_id)
+                found = self._find_label_in_values(v.values, target_id, v.label)
                 if found is not None:
                     return found
         return None
@@ -527,11 +530,18 @@ def _resolve_thesaurus_label(
     )
 
 
-def _build_label_map(values: list, label_map: dict[str, str]) -> None:
+def _build_label_map(values: list, label_map: dict[str, str], parent_label: Optional[str] = None) -> None:
     for v in values:
-        label_map[v.label] = v.id
         if v.values:
-            _build_label_map(v.values, label_map)
+            # A group: its children are the selectable options. Recurse with the
+            # group name as the parent so each child also gets a qualified
+            # "Group: Child" key (the bare child label alone is ambiguous when
+            # two groups share a child label).
+            _build_label_map(v.values, label_map, v.label)
+        else:
+            label_map[v.label] = v.id
+            if parent_label:
+                label_map[qualify_label(parent_label, v.label)] = v.id
 
 
 def _flatten_values(values: list) -> list:

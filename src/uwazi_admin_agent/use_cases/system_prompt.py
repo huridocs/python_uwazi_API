@@ -85,6 +85,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
           `get_templates_by_names`; a non-filterable property is rejected).
         - `values`: for `select`/`multiselect` properties — a list of thesaurus
           LABELS (never UUIDs). An entity matches if it has ANY of the values.
+          For a value inside a thesaurus GROUP, qualify it as `"Group: Child"`
+          (e.g. `"HRC: Resolution"`) so it is unambiguous — two groups may share
+          a child label. For a top-level value use the bare label.
           SPECIAL VALUE `"missing"`: matches entities where the property is
           UNSET (shown as "No Label" in the UI). Use `values=["missing"]` to
           select exactly the unset entities, or `values=["missing", "label1",
@@ -466,9 +469,12 @@ WORKFLOW
     2. For any `select`/`multiselect` property you will set (in the script or in
        the `dummy_spec`), call the `get_thesauris_by_names` TOOL with that
        property's `thesaurus_name`. It returns the EXACT valid value labels
-       (`values` + grouped `groups` — use the bare child label, never a
-       "group / child" prefix). Use those literal labels; NEVER guess a thesaurus
-       label (Uwazi rejects guessed labels with `not a valid thesaurus label`).
+       (`values` + grouped `groups`). For a top-level value use the bare child
+       label; for a value inside a group, qualify it as `"Group: Child"` (e.g.
+       `"HRC: Resolution"`) so it is unambiguous — two groups may share a child
+       label (e.g. `HRC` and `Inter-American Commission` both have a
+       `Resolution`). Use those literal labels; NEVER guess a thesaurus label
+       (Uwazi rejects guessed labels with `not a valid thesaurus label`).
        If unsure which thesauri exist, call `list_thesauri` first.
     3. Discover the entity/metadata shapes you will read with the `query_entities`
        TOOL (`by_text`/`by_template`/`by_ids`). The live `metadata` of existing

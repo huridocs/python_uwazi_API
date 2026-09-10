@@ -18,8 +18,11 @@ ENTITY_INSTRUCTIONS = (
     "template context), NEVER the thesaurus name. The thesaurus name (e.g. "
     "``thesaurus=Book Genres``) is metadata about the property, not the key.\n"
     "- For ``select``/``multiselect`` properties, the value is a thesaurus "
-    'LABEL (e.g. ``"Fantasy"``), not a UUID, not the thesaurus name, and not '
-    "a group-prefixed label.\n\n"
+    'LABEL (e.g. ``"Fantasy"``), not a UUID and not the thesaurus name. When '
+    'the value lives inside a thesaurus GROUP, qualify it as ``"Group: Child"`` '
+    '(e.g. ``"HRC: Resolution"``) so it is unambiguous \u2014 two groups may share '
+    "a child label (e.g. ``HRC`` and ``Inter-American Commission`` both have a "
+    "``Resolution``). For a top-level (ungrouped) value, use the bare label.\n\n"
     "IMPORTANT - Never retry a failed ``create_entities`` with a different "
     "metadata key without first calling ``get_templates_by_names`` to inspect "
     "the actual property names on the template.\n\n"
@@ -75,9 +78,11 @@ ENTITY_INSTRUCTIONS = (
     "invalid thesaurus label, DO NOT retry with different label formats (e.g. "
     "'Group / child', 'Group-child', 'Group::child', etc.). Instead, stop and "
     "call ``get_thesauris_by_names`` to inspect the thesaurus and find the "
-    "exact valid label. The only accepted format is the bare child label (e.g. "
-    "'kitchen'), never a group prefix. If it still fails after this inspection, "
-    "report the error back to the orchestrator \u2014 do not keep guessing.\n"
+    "exact valid label. The accepted formats are the bare child label for a "
+    "top-level value (e.g. 'kitchen') and the qualified ``\"Group: Child\"`` "
+    "label for a grouped value (e.g. 'HRC: Resolution'). If it still fails "
+    "after this inspection, report the error back to the orchestrator \u2014 do "
+    "not keep guessing.\n"
     "- Do not retry a failed mutation more than twice total. After two attempts "
     "on the same entity, report the failure.\n\n"
     "Metadata value shapes (used for BOTH reading and writing). Tools always "
@@ -91,8 +96,9 @@ ENTITY_INSTRUCTIONS = (
     '`"YYYY-MM-DD->YYYY-MM-DD"`.\n'
     '- ``multidate``: list of ISO dates, e.g. `["2024-01-15", "2024-02-01"]`.\n'
     "- ``multidaterange``: list of range objects.\n"
-    '- ``select``: a thesaurus label string (e.g. `"Approved"`). Never a UUID.\n'
-    "- ``multiselect``: list of label strings.\n"
+    '- ``select``: a thesaurus label string (e.g. `"Approved"`). Never a UUID. '
+    'For a grouped value, qualify it as `"Group: Child"` (e.g. `"HRC: Resolution"`).\n'
+    "- ``multiselect``: list of label strings (qualified the same way for grouped values).\n"
     '- ``link``: `{"label": "<text>", "url": "<url>"}` or `"<text>|<url>"`.\n'
     '- ``geolocation``: ONE of `[<lat>, <lon>]`, `{"lat": <lat>, "lon": <lon>}`, '
     'or `"<lat>|<lon>"`. The place name is informational on read and dropped on '
