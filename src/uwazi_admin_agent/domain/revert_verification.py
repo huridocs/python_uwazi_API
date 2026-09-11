@@ -18,13 +18,14 @@ Three checks:
   equals ``snapshot.raw`` (excl. platform-managed). Identity (_id/sharedId) must
   match too (modified entities keep their identity on the update branch).
 - **deleted** entities: re-created via the create branch, so Uwazi minted a
-  fresh _id/sharedId. The comparison excludes platform-managed, identity, and
-  file fields (:data:`IDENTITY_FIELDS`, :data:`FILE_FIELDS`) — only DATA fields
-  are expected to match. A dedicated file-gap check (:func:`build_file_gaps`)
-  compares the snapshot's captured files against the re-created entity's
-  documents/attachments by originalname+kind to flag missing/extra files. The
-  current raw is fetched by the recorded ``restored_shared_id``; a ``None``
-  actual means the re-create failed (the old id is gone).
+  fresh _id/sharedId. The comparison keeps only the data fields the create
+  branch restores (:data:`CREATE_ALLOWED_FIELDS` minus the file-bearing
+  :data:`FILE_FIELDS`) — everything else is dropped or re-minted on re-create.
+  A dedicated file-gap check (:func:`build_file_gaps`) compares the snapshot's
+  captured files against the re-created entity's documents/attachments by
+  originalname+kind to flag missing/extra files. The current raw is fetched by
+  the recorded ``restored_shared_id``; a ``None`` actual means the re-create
+  failed (the old id is gone).
 - **rewired** relationships: ``current_raw[<property_name>]`` equals the
   recorded ``before``. Rewired from-entities are also in ``modified`` (so the
   full-raw check already covers ``relations``), but the plan calls out
@@ -40,6 +41,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.create_payload import CREATE_ALLOWED_FIELDS
 from uwazi_admin_agent.domain.deleted_file import to_file_ref
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.relationship_restore import (
@@ -50,7 +52,7 @@ from uwazi_admin_agent.domain.relationship_restore import (
     remap_metadata_refs,
 )
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
-from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, IDENTITY_FIELDS, PLATFORM_MANAGED_FIELDS
+from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, PLATFORM_MANAGED_FIELDS
 
 MismatchKind = Literal["entity", "relationship", "created"]
 
@@ -73,34 +75,36 @@ def _records_for(manifest: MigrationManifest, shared_id: str) -> list[Any]:
 
 
 def _strip_platform_managed(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return ``raw`` without :data:`PLATFORM_MANAGED_FIELDS` (``None`` passes through)."""
-    if raw is None:
-        return None
-    return {k: v for k, v in raw.items() if k not in PLATFORM_MANAGED_FIELDS}
+    """Return ``raw`` without platform-managed and denormalized-view fields.
 
-
-def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return ``raw`` without platform-managed, identity, file, and relations fields.
-
-    For a deleted entity that was re-created via the create branch, Uwazi minted
-    a fresh _id/sharedId, so those differ by design and must be excluded from the
-    comparison (only the data fields are expected to match). The
-    ``documents``/``attachments`` arrays are denormalized views of the `files`
-    collection and are re-minted on re-upload (fresh file _ids/filenames), so
-    they can never match by identity — they are excluded here and a dedicated
-    :func:`build_file_gaps` check compares by originalname+kind to detect actual
-    file-restore gaps. ``relations`` is likewise a read-only denormalized view of
-    the ``connections`` collection (``getByDocument``): its hub ids and endpoint
-    sharedIds are re-minted/re-derived on re-create, so it is excluded here and a
-    dedicated :func:`build_relationship_gaps` check verifies the mutual-deleted
-    hubs came back (by remapped endpoints + type). Modified entities keep their
-    identity, files, and relationships, so they use the stricter
-    :func:`_strip_platform_managed` (``relations`` IS compared for them).
+    Excludes :data:`PLATFORM_MANAGED_FIELDS` (``editDate``, bumped on every save)
+    and ``relations`` (a read-only denormalized view of the ``connections``
+    collection, re-derived on every read — not reliably restorable). ``None``
+    passes through. Relationship restoration is verified separately by the
+    ``rewired`` check, so dropping ``relations`` here does not hide real loss.
     """
     if raw is None:
         return None
-    skip = PLATFORM_MANAGED_FIELDS | IDENTITY_FIELDS | FILE_FIELDS | {"relations"}
+    skip = PLATFORM_MANAGED_FIELDS | {"relations"}
     return {k: v for k, v in raw.items() if k not in skip}
+
+
+def _strip_for_recreate(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return only the data fields the create branch restores (``None`` passes through).
+
+    A deleted entity is re-created via the create branch, which accepts only
+    :data:`CREATE_ALLOWED_FIELDS` and drops or re-mints everything else
+    (``_id``/``sharedId``, ``language``, ``published``, ``creationDate``,
+    ``generatedToc``, ``propertySelections``, ``file``, ``relations``, ...).
+    Comparing anything beyond the restorable data fields would flag a false
+    mismatch on every re-created entity. ``attachments`` is a file-bearing field
+    (re-minted on re-upload) and is excluded here — a dedicated
+    :func:`build_file_gaps` check compares files by originalname+kind instead.
+    """
+    if raw is None:
+        return None
+    keep = CREATE_ALLOWED_FIELDS - FILE_FIELDS
+    return {k: v for k, v in raw.items() if k in keep}
 
 
 def _remap_for_recreate(raw: dict[str, Any] | None, id_map: dict[str, str]) -> dict[str, Any] | None:
