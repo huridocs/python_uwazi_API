@@ -18,8 +18,11 @@ ES consistency (Option A): a revert re-indexes the dummy in ES (a newer
 unrefreshed version); the immediately-following ``deleteByQuery`` (``conflicts:
 'proceed'``) then skips it on version conflict, leaving an orphan. The harness
 prevents this by (A) skipping the no-op revert for unchanged dummies and
-(B) settling ES to the latest ``editDate`` before the cleanup delete. See
-:mod:`uwazi_admin_agent.domain.search_probe` for the full rationale.
+(B) settling ES to the latest ``editDate`` before the cleanup delete. If the
+settle times out (ES still not fresh), the harness **blocks** the delete and
+leaves the pending dummies in Mongo (recoverable) rather than risk an
+unrecoverable ES orphan; a post-delete re-probe then verifies nothing was left
+behind. See :mod:`uwazi_admin_agent.domain.search_probe` for the full rationale.
 
 Not unit-tested (it needs the real instance); the DoD covers the pure parts only.
 """
@@ -32,13 +35,21 @@ from typing import Any
 
 from loguru import logger
 
-from uwazi_admin_agent.configuration import ES_SETTLE_POLL_INTERVAL_MS, ES_SETTLE_TIMEOUT_MS
+from uwazi_admin_agent.configuration import (
+    ES_SETTLE_GRACE_PERIOD_MS,
+    ES_SETTLE_POLL_INTERVAL_MS,
+    ES_SETTLE_TIMEOUT_MS,
+    ES_VERIFY_RETRY_DELAY_MS,
+)
 from uwazi_admin_agent.domain.search_probe import (
     FreshnessResult,
     build_freshness_result,
     entity_unchanged,
     format_freshness_warning,
-    max_edit_date_per_shared_id,
+    format_orphan_error,
+    format_settle_blocked_error,
+    identify_leftover_shared_ids,
+    strict_settle_targets,
 )
 from uwazi_admin_agent.domain.validation_result import build_validation_outcome
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -101,8 +112,10 @@ class DummyEntityHarness:
     async def run(self, script: str, dummy_spec: list[AgentEntityCreate]) -> Any:
         """Validate ``script`` against dummies built from ``dummy_spec``.
 
-        Returns a :class:`ValidationResult`. Dummies are always deleted
-        (originals + script-created), even on script error or cleanup error;
+        Returns a :class:`ValidationResult`. Dummies are deleted (originals +
+        script-created) on success and on script error. If the ES settle times
+        out (ES not fresh), the delete is **blocked** and the pending dummies are
+        left in Mongo (recoverable) rather than risk an unrecoverable ES orphan;
         a cleanup error is recorded on the result but does not mask the gate
         outcome.
         """
@@ -116,6 +129,7 @@ class DummyEntityHarness:
         script_created_ids: list[str] = []
         cleanup_error: str | None = None
         es_settle_warning: str | None = None
+        reverted: set[str] = set()
 
         try:
             created_ids = await self._create_dummies(dummy_spec)
@@ -135,7 +149,7 @@ class DummyEntityHarness:
             after = await self._snapshot_raws_optional(scope)
 
             if script_error is None:
-                recreated = await self._revert_originals(before, after, scope)
+                recreated, reverted = await self._revert_originals(before, after, scope)
                 post_revert = await self._snapshot_raws_optional_mapped(list(before.keys()), recreated)
         except Exception as exc:  # noqa: BLE001 — harness-level error must not escape without cleanup
             script_error = script_error or f"Harness error: {type(exc).__name__}: {exc}"
@@ -148,21 +162,34 @@ class DummyEntityHarness:
                 # deleteByQuery snapshots the refreshed index and skips docs whose
                 # version advanced since the snapshot (conflicts: 'proceed');
                 # settling to the latest editDate makes the snapshot see that latest
-                # version so it is removed cleanly (no orphan). Targets come only
-                # from alive raws (after/post_revert non-None values), so dead ids
-                # (script-deleted, not re-created) are not polled to a timeout.
+                # version so it is removed cleanly (no orphan). Reverted dummies use
+                # a STRICT target (pre-revert editDate + 1) so a millisecond-collision
+                # editDate can't falsely pass the settle. Targets come only from alive
+                # raws (after/post_revert non-None values), so dead ids (script-deleted,
+                # not re-created) are not polled to a timeout.
                 # Runs in finally so the cleanup is race-free even on error paths.
-                alive_raws = [r for r in (*after.values(), *post_revert.values()) if r]
-                targets = max_edit_date_per_shared_id(alive_raws)
+                targets = strict_settle_targets(after, post_revert, reverted)
                 cleanup_settle = await self._wait_for_es_fresh(targets)
-                if (
-                    cleanup_settle is not None
-                    and cleanup_settle.timed_out
-                    and cleanup_settle.pending_ids
-                    and es_settle_warning is None
-                ):
-                    es_settle_warning = format_freshness_warning("cleanup", cleanup_settle)
-                await self._delete_all(list(scope))
+                pending = cleanup_settle.pending_ids if cleanup_settle is not None else []
+                if pending:
+                    # ES not fresh for these dummies: deleting them now risks an
+                    # unrecoverable orphan (deleteByQuery skips the unrefreshed
+                    # revert re-index on version conflict). Leave them in Mongo
+                    # (recoverable via the normal delete path) and surface a hard
+                    # error instead of proceeding best-effort.
+                    cleanup_error = format_settle_blocked_error(pending)
+                    logger.error("dummy cleanup blocked: ES not fresh for {}", pending)
+                else:
+                    # Fixed grace period after the settle, before the delete: the
+                    # settle's editDate signal is a heuristic, and a short delay
+                    # lets ES fully stabilize so the deleteByQuery snapshots the
+                    # latest version (no version-conflict orphan).
+                    await asyncio.sleep(ES_SETTLE_GRACE_PERIOD_MS / 1000.0)
+                    await self._delete_all(list(scope))
+                    leftover = await self._verify_deleted(list(scope))
+                    if leftover:
+                        cleanup_error = format_orphan_error(leftover)
+                        logger.error("dummy cleanup left orphans: {}", leftover)
             except Exception as exc:  # noqa: BLE001
                 cleanup_error = f"Cleanup failed: {type(exc).__name__}: {exc}"
                 logger.error("dummy cleanup failed: {}", exc)
@@ -264,7 +291,7 @@ class DummyEntityHarness:
         before: dict[str, dict[str, Any]],
         after: dict[str, dict[str, Any] | None],
         scope: set[str],
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], set[str]]:
         """Restore each original dummy to its exact before raw (full raw, incl. relations).
 
         An original the script **deleted** (``after`` is None) cannot be restored
@@ -281,8 +308,15 @@ class DummyEntityHarness:
         and re-indexes ES - a newer unrefreshed version that the cleanup
         ``deleteByQuery`` would skip on version conflict (the orphan root cause).
         Skipping it (Option A, part A) avoids that re-index entirely.
+
+        Returns ``(recreated, reverted)``: ``recreated`` maps old -> new id for
+        deleted-then-re-created originals; ``reverted`` is the set of original ids
+        the script **modified** and this method re-indexed via ``save_raw`` (the
+        dummies whose cleanup settle must use a strict ``editDate`` target to
+        avoid the millisecond-collision orphan).
         """
         recreated: dict[str, str] = {}
+        reverted: set[str] = set()
         for sid, raw in before.items():
             after_raw = after.get(sid)
             if after_raw is None:
@@ -294,8 +328,9 @@ class DummyEntityHarness:
                 logger.debug("skipping no-op revert for unchanged dummy {}", sid)
             else:
                 await self._entity_repository.save_raw(raw)
+                reverted.add(sid)
         logger.info("reverted {} original dummies to before-state", len(before))
-        return recreated
+        return recreated, reverted
 
     async def _snapshot_raws_optional_mapped(
         self, old_ids: list[str], recreated: dict[str, str]
@@ -370,3 +405,31 @@ class DummyEntityHarness:
             return
         await self._entity_api.delete_entities_by_shared_ids(shared_ids)
         logger.info("deleted {} dummy entities", len(shared_ids))
+
+    async def _verify_deleted(self, shared_ids: list[str]) -> list[str]:
+        """Re-probe ES after delete; return the sharedIds still present (orphans).
+
+        A cleanly-deleted dummy's ES doc is gone (the probe returns ``None``); an
+        orphan (``deleteByQuery`` skipped it on version conflict, then the trailing
+        ``refresh`` flushed it) is still present (the probe returns an ``editDate``).
+        Returns the leftover sharedIds so the caller can surface a hard, actionable
+        error instead of silently succeeding. ``None`` probe (no live ES wired) or an
+        empty id list short-circuits to ``[]`` (backward-compatible).
+
+        A first-pass leftover is re-probed once after ``ES_VERIFY_RETRY_DELAY_MS``
+        to rule out read-path lag (the delete's ``refresh: true`` not yet visible to
+        ``/api/v2/search``); only ids still present on the retry are reported.
+        """
+        if self._search_probe is None or not shared_ids:
+            return []
+        observed: dict[str, int | None] = {}
+        for sid in shared_ids:
+            observed[sid] = await self._search_probe.shared_id_edit_date(sid, self._language)
+        leftover = identify_leftover_shared_ids(observed)
+        if leftover:
+            await asyncio.sleep(ES_VERIFY_RETRY_DELAY_MS / 1000.0)
+            observed = {}
+            for sid in leftover:
+                observed[sid] = await self._search_probe.shared_id_edit_date(sid, self._language)
+            leftover = identify_leftover_shared_ids(observed)
+        return leftover

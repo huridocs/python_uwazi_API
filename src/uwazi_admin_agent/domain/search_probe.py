@@ -118,27 +118,43 @@ def build_freshness_result(targets: dict[str, int], observed: dict[str, int | No
     )
 
 
-def max_edit_date_per_shared_id(raws: list[dict[str, Any]]) -> dict[str, int]:
-    """Build ``{sharedId: max editDate}`` from a list of raw entity dicts.
+def strict_settle_targets(
+    after: dict[str, dict[str, Any] | None],
+    post_revert: dict[str, dict[str, Any] | None],
+    reverted: set[str],
+) -> dict[str, int]:
+    """Build the strict settle targets for the cleanup delete.
 
-    Pure: no I/O. Used to compute the freshness target per sharedId from the
-    latest Mongo raws the harness has seen. Keying by the raw's own ``sharedId``
-    (not by the harness's dict key) naturally handles the delete-revert re-create
-    mapping: a re-created raw lives under the old id in ``post_revert`` but its
-    ``sharedId`` is the *new* id, so it targets the new id (the one ES indexes it
-    under). Dead old ids (deleted by the script, present only in ``before``) are
-    excluded by only feeding *alive* raws (``after``/``post_revert`` non-``None``
-    values) from the caller, so the settle never polls a gone sharedId to a
-    timeout.
+    Pure: no I/O. For each alive dummy, returns the ``editDate`` the ES doc must
+    be ``>=`` to guarantee the ``deleteByQuery`` snapshots the LATEST version.
+
+    A **reverted** dummy (the script modified it and the revert re-indexed it) is
+    the orphan risk: its revert ``save_raw`` bumps ``editDate``, but ``editDate``
+    is a millisecond timestamp that can collide with the pre-revert value. A
+    plain ``>= latest`` check would then pass against the stale pre-revert version
+    and the delete would skip the unrefreshed revert re-index. So a reverted
+    dummy's target is its **pre-revert** ``editDate + 1`` (``>=`` becomes
+    "strictly greater than the pre-revert editDate"), which only the revert's
+    re-index can satisfy. Every other dummy (unchanged, script-created,
+    re-created, or modified-but-not-reverted on a script error) has no such
+    collision window and keeps the plain ``>= latest`` target.
     """
     targets: dict[str, int] = {}
-    for raw in raws:
-        if not isinstance(raw, dict):
+    for sid, raw in after.items():
+        if raw is None:
             continue
-        sid = raw.get("sharedId")
         edit_date = _to_int(raw.get("editDate"))
-        if sid and edit_date is not None:
-            targets[sid] = max(targets.get(sid, edit_date), edit_date)
+        if edit_date is None:
+            continue
+        targets[sid] = edit_date + 1 if sid in reverted else edit_date
+    for raw in post_revert.values():
+        if raw is None:
+            continue
+        actual_sid = raw.get("sharedId")
+        edit_date = _to_int(raw.get("editDate"))
+        if not actual_sid or edit_date is None or actual_sid in targets:
+            continue
+        targets[actual_sid] = edit_date
     return targets
 
 
@@ -171,4 +187,53 @@ def format_freshness_warning(stage: str, result: FreshnessResult) -> str:
         f"{len(result.expected_ids)} dummy sharedId(s) not fresh within the "
         f"deadline - the shared ES index may be inconsistent and need a reindex. "
         f"Pending: {pending}"
+    )
+
+
+def identify_leftover_shared_ids(observed: dict[str, int | None]) -> list[str]:
+    """Return the sharedIds still present in ES after a delete (probe returned a non-None editDate).
+
+    Pure: no I/O. After the cleanup delete, a cleanly-deleted dummy's ES doc is
+    gone (the probe returns ``None``); an orphan (``deleteByQuery`` skipped it on
+    version conflict, then the trailing ``refresh`` flushed it) is still present
+    (the probe returns an ``editDate``). This is the post-delete verification
+    seam: the harness re-probes each sharedId after ``_delete_all`` and feeds the
+    results here to name any leftover sharedIds.
+    """
+    return [sid for sid, edit_date in observed.items() if edit_date is not None]
+
+
+def format_orphan_error(leftover: list[str]) -> str:
+    """Render a hard, actionable error naming the orphaned sharedIds.
+
+    Pure: no I/O. An orphan (Mongo row gone, ES doc still present) cannot be
+    removed via the API — Uwazi's delete path queries Mongo first
+    (``MongoEntityPermissionChecker.filterEntities``) and, finding nothing, never
+    issues the ES delete. The operator must reconcile the shared ES index (a
+    targeted reindex or direct ES access). The message names the leftover
+    sharedIds so the operator knows exactly what to reconcile.
+    """
+    ids = ", ".join(leftover)
+    return (
+        f"Cleanup left {len(leftover)} orphan entity/entities in ElasticSearch "
+        f"(Mongo rows already deleted, so they cannot be removed via the API): "
+        f"{ids}. The shared ES index needs a targeted reindex of these sharedIds."
+    )
+
+
+def format_settle_blocked_error(pending: list[str]) -> str:
+    """Render a hard error for a cleanup settle that timed out with not-fresh dummies.
+
+    Pure: no I/O. When the cleanup settle times out, deleting the pending dummies
+    would risk an unrecoverable ES orphan (``deleteByQuery`` skips the unrefreshed
+    revert re-index on version conflict). Instead the harness leaves them in Mongo
+    (recoverable via the normal delete path) and surfaces this error naming the
+    pending sharedIds so the operator can reconcile them.
+    """
+    ids = ", ".join(pending)
+    return (
+        f"Cleanup blocked: {len(pending)} dummy sharedId(s) were not ES-fresh within "
+        f"the settle deadline, so they were left in Mongo (recoverable) rather than "
+        f"risking an unrecoverable ElasticSearch orphan. Left-behind sharedIds: {ids}. "
+        f"Re-run validation or delete these sharedIds manually."
     )
