@@ -82,6 +82,21 @@ DUMMY_LANGUAGE: str = "en"
 ES_SETTLE_TIMEOUT_MS: int = 10_000
 ES_SETTLE_POLL_INTERVAL_MS: int = 250
 
+# Fixed settle grace period (ms) after the ES-freshness settle succeeds, before
+# the cleanup delete. The settle's ``editDate`` signal is a heuristic (it reflects
+# the ES doc's ``editDate`` field, which is only visible after a refresh), while
+# the ``deleteByQuery`` version conflict is keyed on the doc's ``_seq_no``/``_version``
+# (advanced on every write). A short fixed delay after the settle gives ES time to
+# fully stabilize (its default refresh interval is 1s) so the deleteByQuery
+# snapshots the latest version and removes it cleanly. Set generously (3s) since
+# the validation gate is not latency-sensitive and a few extra seconds per run is
+# a cheap price for avoiding an unrecoverable orphan.
+ES_SETTLE_GRACE_PERIOD_MS: int = 3000
+
+# Delay (ms) before re-probing ES in the post-delete verification, to rule out
+# read-path lag (the delete's ``refresh: true`` not yet visible to ``/api/v2/search``).
+ES_VERIFY_RETRY_DELAY_MS: int = 1000
+
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 10000
 

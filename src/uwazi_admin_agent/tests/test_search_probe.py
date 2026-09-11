@@ -11,7 +11,10 @@ from uwazi_admin_agent.domain.search_probe import (
     entity_unchanged,
     extract_edit_date,
     format_freshness_warning,
-    max_edit_date_per_shared_id,
+    format_orphan_error,
+    format_settle_blocked_error,
+    identify_leftover_shared_ids,
+    strict_settle_targets,
 )
 
 # --- extract_edit_date ----------------------------------------------------
@@ -116,43 +119,60 @@ def test_build_freshness_result_is_frozen():
     assert r.timed_out is False
 
 
-# --- max_edit_date_per_shared_id ------------------------------------------
+# --- strict_settle_targets -------------------------------------------------
 
 
-def test_max_edit_date_keys_by_shared_id():
-    raws = [
-        {"sharedId": "a", "editDate": 100},
-        {"sharedId": "b", "editDate": 50},
-        {"sharedId": "a", "editDate": 300},  # re-index -> newer editDate
-    ]
-    assert max_edit_date_per_shared_id(raws) == {"a": 300, "b": 50}
+def test_strict_settle_targets_reverted_uses_pre_revert_plus_one():
+    after = {"a": {"sharedId": "a", "editDate": 100}}
+    post_revert = {"a": {"sharedId": "a", "editDate": 100}}  # collision: same editDate
+    reverted = {"a"}
+    assert strict_settle_targets(after, post_revert, reverted) == {"a": 101}
 
 
-def test_max_edit_date_skips_non_dict_and_missing():
-    raws = [
-        "junk",
-        None,
-        {"editDate": 100},  # no sharedId
-        {"sharedId": "a"},  # no editDate
-        {"sharedId": "a", "editDate": 200},
-    ]
-    assert max_edit_date_per_shared_id(raws) == {"a": 200}
+def test_strict_settle_targets_non_reverted_keeps_latest():
+    after = {"a": {"sharedId": "a", "editDate": 100}}
+    post_revert = {"a": {"sharedId": "a", "editDate": 100}}
+    reverted = set()
+    assert strict_settle_targets(after, post_revert, reverted) == {"a": 100}
 
 
-def test_max_edit_date_handles_recreated_new_shared_id():
-    # A re-created raw lives under the old id in post_revert but its sharedId is
-    # the NEW id; keying by sharedId targets the new id (what ES indexes it under).
-    raws = [
-        {"sharedId": "old1", "editDate": 100},  # before (dead old id - excluded by caller)
-        {"sharedId": "new1", "editDate": 500},  # post_revert re-created raw
-    ]
-    out = max_edit_date_per_shared_id(raws)
-    assert out["new1"] == 500
-    assert "old1" in out and out["old1"] == 100  # caller filters dead ids; helper just keys
+def test_strict_settle_targets_script_created_visibility():
+    after = {"new1": {"sharedId": "new1", "editDate": 500}}
+    post_revert = {}
+    reverted = set()
+    assert strict_settle_targets(after, post_revert, reverted) == {"new1": 500}
 
 
-def test_max_edit_date_empty():
-    assert max_edit_date_per_shared_id([]) == {}
+def test_strict_settle_targets_recreated_new_shared_id():
+    after = {"old1": None}  # deleted by script
+    post_revert = {"old1": {"sharedId": "new1", "editDate": 500}}
+    reverted = set()
+    assert strict_settle_targets(after, post_revert, reverted) == {"new1": 500}
+
+
+def test_strict_settle_targets_mixed():
+    after = {
+        "a": {"sharedId": "a", "editDate": 100},  # reverted
+        "b": {"sharedId": "b", "editDate": 200},  # unchanged
+        "c": {"sharedId": "c", "editDate": 300},  # script-created
+    }
+    post_revert = {
+        "a": {"sharedId": "a", "editDate": 100},
+        "b": {"sharedId": "b", "editDate": 200},
+    }
+    reverted = {"a"}
+    assert strict_settle_targets(after, post_revert, reverted) == {"a": 101, "b": 200, "c": 300}
+
+
+def test_strict_settle_targets_skips_missing_edit_date():
+    after = {"a": {"sharedId": "a"}}  # no editDate
+    post_revert = {}
+    reverted = {"a"}
+    assert strict_settle_targets(after, post_revert, reverted) == {}
+
+
+def test_strict_settle_targets_empty():
+    assert strict_settle_targets({}, {}, set()) == {}
 
 
 # --- entity_unchanged -----------------------------------------------------
@@ -198,3 +218,60 @@ def test_format_freshness_warning_single_pending():
     assert "create" in msg
     assert "1 of 1" in msg
     assert "x9" in msg
+
+
+# --- identify_leftover_shared_ids -----------------------------------------
+
+
+def test_identify_leftover_shared_ids_returns_present_ids():
+    observed = {"a": 100, "b": None, "c": 300}
+    assert identify_leftover_shared_ids(observed) == ["a", "c"]
+
+
+def test_identify_leftover_shared_ids_all_gone():
+    observed = {"a": None, "b": None}
+    assert identify_leftover_shared_ids(observed) == []
+
+
+def test_identify_leftover_shared_ids_empty():
+    assert identify_leftover_shared_ids({}) == []
+
+
+def test_identify_leftover_shared_ids_preserves_order():
+    observed = {"c": 1, "a": None, "b": 2}
+    assert identify_leftover_shared_ids(observed) == ["c", "b"]
+
+
+# --- format_orphan_error ---------------------------------------------------
+
+
+def test_format_orphan_error_names_leftover_ids():
+    msg = format_orphan_error(["6tz8pi497j3", "abc123"])
+    assert "2 orphan" in msg
+    assert "6tz8pi497j3" in msg
+    assert "abc123" in msg
+    assert "reindex" in msg
+
+
+def test_format_orphan_error_single():
+    msg = format_orphan_error(["6tz8pi497j3"])
+    assert "1 orphan" in msg
+    assert "6tz8pi497j3" in msg
+
+
+# --- format_settle_blocked_error -------------------------------------------
+
+
+def test_format_settle_blocked_error_names_pending_ids():
+    msg = format_settle_blocked_error(["a1", "b2"])
+    assert "2 dummy" in msg
+    assert "a1" in msg
+    assert "b2" in msg
+    assert "Mongo" in msg
+    assert "recoverable" in msg
+
+
+def test_format_settle_blocked_error_single():
+    msg = format_settle_blocked_error(["a1"])
+    assert "1 dummy" in msg
+    assert "a1" in msg
