@@ -36,8 +36,9 @@ from typing import Any
 # Fields the POST /api/entities create branch accepts (CreateEntitySchema).
 # Keep these from the snapshot raw so the re-created entity carries the
 # original data; everything else is dropped (identity is re-minted by Uwazi,
-# and relations/documents/etc. cannot be restored via create).
-_CREATE_ALLOWED_FIELDS: frozenset[str] = frozenset({"title", "template", "icon", "user", "metadata", "attachments"})
+# and relations/documents/etc. cannot be restored via create). Public so
+# revert_verification can derive the comparable data fields from it.
+CREATE_ALLOWED_FIELDS: frozenset[str] = frozenset({"title", "template", "icon", "user", "metadata", "attachments"})
 
 
 def strip_deleted_entity_refs(metadata: dict[str, Any], deleted_ids: set[str]) -> dict[str, Any]:
@@ -83,4 +84,4 @@ def to_create_payload(raw: dict[str, Any]) -> dict[str, Any]:
     Pure: returns a new dict; the kept values are referenced (not deep-copied) —
     safe because the payload is JSON-serialized on POST and never mutated here.
     """
-    return {key: raw[key] for key in _CREATE_ALLOWED_FIELDS if key in raw}
+    return {key: raw[key] for key in CREATE_ALLOWED_FIELDS if key in raw}

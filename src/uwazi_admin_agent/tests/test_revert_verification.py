@@ -108,6 +108,23 @@ def test_modified_entity_editdate_only_difference_is_ok() -> None:
     assert result.mismatches == []
 
 
+def test_modified_entity_relations_only_difference_is_ok() -> None:
+    # ``relations`` is a read-only denormalized view re-derived on every read,
+    # so a merge/revert that leaves it different from the snapshot must not be
+    # flagged as a data mismatch (relationship restore is verified separately).
+    manifest = _manifest(modified=[EntityIdentity(shared_id="A")])
+    snapshots = {"A": _snapshot("A", {"_id": "a1", "title": "old", "language": "en", "relations": []})}
+
+    result = verify_revert(
+        manifest,
+        snapshots,
+        {"A": {"_id": "a1", "title": "old", "language": "en", "relations": [{"hub": "h1", "entity": "B"}]}},
+    )
+
+    assert result.ok is True
+    assert result.mismatches == []
+
+
 def test_modified_entity_absent_after_revert_is_flagged() -> None:
     manifest = _manifest(modified=[EntityIdentity(shared_id="A")])
     snapshots = {"A": _snapshot("A", {"_id": "a1", "title": "old", "language": "en"})}
@@ -130,6 +147,77 @@ def test_deleted_entity_recreated_matching_snapshot_is_ok() -> None:
 
     assert result.ok is True
     assert result.checked == 1
+
+
+def test_deleted_entity_recreated_with_only_dropped_field_differences_is_ok() -> None:
+    # A re-created entity differs from its snapshot only in fields the create
+    # branch drops or re-mints (creationDate, language, published, generatedToc,
+    # propertySelections, file, relations, documents, attachments). None of these
+    # are restorable via create, so they must NOT be flagged as mismatches.
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
+    snapshots = {
+        "D": _snapshot(
+            "D",
+            {
+                "_id": "d1",
+                "sharedId": "D",
+                "title": "old D",
+                "template": "tmpl",
+                "icon": {"_id": "i1"},
+                "user": "u1",
+                "metadata": {"caption": [{"value": "hello"}]},
+                "language": "en",
+                "published": True,
+                "creationDate": 1000,
+                "editDate": 1005,
+                "generatedToc": True,
+                "propertySelections": {"fileID": "d1"},
+                "file": {"filename": "f.pdf"},
+                "relations": [{"_id": "r1"}],
+                "documents": [{"_id": "d1"}],
+                "attachments": [],
+            },
+        )
+    }
+    current = {
+        "D": {
+            "_id": "new1",
+            "sharedId": "NEW",
+            "title": "old D",
+            "template": "tmpl",
+            "icon": {"_id": "i1"},
+            "user": "u1",
+            "metadata": {"caption": [{"value": "hello"}]},
+            "language": "fr",
+            "published": False,
+            "creationDate": 2000,
+            "editDate": 2005,
+            "generatedToc": False,
+            "propertySelections": {},
+            "file": None,
+            "relations": [],
+            "documents": [],
+            "attachments": [],
+        }
+    }
+
+    result = verify_revert(manifest, snapshots, current)
+
+    assert result.ok is True
+    assert result.mismatches == []
+
+
+def test_deleted_entity_recreated_with_data_field_mismatch_is_flagged() -> None:
+    # A real data field (title) that did not come back must still be flagged,
+    # even though the dropped/re-minted fields are ignored.
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
+    snapshots = {"D": _snapshot("D", {"_id": "d1", "title": "old D", "language": "en"})}
+
+    result = verify_revert(manifest, snapshots, {"D": {"_id": "new1", "title": "WRONG", "language": "fr"}})
+
+    assert result.ok is False
+    assert result.mismatches[0].kind == "entity"
+    assert result.mismatches[0].shared_id == "D"
 
 
 def test_deleted_entity_not_recreated_is_flagged() -> None:
