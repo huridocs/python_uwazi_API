@@ -12,6 +12,7 @@ from uwazi_api.use_cases.repositories.menu_links_repository import MenuLinksRepo
 from uwazi_api.use_cases.repositories.pages_repository import PagesRepository
 from uwazi_api.use_cases.repositories.relationship_repository import RelationshipRepository
 from uwazi_api.use_cases.repositories.search_repository import SearchRepository
+from uwazi_api.use_cases.repositories.segmentation_repository import SegmentationRepository
 from uwazi_api.use_cases.repositories.settings_repository import SettingsRepository
 from uwazi_api.use_cases.repositories.stats_repository import StatsRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
@@ -44,9 +45,10 @@ class UwaziClient:
         self._stats_repo = StatsRepository(self.http, self._template_repo, self._thesauri_repo)
         self._pages_repo = PagesRepository(self.http)
         self._menu_links_repo = MenuLinksRepository(self.http)
+        self._segmentation_repo = SegmentationRepository(self.http)
 
         # Use cases / services
-        self._file_service = FileService(self._file_repo, self._entity_repo)
+        self._file_service = FileService(self._file_repo, self._entity_repo, self._segmentation_repo)
         self._csv_import = CSVUseCase(self._csv_repo, self._template_repo, self._entity_repo)
         self._entity_export = EntityExportUseCase(self._entity_repo, self._template_repo, self._search_repo)
         self._thesauri_from_df = ThesauriFromDataframeUseCase(self._template_repo, self._thesauri_repo)

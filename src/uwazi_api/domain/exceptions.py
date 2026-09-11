@@ -47,3 +47,11 @@ class AuthenticationError(DomainError):
 
 class PageNotFoundError(DomainError):
     pass
+
+
+class SegmentationNotFoundError(DomainError):
+    pass
+
+
+class SegmentationError(DomainError):
+    pass
