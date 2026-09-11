@@ -232,9 +232,21 @@ def create_entities_from_dataframe():
     return client.entities.create_or_update_entities_from_dataframe(df=data_frame, language="en")
 
 
+def show_segmentation(shared_id: str, language: str = "en"):
+    client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
+    segmentation = client.files.get_segmentation(shared_id=shared_id, language=language)
+    print(f"Segmentation for entity {shared_id}:")
+    print(f"  file: {segmentation.filename} (status={segmentation.status})")
+    print(f"  paragraphs: {len(segmentation.paragraphs)}")
+    for i, paragraph in enumerate(segmentation.paragraphs, start=1):
+        print(f"  [{i}] page {paragraph.page_number}: {paragraph.text}")
+    return segmentation
+
+
 if __name__ == "__main__":
     # upload_csv("PARAGRAPH")
-    upload_entity_with_primary_and_supporting_pdf("PARAGRAPH")
+    show_segmentation("xc4yptkztj")
+    # upload_entity_with_primary_and_supporting_pdf("PARAGRAPH")
     # df = loop_entities()
     # print(df.to_string())
     #
