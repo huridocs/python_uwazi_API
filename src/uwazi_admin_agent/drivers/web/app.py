@@ -441,6 +441,7 @@ def _rowmenu_retry(run_id: str) -> None:
         app.storage.user["user"],
         app.storage.user["password"],
         validated_prompt=detail.validated_prompt,
+        claimed=True,
     )
 
 
@@ -1431,13 +1432,24 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
             )
 
 
-def _start_generation(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
+def _start_generation(
+    name: str,
+    prompt: str,
+    user: str,
+    password: str,
+    validated_prompt: str | None = None,
+    claimed: bool = False,
+) -> None:
     """Register the in-flight placeholder + notification and launch generation.
 
     Shared by the new-task wizard and the retry path on a ``generation_failed``
     run so both produce the identical toast/table/background-task flow.
+
+    ``claimed`` is set by the retry path, which already holds the claim (taken
+    before its destructive ``delete_run``); re-claiming here would fail and
+    abort generation after the run was already deleted.
     """
-    if not _try_claim(name, "creating"):
+    if not claimed and not _try_claim(name, "creating"):
         ui.notify(_busy_label(), type="warning")
         return
     _creating_runs[name] = {"name": name, "prompt": prompt}
