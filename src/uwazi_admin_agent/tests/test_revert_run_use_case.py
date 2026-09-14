@@ -308,6 +308,33 @@ async def test_revert_deleted_recreates_from_snapshot() -> None:
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
 
 
+async def test_revert_resume_does_not_recreate_already_restored_entity() -> None:
+    # Simulate a resume after a mid-crash revert: A was already re-created under
+    # "new-1" and that mapping was checkpointed to the manifest. Re-running revert
+    # must reuse "new-1" and NOT mint a second sharedId (a duplicate/orphan).
+    repo = InMemoryEntityRepository(entities={"new-1": {"sharedId": "new-1", "title": "old A", "language": "en"}})
+    repo._next_id = 1  # "new-1" was already minted by the interrupted attempt
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot("A", {"sharedId": "A", "_id": "a1", "title": "old A", "language": "en"}),
+    )
+    store.save_manifest(
+        "run-1",
+        _manifest(deleted=[EntityIdentity(shared_id="A", restored_shared_id="new-1")]),
+    )
+
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store)
+    await use_case.revert("run-1")
+
+    assert not repo.has("A")
+    assert repo.has("new-1")
+    assert not repo.has("new-2")
+    assert repo._next_id == 1  # no second create_raw happened
+    assert store.load_manifest("run-1").deleted[0].restored_shared_id == "new-1"
+    assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
 # --- revert created entities (delete them) ---------------------------------
 
 

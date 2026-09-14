@@ -170,6 +170,32 @@ def test_deleted_yields_recreate_action() -> None:
     assert actions[0].snapshot.raw["title"] == "old X"
 
 
+def test_deleted_with_restored_shared_id_still_yields_recreate_action() -> None:
+    # Idempotency/resume lives in the USE CASE (``_create_deleted_entity`` short-
+    # circuits on a checkpointed ``restored_shared_id``), NOT in the builder: the
+    # builder always emits a RecreateEntityAction per deleted entity so the use
+    # case can restore its files/relationships on a resume. So both entities are
+    # present here, even though A was already re-created.
+    store = _SnapshotStore(
+        {
+            "A": _snapshot("A", {"_id": "a1", "title": "old A"}),
+            "B": _snapshot("B", {"_id": "b1", "title": "old B"}),
+        }
+    )
+    manifest = _manifest(
+        deleted=[
+            EntityIdentity(shared_id="A", restored_shared_id="new-A"),
+            EntityIdentity(shared_id="B"),
+        ]
+    )
+
+    actions = build_revert_actions(manifest, store)
+
+    recreate = [a for a in actions if isinstance(a, RecreateEntityAction)]
+    assert [a.snapshot.shared_id for a in recreate] == ["A", "B"]
+    assert store.requested == ["A", "B"]
+
+
 def test_missing_snapshot_for_deleted_propagates() -> None:
     manifest = _manifest(deleted=[_identity("gone")])
     with pytest.raises(KeyError):

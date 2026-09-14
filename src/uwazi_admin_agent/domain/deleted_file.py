@@ -61,6 +61,14 @@ class DeletedFile(BaseModel):
     source: DeleteSource = Field(
         description="Which nominator deleted the file: 'dedupe' (revert re-creates a duplicate) or 'explicit'."
     )
+    restored: bool = Field(
+        default=False,
+        description=(
+            "Whether this file has been re-uploaded during a revert. Checkpointed "
+            "into the manifest so a resumed (mid-crash) revert skips already-restored "
+            "files instead of re-uploading duplicates."
+        ),
+    )
 
 
 def to_deleted_file(shared_id: str, ref: FileRef, source: DeleteSource) -> DeletedFile:
