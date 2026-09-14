@@ -40,6 +40,14 @@ class FileRef(BaseModel):
         ),
     )
     content_type: str = Field(description="The MIME type for the multipart part Content-Type header.")
+    restored: bool = Field(
+        default=False,
+        description=(
+            "Whether this file has been re-uploaded to the re-created entity during "
+            "a revert. Checkpointed into the snapshot so a resumed (mid-crash) "
+            "revert skips already-restored files instead of re-uploading duplicates."
+        ),
+    )
     size: int | None = Field(
         default=None,
         description=(

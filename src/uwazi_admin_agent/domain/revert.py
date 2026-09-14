@@ -171,6 +171,14 @@ def build_revert_actions(
     Pure: touches no filesystem or network. ``load_snapshot`` is the injected
     seam that supplies a snapshot by shared id. If a snapshot for a modified
     or deleted entity cannot be loaded, the error propagates — no silent skip.
+
+    Crash-safe/resumable: the action list is always rebuilt from the manifest
+    (not from any in-memory state), and the use case makes the execution
+    idempotent — a deleted entity whose manifest entry already carries a
+    ``restored_shared_id`` (checkpointed after a prior, possibly interrupted,
+    re-create) is not re-created a second time, and already-re-uploaded files
+    (``FileRef.restored`` / ``DeletedFile.restored``) are skipped. So a resumed
+    revert continues from where it left off without duplicate entities or files.
     """
     actions: list[RevertAction] = []
 

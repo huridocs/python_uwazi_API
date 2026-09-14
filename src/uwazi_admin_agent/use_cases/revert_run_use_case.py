@@ -158,6 +158,20 @@ class RevertRunUseCase:
                 return
         logger.warning("revert: no manifest.deleted entry for old sharedId={}", old_shared_id)
 
+    @staticmethod
+    def _restored_shared_id_for(manifest: Any, old_shared_id: str) -> str | None:
+        """Return the checkpointed new sharedId for ``old_shared_id``, or None.
+
+        A previous (possibly interrupted) revert already re-created this deleted
+        entity and checkpointed its minted ``restored_shared_id``. Resuming skips
+        the ``create_raw`` (which would mint a *second* fresh sharedId and leak a
+        duplicate/orphan) and reuses the recorded id for file/relationship restore.
+        """
+        for entry in manifest.deleted:
+            if entry.shared_id == old_shared_id and entry.restored_shared_id:
+                return entry.restored_shared_id
+        return None
+
     async def _create_deleted_entity(self, action: Any, run_id: str, manifest: Any) -> str:
         """Re-create one deleted entity via the create branch, stripping co-deleted refs.
 
@@ -169,10 +183,20 @@ class RevertRunUseCase:
         relationships are re-applied separately by ``_reapply_relationship_refs``
         after both endpoints exist. Records the minted sharedId on the manifest.
         """
+        existing = self._restored_shared_id_for(manifest, action.snapshot.shared_id)
+        if existing is not None:
+            return existing
         deleted_ids = {e.shared_id for e in manifest.deleted}
         stripped_raw = self._strip_deleted_refs_for_recreate(action.snapshot.raw, deleted_ids)
         new_shared_id = await self._entity_repository.create_raw(stripped_raw)
         self._record_restored_shared_id(manifest, action.snapshot.shared_id, new_shared_id)
+        # Checkpoint the restored mapping to the manifest immediately so a
+        # mid-crash revert can be resumed: on re-run, ``_create_deleted_entity``
+        # short-circuits on this ``restored_shared_id`` (skipping a second
+        # ``create_raw`` that would mint a duplicate/orphan entity), while the
+        # relationship re-apply and file-restore steps still resolve the old→new
+        # id via this mapping.
+        self._backup_store.save_manifest(run_id, manifest)
         self._emit(run_id, "recreate_entity", [new_shared_id])
         logger.info(
             "revert: re-created entity (old sharedId={} -> new sharedId={})",
@@ -340,11 +364,16 @@ class RevertRunUseCase:
         audit record but does NOT fail the revert — the entity is already re-created
         with its data; file gaps surface in post-revert verification. A missing file
         repository (e.g. tests) or a snapshot with no captured files is a no-op.
+
+        Crash-safe/resumable: files already marked ``restored`` on the snapshot
+        (checkpointed by a prior, interrupted attempt) are skipped, and each
+        successful upload is checkpointed back into the snapshot immediately.
         """
         if self._file_repository is None or not snapshot.files:
             return
         old_shared_id = snapshot.shared_id
-        actions = build_file_restore_actions(snapshot.files)
+        pending = [ref for ref in snapshot.files if not ref.restored]
+        actions = build_file_restore_actions(pending)
         for act in actions:
             try:
                 data = self._backup_store.load_file_bytes(run_id, old_shared_id, act.file_id)
@@ -356,6 +385,7 @@ class RevertRunUseCase:
                 continue
             ok = await self._upload_one(act, data, new_shared_id)
             if ok:
+                self._mark_file_restored(run_id, snapshot, act.file_id)
                 self._emit_file(run_id, new_shared_id, failed=False)
                 logger.debug("revert: re-uploaded file sharedId={} originalname={}", new_shared_id, act.originalname)
             else:
@@ -365,6 +395,18 @@ class RevertRunUseCase:
         # raw (belt-and-suspenders: the recreate's create_raw had nothing cached
         # under the fresh sharedId, but uploads alone would leave a stale entry).
         self._invalidate([new_shared_id])
+
+    def _mark_file_restored(self, run_id: str, snapshot: Any, file_id: str) -> None:
+        """Checkpoint one successfully re-uploaded file back into the snapshot.
+
+        Marks the matching :class:`FileRef` ``restored`` and re-saves the snapshot
+        so a resumed revert skips it (``_restore_files`` filters on ``restored``).
+        Only the additive ``files`` metadata list is touched — the snapshot's
+        ``raw`` is never mutated (raw fidelity).
+        """
+        files = snapshot.files or []
+        updated = [ref.model_copy(update={"restored": True}) if ref.file_id == file_id else ref for ref in files]
+        self._backup_store.save_snapshot(run_id, snapshot.model_copy(update={"files": updated}))
 
     async def _upload_one(self, action: Any, data: bytes, new_shared_id: str) -> bool:
         """Dispatch one file-restore action to the file repository."""
@@ -390,6 +432,10 @@ class RevertRunUseCase:
         Re-uploading a dedupe-source delete re-creates a duplicate copy (the
         correct undo of a dedupe cleanup); the driver's revert summary says
         so plainly via the record's ``source``.
+
+        Crash-safe/resumable: files already marked ``restored`` on the manifest
+        (checkpointed by a prior, interrupted attempt) are skipped, and each
+        successful upload is checkpointed back into the manifest immediately.
         """
         if self._file_repository is None or not action.files:
             return
@@ -398,6 +444,8 @@ class RevertRunUseCase:
         for record in action.files:
             target = id_map.get(record.shared_id, record.shared_id)
             targets.add(target)
+            if record.restored:
+                continue
             try:
                 data = self._backup_store.load_file_bytes(run_id, record.shared_id, record.file_id)
             except Exception as exc:  # noqa: BLE001 — best-effort; missing bytes must not abort revert
@@ -412,6 +460,8 @@ class RevertRunUseCase:
                 continue
             ok = await self._upload_deleted_file(record, data, target)
             if ok:
+                self._record_deleted_file_restored(manifest, record.shared_id, record.file_id)
+                self._backup_store.save_manifest(run_id, manifest)
                 self._emit_file(run_id, target, failed=False)
                 logger.debug("revert: re-uploaded deleted file sharedId={} originalname={}", target, record.originalname)
             else:
@@ -423,6 +473,19 @@ class RevertRunUseCase:
         # (lossless either way); re-created entities' fresh sharedIds have
         # nothing cached, so invalidating them is a harmless no-op.
         self._invalidate(sorted(targets))
+
+    @staticmethod
+    def _record_deleted_file_restored(manifest: Any, shared_id: str, file_id: str) -> None:
+        """Mark the matching run-deleted file entry ``restored`` on the manifest.
+
+        :class:`DeletedFile` is frozen, so the entry is replaced in place with a
+        copy carrying ``restored=True`` (matched by its ``(shared_id, file_id)``).
+        """
+        for idx, entry in enumerate(manifest.deleted_files):
+            if entry.shared_id == shared_id and entry.file_id == file_id:
+                manifest.deleted_files[idx] = entry.model_copy(update={"restored": True})
+                return
+        logger.warning("revert: no manifest.deleted_files entry for sharedId={} fileId={}", shared_id, file_id)
 
     async def _upload_deleted_file(self, record: Any, data: bytes, target: str) -> bool:
         """Dispatch one deleted-file re-upload to the right endpoint.
