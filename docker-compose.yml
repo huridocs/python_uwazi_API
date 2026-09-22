@@ -38,6 +38,13 @@ services:
     environment:
       - UWAZI_URL=${UWAZI_URL}
       - PROPERTY_FILLER_DATABASE_URL=postgresql://property_filler:property_filler@localhost:5433/property_filler
+      # `.env` is dockerignored, so these are injected by compose interpolation
+      # (docker compose auto-loads the project `.env` for ${VAR} substitution).
+      - PROPERTY_FILLER_TEMPLATE=${PROPERTY_FILLER_TEMPLATE:-DOCUMENT}
+      - PROPERTY_FILLER_PROPERTY=${PROPERTY_FILLER_PROPERTY:-topic}
+      - PROPERTY_FILLER_FILTER=${PROPERTY_FILLER_FILTER:-document_type}
+      - PROPERTY_FILLER_SUBTITLE=${PROPERTY_FILLER_SUBTITLE:-}
+      - PROPERTY_FILLER_PROPERTY_TEMPLATE=${PROPERTY_FILLER_PROPERTY_TEMPLATE:-}
     volumes:
       - admin_agent_data:/app/data
     command: ["/app/.venv/bin/python", "-m", "uwazi_property_filler.drivers.web.app"]

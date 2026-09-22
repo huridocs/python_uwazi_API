@@ -10,13 +10,20 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from loguru import logger
+
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
-from uwazi_property_filler.configuration import FILTER_PROPERTY
+from uwazi_property_filler.configuration import FILTER_PROPERTY, SUBTITLE_PROPERTY
+from uwazi_property_filler.domain.metadata_text import metadata_text, metadata_value
 from uwazi_property_filler.domain.pdf_item import PdfItem
 from uwazi_property_filler.ports.uwazi_port import UwaziPort
+
+# Elasticsearch ``index.max_result_window`` default: the largest window a single
+# Uwazi search request can return, so filtered fetches page by this size.
+_SEARCH_WINDOW = 10_000
 
 
 class UwaziClientAdapter(UwaziPort):
@@ -54,11 +61,25 @@ class UwaziClientAdapter(UwaziPort):
             if filter_value is None:
                 entities = adapter.client.search.get(template_name=template_name, batch_size=10000, language=language)
             else:
+                # One request per filter value, paged: Uwazi caps a single
+                # search at Elasticsearch's 10 000-result window, so each value
+                # is fetched in consecutive windows until exhausted.
                 filters = SearchFilters()
                 filters.add(FILTER_PROPERTY, SelectFilter(values=[filter_value]))
-                entities = adapter.client.search.search_by_filter(
-                    filters, template_name=template_name, batch_size=10000, language=language
-                )
+                entities: list[Any] = []
+                start_from = 0
+                while True:
+                    page = adapter.client.search.search_by_filter(
+                        filters,
+                        template_name=template_name,
+                        start_from=start_from,
+                        batch_size=_SEARCH_WINDOW,
+                        language=language,
+                    )
+                    entities.extend(page)
+                    if len(page) < _SEARCH_WINDOW:
+                        break  # exhausted the value's matching set
+                    start_from += _SEARCH_WINDOW
             file_language = LANGUAGE_TO_FILE_LANGUAGE.get(language)
             items: list[PdfItem] = []
             for entity in entities:
@@ -69,10 +90,21 @@ class UwaziClientAdapter(UwaziPort):
                     PdfItem(
                         shared_id=entity.shared_id or "",
                         title=entity.title or "",
+                        subtitle=metadata_text(metadata_value(entity.metadata or {}, SUBTITLE_PROPERTY)),
                         template_name=template_name,
                         filename=docs[0].filename,
                         language=language,
                     )
+                )
+            if SUBTITLE_PROPERTY:
+                matched = sum(1 for item in items if item.subtitle)
+                logger.info(
+                    "list_documents: subtitle property '{}' matched {}/{} documents "
+                    "(0 usually means the configured name does not exist on template {})",
+                    SUBTITLE_PROPERTY,
+                    matched,
+                    len(items),
+                    template_name,
                 )
             return items
 

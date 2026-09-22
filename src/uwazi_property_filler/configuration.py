@@ -40,6 +40,14 @@ INSTANCE_KEY: str = instance_key(os.environ["UWAZI_URL"])
 TEMPLATE_NAME: str = os.environ.get("PROPERTY_FILLER_TEMPLATE", "DOCUMENT")
 PROPERTY_NAME: str = os.environ.get("PROPERTY_FILLER_PROPERTY", "topic")
 FILTER_PROPERTY: str = os.environ.get("PROPERTY_FILLER_FILTER", "document_type")
+# Secondary text shown under each document title in the UI (e.g. a reference
+# number), also used by the list search. Empty disables the subtitle.
+SUBTITLE_PROPERTY: str = os.environ.get("PROPERTY_FILLER_SUBTITLE", "")
+# Template whose entities are the possible values of ``PROPERTY_NAME`` when it
+# is a relationship property (e.g. TOPIC). Empty falls back to the related
+# template configured on the property itself; select-like properties always
+# use their thesaurus instead.
+PROPERTY_TEMPLATE: str = os.environ.get("PROPERTY_FILLER_PROPERTY_TEMPLATE", "")
 
 _DATABASE_URL = os.environ.get("PROPERTY_FILLER_DATABASE_URL")
 if not _DATABASE_URL:

@@ -119,10 +119,12 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO document_status (instance_key, shared_id, language, status, template_name, title, filename)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO document_status
+                    (instance_key, shared_id, language, status, template_name, subtitle, title, filename)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (instance_key, shared_id, language) DO UPDATE SET
                     template_name = EXCLUDED.template_name,
+                    subtitle = EXCLUDED.subtitle,
                     title = EXCLUDED.title,
                     filename = EXCLUDED.filename
                 """,
@@ -132,6 +134,7 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
                     item.language,
                     item.status.value,
                     item.template_name,
+                    item.subtitle,
                     item.title,
                     item.filename,
                 ),
@@ -144,7 +147,7 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
         with self._pool.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT shared_id, template_name, title, filename, language, status
+                SELECT shared_id, template_name, subtitle, title, filename, language, status
                 FROM document_status
                 WHERE instance_key = %s AND status = %s AND language = %s
                 ORDER BY title
@@ -155,6 +158,7 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
             PdfItem(
                 shared_id=r["shared_id"],
                 title=r["title"] or "",
+                subtitle=r["subtitle"] or "",
                 template_name=r["template_name"] or "",
                 filename=r["filename"] or "",
                 language=r["language"],
@@ -170,7 +174,7 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                SELECT shared_id, template_name, title, filename, language, status
+                SELECT shared_id, template_name, subtitle, title, filename, language, status
                 FROM document_status
                 WHERE instance_key = %s AND shared_id = %s AND language = %s
                 """,
@@ -181,6 +185,7 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
         return PdfItem(
             shared_id=row["shared_id"],
             title=row["title"] or "",
+            subtitle=row["subtitle"] or "",
             template_name=row["template_name"] or "",
             filename=row["filename"] or "",
             language=row["language"],
