@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Uwazi Property Filler — PDF viewer</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #525659; }
+    #container { position: relative; width: 100%; height: 100%; overflow: auto; }
+    #page-wrap { position: relative; margin: 0 auto; }
+    canvas.pdf-page { display: block; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+    .highlight-rect {
+      position: absolute;
+      background: rgba(255, 193, 7, 0.35);
+      border: 1px solid rgba(255, 152, 0, 0.8);
+      pointer-events: none;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="page-wrap"></div>
+  </div>
+  <script type="module" src="/static/pdfjs/viewer.mjs"></script>
+</body>
+</html>
