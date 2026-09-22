@@ -5,7 +5,7 @@ Pure tests only: real :class:`Segmentation` / :class:`Paragraph` inputs, real
 Uwazi instance.
 """
 
-from uwazi_admin_agent.use_cases.segmentation_tools import format_segmentation
+from uwazi_admin_agent.use_cases.segmentation_tools import format_segmentation, segmentation_to_dict
 from uwazi_api.domain.segmentation import Paragraph, Segmentation
 
 
@@ -30,6 +30,28 @@ def _para(page_number: int, top: float, text: str) -> Paragraph:
         text=text,
         type="paragraph",
     )
+
+
+def test_segmentation_to_dict_builds_plain_script_shape() -> None:
+    """The exec-sandbox dict shape: header (filename/status/pages) + page-ordered
+    paragraphs with page_number + text + geometry."""
+    seg = _seg([_para(1, 0.0, "one"), _para(2, 0.0, "two")])
+
+    out = segmentation_to_dict(seg)
+
+    assert out["filename"] == "doc.pdf"
+    assert out["status"] == "ready"
+    assert out["pages"] == 2
+    assert [p["page_number"] for p in out["paragraphs"]] == [1, 2]
+    assert [p["text"] for p in out["paragraphs"]] == ["one", "two"]
+    assert all("left" in p and "top" in p and "text" in p for p in out["paragraphs"])
+
+
+def test_segmentation_to_dict_empty_paragraphs_zero_pages() -> None:
+    out = segmentation_to_dict(_seg([]))
+
+    assert out["pages"] == 0
+    assert out["paragraphs"] == []
 
 
 def test_format_segmentation_renders_header_and_paragraph_lines() -> None:

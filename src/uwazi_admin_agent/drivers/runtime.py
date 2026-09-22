@@ -64,6 +64,7 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
@@ -95,6 +96,7 @@ class Runtime:
         verify_use_case: VerifyRevertUseCase,
         search_probe: SearchProbePort,
         file_cache: FileCacheStore | None,
+        segmentation_repository: SegmentationRepositoryPort,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -107,6 +109,7 @@ class Runtime:
         self.revert_use_case: RevertRunUseCase = revert_use_case
         self.verify_use_case: VerifyRevertUseCase = verify_use_case
         self.search_probe: SearchProbePort = search_probe
+        self.segmentation_repository: SegmentationRepositoryPort = segmentation_repository
         # The persistent file/entity cache (None = disabled). Held here so the
         # step drivers can wire it into their use cases as the stats/invalidation
         # port — the counters live on the store both decorators bump.
@@ -196,6 +199,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
             file_repository=file_repository,
             default_language=DUMMY_LANGUAGE,
             cache_stats=file_cache,
+            segmentation_repository=segmentation_repository,
         ),
     )
 
@@ -233,4 +237,5 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         verify_use_case=verify_use_case,
         search_probe=search_probe,
         file_cache=file_cache,
+        segmentation_repository=segmentation_repository,
     )
