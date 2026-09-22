@@ -391,6 +391,7 @@ class BackupIntercept:
         self._manifest.deleted_files.extend(records)
         self._invalidate(sorted({r.shared_id for r in records}))
         self._invalidate_file_bytes([r.filename for r in records])
+        self._invalidate_segmentations([r.file_id for r in records])
         self._enforce_cap()
         self._emit("delete_file", sorted({r.shared_id for r in records}))
         logger.debug(
@@ -420,3 +421,16 @@ class BackupIntercept:
         if self._cache_control is None or not filenames:
             return
         self._cache_control.invalidate_files(filenames)
+
+    def _invalidate_segmentations(self, file_ids: list[str]) -> None:
+        """Evict cached ready segmentations of deleted files (no-op without a cache control).
+
+        Segmentation keys are the document ``file_id``, so the delete seam —
+        which already carries every deleted file's ``file_id`` — evicts its
+        segmentation here, mirroring :meth:`_invalidate_file_bytes`. Only
+        SUCCEEDED deletes are recorded (a soft-failed delete left its file in
+        place, so its segmentation stays valid).
+        """
+        if self._cache_control is None or not file_ids:
+            return
+        self._cache_control.invalidate_segmentations(file_ids)

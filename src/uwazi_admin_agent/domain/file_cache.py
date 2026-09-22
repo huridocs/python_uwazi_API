@@ -3,7 +3,7 @@
 The cache exists because a generated extraction script does an N+1 read per
 entity (one raw-entity GET + one GET per supporting file) and the same reads
 repeat across a turn's up-to-4 dry-run passes, the execute pass, and every
-later task. Two very different freshness regimes apply:
+later task. Three different freshness regimes apply:
 
 - **File bytes are immutable per storage filename.** Uwazi mints
   ``${Date.now()}${random}.${ext}`` fresh on every upload
@@ -18,6 +18,14 @@ later task. Two very different freshness regimes apply:
   humans edit Uwazi directly), so raw entries carry a capture time and expire
   via ``ENTITY_CACHE_TTL_SECONDS``, plus explicit write-path invalidation
   (the cached repository decorators + :class:`BackupIntercept`).
+- **Ready segmentations are immutable per file_id.** A segmentation's
+  ``status`` transitions ``processing → ready`` and, once ready, never
+  rewrites (the structured paragraphs are re-derived from the same immutable
+  document bytes). Entries are therefore cached forever like file bytes,
+  keyed by the document ``file_id`` (NOT the storage filename), and EVICTED
+  when our own code deletes the owning file row (the delete helpers call
+  ``invalidate_segmentations``). Non-``ready`` results are never cached — a
+  ``processing``/missing segmentation must re-try until it flips to ``ready``.
 
 This module is the unit-test target for the pure decisions: key naming,
 instance namespacing, TTL freshness, the stats value object, and its one-line
@@ -91,6 +99,9 @@ class FileCacheStats(BaseModel):
     raw_hits: int = 0
     raw_fetches: int = 0
     raw_fetch_seconds: float = 0.0
+    seg_hits: int = 0
+    seg_fetches: int = 0
+    seg_fetch_seconds: float = 0.0
     invalidations: int = 0
     evictions: int = 0
 
@@ -107,6 +118,7 @@ def format_cache_stats(stats: FileCacheStats | None) -> str:
     parts = [
         f"files: {stats.file_fetches} fetched, {stats.file_hits} hits ({stats.file_fetch_seconds:.1f}s)",
         f"raws: {stats.raw_fetches} fetched, {stats.raw_hits} hits ({stats.raw_fetch_seconds:.1f}s)",
+        f"segs: {stats.seg_fetches} fetched, {stats.seg_hits} hits ({stats.seg_fetch_seconds:.1f}s)",
     ]
     if stats.invalidations:
         parts.append(f"invalidations: {stats.invalidations}")

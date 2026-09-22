@@ -6,6 +6,7 @@ namespacing is applied by :func:`uwazi_admin_agent.drivers.runtime.build_file_ca
     files/<safe_cache_name(filename)>                              # bytes as stored
     entities/<safe_cache_name(shared_id)>/<safe_cache_name(language)>.json
                                                                    # CachedRaw JSON
+    segmentations/<safe_cache_name(file_id)>.json                  # ready Segmentation JSON
 
 Two freshness regimes (see :mod:`uwazi_admin_agent.domain.file_cache`):
 
@@ -23,6 +24,10 @@ Two freshness regimes (see :mod:`uwazi_admin_agent.domain.file_cache`):
   (the raw-repository decorator on save/delete; :class:`BackupIntercept` for
   sandbox CRUD writes and files-collection mutations — deletes AND revert
   re-uploads); direct human edits are bounded by the TTL alone.
+- Ready segmentations are immutable per document ``file_id``, so entries never
+  expire (like bytes) and are EVICTED only when our own code deletes the
+  owning file row (:meth:`invalidate_segmentations` — the delete helpers carry
+  every deleted file's ``file_id``).
 
 Concurrency: every write is atomic (temp file + ``os.replace``), every read
 treats any OSError as a miss, and there are no cross-process locks —
@@ -57,6 +62,7 @@ from uwazi_admin_agent.domain.file_cache import (
 )
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
+from uwazi_api.domain.segmentation import Segmentation
 
 # Cache key for language=None (the server-default locale row). ISO 639-1
 # language codes are 2 letters, so a real language can never collide with it.
@@ -84,6 +90,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         self._root: Path = Path(root)
         self._files_dir: Path = self._root / "files"
         self._entities_dir: Path = self._root / "entities"
+        self._segmentations_dir: Path = self._root / "segmentations"
         self._max_bytes: int = max_bytes
         self._ttl_seconds: float = ttl_seconds
         self._evict_scan_interval: int = max(1, evict_scan_interval)
@@ -136,6 +143,34 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         self._write_atomic(self._raw_path(shared_id, language), entry.model_dump_json().encode("utf-8"))
         self._maybe_evict()
 
+    # --- segmentations (immutable-forever, keyed by file_id) --------------------
+
+    def get_segmentation(self, file_id: str) -> Segmentation | None:
+        """Cached READY segmentation for ``file_id``, or None on miss.
+
+        The decorator only ever stores ``status == "ready"`` entries, so a hit
+        is always a fully-rendered segmentation. Corrupt/partial entries are
+        treated as plain misses (never raised into the calling script), like
+        raw entries.
+        """
+        try:
+            seg = Segmentation.model_validate_json(self._segmentation_path(file_id).read_text(encoding="utf-8"))
+        except (OSError, ValidationError):
+            return None
+        self._bump(seg_hits=1)
+        return seg
+
+    def put_segmentation(self, file_id: str, seg: Segmentation) -> None:
+        """Atomically store a ready ``seg`` under ``file_id``; amortized eviction check.
+
+        Immutable-forever like file bytes: a ready segmentation never rewrites
+        (the structured paragraphs are re-derived from immutable document
+        bytes), so there is no TTL. It is evicted only when our own code
+        deletes the owning file row (:meth:`invalidate_segmentations`).
+        """
+        self._write_atomic(self._segmentation_path(file_id), seg.model_dump_json(by_alias=True).encode("utf-8"))
+        self._maybe_evict()
+
     # --- invalidation (write-path hook) -----------------------------------------
 
     @override
@@ -163,6 +198,24 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         if evicted:
             self._bump(invalidations=evicted)
 
+    @override
+    def invalidate_segmentations(self, file_ids: Sequence[str]) -> None:
+        """Drop the cached ready segmentation of each document ``file_id`` (best-effort).
+
+        Mirrors :meth:`invalidate_files` but keyed by ``file_id`` (the document
+        ``_id``), which is what the delete helpers carry on every deleted file
+        row. Unknown ids are a true no-op (never counted); eviction is lossless
+        by construction (the bytes are already in the run's backup store), so a
+        race that double-deletes at worst leaves a harmless miss.
+        """
+        evicted = 0
+        for file_id in file_ids:
+            path = self._segmentation_path(file_id)
+            if path.is_file() and self._unlink(path):
+                evicted += 1
+        if evicted:
+            self._bump(invalidations=evicted)
+
     def clear(self) -> int:
         """Remove every cached entry (file bytes + entity raws) for this instance.
 
@@ -172,7 +225,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         the number of entries removed (0 when the cache is empty).
         """
         removed = 0
-        for sub in (self._files_dir, self._entities_dir):
+        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir):
             if not sub.is_dir():
                 continue
             for path in sub.rglob("*"):
@@ -202,6 +255,10 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         """Account one real raw-entity GET (a miss) — called by the read-through decorator."""
         self._bump(raw_fetches=1, raw_fetch_seconds=seconds)
 
+    def note_segmentation_fetch(self, seconds: float) -> None:
+        """Account one real segmentation GET (a miss) — called by the read-through decorator."""
+        self._bump(seg_fetches=1, seg_fetch_seconds=seconds)
+
     # --- internals -----------------------------------------------------------------
 
     def _bump(self, **deltas: float) -> None:
@@ -213,6 +270,9 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
     def _raw_path(self, shared_id: str, language: str | None) -> Path:
         lang_key = language if language else _DEFAULT_LANGUAGE_KEY
         return self._entities_dir / safe_cache_name(shared_id) / f"{safe_cache_name(lang_key)}.json"
+
+    def _segmentation_path(self, file_id: str) -> Path:
+        return self._segmentations_dir / f"{safe_cache_name(file_id)}.json"
 
     @staticmethod
     def _write_atomic(path: Path, data: bytes) -> None:
@@ -300,7 +360,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
     def _scan_all(self) -> list[tuple[Path, int, float]]:
         """Collect (path, size, mtime) for every cached file under the root."""
         entries: list[tuple[Path, int, float]] = []
-        for sub in (self._files_dir, self._entities_dir):
+        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir):
             if not sub.is_dir():
                 continue
             for path in sub.rglob("*"):
@@ -313,7 +373,11 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
                 entries.append((path, stat.st_size, stat.st_mtime))
         return entries
 
-    @staticmethod
-    def _is_expired_raw(path: Path, mtime: float, cutoff: float) -> bool:
-        """True for a raw-entry JSON older than the cutoff (byte files never expire)."""
-        return path.suffix == ".json" and mtime < cutoff
+    def _is_expired_raw(self, path: Path, mtime: float, cutoff: float) -> bool:
+        """True for a raw-entry JSON under ``entities/`` older than the cutoff.
+
+        File bytes and ready segmentations never expire; only entity raws do,
+        so the directory (not just the ``.json`` suffix) decides: segmentation
+        entries are also JSON but live under ``segmentations/``.
+        """
+        return path.suffix == ".json" and self._entities_dir in path.parents and mtime < cutoff

@@ -248,6 +248,12 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
     get_file_bytes_parallel(filenames)
         Bulk `get_file_bytes`: returns a DICT `{filename: bytes_or_None}`.
         Collect all filenames first, then fetch them in ONE call.
+    get_segmentation_parallel(shared_ids, language=None)
+        Bulk `get_segmentation`: returns a DICT `{shared_id: dict_or_None}`
+        (each value the same dict `get_segmentation(sid)` returns, or None
+        when the entity has no primary document / no ready segmentation).
+        Collect all shared_ids first, then fetch them in ONE call — SUBSCRIPT
+        the result: `seg = get_segmentation_parallel(ids)[sid]`.
     move_files_to_entity_parallel(moves, language='en')
         Parallel file-move for MERGE tasks (one task per TARGET, so different
         targets' uploads overlap; each target's own files still move
