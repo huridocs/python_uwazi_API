@@ -7,8 +7,8 @@ Operating model:
   entities, create_relationships, query_entities, query_entities_full). It
   does not run free-form network or DB code — only the bound helpers.
 - Bulk work runs **auto-throttled in parallel**: the bound ``*_parallel``
-  variants (update/create/create_relationships writes, entity-file/file-byte
-  reads) run on up to ``THROTTLE_MAX_WORKERS`` (4) concurrent workers, backing
+  variants (update/create/create_relationships writes, entity-file/file-byte/
+  segmentation reads) run on up to ``THROTTLE_MAX_WORKERS`` (4) concurrent workers, backing
   off toward 1 when Uwazi complains about load (429/rate-limit) and climbing
   back after clean batches — one shared ``ThrottleController`` per execute or
   dry-run pass. The SAME names bind in dummy/dry-run mode with identical

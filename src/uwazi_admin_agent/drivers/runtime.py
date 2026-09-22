@@ -42,6 +42,7 @@ from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStore
 from uwazi_admin_agent.adapters.cached_entity_repository import CachedEntityRepository
 from uwazi_admin_agent.adapters.cached_file_repository import CachedFileRepository
+from uwazi_admin_agent.adapters.cached_segmentation_repository import CachedSegmentationRepository
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
@@ -179,7 +180,12 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     search_probe = UwaziSearchProbe(api.client)
-    segmentation_repository = UwaziSegmentationRepository(api.client)
+    base_segmentation_repository = UwaziSegmentationRepository(api.client)
+    segmentation_repository: SegmentationRepositoryPort = (
+        CachedSegmentationRepository(base_segmentation_repository, file_cache)
+        if file_cache is not None
+        else base_segmentation_repository
+    )
     backup_store = build_backup_store()
     audit_log = build_audit_log()
     llm = OllamaAdapter()

@@ -1150,7 +1150,9 @@ def build_real_exec_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
-        **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
+        **build_parallel_read_helpers(
+            entity_repository, file_repository, default_language, executor, segmentation_repository
+        ),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1314,7 +1316,9 @@ def build_dry_run_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
-        **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
+        **build_parallel_read_helpers(
+            entity_repository, file_repository, default_language, executor, segmentation_repository
+        ),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }

@@ -115,6 +115,7 @@ from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.throttle_policy import classify_mutation_results, is_rate_limit_text, verdict_from_error_text
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.use_cases.file_deletion import (
     cleanup_plan_with_bytes,
     delete_files_with_backup,
@@ -122,12 +123,14 @@ from uwazi_admin_agent.use_cases.file_deletion import (
 )
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
+from uwazi_admin_agent.use_cases.segmentation_tools import segmentation_to_dict
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_relationship_create import AgentRelationshipCreate
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _ENTITY_READ_TOOLS
+from uwazi_api.domain.exceptions import SegmentationNotFoundError
 
 
 def build_parallel_write_helpers(
@@ -153,11 +156,13 @@ def build_parallel_read_helpers(
     file_repository: FileRepositoryPort | None,
     default_language: str,
     executor: ParallelExecutor,
+    segmentation_repository: SegmentationRepositoryPort | None = None,
 ) -> dict[str, Any]:
-    """Build the 2 parallel READ helpers (the real AND dry-run namespaces bind these)."""
+    """Build the 3 parallel READ helpers (the real AND dry-run namespaces bind these)."""
     return {
         "get_entity_files_parallel": _entity_files_parallel(entity_repository, default_language, executor),
         "get_file_bytes_parallel": _file_bytes_parallel(file_repository, executor),
+        "get_segmentation_parallel": _segmentation_parallel(segmentation_repository, default_language, executor),
     }
 
 
@@ -1005,6 +1010,44 @@ def _file_bytes_parallel(
         return data
 
     return get_file_bytes_parallel
+
+
+def _segmentation_parallel(
+    segmentation_repository: SegmentationRepositoryPort | None,
+    default_language: str,
+    executor: ParallelExecutor,
+) -> Callable[[list[str], str | None], dict[str, dict | None]]:
+    if segmentation_repository is None:
+        return _unwired_parallel(
+            "get_segmentation_parallel",
+            "segmentation_repository",
+            "Wire SegmentationRepositoryPort into the runtime/execute use case to enable bulk document-page-text reads.",
+        )
+
+    def get_segmentation_parallel(shared_ids: list[str], language: str | None = None) -> dict[str, dict | None]:
+        lang = language or default_language
+        if not shared_ids:
+            return {}
+        started = time.monotonic()
+
+        def _fetch_segmentation(sid: str) -> dict | None:
+            try:
+                seg = asyncio.run(segmentation_repository.get_by_shared_id(sid, lang))
+            except SegmentationNotFoundError:
+                return None
+            return segmentation_to_dict(seg)
+
+        values, complaints = _run_reads_with_retry([_sid_task(_fetch_segmentation, sid) for sid in shared_ids], executor)
+        segs = dict(zip(shared_ids, values, strict=True))
+        logger.info(
+            "script get_segmentation_parallel: {} entities, {} complaint(s) ({:.1f}s)",
+            len(shared_ids),
+            len(complaints),
+            time.monotonic() - started,
+        )
+        return segs
+
+    return get_segmentation_parallel
 
 
 def _sid_task(fetch: Callable[[str], Any], sid: str) -> Callable[[], Any]:

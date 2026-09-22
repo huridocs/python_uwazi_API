@@ -22,8 +22,9 @@ class CacheInvalidationPort(ABC):
     stale. File rows are not entity rows (a raw's documents/attachments are a
     runtime JOIN from the files collection by sharedId), so a files-collection
     mutation (a delete, a re-upload) invalidates the OWNING ENTITY's raws plus
-    the affected files' cached bytes — the deleting/uploading seams know both
-    keys and drive them through this port.
+    the affected files' cached bytes AND the deleted documents' cached
+    segmentations (keyed by file_id) — the deleting/uploading seams know all
+    three keys and drive them through this port.
     """
 
     @abstractmethod
@@ -42,3 +43,17 @@ class CacheInvalidationPort(ABC):
         persisted to the run's backup store BEFORE the delete call, so
         evicting after the delete can never lose anything.
         """
+        ...
+
+    @abstractmethod
+    def invalidate_segmentations(self, file_ids: Sequence[str]) -> None:
+        """Drop the cached ready segmentations of ``file_ids`` (no-op for unknown ids).
+
+        Segmentation keys are the document ``file_id`` (NOT the storage
+        filename), so the delete helpers — which already carry every deleted
+        file's ``file_id`` — evict its segmentation here, mirroring
+        :meth:`invalidate_files`. Like bytes, a ready segmentation is
+        immutable per file_id, so eviction is only needed when the file row
+        itself is GONE; entries repopulate lazily on the next read.
+        """
+        ...
