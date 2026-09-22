@@ -37,6 +37,7 @@ from uwazi_admin_agent.use_cases.author_extractor_tool import (
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.run_dry_run_script_tool import run_dry_run_script
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
+from uwazi_admin_agent.use_cases.segmentation_tools import get_segmentation, get_segmentation_by_entity
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.use_cases.tools.get_template_names import list_templates
@@ -101,6 +102,10 @@ class GenerateScriptUseCase:
                 author_html_extractor,
                 peek_entity_files,
                 peek_file_text,
+                # Document segmentation: read the structured text of a primary
+                # document (paragraphs, page-ordered) for extraction over docs.
+                get_segmentation,
+                get_segmentation_by_entity,
             ],
             model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
         )

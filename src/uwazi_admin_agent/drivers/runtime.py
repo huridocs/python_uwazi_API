@@ -46,6 +46,7 @@ from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepo
 from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
+from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
 from uwazi_admin_agent.configuration import (
     DUMMY_LANGUAGE,
@@ -175,6 +176,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     search_probe = UwaziSearchProbe(api.client)
+    segmentation_repository = UwaziSegmentationRepository(api.client)
     backup_store = build_backup_store()
     audit_log = build_audit_log()
     llm = OllamaAdapter()
@@ -187,6 +189,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         relationship_api=api,
         search_probe=search_probe,
         file_repository=file_repository,
+        segmentation_repository=segmentation_repository,
         dry_run_use_case=DryRunScriptUseCase(
             entity_api=api,
             entity_repository=entity_repository,
