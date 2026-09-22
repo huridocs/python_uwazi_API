@@ -645,6 +645,7 @@ def _dummy_parallel_helpers(scoped: dict[str, Any], scope: set[str]) -> dict[str
         "create_relationships_parallel": scoped["create_relationships"],
         "get_entity_files_parallel": _dummy_files_parallel(scope),
         "get_file_bytes_parallel": _dummy_bytes_parallel(),
+        "get_segmentation_parallel": _dummy_segmentation_parallel(),
         "move_files_to_entity_parallel": _move_files_noop_parallel_scoped(scope),
         "dedupe_entity_files_parallel": _dedupe_files_noop_parallel_scoped(scope),
         "delete_entity_files_parallel": _delete_files_noop_parallel_scoped(scope),
@@ -669,6 +670,22 @@ def _dummy_bytes_parallel() -> Any:
         return {name: None for name in filenames}
 
     return get_file_bytes_parallel
+
+
+def _dummy_segmentation_parallel() -> Any:
+    """Dummy ``get_segmentation_parallel``: ``None`` per id (dummies carry no documents).
+
+    Mirrors the single ``get_segmentation`` no-op (``_get_segmentation_noop``), so a
+    generated script that calls the bulk helper still runs unchanged in the dummy
+    gate and reads ``None`` per entity — matching what the real helper returns for
+    an entity with no primary document / no ready segmentation.
+    """
+
+    def get_segmentation_parallel(shared_ids: list[str], language: str | None = None) -> dict[str, dict | None]:
+        del language  # ignored: dummies carry no documents to segment
+        return {sid: None for sid in shared_ids}
+
+    return get_segmentation_parallel
 
 
 def _build_get_entity_files_real_helper(

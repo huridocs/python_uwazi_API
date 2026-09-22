@@ -289,9 +289,10 @@ def test_get_segmentation_parallel_unwired_raises(tmp_path: Path) -> None:
         helpers["get_segmentation_parallel"](["S1"])
 
 
-def test_segmentation_parallel_bound_in_real_and_dry_run_not_dummy() -> None:
-    """The parallel name binds in real + dry-run (real reads), but NOT the dummy
-    namespace (which keeps ``get_segmentation`` a no-op)."""
+def test_segmentation_parallel_bound_in_real_dry_run_and_dummy() -> None:
+    """The parallel segmentation name binds in real, dry-run, AND dummy; in the
+    dummy namespace it is a no-op returning ``None`` per id (dummies carry no
+    documents), mirroring the single ``get_segmentation`` no-op."""
     repo = _InMemorySegRepo()
 
     real = build_real_exec_namespace(
@@ -323,7 +324,10 @@ def test_segmentation_parallel_bound_in_real_and_dry_run_not_dummy() -> None:
 
     assert "get_segmentation_parallel" in real
     assert "get_segmentation_parallel" in dry
-    assert "get_segmentation_parallel" not in dummy
+    assert "get_segmentation_parallel" in dummy
+
+    # The dummy no-op mirrors get_segmentation: None per id, no documents.
+    assert dummy["get_segmentation_parallel"](["A", "B"]) == {"A": None, "B": None}
 
 
 class _StubIntercept:
