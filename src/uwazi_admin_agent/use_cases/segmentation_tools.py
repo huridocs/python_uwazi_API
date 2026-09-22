@@ -8,16 +8,22 @@ paragraphs — not the raw PDF bytes (``peek_file_text`` decodes bytes as text a
 only makes sense for HTML/text supporting files). These two tools give it that
 window:
 
-- ``get_segmentation``: fetch one file's segmentation by its ``_id`` (the
+- ``peek_segmentation``: fetch one file's segmentation by its ``_id`` (the
   ``file_id`` that ``peek_entity_files`` returns for kind=document entries) and
   render the paragraphs as page-ordered text.
-- ``get_segmentation_by_entity``: resolve an entity's primary document for a
+- ``peek_segmentation_by_entity``: resolve an entity's primary document for a
   language and return its segmentation, without the caller knowing the file id.
 
 Both are read-only over the raw ``segmentation_repository`` port wired on
 :class:`AdminAgentDeps` (set in ``build_runtime``). A missing port, a missing
 segmentation, or a network error degrade to an error STRING (never raise — a
 tool error is LLM-visible context, not a crash).
+
+NOTE these are AUTHORING-time tools (``peek_``-prefixed, like
+``peek_entity_files``/``peek_file_text``), distinct from the exec-sandbox
+``get_segmentation`` helper the generated SCRIPT calls at execute time — which
+is keyed by ``shared_id`` and returns a plain dict (see
+:func:`segmentation_to_dict`).
 """
 
 from __future__ import annotations
@@ -27,6 +33,24 @@ from pydantic_ai import RunContext
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.peek_file_tools import _truncate_peek
 from uwazi_api.domain.segmentation import Segmentation
+
+
+def segmentation_to_dict(seg: Segmentation) -> dict:
+    """Render a :class:`Segmentation` as a plain dict (pure; unit-testable).
+
+    This is the shape the exec-sandbox ``get_segmentation`` helper returns to the
+    generated script: a header (``filename``/``status``/``pages``) plus a list of
+    ``paragraphs`` each carrying ``page_number``, ``text``, and geometry. ``pages``
+    is the highest paragraph ``page_number`` (pages are 1-indexed, so the max equals
+    the total number of pages that carry text).
+    """
+    page_count = max((p.page_number for p in seg.paragraphs), default=0)
+    return {
+        "filename": seg.filename,
+        "status": seg.status,
+        "pages": page_count,
+        "paragraphs": [p.model_dump() for p in seg.paragraphs],
+    }
 
 
 def format_segmentation(seg: Segmentation) -> str:
@@ -48,7 +72,7 @@ def format_segmentation(seg: Segmentation) -> str:
     return _truncate_peek(text)
 
 
-async def get_segmentation(ctx: RunContext[AdminAgentDeps], file_id: str) -> str:
+async def peek_segmentation(ctx: RunContext[AdminAgentDeps], file_id: str) -> str:
     """Fetch one file's segmentation by its ``_id`` and return its paragraphs as
     page-ordered text. ``file_id`` is the document ``_id`` from
     ``peek_entity_files`` (kind=document). Returns an error string when the
@@ -65,7 +89,7 @@ async def get_segmentation(ctx: RunContext[AdminAgentDeps], file_id: str) -> str
     return format_segmentation(seg)
 
 
-async def get_segmentation_by_entity(ctx: RunContext[AdminAgentDeps], shared_id: str, language: str = "en") -> str:
+async def peek_segmentation_by_entity(ctx: RunContext[AdminAgentDeps], shared_id: str, language: str = "en") -> str:
     """Resolve an entity's primary document for ``language`` and return its
     segmentation as page-ordered text. ``shared_id`` is the entity's sharedId;
     ``language`` is the row locale (ISO 639-1, default ``en``). Returns an error

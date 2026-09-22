@@ -49,6 +49,6 @@ def test_build_agent_registers_schema_inspection_tools() -> None:
         "author_html_extractor",
         "peek_entity_files",
         "peek_file_text",
-        "get_segmentation",
-        "get_segmentation_by_entity",
+        "peek_segmentation",
+        "peek_segmentation_by_entity",
     } <= names

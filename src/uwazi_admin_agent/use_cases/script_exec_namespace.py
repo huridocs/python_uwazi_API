@@ -59,6 +59,7 @@ from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
@@ -73,6 +74,7 @@ from uwazi_admin_agent.use_cases.parallel_script_helpers import (
     build_parallel_read_helpers,
     build_parallel_write_helpers,
 )
+from uwazi_admin_agent.use_cases.segmentation_tools import segmentation_to_dict
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
@@ -81,6 +83,7 @@ from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_functions
+from uwazi_api.domain.exceptions import SegmentationNotFoundError
 
 # stdlib subset the system prompt promises the script (see system_prompt.py).
 # `datetime` is bound as the MODULE (``import datetime``), NOT the class, so the
@@ -740,6 +743,63 @@ def _build_get_file_bytes_real_helper(file_repository: FileRepositoryPort | None
     return get_file_bytes
 
 
+def _get_segmentation_noop() -> Any:
+    """Build the dummy no-op ``get_segmentation`` (dummies carry no documents)."""
+
+    def get_segmentation(shared_id: str, language: str | None = None) -> dict | None:
+        del shared_id, language  # ignored: dummies carry no primary document
+        return None
+
+    return get_segmentation
+
+
+def _build_get_segmentation_real_helper(
+    segmentation_repository: SegmentationRepositoryPort | None,
+    loop: asyncio.AbstractEventLoop,
+    default_language: str,
+) -> Any:
+    """Build the real ``get_segmentation`` bound into the real exec namespace.
+
+    Resolves the entity's primary document for ``language`` and returns its
+    segmentation as a plain dict (``filename``/``status``/``pages`` plus
+    ``paragraphs`` carrying ``page_number``/``text``/geometry). Returns ``None``
+    when the entity has no primary document or no ready segmentation
+    (:class:`SegmentationNotFoundError`) — the script counts it as missing and
+    continues, mirroring ``get_file_bytes``. Unwired ``segmentation_repository``
+    -> a stub that raises a clear ``RuntimeError`` when the script calls it.
+    """
+    if segmentation_repository is None:
+
+        def get_segmentation_unwired(shared_id: str, language: str | None = None) -> dict | None:
+            raise RuntimeError(
+                "get_segmentation requires a wired segmentation_repository (got None). "
+                "Wire SegmentationRepositoryPort into the runtime/execute use case to "
+                "enable document-page-text reading."
+            )
+
+        return get_segmentation_unwired
+
+    def get_segmentation(shared_id: str, language: str | None = None) -> dict | None:
+        lang = language or default_language
+        started = time.monotonic()
+        try:
+            seg = loop.run_until_complete(segmentation_repository.get_by_shared_id(shared_id, lang))
+        except SegmentationNotFoundError:
+            return None
+        result = segmentation_to_dict(seg)
+        # debug, not info: same aggregate-not-per-call logging rationale as above.
+        logger.debug(
+            "script get_segmentation: {} -> {} paragraph(s) across {} page(s) ({:.1f}s)",
+            shared_id,
+            len(result["paragraphs"]),
+            result["pages"],
+            time.monotonic() - started,
+        )
+        return result
+
+    return get_segmentation
+
+
 def build_exec_namespace(
     entity_api: Any,
     relationship_api: Any,
@@ -768,6 +828,7 @@ def build_exec_namespace(
         "move_files_to_entity": _move_files_noop_scoped(scope),
         "get_entity_files": _get_entity_files_noop_scoped(scope),
         "get_file_bytes": _get_file_bytes_noop(),
+        "get_segmentation": _get_segmentation_noop(),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1033,6 +1094,7 @@ def build_real_exec_namespace(
     default_language: str,
     entity_repository: EntityRepositoryPort | None = None,
     file_repository: FileRepositoryPort | None = None,
+    segmentation_repository: SegmentationRepositoryPort | None = None,
     throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
@@ -1087,6 +1149,7 @@ def build_real_exec_namespace(
         **build_parallel_file_delete_helper(entity_repository, file_repository, intercept, default_language, executor),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
+        "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
@@ -1199,6 +1262,7 @@ def build_dry_run_namespace(
     default_language: str,
     dry_run_records: list[dict[str, Any]],
     entity_repository: EntityRepositoryPort | None = None,
+    segmentation_repository: SegmentationRepositoryPort | None = None,
     throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
@@ -1249,6 +1313,7 @@ def build_dry_run_namespace(
         ),
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
+        "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
         **build_parallel_read_helpers(entity_repository, file_repository, default_language, executor),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,

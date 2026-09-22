@@ -56,7 +56,7 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
         default=None,
         description=(
             "Raw segmentation repository for generation-time document-text reading "
-            "(get_segmentation / get_segmentation_by_entity). Set by build_runtime."
+            "(peek_segmentation / peek_segmentation_by_entity). Set by build_runtime."
         ),
     )
     dry_run_use_case: Any | None = Field(

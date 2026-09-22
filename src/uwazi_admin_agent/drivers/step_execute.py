@@ -58,6 +58,7 @@ async def _run_execute_async(run_name: str, on_error: str | None) -> int:
         file_repository=runtime.file_repository,
         cache_stats=runtime.file_cache,
         cache_control=runtime.file_cache,
+        segmentation_repository=runtime.segmentation_repository,
     )
 
     logger.info("execute: run={} on_error={}", run_name, policy.value)

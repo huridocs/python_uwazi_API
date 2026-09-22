@@ -391,6 +391,19 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       (count it as missing and continue - never crash the bulk run). Decode
       yourself: `data.decode("utf-8", errors="replace")`.
 
+  get_segmentation(shared_id, language=None)
+      Read an entity's PRIMARY document's page text via Uwazi's segmentation
+      (the structured paragraphs Uwazi extracted from the document). Resolves
+      the primary document for `language` and returns a dict:
+      `{"filename", "status", "pages", "paragraphs": [{"page_number", "text",
+      "left", "top", "width", "height", "type"}, ...]}`. `pages` is the highest
+      paragraph `page_number` (pages are 1-indexed, so it equals the number of
+      pages that carry text); `paragraphs` is the page-ordered text — search
+      `p["text"]` and read `p["page_number"]` to locate a value. Returns None
+      when the entity has no primary document or no ready segmentation (count
+      it as missing and continue). In validation against dummies this returns
+      None (dummies carry no documents); the fetch path is only exercised live.
+
   htmlextract — pure HTML parsing over the bound namespace (NO import):
       htmlextract.text(html)    # all visible text, tags stripped, whitespace collapsed
       htmlextract.title(html)   # <title> contents or ""

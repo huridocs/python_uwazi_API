@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from uwazi_admin_agent.domain.file_cache import FileCacheStats, format_cache_stats
 from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -76,12 +77,14 @@ class DryRunScriptUseCase:
         file_repository: Any | None,
         default_language: str = "en",
         cache_stats: CacheStatsPort | None = None,
+        segmentation_repository: SegmentationRepositoryPort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._entity_repository = entity_repository
         self._file_repository = file_repository
         self._default_language = default_language
         self._cache_stats: CacheStatsPort | None = cache_stats
+        self._segmentation_repository: SegmentationRepositoryPort | None = segmentation_repository
 
     async def dry_run(self, script: str) -> DryRunReport:
         """Run ``script`` in the dry-run namespace; aggregate the records into a report.
@@ -124,6 +127,7 @@ class DryRunScriptUseCase:
                 default_language=self._default_language,
                 dry_run_records=records,
                 entity_repository=self._entity_repository,
+                segmentation_repository=self._segmentation_repository,
                 # One throttle spans the whole dry-run pass: the parallel read
                 # helpers report their batch verdicts here, so a rehearsal
                 # backs off exactly like the execute pass it is rehearsing.
