@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS document_status (
     language TEXT NOT NULL,
     status TEXT NOT NULL,
     template_name TEXT,
+    subtitle TEXT,
     title TEXT,
     filename TEXT,
     filled_metadata JSONB,
@@ -47,3 +48,14 @@ CREATE TABLE IF NOT EXISTS fill_audit (
     extension_ids JSONB,
     validated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent column additions for databases created before the column existed.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'document_status' AND column_name = 'subtitle'
+    ) THEN
+        ALTER TABLE document_status ADD COLUMN subtitle TEXT;
+    END IF;
+END $$;
