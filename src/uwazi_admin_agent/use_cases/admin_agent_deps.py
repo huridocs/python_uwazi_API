@@ -25,6 +25,7 @@ from uwazi_admin_agent.configuration import MAX_DRY_RUN_ATTEMPTS, MAX_VALIDATION
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
@@ -49,6 +50,13 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
         description=(
             "Raw file repository for generation-time HTML sampling (peek_file_text) "
             "and the bound get_file_bytes helper. Set by build_runtime."
+        ),
+    )
+    segmentation_repository: SegmentationRepositoryPort | None = Field(
+        default=None,
+        description=(
+            "Raw segmentation repository for generation-time document-text reading "
+            "(get_segmentation / get_segmentation_by_entity). Set by build_runtime."
         ),
     )
     dry_run_use_case: Any | None = Field(
