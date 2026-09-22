@@ -20,5 +20,29 @@ services:
     command: ["/app/.venv/bin/python", "-m", "uwazi_admin_agent.drivers.web.app"]
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=property_filler
+      - POSTGRES_PASSWORD=property_filler
+      - POSTGRES_DB=property_filler
+    volumes:
+      - property_filler_pg:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+
+  uwazi-property-filler:
+    build: .
+    network_mode: host
+    environment:
+      - UWAZI_URL=${UWAZI_URL}
+      - PROPERTY_FILLER_DATABASE_URL=postgresql://property_filler:property_filler@localhost:5433/property_filler
+    volumes:
+      - admin_agent_data:/app/data
+    command: ["/app/.venv/bin/python", "-m", "uwazi_property_filler.drivers.web.app"]
+    restart: unless-stopped
+
 volumes:
   admin_agent_data:
+  property_filler_pg:

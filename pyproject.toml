@@ -25,6 +25,8 @@ dependencies = [
     "uvicorn==0.49.0",
     "nicegui>=2.0.0",
     "pyyaml==6.0.3",
+    "psycopg[binary,pool]>=3.2",
+    "httpx>=0.28",
 ]
 
 [project.urls]
@@ -35,6 +37,7 @@ Repository = "https://github.com/huridocs/python_uwazi_API"
 [project.scripts]
 uwazi-admin-agent = "uwazi_admin_agent.drivers.cli:main"
 uwazi-admin-web = "uwazi_admin_agent.drivers.web.app:main"
+uwazi-property-filler = "uwazi_property_filler.drivers.web.app:main"
 [dependency-groups]
 dev = [
     "pytest>=8.4",
@@ -49,7 +52,7 @@ source = "vcs"
 raw-options = { version_scheme = "post-release", local_scheme = "no-local-version" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/uwazi_api", "src/uwazi_agent", "src/uwazi_admin_agent"]
+packages = ["src/uwazi_api", "src/uwazi_agent", "src/uwazi_admin_agent", "src/uwazi_property_filler"]
 
 [tool.ruff]
 line-length = 125
