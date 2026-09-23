@@ -39,6 +39,7 @@ from uwazi_admin_agent.use_cases.run_dry_run_script_tool import run_dry_run_scri
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.segmentation_tools import peek_segmentation, peek_segmentation_by_entity
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
+from uwazi_admin_agent.use_cases.url_fetch_tools import peek_url_text
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.use_cases.tools.get_template_names import list_templates
 from uwazi_agent.use_cases.tools.get_templates_by_names import get_templates_by_names
@@ -106,6 +107,9 @@ class GenerateScriptUseCase:
                 # document (paragraphs, page-ordered) for extraction over docs.
                 peek_segmentation,
                 peek_segmentation_by_entity,
+                # External URL fetch: read a referenced page (an entity's Source
+                # Page URL / URL attachment) when there is no uploaded file.
+                peek_url_text,
             ],
             model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
         )

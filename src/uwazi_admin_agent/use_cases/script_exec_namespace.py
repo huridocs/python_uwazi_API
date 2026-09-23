@@ -60,6 +60,7 @@ from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_t
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort, UrlFetchError
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
@@ -770,6 +771,22 @@ def _get_segmentation_noop() -> Any:
     return get_segmentation
 
 
+def _get_url_text_noop() -> Any:
+    """Build the dummy no-op ``get_url_text`` (dummies carry no source URLs).
+
+    The dummy gate cannot exercise external fetches (dummies are in-memory value
+    objects with no URL-fetchable backing); like ``get_file_bytes`` / ``get_segmentation``
+    the no-op returns ``None`` so the identical script still runs clean in the gate
+    and the fetch path is only exercised live.
+    """
+
+    def get_url_text(url: str) -> str | None:
+        del url  # ignored: dummies carry no source-page URL to fetch
+        return None
+
+    return get_url_text
+
+
 def _build_get_segmentation_real_helper(
     segmentation_repository: SegmentationRepositoryPort | None,
     loop: asyncio.AbstractEventLoop,
@@ -817,6 +834,48 @@ def _build_get_segmentation_real_helper(
     return get_segmentation
 
 
+def _build_get_url_text_real_helper(url_fetcher: UrlFetcherPort | None, loop: asyncio.AbstractEventLoop) -> Any:
+    """Build the real ``get_url_text`` bound into the real exec namespace.
+
+    Fetches an external ``http(s)`` URL's body as decoded text (see
+    :class:`HttpUrlFetcherAdapter`). Returns ``None`` on any fetch failure
+    (disallowed scheme, DNS/timeout, non-2xx, oversized body) — an external
+    source page being down must never crash a bulk run; the script counts it as
+    missing and continues, mirroring ``get_file_bytes`` returning ``None`` on an
+    absent file. Unwired ``url_fetcher`` -> a stub that raises a clear
+    ``RuntimeError`` when the script calls it.
+    """
+    if url_fetcher is None:
+
+        def get_url_text_unwired(url: str) -> str | None:
+            raise RuntimeError(
+                "get_url_text requires a wired url_fetcher (got None). "
+                "Wire UrlFetcherPort into the runtime/execute use case to "
+                "enable source-page HTML extraction."
+            )
+
+        return get_url_text_unwired
+
+    def get_url_text(url: str) -> str | None:
+        started = time.monotonic()
+        try:
+            text = loop.run_until_complete(url_fetcher.fetch_text(url))
+        except UrlFetchError as exc:
+            # debug, not info: external fetches are best-effort and a full pass
+            # can touch thousands of URLs.
+            logger.debug("script get_url_text: {} failed: {} ({:.1f}s)", url, exc, time.monotonic() - started)
+            return None
+        logger.debug(
+            "script get_url_text: {} -> {} chars ({:.1f}s)",
+            url,
+            len(text),
+            time.monotonic() - started,
+        )
+        return text
+
+    return get_url_text
+
+
 def build_exec_namespace(
     entity_api: Any,
     relationship_api: Any,
@@ -846,6 +905,7 @@ def build_exec_namespace(
         "get_entity_files": _get_entity_files_noop_scoped(scope),
         "get_file_bytes": _get_file_bytes_noop(),
         "get_segmentation": _get_segmentation_noop(),
+        "get_url_text": _get_url_text_noop(),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1112,6 +1172,7 @@ def build_real_exec_namespace(
     entity_repository: EntityRepositoryPort | None = None,
     file_repository: FileRepositoryPort | None = None,
     segmentation_repository: SegmentationRepositoryPort | None = None,
+    url_fetcher: UrlFetcherPort | None = None,
     throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
@@ -1167,6 +1228,7 @@ def build_real_exec_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
+        "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),
@@ -1282,6 +1344,7 @@ def build_dry_run_namespace(
     dry_run_records: list[dict[str, Any]],
     entity_repository: EntityRepositoryPort | None = None,
     segmentation_repository: SegmentationRepositoryPort | None = None,
+    url_fetcher: UrlFetcherPort | None = None,
     throttle: ThrottleController | None = None,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
@@ -1333,6 +1396,7 @@ def build_dry_run_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
+        "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),

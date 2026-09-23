@@ -26,6 +26,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
 
 
@@ -57,6 +58,13 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
         description=(
             "Raw segmentation repository for generation-time document-text reading "
             "(peek_segmentation / peek_segmentation_by_entity). Set by build_runtime."
+        ),
+    )
+    url_fetcher: UrlFetcherPort | None = Field(
+        default=None,
+        description=(
+            "External URL fetcher for source-page HTML sampling (peek_url_text) and "
+            "the bound get_url_text helper. Set by build_runtime."
         ),
     )
     dry_run_use_case: Any | None = Field(

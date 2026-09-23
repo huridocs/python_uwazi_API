@@ -34,6 +34,7 @@ from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS
+from uwazi_admin_agent.use_cases.url_fetch_tools import peek_url_text
 from uwazi_agent.use_cases.tools.get_templates_by_names import get_templates_by_names
 from uwazi_agent.use_cases.tools.query_entities import query_entities
 
@@ -84,8 +85,14 @@ The pairs MUST also include at least one NEGATIVE control: an html whose table
 contains rows for OTHER entities but not the `ctx` entity — `extract` must
 return None (or the strictly-matching row), never a wrong row. A false positive
 writes another entity's value into this entity.
-Refine until coverage is good, then emit ExtractorFunction with honest
-samples_total/samples_matched numbers and notes about unmatched samples.
+WHEN the entities carry NO supporting file but DO carry a Source Page URL (a
+`link` metadata property whose value is `{"label": ..., "url": ...}` — possibly
+wrapped in a one-element list): read the URL from the sampled entity's metadata
+and fetch that page with `peek_url_text` instead of `peek_file_text`. The
+returned page is the `html` the same `extract` function consumes, so the rest of
+the workflow (author, then self-prove) is unchanged. Refine until coverage is
+good, then emit ExtractorFunction with honest samples_total/samples_matched
+numbers and notes about unmatched samples.
 """
 
 
@@ -181,6 +188,7 @@ def build_extractor_agent(model: Any) -> Agent[AdminAgentDeps, ExtractorFunction
             get_templates_by_names,
             peek_entity_files,
             peek_file_text,
+            peek_url_text,
             run_validation_script,
         ],
     )

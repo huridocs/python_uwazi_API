@@ -410,6 +410,25 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       it as missing and continue). In validation against dummies this returns
       None (dummies carry no documents); the fetch path is only exercised live.
 
+  get_url_text(url)
+      Fetch an EXTERNAL `http(s)` URL's body and return it decoded as text (the
+      whole page — already byte-capped and UTF-8-decoded for you; do NOT decode
+      again). Use this when an entity has NO uploaded supporting file but DOES
+      carry a Source Page URL: a `link` metadata property whose READ value is
+      `{"label": ..., "url": ...}` (single) or `[{"label": ..., "url": ...},
+      ...]` (repeated) — read the `url` and pass it here, e.g.
+          link = d["metadata"]["source_page_url"]
+          url = link["url"] if isinstance(link, dict) else link[0]["url"]
+          html = get_url_text(url)
+      Returns None on ANY failure (non-http(s) scheme, DNS/timeout, non-2xx,
+      oversized body) — count it as missing and continue, never crash the bulk
+      run. Only `http`/`https` URLs are fetched; a `file://`/`ftp://`/etc URL
+      is refused (returns None). In validation against dummies this returns
+      None (dummies carry no source URLs); the fetch path is only exercised
+      live. Feed the returned text straight into your `extract(html, ctx)`
+      (and parse it with `htmlextract.*`) exactly like `get_file_bytes` bytes
+      would be decoded and parsed.
+
   htmlextract — pure HTML parsing over the bound namespace (NO import):
       htmlextract.text(html)    # all visible text, tags stripped, whitespace collapsed
       htmlextract.title(html)   # <title> contents or ""
@@ -966,6 +985,24 @@ one-document logic. Use this exact shape:
    the gate using literal HTML strings passed through `extract` + `htmlextract`
    directly.
 
+SOURCE PAGE URL (when entities carry NO supporting file but DO carry a link):
+Some entities store their source as a `link` metadata property (e.g.
+`source_page_url`) rather than an uploaded HTML file. Fetch the page and extract
+from it exactly as above, swapping the file-fetch step for a URL fetch:
+- Read the URL from the entity dict's metadata. A `link` READ value is
+  `{"label": ..., "url": ...}` (single) or `[{"label": ..., "url": ...},
+  ...]` (repeated) — unwrap it: `url = link["url"] if isinstance(link, dict)
+  else link[0]["url"]`. (You learn the property's exact name from
+  `get_templates_by_names`; it is a `link`-type property.)
+- `html = get_url_text(url)` (see EXECUTION SANDBOX) — returns None on any
+  failure, count it as missing and continue.
+- Feed `html` straight into `extract(html, ctx)` (NO decode — it is already
+  text) and accumulate updates with `update_entities_parallel` as in steps 3-5.
+There is no `_parallel` URL helper: external fetches are already serial + fenced
+by a timeout/size cap on purpose (do NOT hammer an external site). The dummy
+spec is unchanged — dummies carry no source URL, so validate the extraction
+LOGIC with literal HTML strings; prove the real fetch via the dry run.
+
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):
 - RELATIONSHIPS are NOT merged: `query_entities` does not return the `relations`
@@ -978,8 +1015,11 @@ KNOWN LIMITATIONS (do not try to work around these in the script; note them in
   delete. Flag in `result` if any source had URL attachments.
 - NON-HTML supporting files (PDFs, images, ...) are NOT parsed: `extract` runs
   on HTML only. Skip them and note the skipped count in `result`.
-- URL ATTACHMENTS are absent from `get_entity_files` (no stored bytes), so
-  their content cannot be extracted. Flag in `result` if that matters.
+- URL ATTACHMENTS are absent from `get_entity_files` (no stored bytes), and
+  their `url` is not visible in the entity dict either, so their content cannot
+  be extracted. (A `link`-type SOURCE PAGE URL metadata property IS fetchable
+  via `get_url_text` — see SOURCE PAGE URL above.) Flag in `result` if that
+  matters.
 - FILE DELETES are backed up + revertable, with RESIDUAL limits: `dedupe_entity_files_parallel`
   and `delete_entity_files_parallel` persist every deleted file's bytes BEFORE
   the delete and record it on the run, so revert re-uploads them. But Uwazi
