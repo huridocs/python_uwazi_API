@@ -46,6 +46,7 @@ from uwazi_admin_agent.adapters.cached_segmentation_repository import CachedSegm
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
+from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
@@ -66,6 +67,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
@@ -98,6 +100,7 @@ class Runtime:
         search_probe: SearchProbePort,
         file_cache: FileCacheStore | None,
         segmentation_repository: SegmentationRepositoryPort,
+        url_fetcher: UrlFetcherPort,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -115,6 +118,7 @@ class Runtime:
         # step drivers can wire it into their use cases as the stats/invalidation
         # port — the counters live on the store both decorators bump.
         self.file_cache: FileCacheStore | None = file_cache
+        self.url_fetcher: UrlFetcherPort = url_fetcher
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -189,6 +193,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     backup_store = build_backup_store()
     audit_log = build_audit_log()
     llm = OllamaAdapter()
+    url_fetcher: UrlFetcherPort = HttpUrlFetcherAdapter()
 
     deps = AdminAgentDeps(
         thesauri_api=api,
@@ -199,6 +204,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         search_probe=search_probe,
         file_repository=file_repository,
         segmentation_repository=segmentation_repository,
+        url_fetcher=url_fetcher,
         dry_run_use_case=DryRunScriptUseCase(
             entity_api=api,
             entity_repository=entity_repository,
@@ -206,6 +212,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
             default_language=DUMMY_LANGUAGE,
             cache_stats=file_cache,
             segmentation_repository=segmentation_repository,
+            url_fetcher=url_fetcher,
         ),
     )
 
@@ -244,4 +251,5 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         search_probe=search_probe,
         file_cache=file_cache,
         segmentation_repository=segmentation_repository,
+        url_fetcher=url_fetcher,
     )

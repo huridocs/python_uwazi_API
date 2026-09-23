@@ -328,6 +328,7 @@ async def execute_run(run_id: str, user: str, password: str, on_error: str | Non
         cache_stats=runtime.file_cache,
         cache_control=runtime.file_cache,
         segmentation_repository=runtime.segmentation_repository,
+        url_fetcher=runtime.url_fetcher,
     )
 
     await use_case.execute(

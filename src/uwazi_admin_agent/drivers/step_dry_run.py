@@ -41,6 +41,7 @@ async def _run_dry_run_async(run_name: str) -> int:
         default_language=DUMMY_LANGUAGE,
         cache_stats=runtime.file_cache,
         segmentation_repository=runtime.segmentation_repository,
+        url_fetcher=runtime.url_fetcher,
     )
 
     logger.info("dry-run: run={}", run_name)

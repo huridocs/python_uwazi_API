@@ -47,6 +47,7 @@ from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_real_exec_namespace, run_script_sync
@@ -72,6 +73,7 @@ class ExecuteScriptUseCase:
         cache_stats: CacheStatsPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
         segmentation_repository: SegmentationRepositoryPort | None = None,
+        url_fetcher: UrlFetcherPort | None = None,
     ) -> None:
         self._entity_api: EntityApiPort = entity_api
         self._relationship_api: RelationshipApiPort | None = relationship_api
@@ -84,6 +86,7 @@ class ExecuteScriptUseCase:
         self._cache_stats: CacheStatsPort | None = cache_stats
         self._cache_control: CacheInvalidationPort | None = cache_control
         self._segmentation_repository: SegmentationRepositoryPort | None = segmentation_repository
+        self._url_fetcher: UrlFetcherPort | None = url_fetcher
 
     async def execute(
         self,
@@ -192,6 +195,7 @@ class ExecuteScriptUseCase:
                 entity_repository=self._entity_repository,
                 file_repository=self._file_repository,
                 segmentation_repository=self._segmentation_repository,
+                url_fetcher=self._url_fetcher,
                 throttle=ThrottleController(),
             )
             return run_script_sync(script, namespace)

@@ -59,6 +59,20 @@ MAX_EXTRACTOR_LLM_CALLS: int = 40
 # sampling). HTML supporting files can be huge; the LLM context is not.
 MAX_PEEK_CHARS: int = 200_000
 
+# --- external URL fetching (source-page HTML extraction) ---------------------
+#
+# The agent's read boundary is extended to operator-supplied ``http(s)`` URLs (an
+# entity's Source Page URL — a ``link`` metadata property — or a URL attachment),
+# so extraction runs even when an entity has no uploaded supporting file. Because
+# these URLs are external and unbounded, every fetch is fenced by a scheme
+# allow-list (http/https only), a timeout, and a byte cap. Truncation is a
+# separate, authoring-time concern (``URL_FETCH_MAX_CHARS``) — the exec helper
+# returns the full (byte-capped) text to the pure ``extract`` function.
+URL_FETCH_TIMEOUT_SECONDS: float = 15.0
+URL_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
+# Authoring-time character truncation for peek_url_text (LLM-context bound).
+URL_FETCH_MAX_CHARS: int = 200_000
+
 # Row locale used when the dummy harness creates/snapshots/reverts dummies. The
 # generated script is target-agnostic; the harness fixes the locale for its own
 # create/read/revert so the before/after/post-revert raws are comparable.
