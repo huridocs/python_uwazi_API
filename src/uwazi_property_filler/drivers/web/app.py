@@ -454,7 +454,7 @@ def _build_page() -> None:
                 else:
                     label = f'{FILTER_PROPERTY} = "{value}"'
                 _start_ongoing(page_client, "filter", f"Showing cached documents for {label}…")
-                background_tasks.create(_load_lists())
+                background_tasks.create(_load_lists(select_first=True))
 
             filter_select.on_value_change(_on_filter_change)
 
@@ -478,13 +478,14 @@ def _build_page() -> None:
                     validated_caption = ui.label("").classes("text-caption")
                     validated_list = ui.list().classes("w-full pf-doc-list")
 
+            state["tabs"] = tabs
             state["pending_tab"] = pending_tab
             state["validated_tab"] = validated_tab
             state["pending_caption"] = pending_caption
             state["validated_caption"] = validated_caption
 
             async def _load_initial() -> None:
-                await _load_lists()
+                await _load_lists(select_first=True)
 
             background_tasks.create(_load_initial())
 
@@ -498,7 +499,7 @@ def _build_page() -> None:
                     state["form_container"] = form_container
 
     # --- list loading ------------------------------------------------------
-    async def _load_lists() -> None:
+    async def _load_lists(select_first: bool = False) -> None:
         template = state["template"]
         if not template:
             return
@@ -507,8 +508,33 @@ def _build_page() -> None:
             state["pending"] = pending
             state["validated"] = validated
             _render_lists()
+            if select_first:
+                await _select_first_visible()
         finally:
             _finish_ongoing(page_client, "filter")
+
+    def _first_visible() -> PdfItem | None:
+        """First row the left pane would show, search text included.
+
+        Pending rows come before validated ones, mirroring the default tab
+        order; the tab is switched when the winner lives on the other one so
+        the highlighted row is always the visible one.
+        """
+        for tab_key, bucket in (("pending", state["pending"]), ("validated", state["validated"])):
+            for item in bucket[:_MAX_LIST_ROWS]:
+                if _matches_search(item):
+                    # Keep the winner visible: it may live on the other tab.
+                    state["tabs"].set_value(tab_key)
+                    return item
+        return None
+
+    async def _select_first_visible() -> None:
+        item = _first_visible()
+        if item is None:
+            return
+        if state["selected"] is not None and item.shared_id == state["selected"].shared_id:
+            return
+        await _select_pdf(item)
 
     def _matches_search(item: PdfItem) -> bool:
         needle = state.get("search_text", "")
@@ -629,6 +655,10 @@ def _build_page() -> None:
             state["raw_values"].pop(prop.name, None)
             if widget is not None:
                 widget.value = value
+        # Persist the picked value to Uwazi right away, like the checkboxes.
+        save = state.get("schedule_save")
+        if save is not None:
+            save()
 
     async def _load_form() -> None:
         item = state["selected"]
@@ -691,6 +721,93 @@ def _build_page() -> None:
             if widget is not None:
                 widget.set_text(_display_value(selected))
 
+        # Live persistence: every checkbox mark/unmark is written to Uwazi
+        # right away, and the checkboxes then adopt whatever the instance
+        # returns (its normalization, or values changed elsewhere meanwhile).
+        save_lock = asyncio.Lock()
+        save_gen = 0
+
+        def _current_fill_value() -> Any:
+            """The value that would be saved for the fill property right now."""
+            if fill_property is None:
+                return None
+            if fill_property.name in state["raw_values"]:
+                return state["raw_values"][fill_property.name]
+            widget = state["widgets"].get(fill_property.name)
+            return widget.value if widget is not None else None
+
+        def _schedule_save() -> None:
+            nonlocal save_gen
+            if fill_property is None:
+                return
+            item = state["selected"]
+            if item is None:
+                return
+            save_gen += 1
+            # Snapshot the document and value now: a later document switch
+            # rebuilds the form, and the write must carry the toggled value,
+            # not whatever the form holds by the time the lock is acquired.
+            payload = {fill_property.name: _current_fill_value()}
+            background_tasks.create(_persist_selection(save_gen, item, payload))
+
+        state["schedule_save"] = _schedule_save
+
+        async def _persist_selection(gen: int, item: PdfItem, payload: dict[str, Any]) -> None:
+            """Write the toggled selection to Uwazi, then re-read it from there.
+
+            Serialized by ``save_lock`` so rapid toggles cannot interleave
+            Uwazi's read-modify-write update. When a newer toggle was
+            scheduled meanwhile, this cycle skips both the write and the
+            re-read (the newer cycle persists the fresher state), so a burst
+            of toggles costs exactly one Uwazi write.
+            """
+            async with save_lock:
+                if gen != save_gen:
+                    return  # a newer toggle supersedes this cycle
+                try:
+                    await service.save_entity_metadata(
+                        item.shared_id,
+                        state["template"],
+                        state["language"],
+                        payload,
+                    )
+                except Exception as exc:  # noqa: BLE001 — the toggle stays applied locally
+                    _notify(f"Could not save to Uwazi: {exc}", type="negative")
+                    return
+                if gen != save_gen:
+                    return  # the newer cycle owns the write and the re-read
+                try:
+                    metadata = await service.get_entity_metadata(item.shared_id, state["template"], state["language"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not re-read values from Uwazi for {}: {}", item.shared_id, exc)
+                    return
+                if gen != save_gen or state["selected"] is not item or not _is_attached(form_container):
+                    return
+                # Adopt the instance's values so the checkboxes show what
+                # Uwazi actually stores, even if it changed meanwhile.
+                state["metadata"] = metadata
+                _sync_from_instance(metadata)
+
+        def _sync_from_instance(metadata: dict[str, Any]) -> None:
+            """Re-render the fill-property UI from the instance's metadata."""
+            if fill_property is None:
+                return
+            fresh = metadata.get(fill_property.name)
+            if values_template:
+                checked.clear()
+                for entry in relationship_entries(fresh):
+                    checked[entry["shared_id"]] = entry["title"]
+                _write_selection()
+                _render_current()
+                if values_box is not None:
+                    _render_values(filter_input.value if filter_input is not None else "")
+            else:
+                # Select-like field: refresh the read-only label from Uwazi.
+                state["raw_values"][fill_property.name] = fresh
+                widget = state["widgets"].get(fill_property.name)
+                if widget is not None:
+                    widget.set_text(_display_value(fresh))
+
         def _render_current() -> None:
             """Current values: checked boxes; unchecking removes the value."""
             if current_box is None or not _is_attached(current_box):
@@ -742,7 +859,7 @@ def _build_page() -> None:
                                 ui.item_label(label).classes("pf-doc-title")
 
         def _toggle_value(entry: dict[str, str], is_on: bool) -> None:
-            """Add/remove an entity, then refresh both checkbox lists."""
+            """Add/remove an entity, refresh both checkbox lists, then persist."""
             if is_on:
                 checked[entry["shared_id"]] = entry["title"]
             else:
@@ -751,6 +868,7 @@ def _build_page() -> None:
             _render_current()
             if values_box is not None:
                 _render_values(filter_input.value if filter_input is not None else "")
+            _schedule_save()
 
         if values_template:
             # Section 1 renders checkboxes instead of an editable widget, so

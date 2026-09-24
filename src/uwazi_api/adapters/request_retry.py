@@ -63,6 +63,33 @@ _MAINTENANCE_BODY_MARKERS: tuple[str, ...] = (
     "temporarily unavailable",
 )
 
+# Default per-request timeout (connect, read) in seconds. ``requests`` has no
+# default timeout: a stalled server hangs the caller forever — and in the REST
+# driver that caller is the uvicorn event loop, which would stop accepting
+# connections entirely. Callers can still pass their own ``timeout=``; this is
+# only the fallback.
+DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 30.0)
+
+
+def with_default_timeout(kwargs: dict) -> dict:
+    """Inject ``DEFAULT_TIMEOUT`` into request kwargs unless already set.
+
+    Pure: ``setdefault`` keeps an explicit per-call timeout untouched.
+    """
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    return kwargs
+
+
+class TimeoutSession(requests.Session):
+    """A ``requests.Session`` whose every request carries a timeout.
+
+    Repositories call ``session.get/post/...`` directly in ~40 places, so the
+    timeout is injected once here instead of at each call site.
+    """
+
+    def request(self, method: str, url: str, **kwargs):  # type: ignore[override]
+        return super().request(method, url, **with_default_timeout(kwargs))
+
 
 def is_maintenance_error(status_code: int | None, body: str | None = None) -> bool:
     """True when a response looks like Uwazi is down for maintenance.
@@ -126,7 +153,7 @@ def requests_retry_session(
     session: requests.Session | None = None,
 ) -> requests.Session:
     """Build a ``requests.Session`` that retries transient errors with backoff."""
-    session = session or requests.Session()
+    session = session or TimeoutSession()
     retry = _LoggingRetry(
         total=retries,
         read=retries,

@@ -13,10 +13,11 @@ from uwazi_agent.drivers.rest.models.ai_job_request import AIJobRequest
 from uwazi_agent.drivers.rest.models.ai_job_response import AIJobResponse
 from uwazi_agent.drivers.rest.models.ai_job_status import AIJobStatus
 from uwazi_agent.drivers.rest.models.ai_job_status_response import AIJobStatusResponse
-from uwazi_agent.drivers.rest.models.uwazi_credentials import UwaziCredentials
+from uwazi_agent.drivers.rest.models.uwazi_credentials import UwaziCredentials, login_url_candidates
 from uwazi_agent.drivers.rest.services.chat_storage import InMemoryChatStorage
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
+from uwazi_api.domain.exceptions import AuthenticationError
 
 _chat_storage_ttl = float(os.environ.get("CHAT_STORAGE_TTL_SECONDS", "86400"))
 chat_storage = InMemoryChatStorage(ttl_seconds=_chat_storage_ttl)
@@ -118,21 +119,27 @@ async def delete_job(job_id: str) -> dict:
 
 
 def create_uwazi_api_adapter(credentials: UwaziCredentials) -> UwaziApiAdapter:
-    secure_credentials = credentials.model_copy()
-    secure_credentials.make_url_secure()
+    """Build the adapter, trying each candidate base URL until login works.
 
-    try:
-        return UwaziApiAdapter(
-            user=secure_credentials.username,
-            password=secure_credentials.password,
-            url=secure_credentials.url,
-        )
-    except:
-        return UwaziApiAdapter(
-            user=credentials.username,
-            password=credentials.password,
-            url=credentials.url,
-        )
+    ``https://`` comes first for plain-HTTP input (same upgrade intent as the
+    old ``make_url_secure``) and the ``http://`` fallback keeps local
+    instances working. Login itself is bounded — no maintenance backoff on
+    the handshake, request timeouts everywhere — so a wrong guess costs
+    seconds, not the ~10 minutes of retry sleeps that used to freeze the
+    event loop. Runs in a worker thread (see ``_run_agent``).
+    """
+    failures: list[str] = []
+    for candidate in login_url_candidates(credentials.url):
+        try:
+            return UwaziApiAdapter(
+                user=credentials.username,
+                password=credentials.password,
+                url=candidate,
+            )
+        except Exception as exc:  # noqa: BLE001 — try the next scheme, then report all
+            failures.append(f"{candidate}: {exc}")
+            logger.warning("Uwazi login via {} failed: {}", candidate, exc)
+    raise AuthenticationError("Login failed — " + "; ".join(failures))
 
 
 async def _run_agent(job_id: str, request: AIJobRequest) -> None:
@@ -143,7 +150,9 @@ async def _run_agent(job_id: str, request: AIJobRequest) -> None:
     setup_logging(url=request.credentials.url, user=request.credentials.username)
 
     try:
-        uwazi_api = create_uwazi_api_adapter(request.credentials)
+        # Login is synchronous ``requests`` work; run it off the event loop so
+        # a slow/Uwazi-down handshake can never stop uvicorn from serving.
+        uwazi_api = await asyncio.to_thread(create_uwazi_api_adapter, request.credentials)
 
         llm = OllamaAdapter()
 

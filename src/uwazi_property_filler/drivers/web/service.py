@@ -165,6 +165,15 @@ class PropertyFillerService:
     async def get_entity_metadata(self, shared_id: str, template: str, language: str) -> dict[str, Any]:
         return await self.uwazi.get_entity_metadata(shared_id, template, language)
 
+    async def save_entity_metadata(self, shared_id: str, template: str, language: str, metadata: dict[str, Any]) -> None:
+        """Partial metadata update straight to Uwazi, without validation side effects.
+
+        Used by the live checkbox toggles: every mark/unmark is persisted
+        immediately, while "Mark as validated" (:meth:`validate`) additionally
+        marks the document validated and audits the change.
+        """
+        await self.uwazi.update_metadata(shared_id, template, language, metadata)
+
     async def get_template_properties(self, template: str) -> list[Any]:
         def _fetch() -> list[Any]:
             tpl = self.uwazi.client.templates.get_by_name(template)
