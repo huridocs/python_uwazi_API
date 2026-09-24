@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
-from urllib.parse import urlparse
+
+from requests.cookies import merge_cookies
 
 from uwazi_api.adapters.request_retry import requests_retry_session
 from uwazi_api.domain.exceptions import AuthenticationError
@@ -67,17 +68,33 @@ class HttpClientAdapter(HttpClientPort):
         )
 
     def _get_connect_sid(self) -> str:
-        response = self.request_adapter.post(
-            f"{self.url}/api/login",
-            headers=self.headers,
-            json={"username": self.user, "password": self.password, **({"token": self.token} if self.token else {})},
-        )
-        if response.status_code != 200:
-            raise AuthenticationError(f"Login failed: {response.status_code}")
+        # Login is a handshake, not a maintenance-window call: use a session
+        # WITHOUT the exponential-backoff retry policy. That policy (up to
+        # ~10 minutes of sleeps) exists to ride out 502s on API calls; on
+        # login it only turns a wrong scheme/URL into a multi-minute stall of
+        # whatever thread is logging in. Scheme fallback lives in the agent's
+        # ``login_url_candidates``, so a failed attempt here must fail fast.
+        login_session = requests_retry_session(retries=0)
+        try:
+            response = login_session.post(
+                f"{self.url}/api/login",
+                headers=self.headers,
+                json={"username": self.user, "password": self.password, **({"token": self.token} if self.token else {})},
+            )
+            if response.status_code != 200:
+                raise AuthenticationError(f"Login failed: {response.status_code}")
+            cookie = response.cookies.get("connect.sid")
+            if not cookie:
+                raise AuthenticationError("No connect.sid cookie received")
+            # Carry the SERVER-parsed cookies over as-is. Re-building the
+            # session cookie with ``cookies.set(domain=hostname)`` marks it
+            # ``domain_specified``, and http.cookiejar then never sends it to a
+            # bare host such as localhost (the domain would have to end in
+            # ".localhost"). The session would silently stop authenticating:
+            # Uwazi's reads are public, so only the first write reveals it —
+            # a 401 on every entity create/update.
+            merge_cookies(self.request_adapter.cookies, login_session.cookies)
+        finally:
+            login_session.close()
         self.graylog.info(f"Login into {self.url}: {response.status_code}")
-        cookie = response.cookies.get("connect.sid")
-        if not cookie:
-            raise AuthenticationError("No connect.sid cookie received")
-        parsed = urlparse(self.url)
-        self.request_adapter.cookies.set("connect.sid", cookie, domain=parsed.hostname, path="/")
         return cookie
