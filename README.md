@@ -53,6 +53,63 @@ df = client.exports.to_dataframe(start_from=0, batch_size=100, template_name="te
 
 ---
 
+## Admin Agent Web UI
+
+`src/uwazi_admin_agent` ships a NiceGUI web app for creating and running Uwazi
+admin agent tasks from a browser. It is **not** part of the library above — it
+runs as its own server on port `5055`.
+
+### Configuration
+
+Create a `.env` file in the repo root with:
+
+```
+UWAZI_URL=http://localhost:3000
+UWAZI_USER=admin
+UWAZI_PASSWORD=admin
+OLLAMA_API_KEY=<api-key>
+```
+
+- `UWAZI_URL`, `UWAZI_USER`, `UWAZI_PASSWORD` — required; validated at the web
+  login gate.
+- `OLLAMA_API_KEY` — required by the LLM adapter. This is a key for the hosted
+  API at `https://ollama.com/v1`, not a local Ollama install.
+- `ADMIN_WEB_PORT` (default `5055`), `ADMIN_WEB_STORAGE_SECRET` (has a dev
+  default), `UWAZI_ADMIN_FILE_CACHE=0` (disables the per-instance disk cache,
+  which can grow up to 4 GiB under `src/uwazi_admin_agent/data/file_cache/`)
+  are all optional.
+
+### Linux
+
+```bash
+uv sync
+uv run uwazi-admin-web
+```
+
+### Windows
+
+Requirements: Python >= 3.12 and uv (e.g. `winget install astral-sh.uv`).
+No Postgres, Docker, or WSL is needed for this app; all its data paths are
+resolved relative to the package and work on NTFS.
+
+```powershell
+uv sync
+set PYTHONUTF8=1
+uv run uwazi-admin-web
+```
+
+`set PYTHONUTF8=1` avoids `UnicodeEncodeError` from the logging output on
+cp1252 consoles (use `setx PYTHONUTF8 1` to make it permanent).
+
+### Run it
+
+Open `http://localhost:5055` and log in with your Uwazi credentials. The server
+binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
+host firewall. Run data (prompts, runs, audit logs) lives under
+`src/uwazi_admin_agent/data/`.
+
+---
+
 ## Client Services
 
 The `UwaziClient` provides access to these services:
