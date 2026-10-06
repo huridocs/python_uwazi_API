@@ -9,23 +9,36 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
+from uwazi_api.domain.selection_rectangle import SelectionRectangle
 from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_property_filler.adapters import document_cache_file
 from uwazi_property_filler.adapters.extension_stats import error_count
+from uwazi_property_filler.adapters.label_webhook_adapter import LabelWebhookAdapter
 from uwazi_property_filler.adapters.pdf_cache_store import PdfCacheStore
 from uwazi_property_filler.adapters.postgres_store import PostgresStore
 from uwazi_property_filler.adapters.uwazi_client_adapter import UwaziClientAdapter
-from uwazi_property_filler.configuration import DATABASE_URL, FILTER_PROPERTY, INSTANCE_KEY
+from uwazi_property_filler.configuration import (
+    DATABASE_URL,
+    FILTER_PROPERTY,
+    INSTANCE_KEY,
+    LABEL_RELATIONSHIP_TYPE,
+    LABEL_WEBHOOK_URLS,
+    PROPERTY_TEMPLATE,
+)
 from uwazi_property_filler.domain.document_cache import DocumentCache
 from uwazi_property_filler.domain.extension_category import ExtensionCategory
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.extension_request import ExtensionContext
+from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.pdf_item import PdfItem
 from uwazi_property_filler.ports.extension_port import ExtensionPort
-from uwazi_property_filler.use_cases import extensions_use_case, list_pdfs_use_case, refresh_cache_use_case
+from uwazi_property_filler.ports.label_notify_port import LabelNotifyPort
+from uwazi_property_filler.use_cases import extensions_use_case, label_use_case, list_pdfs_use_case, refresh_cache_use_case
+from uwazi_property_filler.use_cases.get_predictions_use_case import get_predictions
 from uwazi_property_filler.use_cases.get_suggestions_use_case import get_suggestions
 from uwazi_property_filler.use_cases.validate_fill_use_case import validate_fill
 
@@ -38,6 +51,9 @@ class PropertyFillerService:
         self.runners: list[ExtensionPort] = []
         self.highlighters: list[ExtensionPort] = []
         self.displayers: list[ExtensionPort] = []
+        self.labelers: list[ExtensionPort] = []
+        self.notifiers: list[ExtensionPort] = []
+        self.label_webhooks: list[LabelNotifyPort] = [LabelWebhookAdapter(LABEL_WEBHOOK_URLS)]
         # Document lists are pulled from Uwazi only by ``refresh`` (Connect &
         # Refresh); every later read is served from this cache. A snapshot is
         # written to disk on refresh/validate and reloaded here after a
@@ -77,9 +93,13 @@ class PropertyFillerService:
         suggestions = await extensions_use_case.get_enabled(self.store, ExtensionCategory.SUGGESTION)
         highlighters = await extensions_use_case.get_enabled(self.store, ExtensionCategory.HIGHLIGHTER)
         displayers = await extensions_use_case.get_enabled(self.store, ExtensionCategory.DISPLAYER)
+        labelers = await extensions_use_case.get_enabled(self.store, ExtensionCategory.LABELER)
+        notifiers = await extensions_use_case.get_enabled(self.store, ExtensionCategory.NOTIFIER)
         self.runners = extensions_use_case.build_runners(suggestions)
         self.highlighters = extensions_use_case.build_runners(highlighters)
         self.displayers = extensions_use_case.build_runners(displayers)
+        self.labelers = extensions_use_case.build_runners(labelers)
+        self.notifiers = extensions_use_case.build_runners(notifiers)
 
     def _ctx(
         self,
@@ -342,6 +362,144 @@ class PropertyFillerService:
 
         processed = await asyncio.to_thread(_count)
         return {"processed": processed, "errors": error_count(extension_id)}
+
+    # --- labels ------------------------------------------------------------
+
+    async def get_label_values(self, language: str) -> list[dict[str, str]]:
+        """Assignable label values (``[{"shared_id","title"}]``) from the value template."""
+        if not PROPERTY_TEMPLATE:
+            return []
+        return await self.uwazi.search_entities(PROPERTY_TEMPLATE, language, None)
+
+    async def get_labels(self, shared_id: str, template: str, language: str) -> list[Label]:
+        """Manual labels (Uwazi) + cached predictions, for the viewer overlay."""
+        relationship_type_id = await self._label_relationship_type_id()
+        file_id = await self.uwazi.get_file_id(shared_id, language)
+
+        labels: list[Label] = []
+        if relationship_type_id and file_id:
+            relations = await self.uwazi.list_relationships(shared_id, language)
+            manual = label_use_case.labels_from_relations(
+                relations,
+                shared_id=shared_id,
+                file_id=file_id,
+                relationship_type_id=relationship_type_id,
+            )
+            titles = await self._label_titles([lbl.label_shared_id for lbl in manual], language)
+            for lbl in manual:
+                lbl.label_title = titles.get(lbl.label_shared_id, lbl.label_shared_id)
+            labels.extend(manual)
+
+        for prediction in await self.store.list_predictions(INSTANCE_KEY, shared_id):
+            labels.append(self._label_from_prediction(prediction, shared_id, file_id or ""))
+        return labels
+
+    def _label_from_prediction(self, prediction: LabelPrediction, shared_id: str, file_id: str) -> Label:
+        return Label(
+            id=f"{prediction.source}:{prediction.label_shared_id}:{prediction.text}",
+            shared_id=shared_id,
+            file_id=file_id,
+            label_shared_id=prediction.label_shared_id,
+            label_title=prediction.label_title,
+            text=prediction.text,
+            selection_rectangles=prediction.selection_rectangles,
+            page=prediction.page,
+            source=prediction.source,
+            confidence=prediction.confidence,
+        )
+
+    async def create_label(
+        self,
+        shared_id: str,
+        template: str,
+        language: str,
+        text: str,
+        rectangles: list[SelectionRectangle],
+        label_shared_id: str,
+        label_title: str,
+    ) -> Label:
+        """Persist a manual label as a Uwazi relationship, then notify."""
+        relationship_type_id = await self._label_relationship_type_id()
+        if not relationship_type_id:
+            raise RuntimeError(f"Label relationship type '{LABEL_RELATIONSHIP_TYPE}' not found in Uwazi")
+        file_id = await self.uwazi.get_file_id(shared_id, language)
+        if not file_id:
+            raise RuntimeError(f"Document {shared_id} has no file to label")
+
+        label = Label(
+            id=uuid4().hex,
+            shared_id=shared_id,
+            file_id=file_id,
+            label_shared_id=label_shared_id,
+            label_title=label_title,
+            relationship_type_id=relationship_type_id,
+            text=text,
+            selection_rectangles=rectangles,
+            page=_page_of(rectangles),
+        )
+        created = await label_use_case.create_label(
+            self.uwazi, label, file_id=file_id, relationship_type_id=relationship_type_id, language=language
+        )
+        await label_use_case.notify_label(self.label_webhooks, self.notifiers, created, deleted=False)
+        return created
+
+    async def delete_label(self, shared_id: str, language: str, label: Label) -> None:
+        """Delete a manual label's relationship, then notify."""
+        await label_use_case.delete_label(self.uwazi, label, language=language)
+        await label_use_case.notify_label(self.label_webhooks, self.notifiers, label, deleted=True)
+
+    async def refresh_predictions(
+        self,
+        shared_id: str,
+        template: str,
+        language: str,
+        filename: str,
+        current_metadata: dict[str, Any],
+        properties: list[str],
+    ) -> list[LabelPrediction]:
+        """Recompute predictions from enabled labelers and replace the cache."""
+        ctx = self._ctx(shared_id, template, language, filename, current_metadata, properties)
+        return await get_predictions(ctx, self.labelers, self.store, INSTANCE_KEY)
+
+    async def _label_relationship_type_id(self) -> str | None:
+        if not LABEL_RELATIONSHIP_TYPE:
+            return None
+        return await self.uwazi.relationship_type_id(LABEL_RELATIONSHIP_TYPE)
+
+    async def _label_titles(self, shared_ids: list[str], language: str) -> dict[str, str]:
+        if not shared_ids:
+            return {}
+        titles: dict[str, str] = {}
+        if PROPERTY_TEMPLATE:
+            try:
+                for entry in await self.uwazi.search_entities(PROPERTY_TEMPLATE, language, None):
+                    titles[entry["shared_id"]] = entry["title"]
+            except Exception as exc:  # noqa: BLE001 — titles are best-effort
+                logger.warning("Could not resolve label titles from template '{}': {}", PROPERTY_TEMPLATE, exc)
+        missing = [sid for sid in shared_ids if sid not in titles]
+        for sid in missing:
+            try:
+                title = await self._entity_title(sid, language)
+                if title:
+                    titles[sid] = title
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not resolve label title for {}: {}", sid, exc)
+        return titles
+
+    async def _entity_title(self, shared_id: str, language: str) -> str | None:
+        def _fetch() -> str | None:
+            return self.uwazi.client.entities.get_one(shared_id, language).title
+
+        return await asyncio.to_thread(_fetch)
+
+
+def _page_of(rectangles: list[SelectionRectangle]) -> int:
+    if not rectangles:
+        return 1
+    try:
+        return int(rectangles[0].page)
+    except (TypeError, ValueError):
+        return 1
 
 
 def _child_labels(value: Any) -> list[str]:

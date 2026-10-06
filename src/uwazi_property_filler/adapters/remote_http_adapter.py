@@ -15,6 +15,7 @@ from uwazi_property_filler.adapters.extension_stats import record_error
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.extension_request import ExtensionContext
 from uwazi_property_filler.domain.highlight import Highlight
+from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.suggestion import Suggestion
 from uwazi_property_filler.ports.extension_port import ExtensionPort
 
@@ -50,6 +51,9 @@ class RemoteHttpAdapter(ExtensionPort):
     async def highlight(self, ctx: ExtensionContext) -> list[Highlight]:
         return await self._call("highlight", ctx, [], Highlight)
 
+    async def label(self, ctx: ExtensionContext) -> list[LabelPrediction]:
+        return await self._call("label", ctx, [], LabelPrediction)
+
     async def display(self, ctx: ExtensionContext) -> str | None:
         return await self._call("display", ctx, None, None)
 
@@ -58,3 +62,14 @@ class RemoteHttpAdapter(ExtensionPort):
 
     async def fill(self, ctx: ExtensionContext) -> dict[str, Any] | None:
         return await self._call("fill", ctx, None, None)
+
+    async def on_label(self, label: Label) -> None:
+        url = f"{self._endpoint}/on_label"
+        payload = label.model_dump(mode="json")
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 — extension failure must never break a label
+            logger.error("Remote extension '{}' on_label failed: {}", self.record.id, exc)
+            record_error(self.record.id)

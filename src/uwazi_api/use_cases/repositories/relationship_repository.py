@@ -97,6 +97,50 @@ class RelationshipRepository:
             return relation_type.id
         return None
 
+    def list_for_entity(self, shared_id: str, language: str = "en") -> list[dict]:
+        """Raw ``relations`` for one entity (the denormalized read view of its
+        ``connections`` hubs, via ``relationships.getByDocument``).
+
+        Fetched without ``omitRelationships`` so each entry carries ``entity``,
+        ``hub``, ``template``, ``file`` and ``reference``. An empty result (or an
+        entity with no connections) returns ``[]``.
+        """
+        response = self.http.request_adapter.get(
+            url=f"{self.http.url}/api/entities",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            params={"sharedId": shared_id},
+        )
+        if response.status_code != 200:
+            message = (
+                f"Error ({response.status_code}) listing relationships for {shared_id}: "
+                f"{response.content.decode('utf-8', errors='replace')}"
+            )
+            self.http.graylog.error(message)
+            raise UploadError(message)
+        rows = json.loads(response.content).get("rows", [])
+        if not rows:
+            return []
+        return rows[0].get("relations") or []
+
+    def delete(self, hubs: list[str], language: str = "en") -> dict:
+        """Delete connection hubs by ObjectId via the bulk endpoint."""
+        json_data = {"delete": hubs, "save": []}
+        response = self.http.request_adapter.post(
+            url=f"{self.http.url}/api/relationships/bulk",
+            headers=self.http.headers,
+            cookies={"locale": language},
+            data=json.dumps(json_data),
+        )
+        if response.status_code != 200:
+            message = (
+                f"Error deleting relationships {response.status_code} {response.content.decode('utf-8', errors='replace')}"
+            )
+            self.http.graylog.error(message)
+            raise UploadError(message)
+        self.http.graylog.info("Relationships deleted successfully")
+        return json.loads(response.content)
+
     def create(
         self,
         file_entity_shared_id: str,

@@ -49,6 +49,20 @@ CREATE TABLE IF NOT EXISTS fill_audit (
     validated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS prediction (
+    id BIGSERIAL PRIMARY KEY,
+    instance_key TEXT NOT NULL,
+    shared_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    label_shared_id TEXT NOT NULL,
+    label_title TEXT,
+    text TEXT,
+    confidence REAL,
+    rectangles JSONB,
+    page INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Idempotent column additions for databases created before the column existed.
 DO $$
 BEGIN
