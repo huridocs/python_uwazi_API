@@ -15,17 +15,20 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from uwazi_api.domain.selection_rectangle import SelectionRectangle
 from uwazi_property_filler.domain.extension_category import ExtensionCategory
 from uwazi_property_filler.domain.extension_kind import ExtensionKind
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.fill_audit import FillAuditRecord
 from uwazi_property_filler.domain.fill_status import FillStatus
 from uwazi_property_filler.domain.highlight import Highlight
+from uwazi_property_filler.domain.label import LabelPrediction
 from uwazi_property_filler.domain.pdf_item import PdfItem
 from uwazi_property_filler.domain.suggestion import Suggestion
 from uwazi_property_filler.ports.audit_store_port import AuditStorePort
 from uwazi_property_filler.ports.document_store_port import DocumentStorePort
 from uwazi_property_filler.ports.extension_registry_port import ExtensionRegistryPort
+from uwazi_property_filler.ports.prediction_store_port import PredictionStorePort
 from uwazi_property_filler.ports.suggestion_store_port import SuggestionStorePort
 
 _SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
@@ -35,7 +38,7 @@ def _dumps(value: Any) -> str:
     return json.dumps(value, default=str, ensure_ascii=False)
 
 
-class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, ExtensionRegistryPort):
+class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, ExtensionRegistryPort, PredictionStorePort):
     def __init__(self, database_url: str):
         self._pool = ConnectionPool(database_url, min_size=1, max_size=4, kwargs={"row_factory": dict_row})
         self._apply_schema()
@@ -326,3 +329,81 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
                 )
             )
         return result
+
+    # --- PredictionStorePort ------------------------------------------------
+
+    async def save_predictions(self, instance_key: str, shared_id: str, predictions: list[LabelPrediction]) -> None:
+        await asyncio.to_thread(self._save_predictions_sync, instance_key, shared_id, predictions)
+
+    def _save_predictions_sync(self, instance_key: str, shared_id: str, predictions: list[LabelPrediction]) -> None:
+        rows = [
+            (
+                instance_key,
+                shared_id,
+                p.source,
+                p.label_shared_id,
+                p.label_title,
+                p.text,
+                p.confidence,
+                _dumps([r.model_dump() for r in p.selection_rectangles]) if p.selection_rectangles else None,
+                p.page,
+            )
+            for p in predictions
+        ]
+        if not rows:
+            return
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                conn.executemany(
+                    """
+                    INSERT INTO prediction (
+                        instance_key, shared_id, source, label_shared_id,
+                        label_title, text, confidence, rectangles, page
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+
+    async def list_predictions(self, instance_key: str, shared_id: str) -> list[LabelPrediction]:
+        return await asyncio.to_thread(self._list_predictions_sync, instance_key, shared_id)
+
+    def _list_predictions_sync(self, instance_key: str, shared_id: str) -> list[LabelPrediction]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT source, label_shared_id, label_title, text, confidence, rectangles, page
+                FROM prediction
+                WHERE instance_key = %s AND shared_id = %s
+                ORDER BY id
+                """,
+                (instance_key, shared_id),
+            ).fetchall()
+        result: list[LabelPrediction] = []
+        for r in rows:
+            rects = r["rectangles"]
+            rectangles = [
+                SelectionRectangle(**item) for item in (rects if isinstance(rects, list) else json.loads(rects or "[]"))
+            ]
+            result.append(
+                LabelPrediction(
+                    source=r["source"],
+                    label_shared_id=r["label_shared_id"],
+                    label_title=r["label_title"] or "",
+                    text=r["text"] or "",
+                    confidence=r["confidence"] if r["confidence"] is not None else 1.0,
+                    selection_rectangles=rectangles,
+                    page=r["page"] or 1,
+                )
+            )
+        return result
+
+    async def clear_predictions(self, instance_key: str, shared_id: str) -> None:
+        await asyncio.to_thread(self._clear_predictions_sync, instance_key, shared_id)
+
+    def _clear_predictions_sync(self, instance_key: str, shared_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM prediction WHERE instance_key = %s AND shared_id = %s",
+                (instance_key, shared_id),
+            )

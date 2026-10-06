@@ -7,3 +7,5 @@ class ExtensionCategory(str, Enum):
     DISPLAYER = "displayer"
     SEARCH = "search"
     FILLER = "filler"
+    LABELER = "labeler"
+    NOTIFIER = "notifier"

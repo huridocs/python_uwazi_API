@@ -15,6 +15,7 @@ from loguru import logger
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
+from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
 from uwazi_property_filler.configuration import FILTER_PROPERTY, SUBTITLE_PROPERTY
 from uwazi_property_filler.domain.metadata_text import metadata_text, metadata_value
@@ -164,3 +165,52 @@ class UwaziClientAdapter(UwaziPort):
             return result
 
         return await asyncio.to_thread(_search)
+
+    async def create_relationship(
+        self,
+        shared_id: str,
+        file_id: str,
+        reference: Reference,
+        to_entity_shared_id: str,
+        relationship_type_id: str,
+        language: str,
+    ) -> None:
+        def _create() -> None:
+            self._ensure_adapter().client.relationships.create(
+                file_entity_shared_id=shared_id,
+                file_id=file_id,
+                reference=reference,
+                to_entity_shared_id=to_entity_shared_id,
+                relationship_type_id=relationship_type_id,
+                language=language,
+            )
+
+        await asyncio.to_thread(_create)
+
+    async def list_relationships(self, shared_id: str, language: str) -> list[dict]:
+        def _list() -> list[dict]:
+            return self._ensure_adapter().client.relationships.list_for_entity(shared_id, language)
+
+        return await asyncio.to_thread(_list)
+
+    async def delete_relationships(self, hubs: list[str], language: str) -> None:
+        def _delete() -> None:
+            self._ensure_adapter().client.relationships.delete(hubs, language)
+
+        await asyncio.to_thread(_delete)
+
+    async def get_file_id(self, shared_id: str, language: str) -> str | None:
+        def _fetch() -> str | None:
+            adapter = self._ensure_adapter()
+            entity = adapter.client.entities.get_one(shared_id, language)
+            file_language = LANGUAGE_TO_FILE_LANGUAGE.get(language)
+            docs = [d for d in entity.documents if d.language == file_language]
+            return docs[0].id if docs else None
+
+        return await asyncio.to_thread(_fetch)
+
+    async def relationship_type_id(self, name_or_id: str) -> str | None:
+        def _resolve() -> str | None:
+            return self._ensure_adapter().client.relationships.resolve_relation_type_id(name_or_id)
+
+        return await asyncio.to_thread(_resolve)

@@ -49,6 +49,17 @@ SUBTITLE_PROPERTY: str = os.environ.get("PROPERTY_FILLER_SUBTITLE", "")
 # use their thesaurus instead.
 PROPERTY_TEMPLATE: str = os.environ.get("PROPERTY_FILLER_PROPERTY_TEMPLATE", "")
 
+# Labeling configuration (the /labels mode). ``LABEL_RELATIONSHIP_TYPE`` is the
+# Uwazi relationship type that links a document to a label entity, given by
+# NAME or id (resolved via the relationship repository). The assignable label
+# values come from ``PROPERTY_TEMPLATE`` (the same value template the fill form
+# uses). ``LABEL_WEBHOOK_URLS`` are the endpoints notified when a label is
+# created/deleted.
+LABEL_RELATIONSHIP_TYPE: str = os.environ.get("PROPERTY_FILLER_RELATIONSHIP_TYPE", "")
+LABEL_WEBHOOK_URLS: list[str] = [
+    u.strip() for u in os.environ.get("PROPERTY_FILLER_LABEL_WEBHOOK_URLS", "").split(",") if u.strip()
+]
+
 _DATABASE_URL = os.environ.get("PROPERTY_FILLER_DATABASE_URL")
 if not _DATABASE_URL:
     raise RuntimeError(

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+from uwazi_api.domain.reference import Reference
 from uwazi_property_filler.domain.pdf_item import PdfItem
 
 
@@ -36,3 +37,31 @@ class UwaziPort(ABC):
     @abstractmethod
     async def search_entities(self, template_name: str, language: str, query: str | None) -> list[dict[str, str]]:
         """``[{"shared_id","title"}]`` for the relationship option selector."""
+
+    @abstractmethod
+    async def create_relationship(
+        self,
+        shared_id: str,
+        file_id: str,
+        reference: Reference,
+        to_entity_shared_id: str,
+        relationship_type_id: str,
+        language: str,
+    ) -> None:
+        """Link a text reference on ``shared_id``'s document to a target entity."""
+
+    @abstractmethod
+    async def list_relationships(self, shared_id: str, language: str) -> list[dict]:
+        """Raw ``relations`` (denormalized connections) for one entity."""
+
+    @abstractmethod
+    async def delete_relationships(self, hubs: list[str], language: str) -> None:
+        """Delete connection hubs by ObjectId."""
+
+    @abstractmethod
+    async def get_file_id(self, shared_id: str, language: str) -> str | None:
+        """The Uwazi file id of ``shared_id``'s primary document (or ``None``)."""
+
+    @abstractmethod
+    async def relationship_type_id(self, name_or_id: str) -> str | None:
+        """Resolve a relationship type name/id to its id (or ``None``)."""

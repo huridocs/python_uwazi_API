@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import urllib.parse
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from uwazi_property_filler.domain.extension_kind import ExtensionKind
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.metadata_text import relationship_entries
 from uwazi_property_filler.domain.pdf_item import PdfItem
+from uwazi_property_filler.domain.selection import TextItem, word_range_to_rectangles
 from uwazi_property_filler.drivers.web import service as svc
 
 _STATIC_DIR = Path(__file__).parent.parent.parent / "static"
@@ -392,6 +394,7 @@ def _build_page() -> None:
         with ui.row().classes("items-center"):
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
+            ui.button("Label mode", icon="label", on_click=lambda: ui.navigate.to("/labels")).props("flat color=secondary")
             ui.button(
                 "Connect & Refresh",
                 icon="refresh",
@@ -984,6 +987,341 @@ def _build_page() -> None:
         await _load_lists()
 
 
+def _build_label_page() -> None:
+    """The labeling page (/labels): document list + interactive PDF labeler.
+
+    Mirrors ``_build_page``'s header/list patterns but swaps the property form
+    for a labeling panel and an interactive pdf.js viewer. The fill page
+    (``/app``) is untouched.
+    """
+    service = _current_service()
+    if service is None:
+        ui.navigate.to("/")
+        return
+
+    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    with ui.header().classes("items-center justify-between"):
+        with ui.row().classes("items-center"):
+            ui.label("Uwazi Property Filler — Label").classes("text-h6 q-mr-md")
+        with ui.row().classes("items-center"):
+            ui.button("Fill mode", icon="edit_note", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.icon("link", color="secondary").classes("q-mr-xs")
+            ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
+            with ui.button(icon="menu").props("flat round color=secondary"):
+                with ui.menu():
+                    ui.menu_item("Logs", _logs_dialog)
+                    ui.separator()
+                    ui.menu_item("Log out", _logout)
+
+    state: dict[str, Any] = {
+        "service": service,
+        "template": TEMPLATE_NAME,
+        "language": "en",
+        "search_text": "",
+        "pending": [],
+        "validated": [],
+        "selected": None,
+        "labels": [],
+        "sources": {},
+        "values": [],
+    }
+    page_client = context.client
+    page_client._pf_label_state = state  # noqa: SLF001
+
+    def _section(title: str) -> Any:
+        card = ui.card().classes("w-full q-pa-sm q-mb-sm").props("flat bordered")
+        with card:
+            ui.label(title).classes("text-subtitle2 text-weight-bold")
+            ui.separator().classes("w-full q-my-xs")
+        return card
+
+    ui.add_css(_LEFT_PANE_CSS)
+    ui.add_css(_LAYOUT_CSS)
+
+    with ui.splitter(value=25).classes("w-full pf-layout") as outer:
+        with outer.before, ui.column().classes("q-pa-sm"):
+            search_input = ui.input("Search", placeholder="Filter by title or subtitle").classes("w-full")
+
+            def _apply_search() -> None:
+                state["search_text"] = (search_input.value or "").strip().lower()
+                _render_label_lists()
+
+            search_input.on("keydown.enter", _apply_search)
+            ui.button("Search", icon="search", on_click=_apply_search).props("flat dense color=secondary")
+
+            with ui.tabs().classes("w-full q-mt-sm pf-compact-tabs") as tabs:
+                pending_tab = ui.tab("pending", "Pending (0)")
+                validated_tab = ui.tab("validated", "Validated (0)")
+            with ui.tab_panels(tabs, value="pending").classes("w-full"):
+                with ui.tab_panel("pending"):
+                    pending_list = ui.list().classes("w-full pf-doc-list")
+                with ui.tab_panel("validated"):
+                    validated_list = ui.list().classes("w-full pf-doc-list")
+            state["tabs"] = tabs
+            state["pending_tab"] = pending_tab
+            state["validated_tab"] = validated_tab
+            state["pending_list"] = pending_list
+            state["validated_list"] = validated_list
+
+        with outer.after:
+            with ui.splitter(value=72).classes("w-full") as inner:
+                with inner.before:
+                    viewer_container = ui.column().classes("w-full pf-viewer")
+                    state["viewer_container"] = viewer_container
+                with inner.after:
+                    panel = ui.column().classes("w-full q-pa-sm")
+                    state["panel"] = panel
+
+    # --- document list ------------------------------------------------------
+    async def _load_label_lists() -> None:
+        try:
+            pending, validated = await service.list_pdfs(state["template"], state["language"], None)
+            state["pending"] = pending
+            state["validated"] = validated
+            _render_label_lists()
+            if state["selected"] is None:
+                first = (pending + validated)[:1]
+                if first:
+                    await _select_label_pdf(first[0])
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"Could not load documents: {exc}", type="negative")
+
+    def _label_matches(item: PdfItem) -> bool:
+        needle = state.get("search_text", "")
+        if not needle:
+            return True
+        return needle in f"{item.title} {item.subtitle}".lower()
+
+    def _render_label_lists() -> None:
+        if not _is_attached(state["pending_list"]) or not _is_attached(state["validated_list"]):
+            return
+        pending = [it for it in state["pending"] if _label_matches(it)]
+        validated = [it for it in state["validated"] if _label_matches(it)]
+        state["pending_list"].clear()
+        state["validated_list"].clear()
+        with state["pending_list"]:
+            for item in pending[:_MAX_LIST_ROWS]:
+                _label_pdf_row(item)
+        with state["validated_list"]:
+            for item in validated[:_MAX_LIST_ROWS]:
+                _label_pdf_row(item)
+        state["pending_tab"].set_label(f"Pending ({len(pending)})")
+        state["validated_tab"].set_label(f"Validated ({len(validated)})")
+
+    def _label_pdf_row(item: PdfItem) -> None:
+        selected = state["selected"]
+        is_selected = selected is not None and item.shared_id == selected.shared_id
+        classes = "cursor-pointer pf-doc-row-selected" if is_selected else "cursor-pointer"
+        with ui.item(on_click=lambda it=item: background_tasks.create(_select_label_pdf(it))).classes(classes):
+            with ui.item_section():
+                ui.item_label(item.title or item.shared_id).classes("pf-doc-title")
+                if item.subtitle:
+                    ui.item_label(item.subtitle).classes("pf-doc-subtitle")
+
+    # --- selection / labels -------------------------------------------------
+    async def _select_label_pdf(item: PdfItem) -> None:
+        state["selected"] = item
+        _render_label_lists()
+        state["values"] = await service.get_label_values(state["language"])
+        await _refresh_predictions(item)
+        await _reload_labels()
+
+    async def _refresh_predictions(item: PdfItem) -> None:
+        try:
+            metadata = await service.get_entity_metadata(item.shared_id, state["template"], state["language"])
+            properties = [p.name for p in await service.get_template_properties(state["template"])]
+            await service.refresh_predictions(
+                item.shared_id, state["template"], state["language"], item.filename, metadata, properties
+            )
+        except Exception as exc:  # noqa: BLE001 — predictions are best-effort
+            logger.warning("Could not refresh predictions for {}: {}", item.shared_id, exc)
+
+    async def _reload_labels() -> None:
+        item = state["selected"]
+        if item is None:
+            return
+        state["labels"] = await service.get_labels(item.shared_id, state["template"], state["language"])
+        state["sources"] = _sources_from_labels()
+        _load_viewer()
+        _render_panel()
+
+    def _sources_from_labels() -> dict[str, bool]:
+        sources = dict(state.get("sources", {}))
+        for lbl in state["labels"]:
+            if not lbl.is_manual:
+                sources.setdefault(lbl.source, True)
+        return sources
+
+    def _visible_labels() -> list[Any]:
+        return [lbl for lbl in state["labels"] if lbl.is_manual or state["sources"].get(lbl.source, True)]
+
+    def _overlay_json() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for lbl in _visible_labels():
+            for rect in lbl.selection_rectangles:
+                try:
+                    page = int(rect.page)
+                except (TypeError, ValueError):
+                    page = 1
+                out.append(
+                    {
+                        "id": lbl.id,
+                        "page": page,
+                        "left": rect.left,
+                        "top": rect.top,
+                        "width": rect.width,
+                        "height": rect.height,
+                        "text": lbl.text,
+                        "source": lbl.source,
+                        "label_title": lbl.label_title,
+                        "confidence": lbl.confidence,
+                    }
+                )
+        return out
+
+    def _load_viewer() -> None:
+        container = state["viewer_container"]
+        item = state["selected"]
+        if item is None or not _is_attached(container):
+            return
+        overlay = _overlay_json()
+        src = f"/label-viewer/{item.filename}"
+        if overlay:
+            src += "#" + urllib.parse.quote(json.dumps(overlay), safe="")
+        container.clear()
+        with container:
+            ui.element("iframe").props(f'src="{src}" frameborder="0"').classes("w-full pf-viewer-iframe")
+
+    def _render_panel() -> None:
+        panel = state["panel"]
+        if not _is_attached(panel):
+            return
+        panel.clear()
+        item = state["selected"]
+        with panel:
+            if item is None:
+                ui.label("Select a document to start labeling.").classes("text-caption text-grey-6")
+                return
+            with _section("Document"):
+                ui.label(item.title or item.shared_id).classes("text-subtitle1 text-weight-medium")
+                if item.subtitle:
+                    ui.label(item.subtitle).classes("text-caption text-grey-7")
+
+            if state["sources"]:
+                with _section("Prediction sources"):
+                    for src in sorted(state["sources"]):
+                        switch = ui.switch(src, value=state["sources"][src])
+                        switch.on_value_change(lambda e, s=src: _toggle_source(s, bool(e.value)))
+
+            with _section("Labels"):
+                labels = _visible_labels()
+                if not labels:
+                    ui.label("No labels yet. Click two words in the PDF to add one.").classes("text-caption text-grey-6")
+                for lbl in labels:
+                    _label_row(lbl)
+
+    def _toggle_source(source: str, on: bool) -> None:
+        state["sources"][source] = on
+        _load_viewer()
+
+    def _label_row(lbl: Any) -> None:
+        badge = "manual" if lbl.is_manual else lbl.source
+        conf = f" · {int(lbl.confidence * 100)}%" if lbl.confidence is not None else ""
+        with ui.row().classes("items-center w-full justify-between q-py-xs").classes("w-full"):
+            with ui.column().classes("col"):
+                ui.label(lbl.label_title or lbl.label_shared_id).classes("text-body2 text-weight-medium")
+                ui.label(f"{lbl.text[:80] or '(no text)'}").classes("text-caption")
+                ui.label(f"{badge}{conf}").classes("text-caption text-grey-6")
+            if lbl.is_manual:
+                ui.button(icon="delete", on_click=lambda lb=lbl: background_tasks.create(_delete_label(lb))).props(
+                    "flat dense color=negative"
+                )
+
+    async def _delete_label(lbl: Any) -> None:
+        item = state["selected"]
+        if item is None:
+            return
+        try:
+            await service.delete_label(item.shared_id, state["language"], lbl)
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"Could not delete label: {exc}", type="negative")
+            return
+        _notify("Label deleted", type="positive")
+        await _reload_labels()
+
+    def _open_label_picker(text: str, rectangles: list[Any]) -> None:
+        with context.client.layout:
+            with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+                ui.label("New label").classes("text-h6")
+                ui.label(text or "(empty selection)").classes("text-caption q-mb-sm")
+                options = {v["title"]: v["shared_id"] for v in state["values"]}
+                select = ui.select(options, label="Label", with_input=True).classes("w-full")
+                error_label = ui.label().classes("text-negative text-body2")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Cancel", on_click=lambda: dialog.close()).props("flat")
+
+                    def _create() -> None:
+                        background_tasks.create(_do_create_label(dialog, select, text, rectangles, error_label))
+
+                    ui.button("Create", color="primary", on_click=_create)
+        dialog.open()
+
+    async def _do_create_label(dialog: Any, select: Any, text: str, rectangles: list[Any], error_label: Any) -> None:
+        label_shared_id = select.value
+        if not label_shared_id:
+            if _is_attached(error_label):
+                error_label.set_text("Pick a label value.")
+            return
+        title = next((v["title"] for v in state["values"] if v["shared_id"] == label_shared_id), label_shared_id)
+        item = state["selected"]
+        if item is None:
+            return
+        try:
+            await service.create_label(
+                item.shared_id, state["template"], state["language"], text, rectangles, label_shared_id, title
+            )
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"Could not save label: {exc}", type="negative")
+            return
+        dialog.close()
+        _notify("Label saved", type="positive")
+        await _reload_labels()
+
+    def _on_label_selection(e: Any) -> None:
+        data = e.args
+        if not isinstance(data, dict):
+            return
+        raw_items = data.get("items") or []
+        if not raw_items:
+            return
+        try:
+            text_items = [TextItem.model_validate(it) for it in raw_items]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ignoring malformed selection: {}", exc)
+            return
+        text = str(data.get("text") or "")
+        rectangles = word_range_to_rectangles(text_items, 0, len(text_items) - 1)
+        _open_label_picker(text, rectangles)
+
+    ui.on("label_selection", _on_label_selection)
+
+    ui.add_body_html(
+        """
+        <script>
+        (function() {
+          window.addEventListener('message', function(e) {
+            if (e.data && e.data.type === 'label-selection') {
+              emitEvent('label_selection', e.data);
+            }
+          });
+        })();
+        </script>
+        """
+    )
+
+    background_tasks.create(_load_label_lists())
+
+
 def _display_value(value: Any) -> str:
     """Human-readable text for a metadata cell (titles/labels over raw ids)."""
     if value is None:
@@ -1070,6 +1408,14 @@ def _app() -> None:
     _build_page()
 
 
+@ui.page("/labels")
+def _labels() -> None:
+    if not _is_logged_in():
+        ui.navigate.to("/")
+        return
+    _build_label_page()
+
+
 def main() -> None:
     app.add_static_files("/static", str(_STATIC_DIR))
 
@@ -1086,6 +1432,11 @@ def main() -> None:
     @app.get("/viewer/{filename}")
     def _viewer(filename: str) -> Response:
         html = (_STATIC_DIR / "pdfjs" / "viewer.html").read_text()
+        return Response(content=html, media_type="text/html")
+
+    @app.get("/label-viewer/{filename}")
+    def _label_viewer(filename: str) -> Response:
+        html = (_STATIC_DIR / "pdfjs" / "label_viewer.html").read_text()
         return Response(content=html, media_type="text/html")
 
     ui.run(

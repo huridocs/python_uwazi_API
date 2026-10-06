@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Uwazi Property Filler — Label viewer</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #525659; }
+    #hint {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      padding: 4px 12px; font: 12px/1.4 system-ui, sans-serif;
+      background: rgba(44, 62, 80, 0.9); color: #fff;
+    }
+    #container { position: relative; width: 100%; height: 100%; overflow: auto; padding-top: 28px; }
+    #page-wrap { position: relative; margin: 0 auto; }
+    .page {
+      position: relative; margin: 12px auto; overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); background: #fff;
+    }
+    canvas.pdf-page { display: block; }
+
+    /* pdf.js text layer (invisible overlay for hit-testing) */
+    .text-layer {
+      position: absolute; text-align: initial; inset: 0; overflow: hidden;
+      opacity: 1; line-height: 1; text-size-adjust: none; forced-color-adjust: none;
+      transform-origin: 0 0; z-index: 0;
+    }
+    .text-layer span {
+      color: transparent; position: absolute; white-space: pre; cursor: crosshair;
+      transform-origin: 0% 0%; user-select: none;
+    }
+    .text-layer span.markedContent { top: 0; height: 0; }
+    .text-layer span.pf-sel-first { background: rgba(255, 193, 7, 0.55); }
+    .text-layer span.pf-sel-range { background: rgba(255, 193, 7, 0.35); }
+
+    /* label / prediction rectangles */
+    .label-rect {
+      position: absolute; pointer-events: none; box-sizing: border-box; z-index: 2;
+      border: 1px solid rgba(255, 152, 0, 0.85);
+      background: rgba(255, 193, 7, 0.28);
+    }
+    .label-rect[data-source="manual"] {
+      border-color: rgba(24, 188, 156, 0.95);
+      background: rgba(24, 188, 156, 0.22);
+    }
+  </style>
+</head>
+<body>
+  <div id="hint">Label mode: click a word, then click another word to select a span. The selection is sent to the parent app.</div>
+  <div id="container">
+    <div id="page-wrap"></div>
+  </div>
+  <script type="module" src="/static/pdfjs/label_viewer.js"></script>
+</body>
+</html>

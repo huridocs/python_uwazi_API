@@ -4,6 +4,7 @@ from typing import Any
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.extension_request import ExtensionContext
 from uwazi_property_filler.domain.highlight import Highlight
+from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.suggestion import Suggestion
 
 
@@ -21,6 +22,9 @@ class ExtensionPort(ABC):
     async def highlight(self, ctx: ExtensionContext) -> list[Highlight]: ...
 
     @abstractmethod
+    async def label(self, ctx: ExtensionContext) -> list[LabelPrediction]: ...
+
+    @abstractmethod
     async def display(self, ctx: ExtensionContext) -> str | None: ...
 
     @abstractmethod
@@ -28,3 +32,11 @@ class ExtensionPort(ABC):
 
     @abstractmethod
     async def fill(self, ctx: ExtensionContext) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    async def on_label(self, label: Label) -> None:
+        """Notified after a manual label is created or deleted in Uwazi.
+
+        Local/remote services can recompute predictions or persist labeled data
+        here. Failures are swallowed by the adapters.
+        """

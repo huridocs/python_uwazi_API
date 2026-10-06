@@ -22,6 +22,7 @@ from uwazi_property_filler.configuration import EXTENSIONS_DIR
 from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.extension_request import ExtensionContext
 from uwazi_property_filler.domain.highlight import Highlight
+from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.suggestion import Suggestion
 from uwazi_property_filler.ports.extension_port import ExtensionPort
 
@@ -69,6 +70,9 @@ class LocalPluginAdapter(ExtensionPort):
     async def highlight(self, ctx: ExtensionContext) -> list[Highlight]:
         return await self._call("highlight", ctx, [])
 
+    async def label(self, ctx: ExtensionContext) -> list[LabelPrediction]:
+        return await self._call("label", ctx, [])
+
     async def display(self, ctx: ExtensionContext) -> str | None:
         return await self._call("display", ctx, None)
 
@@ -77,3 +81,21 @@ class LocalPluginAdapter(ExtensionPort):
 
     async def fill(self, ctx: ExtensionContext) -> dict[str, Any] | None:
         return await self._call("fill", ctx, None)
+
+    async def on_label(self, label: Label) -> None:
+        """Call the plugin's ``on_label(label)``; swallow any failure."""
+        fn = getattr(self._obj, "on_label", None)
+        if fn is None:
+            return
+
+        def _run() -> Any:
+            result = fn(label)
+            if inspect.isawaitable(result):
+                return asyncio.run(result)
+            return result
+
+        try:
+            await asyncio.to_thread(_run)
+        except (NotImplementedError, Exception) as exc:  # noqa: BLE001
+            logger.error("Local extension '{}' on_label failed: {}", self.record.id, exc)
+            record_error(self.record.id)
