@@ -58,6 +58,10 @@ _LEFT_PANE_CSS = """
     white-space: normal;
     word-break: break-word;
 }
+.pf-label-menu .q-item__label {
+    white-space: normal;
+    word-break: break-word;
+}
 .pf-compact-tabs .q-tab {
     min-height: 28px;
     padding: 0 8px;
@@ -197,6 +201,11 @@ def _start_ongoing(client: Any, key: str, message: str) -> None:
     """
     if client is None or client.is_deleted:
         return
+    # Re-triggering the same key while the previous toast is still up must
+    # retire the old one, or it stays on screen forever (dismissed handle lost).
+    previous = _ongoing_notifications.pop((client.id, key), None)
+    if previous is not None and _is_attached(previous):
+        previous.dismiss()
     with client.layout:
         _ongoing_notifications[(client.id, key)] = ui.notification(
             message,
@@ -1005,10 +1014,16 @@ def _build_label_page() -> None:
             ui.label("Uwazi Property Filler — Label").classes("text-h6 q-mr-md")
         with ui.row().classes("items-center"):
             ui.button("Fill mode", icon="edit_note", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.button(
+                "Connect & Refresh",
+                icon="refresh",
+                on_click=lambda: background_tasks.create(_refresh_label_data()),
+            ).props("flat color=secondary")
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
             with ui.button(icon="menu").props("flat round color=secondary"):
                 with ui.menu():
+                    ui.menu_item("Extensions", _extensions_dialog)
                     ui.menu_item("Logs", _logs_dialog)
                     ui.separator()
                     ui.menu_item("Log out", _logout)
@@ -1017,6 +1032,7 @@ def _build_label_page() -> None:
         "service": service,
         "template": TEMPLATE_NAME,
         "language": "en",
+        "filter_value": None,
         "search_text": "",
         "pending": [],
         "validated": [],
@@ -1038,9 +1054,32 @@ def _build_label_page() -> None:
     ui.add_css(_LEFT_PANE_CSS)
     ui.add_css(_LAYOUT_CSS)
 
-    with ui.splitter(value=25).classes("w-full pf-layout") as outer:
+    with ui.splitter(value=20).classes("w-full pf-layout") as outer:
         with outer.before, ui.column().classes("q-pa-sm"):
-            search_input = ui.input("Search", placeholder="Filter by title or subtitle").classes("w-full")
+            filter_select = (
+                ui.select({}, label="Filter", with_input=False)
+                .props("popup-content-class=pf-filter-menu")
+                .classes("w-full pf-filter-select")
+            )
+            state["filter_select"] = filter_select
+
+            async def _load_label_filters() -> None:
+                options = await service.get_filter_options(state["template"], state["language"])
+                if not _is_attached(filter_select):
+                    return
+                filter_select.set_options({"ALL": "ALL", **options}, value="ALL")
+
+            background_tasks.create(_load_label_filters())
+
+            def _on_label_filter_change(e: Any) -> None:
+                value = e.value
+                state["filter_value"] = None if value in (None, "ALL") else value
+                _start_ongoing(page_client, "filter", f"Showing cached documents for {value or 'all documents'}…")
+                background_tasks.create(_load_label_lists(select_first=True))
+
+            filter_select.on_value_change(_on_label_filter_change)
+
+            search_input = ui.input("Search", placeholder="Filter by title or subtitle").classes("w-full q-mt-xs")
 
             def _apply_search() -> None:
                 state["search_text"] = (search_input.value or "").strip().lower()
@@ -1073,18 +1112,66 @@ def _build_label_page() -> None:
                     state["panel"] = panel
 
     # --- document list ------------------------------------------------------
-    async def _load_label_lists() -> None:
+    async def _load_label_lists(select_first: bool = False) -> None:
         try:
-            pending, validated = await service.list_pdfs(state["template"], state["language"], None)
+            pending, validated = await service.list_pdfs(state["template"], state["language"], state.get("filter_value"))
             state["pending"] = pending
             state["validated"] = validated
             _render_label_lists()
-            if state["selected"] is None:
+            if state["selected"] is None and select_first:
+                first = _first_label_visible()
+                if first:
+                    await _select_label_pdf(first)
+            elif state["selected"] is None:
                 first = (pending + validated)[:1]
                 if first:
-                    await _select_label_pdf(first[0])
+                    await _select_label_pdf(first)
         except Exception as exc:  # noqa: BLE001
             _notify(f"Could not load documents: {exc}", type="negative")
+        finally:
+            _finish_ongoing(page_client, "filter")
+
+    def _first_label_visible() -> PdfItem | None:
+        """First row the left pane would show, mirroring fill mode."""
+        for bucket in (state["pending"], state["validated"]):
+            for item in bucket[:_MAX_LIST_ROWS]:
+                if _label_matches(item):
+                    return item
+        return None
+
+    async def _reload_label_after_refresh() -> None:
+        """Re-render lists and filter counts right after the data refresh."""
+        for step in (_load_label_lists, _load_label_filters):
+            try:
+                await step()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Connect & Refresh: {} failed: {}", step.__name__, exc)
+
+    async def _refresh_label_data() -> None:
+        """Connect & Refresh for the label page, same flow as fill mode."""
+        template = state["template"]
+        if not template:
+            _notify("Select a template first", type="warning")
+            return
+        _start_ongoing(page_client, "refresh", "Fetching documents from the instance…")
+        try:
+            count = await service.refresh(template, state["language"])
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"Refresh failed: {exc}", type="negative")
+            return
+        finally:
+            _finish_ongoing(page_client, "refresh")
+        await _reload_label_after_refresh()
+        _notify(f"Refreshed: cached {count} documents", type="positive")
+        _start_ongoing(page_client, "pdfs", "Caching PDF files…")
+        try:
+            cached = await service.warm_pdf_cache(template, state["language"])
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"PDF caching failed: {exc}", type="negative")
+            return
+        finally:
+            _finish_ongoing(page_client, "pdfs")
+        _notify(f"Cached {cached} PDF files", type="positive")
 
     def _label_matches(item: PdfItem) -> bool:
         needle = state.get("search_text", "")
@@ -1250,29 +1337,65 @@ def _build_label_page() -> None:
         await _reload_labels()
 
     def _open_label_picker(text: str, rectangles: list[Any]) -> None:
+        """Modal to assign a label to a PDF selection: search input filters
+        the label values (the list can be long), clicking one picks it."""
+        chosen: dict[str, str] = {}  # when set: shared_id -> title of the pick.
         with context.client.layout:
             with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
                 ui.label("New label").classes("text-h6")
                 ui.label(text or "(empty selection)").classes("text-caption q-mb-sm")
-                options = {v["title"]: v["shared_id"] for v in state["values"]}
-                select = ui.select(options, label="Label", with_input=True).classes("w-full")
+
+                options_box = ui.column().classes("w-full")
+                search = ui.input(placeholder="Search labels…").props("clearable dense outlined").classes("w-full")
+
+                def _render_options() -> None:
+                    if not _is_attached(options_box):
+                        return
+                    needle = (search.value or "").strip().lower()
+                    options_box.clear()
+                    with options_box:
+                        values = [v for v in state["values"] if not needle or needle in (v.get("title") or "").lower()]
+                        if not state["values"]:
+                            ui.label("No label values available.").classes("text-caption text-grey-6")
+                        elif not values:
+                            ui.label("No matching value.").classes("text-caption text-grey-6")
+                        for v in values[:_MAX_LIST_ROWS]:
+                            is_chosen = v["shared_id"] in chosen
+                            with ui.item(on_click=lambda entry=v: _pick(entry)).classes(
+                                "cursor-pointer" + (" pf-doc-row-selected" if is_chosen else "")
+                            ):
+                                with ui.item_section():
+                                    ui.item_label(v.get("title") or v["shared_id"]).classes("pf-doc-title")
+
+                def _pick(entry: dict[str, str]) -> None:
+                    if next(iter(chosen), None) == entry["shared_id"]:
+                        chosen.clear()
+                    else:
+                        chosen.clear()
+                        chosen[entry["shared_id"]] = entry.get("title") or entry["shared_id"]
+                    _render_options()
+
                 error_label = ui.label().classes("text-negative text-body2")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Cancel", on_click=lambda: dialog.close()).props("flat")
 
                     def _create() -> None:
-                        background_tasks.create(_do_create_label(dialog, select, text, rectangles, error_label))
+                        background_tasks.create(_do_create_label(dialog, chosen, text, rectangles, error_label))
 
                     ui.button("Create", color="primary", on_click=_create)
+
+                search.on_value_change(lambda: _render_options())
+                _render_options()
         dialog.open()
 
-    async def _do_create_label(dialog: Any, select: Any, text: str, rectangles: list[Any], error_label: Any) -> None:
-        label_shared_id = select.value
-        if not label_shared_id:
+    async def _do_create_label(
+        dialog: Any, chosen: dict[str, str], text: str, rectangles: list[Any], error_label: Any
+    ) -> None:
+        if not chosen:
             if _is_attached(error_label):
                 error_label.set_text("Pick a label value.")
             return
-        title = next((v["title"] for v in state["values"] if v["shared_id"] == label_shared_id), label_shared_id)
+        label_shared_id, title = next(iter(chosen.items()))
         item = state["selected"]
         if item is None:
             return
@@ -1319,7 +1442,7 @@ def _build_label_page() -> None:
         """
     )
 
-    background_tasks.create(_load_label_lists())
+    background_tasks.create(_load_label_lists(select_first=True))
 
 
 def _display_value(value: Any) -> str:
