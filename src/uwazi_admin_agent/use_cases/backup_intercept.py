@@ -45,7 +45,7 @@ from uwazi_admin_agent.domain.backup_decision import (
 from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
-from uwazi_admin_agent.domain.manifest import MigrationManifest
+from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -83,6 +83,11 @@ class BackupIntercept:
         self._language: str = language
         self._loop: asyncio.AbstractEventLoop = loop
         self._backed_up: set[str] = set()
+        # First-touch raws, kept in memory for the applied-write records: the
+        # diff needs the PRE-RUN value of every property a payload touches, and
+        # only the first-touch snapshot of an entity carries that (a second
+        # write on the same entity must not read back its own output).
+        self._raw_before: dict[str, dict[str, Any]] = {}
         self._audit_log: AuditLogPort | None = audit_log
         self._cap: int = cap
         self._file_repository: FileRepositoryPort | None = file_repository
@@ -115,6 +120,7 @@ class BackupIntercept:
             results = create_entities(entities_dicts, language)
             created_ids = [sid for r in results if isinstance(r, dict) if r.get("success") if (sid := r.get("shared_id"))]
             self._record_created(results)
+            self.record_applied_creates(entities_dicts, results, language)
             self._emit("create", created_ids)
             return results
 
@@ -122,6 +128,7 @@ class BackupIntercept:
             ids = [sid for e in entities_dicts if (sid := e.get("shared_id"))]
             self._backup_before_modify(ids, language or self._language)
             result = update_entities(entities_dicts, language)
+            self.record_applied_updates(entities_dicts, result, language)
             self._invalidate(ids)
             self._emit("update", ids)
             return result
@@ -140,6 +147,7 @@ class BackupIntercept:
             del language  # ignored: publish/unpublish act on all language rows by sharedId
             self._backup_before_modify(shared_ids, self._language)
             result = set_publish_status(shared_ids, published)
+            self.record_applied_publish("publish" if published else "unpublish", shared_ids)
             self._invalidate(shared_ids)
             self._emit("set_publish_status", shared_ids)
             return result
@@ -148,6 +156,7 @@ class BackupIntercept:
             del language
             self._backup_before_modify(shared_ids, self._language)
             result = publish_entities(shared_ids)
+            self.record_applied_publish("publish", shared_ids)
             self._invalidate(shared_ids)
             self._emit("publish", shared_ids)
             return result
@@ -156,6 +165,7 @@ class BackupIntercept:
             del language
             self._backup_before_modify(shared_ids, self._language)
             result = unpublish_entities(shared_ids)
+            self.record_applied_publish("unpublish", shared_ids)
             self._invalidate(shared_ids)
             self._emit("unpublish", shared_ids)
             return result
@@ -180,12 +190,12 @@ class BackupIntercept:
             "create_relationships": create_relationships_intercepted,
         }
 
-    def _backup_before_modify(self, shared_ids: list[str], language: str) -> None:
-        """Snapshot first-touch entities, add to manifest.modified."""
+    def _backup_before_modify(self, shared_ids: list[str], language: str) -> dict[str, EntitySnapshot]:
+        """Snapshot first-touch entities, add to manifest.modified; return them."""
         decision = decide_backup("update", shared_ids, self._created_set(), self._backed_up)
-        self._apply_snapshot_decision(decision, language)
+        return self._apply_snapshot_decision(decision, language)
 
-    def _backup_before_delete(self, shared_ids: list[str]) -> None:
+    def _backup_before_delete(self, shared_ids: list[str]) -> dict[str, EntitySnapshot]:
         """Snapshot first-touch entities, add to manifest.deleted (or remove from created).
 
         For a delete, Uwazi tears down the entity's stored file bytes
@@ -200,31 +210,41 @@ class BackupIntercept:
         will not try to re-upload bytes it does not have); the snapshot still saves.
         """
         decision = decide_backup("delete", shared_ids, self._created_set(), self._backed_up)
-        self._apply_snapshot_decision(decision, self._language, capture_files=True)
+        return self._apply_snapshot_decision(decision, self._language, capture_files=True)
 
-    def _backup_before_rewire(self, from_ids: list[str], language: str) -> None:
+    def _backup_before_rewire(self, from_ids: list[str], language: str) -> dict[str, EntitySnapshot]:
         """Snapshot first-touch from-entities, add to modified, record RewiredRelationship."""
         decision = decide_backup("create_relationships", from_ids, self._created_set(), self._backed_up)
         raws = self._fetch_raws(decision.snapshot_ids, language)
         snapshots = self._save_snapshots(decision.snapshot_ids, raws)
+        self._raw_before.update({sid: raws[sid] for sid in snapshots})
         rewired = build_rewired_relationships(decision.snapshot_ids, raws, language)
         _ = populate_manifest(self._manifest, decision, snapshots)
         self._manifest.rewired.extend(rewired)
         self._enforce_cap()
         logger.debug("backup rewire: snapshotted {} from-entities, recorded {} rewired", len(snapshots), len(rewired))
+        return snapshots
 
-    def _apply_snapshot_decision(self, decision: BackupDecision, language: str, capture_files: bool = False) -> None:
+    def _apply_snapshot_decision(
+        self, decision: BackupDecision, language: str, capture_files: bool = False
+    ) -> dict[str, EntitySnapshot]:
         """Fetch raws, save snapshots, populate manifest for a backup decision.
 
         ``capture_files`` is set only on the delete path: after building each
         snapshot, fetch the uploaded files' bytes and attach the :class:`FileRef`
         metadata list so delete-revert can re-upload them.
+
+        Returns the freshly-taken snapshots keyed by shared_id (first-touch only;
+        an already-backed-up id is absent) and retains their raws in
+        ``_raw_before`` so applied-write records can diff against pre-run values.
         """
         raws = self._fetch_raws(decision.snapshot_ids, language)
         snapshots = self._save_snapshots(decision.snapshot_ids, raws, capture_files=capture_files)
+        self._raw_before.update({sid: raws[sid] for sid in snapshots})
         _ = populate_manifest(self._manifest, decision, snapshots)
         self._enforce_cap()
         logger.debug("backup decision: snapshotted {} entities", len(snapshots))
+        return snapshots
 
     def _record_created(self, results: list[dict]) -> None:
         """Record script-created shared_ids onto manifest.created (post-create)."""
@@ -235,6 +255,111 @@ class BackupIntercept:
         _ = populate_manifest(self._manifest, decision, snapshots={})
         self._enforce_cap()
         logger.debug("backup intercept: recorded {} created entities", len(new_ids))
+
+    def record_applied_publish(self, op: str, shared_ids: list[str]) -> None:
+        """Record one publish-status write per id (all ids, success not derivable).
+
+        The bulk publish endpoints return aggregate counts, not per-id outcomes,
+        so a soft-failed id would be over-recorded. That is harmless and
+        self-explaining: its diff renders before == after (nothing changed).
+        """
+        for sid in shared_ids:
+            raw = self._raw_before.get(sid) or {}
+            self._manifest.applied_writes.append(
+                AppliedWrite(
+                    op=op,  # type: ignore[arg-type]  # callers pass "publish"/"unpublish"
+                    shared_id=sid,
+                    language=self._language,
+                    metadata_before={"published": raw.get("published")},
+                )
+            )
+
+    def record_applied_updates(self, entities_dicts: list[dict], results: list[dict], language: str | None) -> None:
+        """Record one applied write per SUCCESSFUL updated id, with before-values.
+
+        ``entities_dicts`` is the exact payload the script sent (AgentEntity-shaped),
+        ``results`` the per-id outcome dicts the underlying helper returned. The
+        before-values come from the first-touch raw of that id — for an id the run
+        created earlier there is none, so ``metadata_before`` is empty and every
+        property reads as newly set, which is what happened.
+        """
+        by_id = {sid: e for e in entities_dicts if (sid := e.get("shared_id"))}
+        for result in results:
+            if not (isinstance(result, dict) and result.get("success")):
+                continue
+            sid = result.get("shared_id")
+            entity = by_id.get(sid)
+            if not sid or entity is None:
+                continue
+            self._manifest.applied_writes.append(
+                self._build_applied_write(
+                    op="update",
+                    shared_id=sid,
+                    language=entity.get("language") or language or self._language,
+                    title=entity.get("title"),
+                    template_name=entity.get("template_name"),
+                    metadata=entity.get("metadata") or {},
+                    before_raw=self._raw_before.get(sid),
+                )
+            )
+
+    def record_applied_creates(self, entities_dicts: list[dict], results: list[dict], language: str | None) -> None:
+        """Record one applied write per SUCCESSFULLY created id (no before-values).
+
+        Creates have no pre-run state: Uwazi minted the sharedId, so there is no
+        snapshot and no before-raw. Every property therefore reads as set from
+        nothing, which is exactly the truth.
+        """
+        creates = list(entities_dicts)
+        for index, result in enumerate(results):
+            if not (isinstance(result, dict) and result.get("success")):
+                continue
+            sid = result.get("shared_id")
+            if not sid:
+                continue
+            # Creates are applied one-per-dict in input order; a soft-failed create
+            # does not shift the mapping because the adapter returns one result per
+            # input dict, in that order.
+            entity = creates[index] if index < len(creates) else {}
+            self._manifest.applied_writes.append(
+                self._build_applied_write(
+                    op="create",
+                    shared_id=sid,
+                    language=entity.get("language") or language or self._language,
+                    title=entity.get("title"),
+                    template_name=entity.get("template_name"),
+                    metadata=entity.get("metadata") or {},
+                    before_raw=None,
+                )
+            )
+
+    def _build_applied_write(
+        self,
+        op: str,
+        shared_id: str,
+        language: str,
+        title: Any,
+        template_name: Any,
+        metadata: dict[str, Any],
+        before_raw: dict[str, Any] | None,
+    ) -> AppliedWrite:
+        """Assemble one :class:`AppliedWrite`, restricting the before-state to the payload's keys.
+
+        Only the properties the payload touched can be diffed, so only those keys
+        are copied out of the before-raw — a big raw's untouched metadata never
+        lands on the manifest.
+        """
+        before_metadata = (before_raw or {}).get("metadata") or {}
+        return AppliedWrite(
+            op=op,  # type: ignore[arg-type]  # callers pass "update"/"create"
+            shared_id=shared_id,
+            language=language,
+            title=title if isinstance(title, str) else None,
+            title_before=(before_raw or {}).get("title"),
+            template_name=template_name if isinstance(template_name, str) else None,
+            metadata=metadata,
+            metadata_before={key: before_metadata.get(key) for key in metadata},
+        )
 
     def _enforce_cap(self) -> None:
         """Raise :class:`CapExceededError` if the touch set exceeds the cap.
