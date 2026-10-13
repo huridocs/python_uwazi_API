@@ -1003,6 +1003,10 @@ def _entity_section(
     ``show_changes`` is off for deleted entities (the run removed their metadata
     with the row) and ``show_segmentation`` likewise (their stored files are
     gone, so the fetch could only fail).
+
+    Rows are paginated 25 per page: a run can touch thousands of entities, and
+    rendering them all at once produces a table tall enough to stall the modal
+    (and a refresh payload large enough to drop the websocket).
     """
     if not entities:
         return None
@@ -1055,7 +1059,12 @@ def _entity_section(
             row["restored_shared_id"] = entity.restored_shared_id or "—"
         rows.append(row)
 
-    table = ui.table(rows=rows, columns=columns, row_key="shared_id", pagination={"rowsPerPage": 0}).classes("w-full")
+    table = ui.table(
+        rows=rows,
+        columns=columns,
+        row_key="shared_id",
+        pagination={"rowsPerPage": 25},
+    ).classes("w-full")
     table.add_slot(
         "body-cell-title",
         """
@@ -1279,9 +1288,14 @@ def _results_dialog(run_id: str) -> None:
                 _modal_header(dialog, f"Run results — {run_id}")
                 with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
                     if results.result is not None:
-                        ui.label("Result").classes("text-subtitle1 text-grey-7")
-                        ui.code(results.result, language=None).classes("w-full").style("white-space: pre-wrap")
-                        ui.separator()
+                        ui.label("Result").classes("text-subtitle1 text-grey-7 shrink-0")
+                        ui.label(results.result).classes(
+                            "w-full font-mono text-body2 rounded-borders q-pa-sm shrink-0"
+                        ).style(
+                            "white-space: pre-wrap; word-break: break-word; "
+                            "max-height: 320px; overflow-y: auto; background: rgba(0,0,0,0.03)"
+                        )
+                        ui.separator().classes("shrink-0")
                     counts = [
                         ("Modified", len(results.modified)),
                         ("Created", len(results.created)),
@@ -1289,11 +1303,15 @@ def _results_dialog(run_id: str) -> None:
                         ("Rewired", len(results.rewired)),
                         ("Files deleted", len(results.deleted_files)),
                     ]
-                    with ui.row().classes("w-full q-mb-md gap-md"):
+                    with ui.row().classes("w-full q-mb-md gap-3 no-wrap items-stretch shrink-0"):
                         for label, count in counts:
-                            with ui.column().classes("items-center"):
+                            with (
+                                ui.column()
+                                .classes("items-center justify-center grow rounded-borders q-pa-sm")
+                                .style("border: 1px solid rgba(0,0,0,0.12); min-width: 0")
+                            ):
                                 ui.label(str(count)).classes("text-h5")
-                                ui.label(label).classes("text-caption text-grey-7")
+                                ui.label(label).classes("text-caption text-grey-7 text-center")
                     if not any(c for _, c in counts) and results.result is None:
                         ui.label("No results recorded on this run.").classes("text-grey-7 q-pa-md")
                     _section("Modified entities", results.modified)
