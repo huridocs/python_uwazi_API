@@ -1282,7 +1282,7 @@ def _results_dialog(run_id: str) -> None:
                         ui.label("Result").classes("text-subtitle1 text-grey-7")
                         ui.textarea(value=results.result).classes("w-full font-mono").props(
                             "readonly outlined autogrow"
-                        ).style("min-height: 60px; max-height: 320px")
+                        ).style("min-height: 60px")
                         ui.separator()
                     counts = [
                         ("Modified", len(results.modified)),
