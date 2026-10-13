@@ -1277,12 +1277,12 @@ def _results_dialog(run_id: str) -> None:
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 _modal_header(dialog, f"Run results — {run_id}")
-                with ui.column().classes("w-full grow").style("overflow-y: auto"):
+                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
                     if results.result is not None:
                         ui.label("Result").classes("text-subtitle1 text-grey-7")
                         ui.textarea(value=results.result).classes("w-full font-mono").props(
                             "readonly outlined autogrow"
-                        ).style("min-height: 60px")
+                        ).style("min-height: 60px; max-height: 320px")
                         ui.separator()
                     counts = [
                         ("Modified", len(results.modified)),
