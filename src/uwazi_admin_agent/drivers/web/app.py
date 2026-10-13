@@ -15,12 +15,13 @@ import json
 import os
 import threading
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.metadata_diff import PropertyChange, build_property_changes
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.drivers.web.run_service import (
@@ -32,6 +33,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     create_and_generate,
     delete_run,
     execute_run,
+    get_entity_segmentation,
     get_execution_history,
     get_run,
     get_run_audit,
@@ -605,6 +607,36 @@ async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> 
         _broadcast_rows()
 
 
+def _close_button(dialog: Any, dense: bool = False) -> Any:
+    """Standard modal dismiss button (X icon + label), flat."""
+    button = ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+    if dense:
+        button.props("dense")
+    return button
+
+
+def _modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = None) -> None:
+    """Modal title row with a top-right Close button.
+
+    Every modal keeps its Close at the BOTTOM-right too (pinned footers in the
+    maximized dialogs); this is the second, always-reachable escape hatch at the
+    top. ``trailing`` builds extra header widgets (e.g. Refresh / Copy all) that
+    sit between the title and the Close button.
+    """
+    with ui.row().classes("w-full items-center justify-between no-wrap"):
+        ui.label(title).classes("text-h6")
+        with ui.row().classes("items-center no-wrap"):
+            if trailing is not None:
+                trailing()
+            _close_button(dialog)
+
+
+def _footer_close(dialog: Any) -> None:
+    """The bottom-right Close row that closes a maximized modal."""
+    with ui.row().classes("w-full justify-end"):
+        ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+
+
 def _confirm_dialog(
     title: str,
     message: str,
@@ -620,7 +652,7 @@ def _confirm_dialog(
     """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card():
-            ui.label(title).classes("text-h6")
+            _modal_header(dialog, title)
             ui.label(message).classes("text-body1")
             with ui.row().classes("w-full justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close())
@@ -641,7 +673,7 @@ def _rename_dialog(run_id: str) -> None:
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
             dialog.props("persistent")
-            ui.label(f"Rename task — {run_id}").classes("text-h6")
+            _modal_header(dialog, f"Rename task — {run_id}")
             name_input = ui.input(
                 "New name",
                 value=run_id,
@@ -692,29 +724,30 @@ def _info_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").style("overflow-y: auto"):
-            ui.label(f"Task — {run_id}").classes("text-h6")
-            ui.separator()
-            with ui.row().classes("w-full items-center justify-between"):
-                ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-                _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-            ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
-                "min-height: 120px"
-            )
-            if detail.validated_prompt:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                _modal_header(dialog, f"Task — {run_id}")
                 ui.separator()
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
-                    _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
-                    "readonly outlined autogrow"
-                ).style("min-height: 120px")
-            if detail.error:
-                ui.separator()
-                ui.label("Last error").classes("text-subtitle1 text-grey-7")
-                ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10")
-            with ui.row().classes("w-full q-mt-lg justify-end"):
-                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+                        _copy_to_clipboard(detail.prompt or "", "Copy prompt")
+                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props(
+                        "readonly outlined autogrow"
+                    ).style("min-height: 120px")
+                    if detail.validated_prompt:
+                        ui.separator()
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
+                            _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
+                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                            "readonly outlined autogrow"
+                        ).style("min-height: 120px")
+                    if detail.error:
+                        ui.separator()
+                        ui.label("Last error").classes("text-subtitle1 text-grey-7")
+                        ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10")
+                _footer_close(dialog)
     dialog.open()
 
 
@@ -727,34 +760,35 @@ def _history_dialog(run_id: str) -> None:
     """
     events = get_execution_history(run_id)
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label(f"Execution history — {run_id}").classes("text-h6")
-            if not events:
-                ui.label("No executions recorded yet.").classes("text-grey-7 q-pa-md")
-            else:
-                rows = [
-                    {
-                        "time": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                        "type": e.type.capitalize(),
-                        "outcome": e.outcome,
-                        "detail": e.detail or "",
-                    }
-                    for e in events
-                ]
-                columns = [
-                    {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
-                    {"name": "type", "label": "Type", "field": "type", "align": "left", "sortable": True},
-                    {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
-                    {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
-                ]
-                ui.table(
-                    rows=rows,
-                    columns=columns,
-                    row_key="time",
-                    pagination={"rowsPerPage": 0},
-                ).classes("w-full")
-            with ui.row().classes("w-full q-mt-md justify-end"):
-                ui.button("Close", on_click=dialog.close).props("color=grey-7 flat")
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                _modal_header(dialog, f"Execution history — {run_id}")
+                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
+                    if not events:
+                        ui.label("No executions recorded yet.").classes("text-grey-7 q-pa-md")
+                    else:
+                        rows = [
+                            {
+                                "time": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                                "type": e.type.capitalize(),
+                                "outcome": e.outcome,
+                                "detail": e.detail or "",
+                            }
+                            for e in events
+                        ]
+                        columns = [
+                            {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
+                            {"name": "type", "label": "Type", "field": "type", "align": "left", "sortable": True},
+                            {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
+                            {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
+                        ]
+                        ui.table(
+                            rows=rows,
+                            columns=columns,
+                            row_key="time",
+                            pagination={"rowsPerPage": 0},
+                        ).classes("w-full")
+                _footer_close(dialog)
     dialog.open()
 
 
@@ -779,8 +813,7 @@ def _error_dialog(run_id: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label(f"Error details — {run_id}").classes("text-h6")
+                _modal_header(dialog, f"Error details — {run_id}")
                 if detail.error:
                     ui.textarea(value=detail.error).classes("w-full grow font-mono text-caption").props(
                         "readonly outlined"
@@ -815,8 +848,7 @@ def _error_dialog(run_id: str) -> None:
                             row_key="time",
                             pagination={"rowsPerPage": 0},
                         ).classes("w-full")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+                _footer_close(dialog)
     dialog.open()
 
 
@@ -842,36 +874,38 @@ def _script_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh; overflow-y: auto"):
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
-            with ui.column().classes("w-full items-stretch"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label(f"Generated script — {run_id}").classes("text-h6")
-                    _copy_to_clipboard(
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                _modal_header(
+                    dialog,
+                    f"Generated script — {run_id}",
+                    lambda: _copy_to_clipboard(
                         f"Prompt:\n{detail.prompt or ''}\n\n"
                         f"Validated prompt:\n{detail.validated_prompt or ''}\n\n"
                         f"Script:\n{detail.script}",
                         "Copy all",
-                    )
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-                    _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props("readonly outlined autogrow").style(
-                    "min-height: 80px"
+                    ),
                 )
-                if detail.validated_prompt:
+                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
                     with ui.row().classes("w-full items-center justify-between"):
-                        ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
-                        _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                    ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                        ui.label("Prompt").classes("text-subtitle1 text-grey-7")
+                        _copy_to_clipboard(detail.prompt or "", "Copy prompt")
+                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props(
                         "readonly outlined autogrow"
                     ).style("min-height: 80px")
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("Script").classes("text-subtitle1 text-grey-7")
-                    _copy_to_clipboard(detail.script, "Copy script")
-                ui.code(detail.script, language="python").classes("w-full")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+                    if detail.validated_prompt:
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
+                            _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
+                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                            "readonly outlined autogrow"
+                        ).style("min-height: 80px")
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Script").classes("text-subtitle1 text-grey-7")
+                        _copy_to_clipboard(detail.script, "Copy script")
+                    ui.code(detail.script, language="python").classes("w-full")
+                _footer_close(dialog)
     dialog.open()
 
 
@@ -883,16 +917,113 @@ def _format_value(value: Any) -> str:
     return text if len(text) <= 200 else text[:200] + "…"
 
 
-def _entity_section(title: str, entities: list[Any], include_restored: bool = False) -> None:
-    """Render one touch-set section (modified/created/deleted) as a table, if non-empty."""
+def _entity_url(shared_id: str, language: str | None) -> str | None:
+    """The controlled instance's public URL for one entity row, or None if unknown.
+
+    Uwazi serves an entity at ``/<language>/entity/<sharedId>``; the language
+    falls back to ``en`` when the row's locale is unknown. Returns None when
+    ``UWAZI_URL`` is not configured, so the caller omits the link instead of
+    rendering a broken one.
+    """
+    if _CONTROLLED_UWAZI_URL == "not configured":
+        return None
+    return f"{_CONTROLLED_UWAZI_URL.rstrip('/')}/{language or 'en'}/entity/{shared_id}"
+
+
+def _merge_changes(writes: list[Any]) -> list[PropertyChange]:
+    """Merge one entity's applied writes into one property list (record order).
+
+    A property touched by several writes keeps the BEFORE of the first write
+    that touched it (the pre-run value) and the AFTER of the last (the surviving
+    value), so the table shows the net effect of the run rather than each step.
+    """
+    order: list[str] = []
+    before: dict[str, str] = {}
+    after: dict[str, str] = {}
+    for write in writes:
+        for change in build_property_changes(write):
+            if change.property not in before:
+                order.append(change.property)
+                before[change.property] = change.before
+            after[change.property] = change.after
+    return [
+        PropertyChange(
+            property=name,
+            before=before[name],
+            after=after[name],
+            changed=before[name] != after[name],
+        )
+        for name in order
+    ]
+
+
+def _change_summary(changes: list[PropertyChange]) -> str:
+    """One-line summary of the changed properties, truncated with a remainder count."""
+    changed = [c.property for c in changes if c.changed]
+    if not changed:
+        return "—"
+    shown: list[str] = []
+    for name in changed:
+        if shown and len(", ".join([*shown, name])) > 60:
+            break
+        shown.append(name)
+    remaining = len(changed) - len(shown)
+    text = ", ".join(shown)
+    return f"{text} (+{remaining} more)" if remaining else text
+
+
+def _row_language(identity_language: str | None, writes: list[Any]) -> str | None:
+    """The row locale to use for an entity's link and segmentation fetch.
+
+    The identity's language wins. A created entity's identity carries none
+    (Uwazi mints the row; we only learn its sharedId), so the write that created
+    it supplies the language the script asked for. None when neither knows.
+    """
+    if identity_language:
+        return identity_language
+    return next((w.language for w in writes if w.language), None)
+
+
+def _entity_section(
+    title: str,
+    entities: list[Any],
+    writes_by_sid: dict[str, list[Any]],
+    titles: dict[str, str],
+    include_restored: bool = False,
+    show_changes: bool = True,
+    show_segmentation: bool = True,
+) -> Any:
+    """Render one touch-set section (modified/created/deleted) as a table, if non-empty.
+
+    Rows prefer the entity title over the shared id, carry the controlled
+    instance's URL for the open-in-Uwazi icon, and summarize the properties the
+    run changed for that entity. The emitted events (``changes``,
+    ``segmentation``) are wired by the caller, which owns the run's data.
+
+    ``show_changes`` is off for deleted entities (the run removed their metadata
+    with the row) and ``show_segmentation`` likewise (their stored files are
+    gone, so the fetch could only fail).
+    """
     if not entities:
-        return
+        return None
     ui.label(title).classes("text-subtitle1 q-mt-md")
     columns = [
-        {"name": "shared_id", "label": "Shared ID", "field": "shared_id", "align": "left", "sortable": True},
-        {"name": "internal_id", "label": "Internal ID", "field": "internal_id", "align": "left", "sortable": True},
-        {"name": "language", "label": "Language", "field": "language", "align": "left", "sortable": True},
+        {
+            "name": "title",
+            "label": "Title",
+            "field": "title",
+            "align": "left",
+            "sortable": True,
+            "style": "max-width: 320px; white-space: normal; word-break: break-word",
+        },
     ]
+    if show_changes:
+        columns.append({"name": "changes", "label": "Changes", "field": "changes", "align": "left", "sortable": True})
+    columns.append({"name": "language", "label": "Language", "field": "language", "align": "left", "sortable": True})
+    if show_segmentation:
+        columns.append(
+            {"name": "segmentation", "label": "Segmentation", "field": "segmentation", "align": "center", "sortable": False}
+        )
     if include_restored:
         columns.append(
             {
@@ -903,17 +1034,64 @@ def _entity_section(title: str, entities: list[Any], include_restored: bool = Fa
                 "sortable": False,
             }
         )
+    columns.append({"name": "shared_id", "label": "Shared ID", "field": "shared_id", "align": "left", "sortable": True})
+
     rows = []
-    for e in entities:
+    for entity in entities:
+        shared_id = entity.shared_id
+        writes = writes_by_sid.get(shared_id, [])
+        changes = _merge_changes(writes)
+        language = _row_language(entity.language, writes)
         row = {
-            "shared_id": e.shared_id,
-            "internal_id": e.internal_id or "—",
-            "language": e.language or "—",
+            "shared_id": shared_id,
+            "title": titles.get(shared_id) or shared_id,
+            "url": _entity_url(shared_id, language),
+            "language": language or "—",
+            "language_raw": language or "en",
+            "changes": _change_summary(changes) if show_changes else "—",
+            "has_changes": any(c.changed for c in changes),
         }
         if include_restored:
-            row["restored_shared_id"] = e.restored_shared_id or "—"
+            row["restored_shared_id"] = entity.restored_shared_id or "—"
         rows.append(row)
-    ui.table(rows=rows, columns=columns, row_key="shared_id", pagination={"rowsPerPage": 0}).classes("w-full")
+
+    table = ui.table(rows=rows, columns=columns, row_key="shared_id", pagination={"rowsPerPage": 0}).classes("w-full")
+    table.add_slot(
+        "body-cell-title",
+        """
+        <q-td :props="props">
+            <span>{{ props.row.title }}</span>
+            <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener"
+               style="margin-left:8px" title="Open in Uwazi">
+                <q-icon name="open_in_new" size="16px" />
+            </a>
+        </q-td>
+        """,
+    )
+    if show_changes:
+        table.add_slot(
+            "body-cell-changes",
+            """
+            <q-td :props="props">
+                <span>{{ props.row.changes }}</span>
+                <q-btn v-if="props.row.has_changes" dense flat icon="difference" color="primary"
+                       title="Show changed properties"
+                       @click="$parent.$emit('changes', props.row)" />
+            </q-td>
+            """,
+        )
+    if show_segmentation:
+        table.add_slot(
+            "body-cell-segmentation",
+            """
+            <q-td :props="props" class="text-no-wrap">
+                <q-btn dense flat icon="description" color="grey-8"
+                       title="View document segmentation"
+                       @click="$parent.$emit('segmentation', props.row)" />
+            </q-td>
+            """,
+        )
+    return table
 
 
 def _rewired_section(rewired: list[Any]) -> None:
@@ -945,6 +1123,108 @@ def _files_section(files: list[Any]) -> None:
     ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
 
 
+def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
+    """Modal: one entity's property changes (before → after), from run data only.
+
+    Opened from a row's diff button; the rows were computed when the results
+    dialog was built, so this is pure rendering — no fetch, no I/O.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full").style("min-width: 600px; height: 85dvh"):
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                _modal_header(dialog, f"Changes — {row['title']}")
+                ui.label(f"sharedId {row['shared_id']}").classes("text-caption text-grey-7")
+                columns = [
+                    {"name": "property", "label": "Property", "field": "property", "align": "left", "sortable": True},
+                    {"name": "before", "label": "Before", "field": "before", "align": "left", "sortable": False},
+                    {"name": "after", "label": "After", "field": "after", "align": "left", "sortable": False},
+                ]
+                rows = [
+                    {
+                        "property": c.property,
+                        "before": c.before,
+                        "after": c.after,
+                        "changed": c.changed,
+                        "cls": "text-weight-medium" if c.changed else "text-grey-7",
+                    }
+                    for c in changes
+                ]
+                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
+                    table = ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+                    table.add_slot(
+                        "body-cell-property",
+                        """
+                        <q-td :props="props">
+                            <span :class="props.row.cls">{{ props.row.property }}</span>
+                        </q-td>
+                        """,
+                    )
+                    table.add_slot(
+                        "body-cell-after",
+                        """
+                        <q-td :props="props">
+                            <span :class="props.row.cls">{{ props.row.after }}</span>
+                        </q-td>
+                        """,
+                    )
+                _footer_close(dialog)
+    dialog.open()
+
+
+def _segmentation_dialog(row: dict[str, Any]) -> None:
+    """Modal: one entity's primary-document segmentation, fetched on demand.
+
+    The fetch is the only live Uwazi call this dialog makes (nothing in the run
+    data carries document text). A placeholder shows while the background task
+    runs; failure degrades to an error label rather than a crash.
+    """
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+            dialog.props("maximized")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                _modal_header(dialog, f"Document segmentation — {row['title']}")
+                body = ui.column().classes("w-full grow").style("overflow-y: auto")
+                with body:
+                    ui.linear_progress(show_value=False).classes("w-full")
+                    ui.label(f"Fetching segmentation for {row['shared_id']} ({row['language_raw']})…").classes(
+                        "text-body2 text-grey-7"
+                    )
+                _footer_close(dialog)
+                background_tasks.create(_load_segmentation(body, row), name=f"segmentation {row['shared_id']}")
+    dialog.open()
+
+
+async def _load_segmentation(body: Any, row: dict[str, Any]) -> None:
+    """Fetch + render one entity's segmentation into an already-open dialog body."""
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        _render_segmentation_error(body, RuntimeError("not logged in to Uwazi"))
+        return
+    try:
+        segmentation = await get_entity_segmentation(user, password, row["shared_id"], row["language_raw"])
+    except Exception as exc:  # noqa: BLE001 — degrade to an error label, never crash the UI
+        _render_segmentation_error(body, exc)
+        return
+    body.clear()
+    with body:
+        page_count = max((p.page_number for p in segmentation.paragraphs), default=0)
+        ui.label(
+            f"{segmentation.filename} — status={segmentation.status}, "
+            f"pages={page_count}, paragraphs={len(segmentation.paragraphs)}"
+        ).classes("text-subtitle1 text-grey-7")
+        ordered = sorted(segmentation.paragraphs, key=lambda p: (p.page_number, p.top, p.left))
+        text = "\n".join(f"[page {p.page_number}] {p.text}" for p in ordered) or "(no paragraphs)"
+        ui.code(text).classes("w-full").style("white-space: pre-wrap")
+
+
+def _render_segmentation_error(body: Any, exc: Exception) -> None:
+    """Replace the dialog body with a readable failure (the tool's degrade-to-string spirit)."""
+    body.clear()
+    with body:
+        ui.label(f"{type(exc).__name__}: {exc}").classes("text-body2 text-red-10").style("white-space: pre-wrap")
+
+
 def _results_dialog(run_id: str) -> None:
     """Modal: the run's execution results — its `result` value and touch-set.
 
@@ -953,6 +1233,12 @@ def _results_dialog(run_id: str) -> None:
     the manifest's touch-set via ``get_run_results``; a run with no touch-set
     (never executed) shows an empty state. The script's `result` value (the
     answer for a query task, or the summary for a mutation task) is shown first.
+
+    Each entity row shows its title (with an open-in-Uwazi icon), a summary of
+    the properties the run changed (with a button opening the before/after list),
+    the row language, and a button that fetches that entity's document
+    segmentation on demand. Titles and diffs come from run data only; the
+    segmentation is the single live fetch, and only when asked for.
 
     The dialog is maximized (top to bottom): the result + summary + section
     tables fill the space between a pinned title and a pinned footer, scrolling
@@ -964,12 +1250,33 @@ def _results_dialog(run_id: str) -> None:
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
 
+    writes_by_sid: dict[str, list[Any]] = {}
+    for write in results.applied_writes:
+        writes_by_sid.setdefault(write.shared_id, []).append(write)
+
+    def _on_changes(e: Any) -> None:
+        row = e.args
+        changes = _merge_changes(writes_by_sid.get(row["shared_id"], []))
+        if not changes:
+            ui.notify("No property changes recorded for this entity.", type="warning")
+            return
+        _changes_dialog(row, changes)
+
+    def _on_segmentation(e: Any) -> None:
+        _segmentation_dialog(e.args)
+
+    def _section(title: str, entities: list[Any], **kwargs: Any) -> None:
+        table = _entity_section(title, entities, writes_by_sid, results.titles, **kwargs)
+        if table is None:
+            return
+        table.on("changes", _on_changes)
+        table.on("segmentation", _on_segmentation)
+
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label(f"Run results — {run_id}").classes("text-h6")
+                _modal_header(dialog, f"Run results — {run_id}")
                 with ui.column().classes("w-full grow").style("overflow-y: auto"):
                     if results.result is not None:
                         ui.label("Result").classes("text-subtitle1 text-grey-7")
@@ -991,13 +1298,18 @@ def _results_dialog(run_id: str) -> None:
                                 ui.label(label).classes("text-caption text-grey-7")
                     if not any(c for _, c in counts) and results.result is None:
                         ui.label("No results recorded on this run.").classes("text-grey-7 q-pa-md")
-                    _entity_section("Modified entities", results.modified)
-                    _entity_section("Created entities", results.created)
-                    _entity_section("Deleted entities", results.deleted, include_restored=True)
+                    _section("Modified entities", results.modified)
+                    _section("Created entities", results.created)
+                    _section(
+                        "Deleted entities",
+                        results.deleted,
+                        include_restored=True,
+                        show_changes=False,
+                        show_segmentation=False,
+                    )
                     _rewired_section(results.rewired)
                     _files_section(results.deleted_files)
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+                _footer_close(dialog)
     dialog.open()
 
 
@@ -1046,21 +1358,24 @@ def _logs_dialog() -> None:
     while the dialog is open.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full"):
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
-            with ui.row().classes("items-center justify-between q-mb-md"):
-                ui.label("Service Logs").classes("text-h6")
-                with ui.row():
-                    ui.button("Refresh", icon="refresh", on_click=lambda: _refresh_logs(log_area)).props("flat dense")
-                    ui.button("Close", icon="close", on_click=lambda: dialog.close()).props("flat dense")
-            log_area = ui.textarea().classes("w-full").props("readonly autogrow").classes("font-mono text-caption")
-            log_area.style("height: calc(100vh - 140px)")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                with ui.row().classes("w-full items-center justify-between q-mb-md"):
+                    ui.label("Service Logs").classes("text-h6")
+                    with ui.row().classes("items-center no-wrap"):
+                        ui.button("Refresh", icon="refresh", on_click=lambda: _refresh_logs(log_area)).props("flat dense")
+                        _close_button(dialog, dense=True)
+                log_area = (
+                    ui.textarea().classes("w-full grow font-mono text-caption").props("readonly").style("min-height: 0")
+                )
 
-            def _refresh_logs(la: Any) -> None:
-                la.value = "\n".join(_LOG_BUFFER)
+                def _refresh_logs(la: Any) -> None:
+                    la.value = "\n".join(_LOG_BUFFER)
 
-            _refresh_logs(log_area)
-            ui.timer(1.0, lambda: _refresh_logs(log_area))
+                _refresh_logs(log_area)
+                ui.timer(1.0, lambda: _refresh_logs(log_area))
+                _footer_close(dialog)
         dialog.open()
 
 
@@ -1087,17 +1402,18 @@ def _capabilities_dialog() -> None:
     auto-refresh doesn't destroy it. Mirrors ``_logs_dialog``'s modal layout.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full"):
+        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
-            with ui.row().classes("items-center justify-between q-mb-md"):
-                ui.label("Example Tasks").classes("text-h6")
-                ui.button("Close", icon="close", on_click=lambda: dialog.close()).props("flat dense")
-            content = ui.column().classes("w-full q-pr-md").style("height: calc(100vh - 120px); overflow-y: auto")
-            with content:
-                for title, prompt in _EXAMPLE_TASKS:
-                    with ui.card().classes("w-full"):
-                        ui.label(title).classes("text-subtitle1 text-bold")
-                        ui.label(prompt).classes("text-body2 text-grey-7")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                with ui.row().classes("w-full items-center justify-between q-mb-md"):
+                    ui.label("Example Tasks").classes("text-h6")
+                    _close_button(dialog, dense=True)
+                with ui.column().classes("w-full grow q-pr-md").style("overflow-y: auto"):
+                    for title, prompt in _EXAMPLE_TASKS:
+                        with ui.card().classes("w-full"):
+                            ui.label(title).classes("text-subtitle1 text-bold")
+                            ui.label(prompt).classes("text-body2 text-grey-7")
+                _footer_close(dialog)
         dialog.open()
 
 
@@ -1112,7 +1428,7 @@ def _clear_cache_dialog() -> None:
     """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-            ui.label("Clear cache").classes("text-h6")
+            _modal_header(dialog, "Clear cache")
             ui.label(
                 "Clear the persistent file/entity cache? The next task will "
                 "re-fetch entity data and file bytes from Uwazi instead of "
@@ -1181,6 +1497,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
+        _modal_header(dialog, "New task")
         with ui.stepper() as stepper:
             state["_dialog"] = dialog
             state["_stepper"] = stepper
@@ -1188,6 +1505,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
             _wizard_step_prompt(state, stepper, dialog, prefill=prefill_prompt)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
+        _footer_close(dialog)
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")

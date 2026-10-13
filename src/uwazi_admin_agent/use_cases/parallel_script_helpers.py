@@ -372,6 +372,7 @@ def _update_parallel(
         dumped = _dump_write_results(values)
         outcome = _report_write_outcome(dumped, executor)
         _invalidate_entity_reads(tool_cache)
+        intercept.record_applied_updates(entities_dicts, dumped, lang)
         intercept._invalidate(ids)
         intercept._emit("update", ids)
         _log_write_batch("update_entities_parallel", outcome, len(ids), started)
@@ -401,6 +402,7 @@ def _create_parallel(
         outcome = _report_write_outcome(dumped, executor)
         _invalidate_entity_reads(tool_cache)
         intercept._record_created(dumped)  # post-create, exactly like the sequential intercept
+        intercept.record_applied_creates(entities_dicts, dumped, lang)
         created_ids = [r["shared_id"] for r in dumped if r.get("success") and r.get("shared_id")]
         intercept._emit("create", created_ids)
         _log_write_batch("create_entities_parallel", outcome, len(creates), started)

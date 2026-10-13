@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,47 @@ class RewiredRelationship(BaseModel):
     entity: EntityIdentity = Field(description="The entity whose relationship was rewired.")
     property_name: str = Field(description="The relationship field/property that changed.")
     before: Any = Field(description="The raw before-state of that relationship field.")
+
+
+class AppliedWrite(BaseModel):
+    """One write the executed script applied to one entity row, with its before-state.
+
+    Recorded by :class:`~uwazi_admin_agent.use_cases.backup_intercept.BackupIntercept`
+    at execute time from the very payload the generated script sent, so the results
+    window can show per-entity property diffs without any HTTP call or snapshot
+    parsing. ``metadata``/``metadata_before`` are AgentEntity-shaped raw metadata
+    dicts; ``metadata_before`` is deliberately restricted to the property keys
+    present in ``metadata`` — those are the only keys the diff compares.
+
+    Not a revert record: revert rides the snapshots. This is the human-readable
+    "what changed" log.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op: Literal["update", "create", "publish", "unpublish"] = Field(description="Which mutating call produced this write.")
+    shared_id: str = Field(description="The Uwazi sharedId the write targeted.")
+    language: str | None = Field(default=None, description="The row locale the write used, when known.")
+    title: str | None = Field(
+        default=None,
+        description="The title the script set; None for publish ops and for partial (metadata-only) updates.",
+    )
+    title_before: str | None = Field(
+        default=None,
+        description="The raw `title` before the write; None for creates (nothing existed).",
+    )
+    template_name: str | None = Field(default=None, description="The entity template name, when the write carried it.")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="The applied metadata payload (AgentEntity-shaped); empty for publish ops.",
+    )
+    metadata_before: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The raw before-metadata, restricted to the property keys present in "
+            "`metadata` — the only keys the diff compares. Empty for creates."
+        ),
+    )
 
 
 class MigrationManifest(BaseModel):
@@ -84,6 +125,15 @@ class MigrationManifest(BaseModel):
             "joins, successful deletes only)."
         ),
     )
+    applied_writes: list[AppliedWrite] = Field(
+        default_factory=list,
+        description=(
+            "Every write the script actually applied, with its before-state — the "
+            "results window's per-entity property diff source. Recorded by BackupIntercept "
+            "from the payload the script sent, so the diff needs no HTTP call and no "
+            "snapshot parsing. Empty for runs executed before this field existed."
+        ),
+    )
     status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
     last_executed_at: datetime | None = Field(
         default=None,
@@ -123,4 +173,5 @@ class MigrationManifest(BaseModel):
         self.created = []
         self.deleted = []
         self.deleted_files = []
+        self.applied_writes = []
         self.result = None

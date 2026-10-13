@@ -29,16 +29,18 @@ from uwazi_admin_agent.configuration import (
 )
 from uwazi_admin_agent.domain.audit_record import AuditRecord
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
-from uwazi_admin_agent.domain.manifest import MigrationManifest, RewiredRelationship, RunStatus
+from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
+from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.use_cases.clarify_prompt_use_case import ClarifyPromptUseCase
 from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
+from uwazi_api.domain.segmentation import Segmentation
 
 
 class GenerateError(Exception):
@@ -98,7 +100,9 @@ class RunResults:
     the full identity lists from the manifest so the UI can show exactly which
     entities were modified/created/deleted, which relationships were rewired,
     and which files were deleted. It also carries the script's ``result`` value
-    (the answer for a query task, or the summary for a mutation task).
+    (the answer for a query task, or the summary for a mutation task), the
+    ``applied_writes`` (what each write did, with before-values — the diff
+    source), and ``titles`` (shared_id → title, resolved without any HTTP call).
     """
 
     run_id: str
@@ -109,6 +113,8 @@ class RunResults:
     deleted: list[EntityIdentity]
     rewired: list[RewiredRelationship]
     deleted_files: list[DeletedFile]
+    applied_writes: list[AppliedWrite]
+    titles: dict[str, str]
 
 
 def _touch_counts(manifest: MigrationManifest) -> tuple[int, int, int, int]:
@@ -183,8 +189,15 @@ def get_run_results(run_id: str) -> RunResults:
     Reads the manifest directly (not the count-reduced :func:`get_run`) so a
     reverted run still shows its full touch-set — the manifest keeps the lists
     for post-revert verification even though the table counts read as 0.
+
+    Also resolves each touched entity's title with zero HTTP calls: recorded
+    applied writes carry the title the script set, and anything still missing
+    (a legacy run that recorded no writes, or an entity only touched by a
+    rewire/delete) is read out of that entity's on-disk before-snapshot. A
+    missing snapshot is skipped — the UI falls back to the shared id.
     """
-    manifest = build_backup_store().load_manifest(run_id)
+    store = build_backup_store()
+    manifest = store.load_manifest(run_id)
     return RunResults(
         run_id=manifest.run_id,
         status=manifest.status,
@@ -194,7 +207,49 @@ def get_run_results(run_id: str) -> RunResults:
         deleted=manifest.deleted,
         rewired=manifest.rewired,
         deleted_files=manifest.deleted_files,
+        applied_writes=manifest.applied_writes,
+        titles=_resolve_titles(store, run_id, manifest),
     )
+
+
+def _resolve_titles(store: BackupStorePort, run_id: str, manifest: MigrationManifest) -> dict[str, str]:
+    """Build the shared_id → title map for a run, from run data only (no HTTP).
+
+    Two sources, in order: the titles the applied writes recorded (what the
+    script set, always current), then the raw ``title`` inside each touched
+    entity's before-snapshot (covers legacy runs and entities this run only
+    rewired or deleted). Entities created by this run have no snapshot — their
+    title comes from the create's applied write.
+    """
+    titles: dict[str, str] = {}
+    for write in manifest.applied_writes:
+        if write.title:
+            titles[write.shared_id] = write.title
+    created_ids = {e.shared_id for e in manifest.created}
+    touched = [e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)]
+    for shared_id in touched:
+        if shared_id in titles or shared_id in created_ids:
+            continue
+        try:
+            snapshot = store.load_snapshot(run_id, shared_id)
+        except Exception:  # noqa: BLE001 — a missing/broken snapshot must not break the dialog
+            continue
+        title = (snapshot.raw or {}).get("title")
+        if isinstance(title, str) and title:
+            titles[shared_id] = title
+    return titles
+
+
+async def get_entity_segmentation(user: str, password: str, shared_id: str, language: str) -> Segmentation:
+    """Fetch one entity's primary-document segmentation (the results window's viewer).
+
+    Resolves the entity's document for ``language`` on the controlled instance and
+    returns its segmentation. The repository is the runtime's cache-wrapped
+    :class:`SegmentationRepositoryPort`, so a repeat view is served from the
+    persistent cache. Raises on any failure — the caller degrades to an error label.
+    """
+    runtime = build_runtime(user=user, password=password)
+    return await runtime.deps.segmentation_repository.get_by_shared_id(shared_id, language)
 
 
 def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
@@ -414,19 +469,6 @@ def _resolve_on_error(on_error: str | None) -> OnErrorPolicy:
 
 
 __all__ = [
-    "RunDetail",
-    "RunSummary",
-    "create_and_generate",
-    "delete_run",
-    "rename_run",
-    "execute_run",
-    "get_run",
-    "list_runs",
-    "revert_run",
-]
-
-
-__all__ = [
     "GenerateError",
     "RevertVerificationError",
     "RunDetail",
@@ -438,6 +480,7 @@ __all__ = [
     "delete_run",
     "rename_run",
     "execute_run",
+    "get_entity_segmentation",
     "get_run",
     "get_run_audit",
     "get_run_results",
