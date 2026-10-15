@@ -17,6 +17,7 @@ from uwazi_api.use_cases.repositories.settings_repository import SettingsReposit
 from uwazi_api.use_cases.repositories.stats_repository import StatsRepository
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
+from uwazi_api.use_cases.repositories.translation_repository import TranslationRepository
 from uwazi_api.use_cases.thesauri_from_dataframe_use_case import ThesauriFromDataframeUseCase
 
 
@@ -46,6 +47,7 @@ class UwaziClient:
         self._pages_repo = PagesRepository(self.http)
         self._menu_links_repo = MenuLinksRepository(self.http)
         self._segmentation_repo = SegmentationRepository(self.http)
+        self._translation_repo = TranslationRepository(self.http)
 
         # Use cases / services
         self._file_service = FileService(self._file_repo, self._entity_repo, self._segmentation_repo)
@@ -108,3 +110,7 @@ class UwaziClient:
     @property
     def stats(self) -> StatsRepository:
         return self._stats_repo
+
+    @property
+    def translations(self) -> TranslationRepository:
+        return self._translation_repo

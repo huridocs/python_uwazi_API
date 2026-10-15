@@ -55,3 +55,18 @@ class SegmentationNotFoundError(DomainError):
 
 class SegmentationError(DomainError):
     pass
+
+
+class TranslationError(DomainError):
+    """Raised when a ``/api/translationService`` call does not yield a translation."""
+
+
+class TranslationNotAvailableError(TranslationError):
+    """Raised when Uwazi refuses the translation endpoint itself.
+
+    ``POST /api/translationService`` is guarded by ``needsAuthorization`` and
+    by the ``translationService`` feature flag (a disabled flag answers ``403
+    {"error": "Feature not available"}`` before the controller ever runs). A
+    401/403/404 here means the endpoint is unreachable for this user/tenant,
+    not that the translation itself failed.
+    """
