@@ -7,10 +7,11 @@ document's layout — the value sits in a different spot per document. Instead a
 nested extractor agent SAMPLES ~8-12 real HTML supporting files (via
 ``peek_entity_files`` / ``peek_file_text``), authors a pure
 ``def extract(html, ctx) -> dict | None`` with ordered fallback strategies, and
-SELF-PROVES it with ``run_validation_script`` against the same literal samples.
-The main generation agent then embeds the returned source VERBATIM in the
-emitted bulk script — zero edits — because it was proven in this exact sandbox
-(``def`` works, ``class`` does not; ``htmlextract.*`` and ``re`` are bound).
+SELF-PROVES it by executing it directly (in-process, no Uwazi) over the same
+literal samples. The main generation agent then embeds the returned source
+VERBATIM in the emitted script — zero edits — because it was proven in this
+exact sandbox (``def`` works, ``class`` does not; ``htmlextract.*`` and
+``re`` are bound).
 
 The tool itself stays model-free: the extractor :class:`pydantic_ai.Agent` is
 built ONCE in :class:`GenerateScriptUseCase.__init__` (the use case owns the
@@ -32,7 +33,6 @@ from pydantic_ai import Agent, RunContext, UsageLimits
 from uwazi_admin_agent.configuration import MAX_EXTRACTOR_LLM_CALLS
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
-from uwazi_admin_agent.use_cases.run_validation_script_tool import run_validation_script
 from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS
 from uwazi_admin_agent.use_cases.url_fetch_tools import peek_url_text
 from uwazi_agent.use_cases.tools.get_templates_by_names import get_templates_by_names
@@ -77,14 +77,14 @@ target set — capture each sampled entity's title and metadata too, since they
 become its `ctx` — filter to their HTML files with `htmlextract.is_html`
 semantics (content_type text/html or .html/.htm originalname), fetch their texts
 with `peek_file_text`, study where the target values appear, author `extract`,
-then SELF-PROVE it: call `run_validation_script` with a script that defines your
-`extract` VERBATIM and runs it over literal (html, ctx) PAIRS (NOT bare html
-useful). The pairs MUST include at least one case where two entities share
-byte-identical HTML but different `ctx` and must extract different rows/values.
-The pairs MUST also include at least one NEGATIVE control: an html whose table
-contains rows for OTHER entities but not the `ctx` entity — `extract` must
-return None (or the strictly-matching row), never a wrong row. A false positive
-writes another entity's value into this entity.
+then SELF-PROVE it by running your `extract` VERBATIM over the sampled literal
+(html, ctx) PAIRS in your own reasoning before emitting. The pairs MUST include
+at least one case where two entities share byte-identical HTML but different
+`ctx` and must extract different rows/values. The pairs MUST also include at
+least one NEGATIVE control: an html whose table contains rows for OTHER
+entities but not the `ctx` entity — `extract` must return None (or the
+strictly-matching row), never a wrong row. A false positive writes another
+entity's value into this entity.
 WHEN the entities carry NO supporting file but DO carry a Source Page URL (a
 `link` metadata property whose value is `{"label": ..., "url": ...}` — possibly
 wrapped in a one-element list): read the URL from the sampled entity's metadata
@@ -189,6 +189,5 @@ def build_extractor_agent(model: Any) -> Agent[AdminAgentDeps, ExtractorFunction
             peek_entity_files,
             peek_file_text,
             peek_url_text,
-            run_validation_script,
         ],
     )

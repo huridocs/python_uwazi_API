@@ -50,18 +50,21 @@ import re
 import time
 import traceback
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
 from uwazi_admin_agent.domain.file_deletion import group_deletions_by_entity
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
+from uwazi_admin_agent.domain.llm_budget import LlmLedger
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort, UrlFetchError
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
+from uwazi_admin_agent.use_cases.llm_script_helpers import build_llm_script_helpers, selection_llm_refusal
 from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
     assert_unique_deletion_requests,
@@ -267,6 +270,85 @@ def filter_in_scope_by_template(in_scope: list[AgentEntity], template_name: str 
 # The three search modes both bound read helpers share (the engine lives in
 # ``_run_search_mode``; ``by_ids`` is a ``query_entities``-only mode).
 _SEARCH_MODES: tuple[str, ...] = ("by_text", "by_filter", "by_template")
+
+
+def scope_read_result(result: Any, scope: set[str]) -> Any:
+    """Post-filter a bound read helper's return value to ``scope`` (pure).
+
+    The subset-prediction mechanism: the SAME script runs unchanged, but a
+    ``query_entities``/``query_entities_full`` call sees only the selected
+    entities. Silent drop is the semantic (a script that asks for the whole
+    template gets its scope's slice) — deliberately not an exception, because
+    the script's own logic is scope-blind by design.
+
+    Handles every shape the helpers return: the error string passes through
+    untouched, ``by_ids``/``query_entities_full`` return ``list[dict]``, and the
+    search modes return a ``SimpleNamespace(summary, examples)`` whose summary
+    id list + count are re-derived. Anything else (an unwired stub's raise never
+    reaches here) is returned as-is.
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict) and str(item.get("shared_id") or "") in scope]
+    if isinstance(result, SimpleNamespace):
+        examples = [
+            example
+            for example in (result.examples or [])
+            if isinstance(example, dict) and str(example.get("shared_id") or "") in scope
+        ]
+        summary = result.summary
+        ids = filter_ids_to_scope(list(summary.shared_ids), scope)
+        return SimpleNamespace(summary=summary.model_copy(update={"shared_ids": ids, "count": len(ids)}), examples=examples)
+    return result
+
+
+def _scoped_read_wrapper(base: Any, scope: set[str]) -> Any:
+    """Wrap a bound read helper so its result is post-filtered to ``scope``."""
+
+    def scoped(*args: Any, **kwargs: Any) -> Any:
+        return scope_read_result(base(*args, **kwargs), scope)
+
+    return scoped
+
+
+def _scoped_entity_reads(
+    namespace: dict[str, Any],
+    scope: set[str],
+) -> None:
+    """Post-filter a dry-run namespace's entity reads to ``scope`` IN PLACE.
+
+    Only the dry run takes a subset scope (predictions are the rehearsal), so
+    this rewrites the two discovery helpers plus the two per-entity readers:
+
+    - ``query_entities`` / ``query_entities_full``: results filtered (see
+      :func:`scope_read_result`);
+    - ``get_entity_files``: ``[]`` for a sharedId outside the scope (the script's
+      per-entity loop must skip it exactly as it would for an entity with no
+      files);
+    - ``get_segmentation``: ``None`` for a sharedId outside the scope (same
+      "missing, continue" contract the helper already documents).
+    """
+    namespace["query_entities"] = _scoped_read_wrapper(namespace["query_entities"], scope)
+    namespace["query_entities_full"] = _scoped_read_wrapper(namespace["query_entities_full"], scope)
+
+    base_files = namespace["get_entity_files"]
+
+    def get_entity_files(shared_id: str, language: str | None = None) -> Any:
+        if shared_id not in scope:
+            return []
+        return base_files(shared_id, language)
+
+    namespace["get_entity_files"] = get_entity_files
+
+    base_segmentation = namespace["get_segmentation"]
+
+    def get_segmentation(shared_id: str, language: str | None = None) -> Any:
+        if shared_id not in scope:
+            return None
+        return base_segmentation(shared_id, language)
+
+    namespace["get_segmentation"] = get_segmentation
 
 
 def full_mode_usage_error(mode: str) -> str:
@@ -884,6 +966,7 @@ def build_exec_namespace(
     dummy_entities: list[AgentEntity],
     tool_cache: Any,
     default_language: str,
+    target_shared_id: str | None = None,
 ) -> dict[str, Any]:
     """Construct the dummy-scoped exec namespace for the candidate script.
 
@@ -892,7 +975,10 @@ def build_exec_namespace(
     reused sync CRUD helpers (from ``_build_sync_crud_functions``) are wrapped to
     refuse out-of-scope ids. The bound stdlib subset and ``SAFE_BUILTINS`` make
     the namespace the §2.1 safety boundary. Returns the namespace dict ready for
-    ``exec``; the caller reads ``namespace["result"]`` afterwards.
+    ``exec``; the caller reads ``namespace["result"]`` afterwards. When
+    ``target_shared_id`` is given it is bound as ``TARGET_SHARED_ID`` (the apply
+    script's one-entity contract, exercised by the validation harness); the
+    default ``None`` still binds the name (create mode reads None).
     """
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
     scoped = _scoped_write_helpers(crud, scope)
@@ -909,6 +995,11 @@ def build_exec_namespace(
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
+    # The APPLY script's contract, exercised by the validation harness: bind
+    # the one-entity target so a candidate apply script is validated under the
+    # same binding the outcome pass / apply use case uses. The dummy harness
+    # passes the first dummy's shared_id (or None for a create-mode script).
+    namespace["TARGET_SHARED_ID"] = target_shared_id
     return namespace
 
 
@@ -1174,6 +1265,9 @@ def build_real_exec_namespace(
     segmentation_repository: SegmentationRepositoryPort | None = None,
     url_fetcher: UrlFetcherPort | None = None,
     throttle: ThrottleController | None = None,
+    llm_runtime: LlmRuntimePort | None = None,
+    llm_ledger: LlmLedger | None = None,
+    target_shared_id: str | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
 
@@ -1212,6 +1306,9 @@ def build_real_exec_namespace(
       for the whole run; ``throttle`` defaults to a fresh controller so bare
       test/inspection builds stay valid, while :class:`ExecuteScriptUseCase`
       passes its own so the allowance persists across every helper call.
+    - ``TARGET_SHARED_ID`` (the apply script's contract): when a sharedId string
+      is given every discovery helper is post-filtered to that ONE entity (the
+      apply path); ``None`` binds ``TARGET_SHARED_ID = None`` (create mode).
     """
     crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
     controller = throttle if throttle is not None else ThrottleController()
@@ -1232,9 +1329,13 @@ def build_real_exec_namespace(
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),
+        **build_llm_script_helpers(llm_runtime, llm_ledger, loop),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
+    if target_shared_id is not None:
+        _scoped_entity_reads(namespace, {target_shared_id})
+    namespace["TARGET_SHARED_ID"] = target_shared_id
     return namespace
 
 
@@ -1346,6 +1447,12 @@ def build_dry_run_namespace(
     segmentation_repository: SegmentationRepositoryPort | None = None,
     url_fetcher: UrlFetcherPort | None = None,
     throttle: ThrottleController | None = None,
+    llm_runtime: LlmRuntimePort | None = None,
+    llm_ledger: LlmLedger | None = None,
+    llm_progress: Callable[[int], None] | None = None,
+    entity_scope: set[str] | None = None,
+    target_shared_id: str | None = None,
+    apply_mode: bool = False,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
 
@@ -1372,10 +1479,26 @@ def build_dry_run_namespace(
       ``refuse_file`` op per explicit-deletion refusal, reason included) —
       the operator's review copy for operations whose undo is a re-upload,
       not an un-record.
+    - ``TARGET_SHARED_ID``: when ``target_shared_id`` is a sharedId string the
+      APPLY script runs against that ONE entity — every discovery helper is
+      post-filtered to it (see :func:`_scoped_entity_reads`) so reads/writes can
+      only ever touch that entity. ``None`` = the selection (discovery) mode:
+      ``TARGET_SHARED_ID`` is bound as ``None`` and nothing is scoped.
+    - LLM helpers: bound ONLY when BOTH ``llm_runtime`` and ``llm_ledger`` are
+      given AND ``apply_mode`` is True — a budgeted pass that lets the script's
+      own ``llm_complete``/``llm_map`` calls through (the planning pass wires
+      the creation-time budget this way). Without them the helpers are
+      :func:`selection_llm_refusal` loud stubs — right for an LLM-free pass,
+      and the designed failure for one that needs the LLM without a budget.
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
     dry_writes = _dry_run_write_helpers(dry_run_records)
+    if apply_mode and llm_runtime is not None and llm_ledger is not None:
+        llm_helpers = build_llm_script_helpers(llm_runtime, llm_ledger, loop, progress=llm_progress)
+    else:
+        # Selection mode (or an apply run without budget wiring): loud refusals.
+        llm_helpers = selection_llm_refusal()
     namespace: dict[str, Any] = {
         "query_entities": (
             _dry_run_query_entities_unwired() if entity_api is None else _real_sync_query_entities_factory(entity_api, loop)
@@ -1400,9 +1523,15 @@ def build_dry_run_namespace(
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),
+        **llm_helpers,
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
+    if entity_scope is not None:
+        _scoped_entity_reads(namespace, set(entity_scope))
+    if target_shared_id is not None:
+        _scoped_entity_reads(namespace, {target_shared_id})
+    namespace["TARGET_SHARED_ID"] = target_shared_id
     return namespace
 
 

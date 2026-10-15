@@ -58,18 +58,53 @@ class UwaziEntityRepository(EntityRepositoryPort):
 
     @override
     async def save_raw(self, raw: dict[str, Any]) -> None:
-        # POST /api/entities upserts by (sharedId, locale); the locale cookie
-        # selects the row language (§8). Posting the raw dict preserves fields.
+        """Upsert a raw entity dict via POST /api/entities (the locale cookie picks the row).
+
+        ``POST /api/entities`` is a **merge** over the stored metadata: a key the
+        payload omits keeps its stored value. That matters for revert — restoring
+        a snapshot must also UNDO a property the script ADDED, and a snapshot
+        predates that key, so omitting it would leave the added value live (and
+        post-revert verification would correctly flag the mismatch).
+
+        So the payload explicitly clears every key that exists on the entity now
+        but is absent from the snapshot raw. An empty list is the shape Uwazi
+        accepts for "this property holds nothing" across property types.
+        """
         language = raw.get("language") or "en"
+        payload = await self._with_explicit_clears(raw, language)
         response = self._client.http.post_json(
             url=f"{self._client.http.url}/api/entities",
-            json=raw,
+            json=payload,
             cookies={"locale": language},
         )
         if response.status_code != 200:
             body = response.content.decode("utf-8", errors="replace")
             raise RuntimeError(f"save_raw failed ({response.status_code}): {body}")
         logger.debug("raw saved sharedId={}", raw.get("sharedId"))
+
+    async def _with_explicit_clears(self, raw: dict[str, Any], language: str) -> dict[str, Any]:
+        """Add empty-list entries for keys live now but not in the snapshot raw.
+
+        Best-effort: if the current row cannot be read (e.g. this is a
+        relationship-ref re-save on a row that is momentarily absent), the raw is
+        sent unchanged — the merge cannot have added anything in that case either.
+        """
+        snapshot_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        shared_id = raw.get("sharedId")
+        if not shared_id:
+            return raw
+        try:
+            current = await self.get_raw_by_shared_id(shared_id, language)
+        except Exception as exc:  # noqa: BLE001 — fall back to the plain save
+            logger.debug("save_raw: could not read current row for {} ({})", shared_id, exc)
+            return raw
+        current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+        extra_keys = [key for key in current_metadata if key not in snapshot_metadata]
+        if not extra_keys:
+            return raw
+        logger.info("save_raw: clearing {} key(s) absent from the snapshot for {}", len(extra_keys), shared_id)
+        merged = {**raw, "metadata": {**snapshot_metadata, **{key: [] for key in extra_keys}}}
+        return merged
 
     @override
     async def create_raw(self, raw: dict[str, Any]) -> str:

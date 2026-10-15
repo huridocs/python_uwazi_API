@@ -22,7 +22,7 @@ as the intercept seam stand-in. What is pinned:
 - the dry run RECORDS every would-be delete (op ``delete_file`` with
   shared_id/file_id/originalname/filename) — the audit trail for an operation
   that is not revertable — and never records a kept copy;
-- ``_count_ops``/``DryRunReport``/``_format_result`` surface the new counter.
+- ``_count_ops``/``DryRunReport`` surface the new counter.
 """
 
 import asyncio
@@ -33,7 +33,6 @@ import pytest
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunReport, _count_ops
-from uwazi_admin_agent.use_cases.run_dry_run_script_tool import _format_result
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     ScopeViolationError,
     build_dry_run_namespace,
@@ -359,7 +358,7 @@ def test_dry_run_dedupe_empty_returns_empty() -> None:
 
 def test_count_ops_and_report_surface_would_delete_files() -> None:
     """delete_file records feed the would_delete_files counter (distinct from
-    would_delete entities), and _format_result renders it for review."""
+    would_delete entities)."""
     records = [
         {"op": "delete", "shared_id": "E9"},
         {
@@ -396,9 +395,6 @@ def test_count_ops_and_report_surface_would_delete_files() -> None:
         records=records,
     )
     assert report.would_delete_files == 2
-    out = _format_result(report, 1, 3)
-    assert "delete_files=2" in out
-    assert "No-op warning" not in out  # file deletes count as would-be writes
 
 
 # --- real mode: unwired ports surface as a script error -----------------------

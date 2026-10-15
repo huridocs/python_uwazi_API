@@ -6,9 +6,7 @@ post-script after-state, and the post-revert state. This module holds the
 **pure** pieces the gate is built from: the result/diff/mismatch models and
 :func:`build_validation_outcome`, which assembles a :class:`ValidationResult`
 from literal raw dicts. These are the unit-test target named by the Phase 3 DoD
-("validation-result shape, the exact-raw-restore comparison, the diff"); the
-live harness that gathers the dicts from Uwazi lives in
-``use_cases/dummy_entity_harness.py`` and is validated via the simulation run.
+("validation-result shape, the exact-raw-restore comparison, the diff").
 
 ``passed`` means the script ran cleanly (no exception, ``result`` set) **and**
 every *original* dummy's post-revert raw equals its before raw — i.e. the

@@ -75,6 +75,7 @@ class BackupIntercept:
         cap: int = 1000,
         file_repository: FileRepositoryPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
+        already_backed_up: set[str] | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -82,7 +83,12 @@ class BackupIntercept:
         self._run_id: str = run_id
         self._language: str = language
         self._loop: asyncio.AbstractEventLoop = loop
-        self._backed_up: set[str] = set()
+        # Entities already snapshotted in THIS manifest (an earlier accept of
+        # the same accumulating apply run): they must NOT be re-snapshotted —
+        # the first-touch snapshot is the pre-ANY-apply state the revert
+        # restores, so a second snapshot would both duplicate the manifest
+        # entry and capture a half-applied raw as "before".
+        self._backed_up: set[str] = set(already_backed_up or ())
         # First-touch raws, kept in memory for the applied-write records: the
         # diff needs the PRE-RUN value of every property a payload touches, and
         # only the first-touch snapshot of an entity carries that (a second

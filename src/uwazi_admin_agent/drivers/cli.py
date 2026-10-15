@@ -1,8 +1,8 @@
 """The ``uwazi-admin-agent`` CLI entrypoint (Phase 5).
 
 A single argparse dispatcher with one subcommand per run-lifecycle step
-(§2.2): ``generate`` → ``simulate`` → ``execute`` → ``revert``, plus the
-read-only ``list-runs`` and ``inspect-run``. Each subcommand delegates to a
+(§2.2): ``generate`` → ``scan`` → ``revert``, plus the read-only
+``list-runs`` and ``inspect-run``. Each subcommand delegates to a
 thin step driver in ``drivers/step_<name>.py`` that wires adapters to a use
 case and runs it — **no business logic lives here** (§4: drivers → use_cases +
 adapters).
@@ -23,13 +23,11 @@ import sys
 from typing import Sequence
 
 from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
-from uwazi_admin_agent.drivers.step_dry_run import run_dry_run
-from uwazi_admin_agent.drivers.step_execute import run_execute
 from uwazi_admin_agent.drivers.step_generate import run_generate
 from uwazi_admin_agent.drivers.step_inspect_run import run_inspect_run
 from uwazi_admin_agent.drivers.step_list_runs import run_list_runs
 from uwazi_admin_agent.drivers.step_revert import run_revert
-from uwazi_admin_agent.drivers.step_simulate import run_simulate
+from uwazi_admin_agent.drivers.step_scan import run_scan
 from uwazi_admin_agent.drivers.step_verify import run_verify
 
 
@@ -39,39 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
         prog="uwazi-admin-agent",
         description="Admin agent: turn a natural-language prompt into a safe, revertable Uwazi migration.",
     )
-    sub = parser.add_subparsers(
-        dest="command", required=True, metavar="{generate,simulate,dry-run,execute,revert,verify,list-runs,inspect-run}"
-    )
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{generate,scan,revert,verify,list-runs,inspect-run}")
 
     sub.add_parser(
         "generate",
-        help="Generate the migration script for the active run (includes LLM-driven dummy validation).",
+        help="Generate the script for the active run.",
     )
 
-    p_simulate = sub.add_parser(
-        "simulate",
-        help="Re-run the dummy-entity validation gate on the emitted script using a local dummy_spec.yaml.",
+    p_scan = sub.add_parser(
+        "scan",
+        help="Run the script as the planning pass (recorded no-op writes; the review table's source).",
     )
-
-    p_dry_run = sub.add_parser(
-        "dry-run",
-        help="Rehearse the emitted script against real entities with recorded (no-op) writes.",
-    )
-    p_dry_run.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
-
-    p_simulate.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
-
-    p_execute = sub.add_parser(
-        "execute",
-        help="Execute the validated script against real entities with backup-intercepted CRUD.",
-    )
-    p_execute.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
-    p_execute.add_argument(
-        "--on-error",
-        choices=("stop", "stop-and-revert"),
-        default=None,
-        help="What to do if the script raises mid-run (default: stop).",
-    )
+    p_scan.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
 
     p_revert = sub.add_parser(
         "revert",
@@ -108,12 +85,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "generate":
         return run_generate()
-    if command == "dry-run":
-        return run_dry_run(run_name=_resolve_run_name(args.run))
-    if command == "simulate":
-        return run_simulate(run_name=_resolve_run_name(args.run))
-    if command == "execute":
-        return run_execute(run_name=_resolve_run_name(args.run), on_error=args.on_error)
+    if command == "scan":
+        return run_scan(run_name=_resolve_run_name(args.run))
     if command == "revert":
         return run_revert(run_name=_resolve_run_name(args.run))
     if command == "verify":

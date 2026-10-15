@@ -34,14 +34,21 @@ def test_build_parser_help_lists_all_subcommands() -> None:
 
     for subcommand in (
         "generate",
-        "simulate",
-        "execute",
+        "scan",
         "revert",
         "verify",
         "list-runs",
         "inspect-run",
     ):
         assert subcommand in help_text, f"subcommand {subcommand!r} missing from --help"
+
+
+def test_build_parser_rejects_removed_subcommands() -> None:
+    """Whole-set script execution and the dummy/simulation gate are gone:
+    runs are planned (scan) and executed as reviewed rows (the Run heuristic)."""
+    for removed in ("execute", "dry-run", "simulate", "apply"):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args([removed])
 
 
 def test_build_parser_dispatches_list_runs_command() -> None:
@@ -51,7 +58,7 @@ def test_build_parser_dispatches_list_runs_command() -> None:
 
 
 def test_build_parser_accepts_run_override_for_per_run_steps() -> None:
-    for command in ("simulate", "execute", "revert", "verify", "inspect-run"):
+    for command in ("scan", "revert", "verify", "inspect-run"):
         args = build_parser().parse_args([command, "--run", "my-run"])
         assert args.command == command
         assert args.run == "my-run"
@@ -62,25 +69,13 @@ def test_build_parser_rejects_unknown_subcommand() -> None:
         build_parser().parse_args(["bogus"])
 
 
-# --- execute --on-error flag (Phase 6) -------------------------------------
+# --- scan/apply subcommands (two-script model) -------------------------------
 
 
-def test_build_parser_execute_defaults_on_error_to_none() -> None:
-    # None means the driver falls back to DEFAULT_ON_ERROR_POLICY.
-    args = build_parser().parse_args(["execute"])
-    assert args.command == "execute"
-    assert args.on_error is None
-
-
-def test_build_parser_execute_accepts_on_error_choices() -> None:
-    for value in ("stop", "stop-and-revert"):
-        args = build_parser().parse_args(["execute", "--on-error", value])
-        assert args.on_error == value
-
-
-def test_build_parser_execute_rejects_invalid_on_error() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["execute", "--on-error", "nuke"])
+def test_build_parser_scan_parses() -> None:
+    args = build_parser().parse_args(["scan", "--run", "r"])
+    assert args.command == "scan"
+    assert args.run == "r"
 
 
 def test_build_parser_verify_subcommand_parses() -> None:

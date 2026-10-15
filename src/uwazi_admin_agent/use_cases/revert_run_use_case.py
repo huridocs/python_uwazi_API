@@ -57,6 +57,7 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.ports.template_property_port import TemplatePropertyLookupPort
 
 
@@ -71,6 +72,7 @@ class RevertRunUseCase:
         file_repository: FileRepositoryPort | None = None,
         template_property_lookup: TemplatePropertyLookupPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
+        suggestion_store: SuggestionStorePort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -78,6 +80,9 @@ class RevertRunUseCase:
         self._file_repository: FileRepositoryPort | None = file_repository
         self._template_property_lookup: TemplatePropertyLookupPort | None = template_property_lookup
         self._cache_control: CacheInvalidationPort | None = cache_control
+        # Optional: the review rows' status follows the revert so the review
+        # table shows them runnable again (None = no store wired = no-op).
+        self._suggestion_store: SuggestionStorePort | None = suggestion_store
 
     async def revert(self, run_id: str) -> None:
         """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones.
@@ -114,15 +119,34 @@ class RevertRunUseCase:
         self._backup_store.save_manifest(run_id, manifest)
         self._backup_store.update_status(run_id, RunStatus.REVERTED)
         self._emit_run(AuditOutcome.SUCCESS, run_id)
+        # The review rows now describe writes that no longer exist: mark them
+        # reverted so the review table shows them as runnable again.
+        reverted_rows = self._mark_rows_reverted(run_id)
         logger.info(
-            "revert done run={} actions={} modified={} deleted={} created={} deleted_files={}",
+            "revert done run={} actions={} modified={} deleted={} created={} deleted_files={} review_rows={}",
             run_id,
             len(actions),
             len(manifest.modified),
             len(manifest.deleted),
             len(manifest.created),
             len(manifest.deleted_files),
+            reverted_rows,
         )
+
+    def _mark_rows_reverted(self, run_id: str) -> int:
+        """Move the run's APPLIED review rows to REVERTED (best-effort, never fails a revert).
+
+        The writes are already undone by this point; this only keeps the review
+        table honest. A store failure (or no store wired) is logged, never
+        raised — the revert itself succeeded and must not be reported as failed.
+        """
+        if self._suggestion_store is None:
+            return 0
+        try:
+            return self._suggestion_store.mark_applied_reverted(run_id)
+        except Exception as exc:  # noqa: BLE001 — a status refresh must not fail the revert
+            logger.warning("could not mark review rows reverted for run={}: {}", run_id, exc)
+            return 0
 
     async def _execute_action(self, action: Any, run_id: str, manifest: Any) -> None:
         """Dispatch one revert action to the entity repository (+ audit + manifest record)."""

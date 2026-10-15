@@ -15,15 +15,29 @@ import json
 import os
 import threading
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable
 
+from fastapi import Response
 from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
+from uwazi_admin_agent.configuration import (
+    LLM_PRICE_INPUT_PER_MTOK,
+    LLM_PRICE_OUTPUT_PER_MTOK,
+    SCRIPT_DEFAULT_MAX_COST,
+    SCRIPT_DEFAULT_MAX_REQUESTS,
+)
 from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.metadata_diff import PropertyChange, build_property_changes
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
+
+# Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
+# on import, so the runs table's Review action can navigate to it.
+from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web.run_service import (
     GenerateError,
     RevertVerificationError,
@@ -32,7 +46,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     clear_cache,
     create_and_generate,
     delete_run,
-    execute_run,
+    fetch_entity_document_bytes,
     get_entity_segmentation,
     get_execution_history,
     get_run,
@@ -135,11 +149,6 @@ def _release_run(run_id: str) -> None:
 
 
 _IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
-
-
-def _can_execute_js(status_var: str) -> str:
-    """JS expression: True when the run may be executed (no script on generation failure)."""
-    return f"({status_var} !== 'generation_failed')"
 
 
 def _mark_running(run_id: str, label: str) -> None:
@@ -351,9 +360,8 @@ def _build_runs_table() -> ui.table:
         "body-cell-actions",
         f"""
         <q-td :props="props" class="text-no-wrap">
-            <q-btn dense flat icon="play_arrow" color="primary"
-                   :disable="props.row.busy || {_IN_FLIGHT_JS} || !{_can_execute_js("props.row.status")}"
-                   @click="$parent.$emit('execute', props.row)" />
+            <q-btn dense flat icon="fact_check" color="secondary" title="Review &amp; apply"
+                   @click="$parent.$emit('review', props.row)" />
             <q-btn dense flat icon="undo" color="warning"
                    :disable="props.row.busy || {_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
                    @click="$parent.$emit('rollback', props.row)" />
@@ -367,7 +375,7 @@ def _build_runs_table() -> ui.table:
     )
     table.add_slot("no-data", '<div class="text-body1 text-grey-7 q-pa-md">No tasks</div>')
 
-    table.on("execute", _on_execute)
+    table.on("review", _on_review)
     table.on("rollback", _on_rollback)
     table.on("info", _on_info)
     table.on("rowmenu", _on_rowmenu)
@@ -394,6 +402,7 @@ def _build_row_menu() -> None:
         # close callback would do (the raw element isn't a ``ui.menu``).
         menu = ui.element("q-menu").props("touch-position auto-close")
         with menu:
+            ui.menu_item("Review suggestions", lambda: _row_menu_action(_rowmenu_review))
             retry_item = ui.menu_item("Retry generation", lambda: _row_menu_action(_rowmenu_retry))
             errors_item = ui.menu_item("Error details", lambda: _row_menu_action(_error_dialog))
             ui.separator()
@@ -420,6 +429,11 @@ def _row_menu_action(action: Any) -> None:
     run_id = app.storage.client.get("rowmenu_run", "")
     if run_id:
         action(run_id)
+
+
+def _rowmenu_review(run_id: str) -> None:
+    """Jump to the run's review page."""
+    ui.navigate.to(f"/review/{run_id}")
 
 
 def _rowmenu_retry(run_id: str) -> None:
@@ -506,21 +520,6 @@ def _broadcast_rows() -> None:
             _refresh_rows_client()
 
 
-def _on_execute(e: Any) -> None:
-    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    if not _try_claim(run_id, "running"):
-        ui.notify(_busy_label(), type="warning")
-        return
-    background_tasks.create(
-        _run_async(
-            execute_run(run_id, app.storage.user["user"], app.storage.user["password"]),
-            f"Executed {run_id}",
-            run_id,
-        ),
-        name=f"execute {run_id}",
-    )
-
-
 def _on_rollback(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
     _confirm_dialog(
@@ -530,6 +529,12 @@ def _on_rollback(e: Any) -> None:
         success_msg=f"Reverted {run_id}",
         run_id=run_id,
     )
+
+
+def _on_review(e: Any) -> None:
+    """Open the run's review page — the primary write path (accept writes there)."""
+    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    ui.navigate.to(f"/review/{run_id}")
 
 
 def _on_delete(e: Any) -> None:
@@ -622,8 +627,12 @@ def _modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = 
     maximized dialogs); this is the second, always-reachable escape hatch at the
     top. ``trailing`` builds extra header widgets (e.g. Refresh / Copy all) that
     sit between the title and the Close button.
+
+    The row is ``shrink-0``: the maximized cards are fixed-height flex columns
+    whose middle section scrolls, and a compressible header would be squeezed
+    to nothing once the scroll content stops shrinking (``shrink-0`` children).
     """
-    with ui.row().classes("w-full items-center justify-between no-wrap"):
+    with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         ui.label(title).classes("text-h6")
         with ui.row().classes("items-center no-wrap"):
             if trailing is not None:
@@ -632,8 +641,11 @@ def _modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = 
 
 
 def _footer_close(dialog: Any) -> None:
-    """The bottom-right Close row that closes a maximized modal."""
-    with ui.row().classes("w-full justify-end"):
+    """The bottom-right Close row that closes a maximized modal.
+
+    ``shrink-0`` keeps it pinned: only the middle scroll column may shrink.
+    """
+    with ui.row().classes("w-full justify-end shrink-0"):
         ui.button("Close", icon="close", on_click=dialog.close).props("flat")
 
 
@@ -716,6 +728,12 @@ def _info_dialog(run_id: str) -> None:
 
     Created on the page layout (not inside the table) so the row auto-refresh
     can't destroy it. Read-only; actions live in the row's ``more_vert`` menu.
+
+    The title and the Close footer stay pinned; the middle column scrolls.
+    Its children are all ``shrink-0`` for the same reason as
+    ``_script_dialog``: compressible children squeeze the autogrow textareas'
+    boxes while their content keeps its full height, so the prompt text spills
+    out of the textbox and overlaps the widgets below it.
     """
     try:
         detail = get_run(run_id)
@@ -727,26 +745,26 @@ def _info_dialog(run_id: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 _modal_header(dialog, f"Task — {run_id}")
-                ui.separator()
+                ui.separator().classes("shrink-0")
                 with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    with ui.row().classes("w-full items-center justify-between"):
+                    with ui.row().classes("w-full items-center justify-between shrink-0"):
                         ui.label("Prompt").classes("text-subtitle1 text-grey-7")
                         _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props(
+                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono shrink-0").props(
                         "readonly outlined autogrow"
                     ).style("min-height: 120px")
                     if detail.validated_prompt:
-                        ui.separator()
-                        with ui.row().classes("w-full items-center justify-between"):
+                        ui.separator().classes("shrink-0")
+                        with ui.row().classes("w-full items-center justify-between shrink-0"):
                             ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
                             _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono shrink-0").props(
                             "readonly outlined autogrow"
                         ).style("min-height: 120px")
                     if detail.error:
-                        ui.separator()
-                        ui.label("Last error").classes("text-subtitle1 text-grey-7")
-                        ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10")
+                        ui.separator().classes("shrink-0")
+                        ui.label("Last error").classes("text-subtitle1 text-grey-7 shrink-0")
+                        ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10 shrink-0")
                 _footer_close(dialog)
     dialog.open()
 
@@ -860,9 +878,13 @@ def _script_dialog(run_id: str) -> None:
     run's generated script lives at ``<run>/script.py``; a run whose generation
     failed has none, and the menu item is hidden in that case.
 
-    The dialog is maximized and the card scrolls as a whole, so the prompt and
-    script keep their natural (autogrow) sizes and long content simply extends
-    the page instead of overlapping.
+    The dialog is maximized: the title row and the Close footer stay pinned
+    while the middle column scrolls. Every child of that scrolling column is
+    ``shrink-0`` — a compressible child lets the autogrow prompt textarea (and
+    the ``ui.code`` block, whose inner markdown is sized ``height: 100%``) keep
+    its full content height while its box is squeezed, so the script text
+    spills out of its box and paints on top of the prompt textbox. With nothing
+    shrinkable the column simply scrolls instead.
     """
     try:
         detail = get_run(run_id)
@@ -888,23 +910,23 @@ def _script_dialog(run_id: str) -> None:
                     ),
                 )
                 with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    with ui.row().classes("w-full items-center justify-between"):
+                    with ui.row().classes("w-full items-center justify-between shrink-0"):
                         ui.label("Prompt").classes("text-subtitle1 text-grey-7")
                         _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono").props(
+                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono shrink-0").props(
                         "readonly outlined autogrow"
                     ).style("min-height: 80px")
                     if detail.validated_prompt:
-                        with ui.row().classes("w-full items-center justify-between"):
+                        with ui.row().classes("w-full items-center justify-between shrink-0"):
                             ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
                             _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono").props(
+                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono shrink-0").props(
                             "readonly outlined autogrow"
                         ).style("min-height: 80px")
-                    with ui.row().classes("w-full items-center justify-between"):
+                    with ui.row().classes("w-full items-center justify-between shrink-0"):
                         ui.label("Script").classes("text-subtitle1 text-grey-7")
                         _copy_to_clipboard(detail.script, "Copy script")
-                    ui.code(detail.script, language="python").classes("w-full")
+                    ui.code(detail.script, language="python").classes("w-full shrink-0")
                 _footer_close(dialog)
     dialog.open()
 
@@ -1756,6 +1778,28 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
             ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
         )
         state["_generate_prompt_display"] = prompt_display
+        ui.separator()
+        with ui.column().classes("w-full q-mt-sm"):
+            ui.label("LLM caps for the script's tool calls").classes("text-subtitle1 text-bold")
+            ui.label(
+                "The generated script may call the LLM to compute values (per entity). "
+                "These HARD caps apply ONLY to those calls — never to script generation itself. "
+                "A script that computes everything in pure Python costs nothing under them."
+            ).classes("text-body2 text-grey-7")
+            with ui.row().classes("w-full items-center gap-2"):
+                state["_caps_cost_input"] = ui.number(
+                    "Max cost ($)", value=SCRIPT_DEFAULT_MAX_COST, min=0.0, step=0.5, format="%.2f"
+                ).classes("grow")
+                state["_caps_requests_input"] = ui.number(
+                    "Max calls (backstop)", value=SCRIPT_DEFAULT_MAX_REQUESTS, min=0, step=1
+                ).classes("grow")
+            ui.label(
+                "Default is 0 on both: the script's LLM calls are disabled — the pass aborts cleanly on the "
+                "first one. Raise a cap here to let the script spend within it."
+            ).classes("text-body2 text-grey-7")
+            ui.label("The pass aborts cleanly at the caps; rows computed before the halt are kept.").classes(
+                "text-body2 text-grey-7"
+            )
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: _wizard_generate_back(state)).props("color=grey-7 flat")
@@ -1773,6 +1817,7 @@ def _start_generation(
     password: str,
     validated_prompt: str | None = None,
     claimed: bool = False,
+    budget: LlmBudget | None = None,
 ) -> None:
     """Register the in-flight placeholder + notification and launch generation.
 
@@ -1789,13 +1834,13 @@ def _start_generation(
     _creating_runs[name] = {"name": name, "prompt": prompt}
     _broadcast_rows()
     _generating_notifications[name] = ui.notification(
-        "Generating script (this may take a minute)...",
+        "Generating script, then the automatic LLM-free selection scan (this may take a minute)...",
         type="ongoing",
         spinner=True,
         timeout=None,
     )
     background_tasks.create(
-        _do_generate(name, prompt, user, password, validated_prompt),
+        _do_generate(name, prompt, user, password, validated_prompt, budget),
         name=f"generate {name}",
     )
 
@@ -1806,22 +1851,98 @@ def _wizard_generate(state: dict[str, Any], dialog: Any) -> None:
     if not name or not prompt:
         ui.notify("Name and prompt are required", type="warning")
         return
+    budget = _wizard_budget(state)
     dialog.close()
+    _confirm_generation(name, prompt, state.get("validated_prompt"), budget)
+
+
+def _script_caps_model() -> str:
+    """The configured model name (falls back to a placeholder when unreadable)."""
+    try:
+        from uwazi_agent.configuration import MODEL
+
+        return MODEL
+    except Exception:  # noqa: BLE001 — a missing/renamed constant must not break the wizard
+        return "(model not configured)"
+
+
+def _wizard_budget(state: dict[str, Any]) -> LlmBudget:
+    """The approved budget for the script's llm_complete/llm_map calls (wizard caps step).
+
+    0 is a real, operator-visible value — the deny-by-default prefill — so it
+    is kept as-is (a 0 request cap aborts the pass on its first LLM call).
+    Only an empty/invalid input falls back to the configured default.
+    """
+    cost = _cap_float(state["_caps_cost_input"].value) if state.get("_caps_cost_input") is not None else None
+    requests = _cap_int(state["_caps_requests_input"].value) if state.get("_caps_requests_input") is not None else None
+    return LlmBudget(
+        max_cost=SCRIPT_DEFAULT_MAX_COST if cost is None else cost,
+        max_requests=SCRIPT_DEFAULT_MAX_REQUESTS if requests is None else requests,
+        price=LlmPrice(
+            model=_script_caps_model(),
+            input_per_mtok=LLM_PRICE_INPUT_PER_MTOK,
+            output_per_mtok=LLM_PRICE_OUTPUT_PER_MTOK,
+        ),
+    )
+
+
+def _cap_float(value: Any) -> float | None:
+    """Coerce a caps input to a non-negative float (None/invalid → None = 'use the default')."""
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _cap_int(value: Any) -> int | None:
+    """Coerce a caps input to a non-negative int (None/invalid → None = 'use the default')."""
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _confirm_generation(name: str, prompt: str, validated_prompt: str | None, budget: LlmBudget) -> None:
+    """A plain go/no-go confirm, then launch generation.
+
+    Generation itself is bounded by the built-in caps (``MAX_LLM_CALLS``
+    requests via pydantic-ai's ``UsageLimits``, ``LLM_MAX_OUTPUT_TOKENS`` per
+    call). ``budget`` — approved in the wizard's caps step — is the HARD ceiling
+    on the generated script's own llm_complete/llm_map calls, enforced during
+    the planning pass that populates the review table.
+    """
+    ui.notification(
+        "Generating the script — the planning pass runs right after and fills the review table under the approved LLM caps.",
+        type="info",
+        timeout=6,
+    )
     _start_generation(
         name,
         prompt,
         app.storage.user["user"],
         app.storage.user["password"],
-        validated_prompt=state.get("validated_prompt"),
+        validated_prompt=validated_prompt,
+        budget=budget,
     )
 
 
-async def _do_generate(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
+async def _do_generate(
+    name: str,
+    prompt: str,
+    user: str,
+    password: str,
+    validated_prompt: str | None = None,
+    budget: LlmBudget | None = None,
+) -> None:
     # create_and_generate does synchronous Uwazi HTTP + LLM calls; run it on a
     # worker thread so the event loop stays free to serve the UI and websocket.
     try:
-        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password, validated_prompt))
-        _broadcast_notify(f"Run {name!r} created and generated", type="positive")
+        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password, validated_prompt, budget))
+        _broadcast_notify(
+            f"Run {name!r} generated — the planning pass filled the review table.",
+            type="positive",
+        )
     except Exception as exc:  # noqa: BLE001
         _notify_error("Generation failed", str(exc))
     finally:
@@ -1924,6 +2045,7 @@ def _app() -> None:
 
 def main() -> None:
     """Run the NiceGUI server (uvicorn under the hood) on port 5055."""
+    _register_static_and_routes()
     port = int(os.environ.get("ADMIN_WEB_PORT", "5055"))
     ui.run(
         host="0.0.0.0",
@@ -1932,6 +2054,44 @@ def main() -> None:
         title="Uwazi Admin Agent",
         storage_secret=os.environ.get("ADMIN_WEB_STORAGE_SECRET", "dev-admin-web-secret"),
     )
+
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _register_static_and_routes() -> None:
+    """Serve the pdf.js viewer assets and the per-entity document route.
+
+    The viewer is the proven pdf.js setup copied from ``uwazi_property_filler``
+    (its own static dir and module scripts), pointed at this app's route: the
+    review window's iframe loads ``/static/pdfjs/review_viewer.html`` and the
+    viewer fetches ``/review-pdf?run=<run_id>&sid=<shared_id>``, which streams
+    the entity's PRIMARY document bytes through the cached file repository.
+    """
+    _STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    app.add_static_files("/static", str(_STATIC_DIR))
+
+    @app.get("/review-pdf")
+    def _review_pdf(run: str, sid: str) -> Response:
+        # The viewer loads this route in an iframe, so the browser presents the
+        # session cookie: authentication comes from the session, never the URL.
+        user: str | None = None
+        password: str | None = None
+        try:
+            user = app.storage.user.get("user")
+            password = app.storage.user.get("password")
+        except Exception as exc:  # noqa: BLE001 — no session ⇒ unauthenticated, not a crash
+            logger.warning("review-pdf session read failed run={} sid={}: {}", run, sid, exc)
+        if not user or not password:
+            return Response(status_code=401)
+        try:
+            data = asyncio.run(fetch_entity_document_bytes(user, password, sid))
+        except Exception as exc:  # noqa: BLE001 — a fetch failure is a 404 to the viewer
+            logger.warning("review-pdf fetch failed run={} sid={}: {}", run, sid, exc)
+            return Response(status_code=404)
+        if data is None:
+            return Response(status_code=404)
+        return Response(content=data, media_type="application/pdf")
 
 
 if __name__ == "__main__":

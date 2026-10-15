@@ -1,9 +1,10 @@
-"""``uwazi-admin-agent dry-run`` — read-only extraction rehearsal against real entities.
+"""``uwazi-admin-agent scan`` — the PLANNING scan against real entities (read-only).
 
 Runs the emitted ``script.py`` against real entities with real supporting
-files while every write helper is a no-op recorder: per-entity would-be-updates
-report + the script's own ``result``, zero mutations. Mirrors
-``step_simulate``'s print/exit conventions.
+files while every write helper is a no-op recorder: the per-entity
+would-be-write records that build the review table's rows + the script's own
+``result``, zero mutations. This is the ONE script run as the planning pass;
+there is no separate apply script.
 """
 
 from __future__ import annotations
@@ -21,12 +22,12 @@ from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseC
 _MAX_PRINTED_RECORDS = 10
 
 
-def run_dry_run(run_name: str) -> int:
-    """Dry-run the emitted script against real entities; return an exit code."""
-    return asyncio.run(_run_dry_run_async(run_name))
+def run_scan(run_name: str) -> int:
+    """Run the planning scan (dry) for a run; return an exit code."""
+    return asyncio.run(_run_scan_async(run_name))
 
 
-async def _run_dry_run_async(run_name: str) -> int:
+async def _run_scan_async(run_name: str) -> int:
     script_path = RUNS_PATH / run_name / SCRIPT_FILENAME
     if not script_path.is_file():
         print(f"error: no generated script at {script_path} (run `generate` first)", flush=True)
@@ -44,10 +45,10 @@ async def _run_dry_run_async(run_name: str) -> int:
         url_fetcher=runtime.url_fetcher,
     )
 
-    logger.info("dry-run: run={}", run_name)
+    logger.info("scan: run={}", run_name)
     report = await use_case.dry_run(script)
 
-    print(f"dry-run: run={run_name} passed={report.passed}")
+    print(f"scan: run={run_name} passed={report.passed}")
     if report.script_error:
         print(f"  script error: {report.script_error.splitlines()[0]}")
     elif report.script_result is not None:

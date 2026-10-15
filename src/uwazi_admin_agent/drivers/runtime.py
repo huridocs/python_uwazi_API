@@ -49,9 +49,10 @@ from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileReposito
 from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
+from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
 from uwazi_admin_agent.configuration import (
-    DUMMY_LANGUAGE,
     ENTITY_CACHE_TTL_SECONDS,
     FILE_CACHE_DIR,
     FILE_CACHE_ENABLED,
@@ -59,6 +60,7 @@ from uwazi_admin_agent.configuration import (
     FILE_CACHE_MAX_BYTES,
     ROOT_PATH,
     RUNS_PATH,
+    SUGGESTIONS_DB_PATH,
 )
 from uwazi_admin_agent.domain.file_cache import instance_dir_name
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
@@ -66,10 +68,10 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
+from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
-from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
 from uwazi_admin_agent.use_cases.verify_revert_use_case import VerifyRevertUseCase
 from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
@@ -101,6 +103,7 @@ class Runtime:
         file_cache: FileCacheStore | None,
         segmentation_repository: SegmentationRepositoryPort,
         url_fetcher: UrlFetcherPort,
+        template_labels: TemplateLabelPort | None = None,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -119,6 +122,8 @@ class Runtime:
         # port — the counters live on the store both decorators bump.
         self.file_cache: FileCacheStore | None = file_cache
         self.url_fetcher: UrlFetcherPort = url_fetcher
+        # Template id -> display label (a raw carries the id; people see the name).
+        self.template_labels: TemplateLabelPort | None = template_labels
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -183,6 +188,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         CachedFileRepository(base_file_repository, file_cache) if file_cache is not None else base_file_repository
     )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
+    template_labels: TemplateLabelPort = UwaziTemplateLabels(api.client)
     search_probe = UwaziSearchProbe(api.client)
     base_segmentation_repository = UwaziSegmentationRepository(api.client)
     segmentation_repository: SegmentationRepositoryPort = (
@@ -205,15 +211,6 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         file_repository=file_repository,
         segmentation_repository=segmentation_repository,
         url_fetcher=url_fetcher,
-        dry_run_use_case=DryRunScriptUseCase(
-            entity_api=api,
-            entity_repository=entity_repository,
-            file_repository=file_repository,
-            default_language=DUMMY_LANGUAGE,
-            cache_stats=file_cache,
-            segmentation_repository=segmentation_repository,
-            url_fetcher=url_fetcher,
-        ),
     )
 
     revert_use_case = RevertRunUseCase(
@@ -225,6 +222,9 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         # Re-upload targets' cached raws are dropped after the file restores
         # (a re-upload mutates the files collection, not the entity row).
         cache_control=file_cache,
+        # So a revert also flips the run's APPLIED review rows to REVERTED:
+        # their writes are gone, and the review table must show them runnable.
+        suggestion_store=SqliteSuggestionStore(SUGGESTIONS_DB_PATH),
     )
     verify_use_case = VerifyRevertUseCase(
         entity_repository=entity_repository,
@@ -252,4 +252,5 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         file_cache=file_cache,
         segmentation_repository=segmentation_repository,
         url_fetcher=url_fetcher,
+        template_labels=template_labels,
     )

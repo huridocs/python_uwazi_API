@@ -41,7 +41,6 @@ def test_build_agent_registers_schema_inspection_tools() -> None:
     names = set(agent._function_toolset.tools.keys())
     assert {
         "query_entities",
-        "run_validation_script",
         "get_templates_by_names",
         "list_templates",
         "get_thesauris_by_names",

@@ -60,21 +60,6 @@ def test_prompt_has_create_tasks_section() -> None:
     assert "not defined in template" in SYSTEM_PROMPT
 
 
-def test_prompt_flags_create_noop_false_pass() -> None:
-    """A CREATE prompt that yields 0 created dummies is a FAIL; the prompt must say so
-    and point at `created_shared_ids` / `before=None` diffs so the LLM doesn't
-    emit a 0-create no-op."""
-    assert "FALSE-PASS GUARD" in SYSTEM_PROMPT
-    assert "created_shared_ids" in SYSTEM_PROMPT
-    assert "before=None" in SYSTEM_PROMPT
-
-
-def test_prompt_reinforces_noop_for_create_in_validation() -> None:
-    """The VALIDATION 0-diff paragraph must cross-reference create tasks so a 0-create
-    pass is treated as a FAIL there too."""
-    assert "CREATE TASKS / FALSE-PASS GUARD" in SYSTEM_PROMPT
-
-
 def test_prompt_pins_search_result_attribute_access() -> None:
     """The prompt must show the correct ATTRIBUTE access form for search modes."""
     assert "res.summary.shared_ids" in SYSTEM_PROMPT
@@ -98,13 +83,6 @@ def test_prompt_pins_by_ids_dict_subscript_access() -> None:
     assert 'd["shared_id"]' in SYSTEM_PROMPT
     assert 'd["metadata"]' in SYSTEM_PROMPT
     assert "list[dict]" in SYSTEM_PROMPT
-
-
-def test_prompt_warns_noop_pass_on_change_prompt() -> None:
-    """A 0-diff PASS on a change-prompt is a no-op false pass; the prompt must tell
-    the LLM to treat it as a FAIL and fix the script."""
-    assert "0 diffs" in SYSTEM_PROMPT
-    assert "no-op" in SYSTEM_PROMPT.lower() or "did nothing" in SYSTEM_PROMPT.lower()
 
 
 def test_prompt_reinforces_attribute_access_in_merge_sections() -> None:
@@ -168,32 +146,11 @@ def test_prompt_teaches_string_key_dedupe() -> None:
 # --- Dummy-spec rules (Fix B) ------------------------------------------------
 
 
-def test_prompt_forbids_thesaurus_properties_in_dummy_spec() -> None:
-    """Guessed thesaurus labels make Uwazi reject dummy creation. The prompt must
-    keep `select`/`multiselect` (and the `not a valid thesaurus label` rejection) in
-    the dummy-spec AVOID set. (Rewritten to also exclude date-family + relationship;
-    the thesaurus-rejection behavior is still pinned.)"""
-    assert "thesaurus" in SYSTEM_PROMPT
-    assert "`select` / `multiselect`" in SYSTEM_PROMPT
-    assert "not a valid thesaurus label" in SYSTEM_PROMPT
-
-
 def test_prompt_requires_exact_labels_when_thesaurus_property_needed() -> None:
     """If a non-simple property is essential, the LLM must discover its exact valid
     value/label from existing entities first - never guess."""
     assert "EXACT valid" in SYSTEM_PROMPT
     assert "never guess" in SYSTEM_PROMPT
-
-
-def test_prompt_requires_small_dummy_spec() -> None:
-    """The dummy spec proves the merge logic, not the production scale. The prompt
-    must cap it at a small representative sample."""
-    assert "SMALL" in SYSTEM_PROMPT
-    assert "2-3 dummies per title group" in SYSTEM_PROMPT
-    assert "production scale" in SYSTEM_PROMPT
-
-
-# --- Metadata WRITE shape (date/select scalar, not array) -------------------
 
 
 def test_prompt_distinguishes_read_and_write_metadata_shapes() -> None:
@@ -247,26 +204,6 @@ def test_prompt_forbids_importing_bound_modules_with_example() -> None:
 # --- Dummy-spec excludes date-family; create-task needs >=1 dummy -----------
 
 
-def test_prompt_dummy_spec_avoids_date_family() -> None:
-    """The dummy_spec must use text/numeric only; date-family properties need
-    numeric-timestamp coercion and a guessed string fails creation. The prompt
-    must list date/daterange/multidate/multidaterange in the dummy-spec AVOID set."""
-    assert "`text` or `numeric` ONLY" in SYSTEM_PROMPT
-    for token in ("`date`", "`daterange`", "`multidate`", "`multidaterange`"):
-        assert token in SYSTEM_PROMPT
-
-
-def test_prompt_create_tasks_requires_at_least_one_dummy() -> None:
-    """An empty dummy_spec makes the harness error with 'No dummy entities were
-    created'; the prompt must tell the LLM to pass >=1 minimal dummy for a create
-    task (the script creates the real targets)."""
-    assert "REQUIRES at least one dummy" in SYSTEM_PROMPT
-    assert "No dummy entities were created" in SYSTEM_PROMPT
-
-
-# --- Extraction contract (HTML supporting-file phase) --------------------------
-
-
 def test_prompt_has_extraction_tasks_section() -> None:
     """An EXTRACTION TASKS section must exist and pin the sample-derived shape:
     author via the tool, embed VERBATIM, per-entity fetch, decode, unmatched ->
@@ -312,30 +249,6 @@ def test_prompt_documents_non_html_limitation() -> None:
     assert SYSTEM_PROMPT.count("URL ATTACHMENTS") >= 2
 
 
-def test_prompt_has_dry_run_section() -> None:
-    """A DRY RUN section must exist and pin the real-data rehearsal contract:
-    the tool name, zero writes, the would-be counters, and the hard limit."""
-    for token in (
-        "DRY RUN (real-data rehearsal",
-        "run_dry_run_script",
-        "zero mutations",
-        "would-update",
-        "dry_run_limit",
-    ):
-        assert token in SYSTEM_PROMPT, token
-
-
-def test_prompt_dry_run_tool_in_sandbox_contract() -> None:
-    """The sandbox contract must document `run_dry_run_script` with its zero-write
-    semantics so the LLM knows it is bound before it reaches for a CLI step."""
-    assert "run_dry_run_script(python_code)" in SYSTEM_PROMPT
-    assert "ZERO writes" in SYSTEM_PROMPT
-    assert "RECORDS what it would have written" in SYSTEM_PROMPT
-
-
-# --- CREATE TASKS: fill relationship-type properties (not SKIP) ---------------
-
-
 def test_prompt_no_longer_skips_relationship_properties() -> None:
     """The old CREATE TASKS rule told the LLM to SKIP relationship properties for a
     generic 'create with random info' prompt, leaving every relationship property
@@ -359,22 +272,6 @@ def test_prompt_teaches_in_metadata_relationship_fill_not_create_relationships()
     assert "IN-METADATA" in SYSTEM_PROMPT
     assert 'metadata[rel_prop] = ["sid", ...]' in SYSTEM_PROMPT
     assert "NOT tied to a property" in SYSTEM_PROMPT
-
-
-def test_prompt_teaches_scenario_a_two_phase_self_pool() -> None:
-    """Scenario A (related_template_name == the template being created) is two-phase:
-    create all first with relationship props unset, collect minted shared_ids, then
-    update_entities to wire each entity to a random subset of the OTHER created ids
-    (self excluded). Gate-validatable (created dummies are in scope)."""
-    assert "Scenario A" in SYSTEM_PROMPT
-    assert "SELF/SAME-POOL" in SYSTEM_PROMPT
-    assert "Two-phase" in SYSTEM_PROMPT
-    assert "UNSET" in SYSTEM_PROMPT
-    assert "OTHER just-created ids" in SYSTEM_PROMPT
-    # self-exclusion is called out (the phrase wraps across a line; assert a
-    # contiguous piece + the rationale).
-    assert "the platform drops self-refs anyway" in SYSTEM_PROMPT
-    assert "gate-validatable" in SYSTEM_PROMPT.lower()
 
 
 def test_prompt_teaches_scenario_a_reads_minted_shared_ids_from_results() -> None:
@@ -408,35 +305,6 @@ def test_prompt_teaches_scenario_b_empty_pool_guard() -> None:
     `random.sample([], k)` (raises ValueError)."""
     assert "EMPTY" in SYSTEM_PROMPT
     assert "ValueError: sample larger than population" in SYSTEM_PROMPT
-
-
-def test_prompt_teaches_scenario_b_is_live_only_no_related_dummies() -> None:
-    """Scenario B wiring is live-only: the dummy_spec must NOT add related-template
-    dummies (they false-fail the gate via orphan relationship hubs). The real wiring
-    is proven via dry-run + manual run."""
-    assert "LIVE-ONLY" in SYSTEM_PROMPT
-    assert "do NOT add related-template dummies" in SYSTEM_PROMPT
-    assert "orphan relationship hub" in SYSTEM_PROMPT
-    assert "run_dry_run_script" in SYSTEM_PROMPT
-
-
-def test_prompt_teaches_relationship_result_reporting() -> None:
-    """`result` must honestly report which relationship props were wired, the
-    scenario, refs-per-entity, and gate-proven vs live-only."""
-    assert "gate-proven" in SYSTEM_PROMPT
-    assert "live-only" in SYSTEM_PROMPT
-    assert "refs/entity" in SYSTEM_PROMPT or "refs/entity,".lower() in SYSTEM_PROMPT.lower()
-
-
-def test_prompt_teaches_create_then_update_reverts_as_delete() -> None:
-    """The prompt must reassure that a create-then-update-same-entity run reverts as
-    a clean delete (the update on a just-created entity adds nothing to the
-    manifest) — the safety property the whole two-phase workflow relies on."""
-    assert "clean DELETE" in SYSTEM_PROMPT
-    assert "adds nothing to the manifest" in SYSTEM_PROMPT
-
-
-# --- PARALLEL BULK HELPERS (auto-throttled) ---------------------------------
 
 
 def test_prompt_declares_the_parallel_bulk_helpers() -> None:
@@ -572,20 +440,6 @@ def test_prompt_teaches_cleanup_keeps_cited_copies() -> None:
     assert "operator may need to rewire those by hand" in SYSTEM_PROMPT
 
 
-def test_prompt_declares_file_deletes_backed_up_and_revertable() -> None:
-    """File deletes are now backed up (bytes persisted BEFORE the delete call)
-    and revertable (revert re-uploads the captured bytes) — the prompt must
-    say so, keep the dry-run-first review (the V2 text-reference residual
-    is what it still guards), and be honest that a reverted cleanup
-    RE-CREATES its duplicates."""
-    assert "REVERTABLE: every delete's bytes are backed up BEFORE the delete" in SYSTEM_PROMPT
-    assert "revert re-uploads them" in SYSTEM_PROMPT
-    assert "RUN THE DRY RUN FIRST for a cleanup, always" in SYSTEM_PROMPT
-    assert "op `delete_file`" in SYSTEM_PROMPT
-    assert "reports `delete_files=N` in its counters" in SYSTEM_PROMPT
-    assert "publish/unpublish/rewire/delete-files)" in SYSTEM_PROMPT
-
-
 def test_prompt_declares_the_explicit_file_deletion_helper() -> None:
     """The explicit deletion helper must be declared with its deletions
     contract (precise file_id form + name convenience), the per-entity
@@ -648,16 +502,6 @@ def test_prompt_requires_per_kind_result_breakdown() -> None:
     assert "(3 attachments, 1 document)" in SYSTEM_PROMPT
 
 
-def test_prompt_dry_run_records_carry_kind_for_review() -> None:
-    """Every dry-run delete_file record carries the file's `kind` (the additive
-    recorder field), and the prompt must tell the script author to CHECK it
-    against the named class before approving — the review step that catches a
-    kind confusion before anything is deleted."""
-    assert "Every `delete_file` record carries the file's `kind`" in SYSTEM_PROMPT
-    assert "must read `'kind': 'attachment'`" in SYSTEM_PROMPT
-    assert "shared_id/file_id/kind/" in SYSTEM_PROMPT  # the CLEANUP field list carries it too
-
-
 def test_prompt_has_cleanup_tasks_recipe() -> None:
     """CLEANUP TASKS must exist with the discover-then-one-call shape:
     query_entities_full collects all_ids, ONE dedupe_entity_files_parallel
@@ -677,3 +521,24 @@ def test_prompt_flags_v2_text_reference_residual_risk() -> None:
     the limitation must stay pinned so it is not silently dropped."""
     assert "V2 text references to a" in SYSTEM_PROMPT
     assert "NOT visible to the script" in SYSTEM_PROMPT
+
+
+def test_prompt_documents_the_llm_helpers() -> None:
+    """Prediction passes may call the LLM per entity; the prompt must document
+    both helpers, the one-output-per-input contract of `llm_map`, and the
+    clean-halt budget rule (otherwise the LLM either never uses them or retries
+    in a loop after the budget stops the pass)."""
+    assert "llm_complete(instruction, text)" in SYSTEM_PROMPT
+    assert "llm_map(instruction, items)" in SYSTEM_PROMPT
+    assert "ONE OUTPUT PER" in SYSTEM_PROMPT
+    assert "ALWAYS prefer" in SYSTEM_PROMPT
+    assert "BUDGET (CRITICAL)" in SYSTEM_PROMPT
+    assert "never retry inside a loop" in SYSTEM_PROMPT
+    assert "the pass STOPS" in SYSTEM_PROMPT
+
+
+def test_prompt_explains_subset_scoping_via_discovery() -> None:
+    """A subset prediction pass works by filtering discovery results, so the
+    prompt must say so — otherwise a script with hardcoded ids is unknowingly
+    unscopable and the operator's cost estimate is wrong."""
+    assert "records only that slice's rows" in SYSTEM_PROMPT

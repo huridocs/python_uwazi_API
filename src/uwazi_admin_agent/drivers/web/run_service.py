@@ -10,35 +10,58 @@ No business logic: this is a driver that wires adapters to use cases, matching
 the ``drivers/`` layer convention.
 """
 
+import asyncio
 import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import yaml
+from loguru import logger
 
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
+from uwazi_admin_agent.adapters.pydantic_ai_runtime import PydanticAiLlmRuntime
 from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
+from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+from uwazi_admin_agent.adapters.tasks_store import YamlTaskStore
 from uwazi_admin_agent.configuration import (
-    DEFAULT_ON_ERROR_POLICY,
     DUMMY_LANGUAGE,
-    MAX_ENTITIES_PER_RUN,
+    LLM_PRICE_INPUT_PER_MTOK,
+    LLM_PRICE_OUTPUT_PER_MTOK,
     PROMPTS_PATH,
     RUNS_FILE,
     RUNS_PATH,
+    SUGGESTIONS_DB_PATH,
+    TASKS_PATH,
 )
 from uwazi_admin_agent.domain.audit_record import AuditRecord
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
+from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, RewiredRelationship, RunStatus
-from uwazi_admin_agent.domain.on_error_policy import OnErrorPolicy
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
+from uwazi_admin_agent.domain.suggestion import (
+    EntityReviewRow,
+    PredictionAttempt,
+    Suggestion,
+    SuggestionFilter,
+)
+from uwazi_admin_agent.domain.task import TaskView
 from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
+from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
+from uwazi_admin_agent.ports.task_store_port import TaskStorePort
+from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
+    ApplyRefusedError,
+    ApplySuggestionsUseCase,
+)
 from uwazi_admin_agent.use_cases.clarify_prompt_use_case import ClarifyPromptUseCase
-from uwazi_admin_agent.use_cases.execute_script_use_case import ExecuteScriptUseCase
+from uwazi_admin_agent.use_cases.generate_predictions_use_case import GeneratePredictionsUseCase
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
 from uwazi_api.domain.segmentation import Segmentation
 
@@ -252,6 +275,39 @@ async def get_entity_segmentation(user: str, password: str, shared_id: str, lang
     return await runtime.deps.segmentation_repository.get_by_shared_id(shared_id, language)
 
 
+async def entity_document_filename(user: str, password: str, shared_id: str, language: str = DUMMY_LANGUAGE) -> str | None:
+    """The storage filename of an entity's PRIMARY document, or None (no bytes fetched).
+
+    The review window uses this to decide between the pdf.js viewer and the
+    segmentation-text fallback before it renders either — cheaper than asking the
+    viewer to discover the absence itself.
+    """
+    runtime = build_runtime(user=user, password=password)
+    raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, language)
+    documents = [ref for ref in extract_file_refs(raw) if ref.kind == "document"]
+    return documents[0].filename if documents else None
+
+
+async def fetch_entity_document_bytes(
+    user: str, password: str, shared_id: str, language: str = DUMMY_LANGUAGE
+) -> bytes | None:
+    """Fetch an entity's PRIMARY document bytes for the review window's viewer.
+
+    Resolves the file refs from the entity's raw, prefers a ``document`` kind,
+    and returns its bytes through the cached file repository (so re-opening the
+    same entity is free). ``None`` when the entity has no uploaded primary
+    document — the review window then falls back to the segmentation text.
+    """
+    runtime = build_runtime(user=user, password=password)
+    raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, language)
+    refs = extract_file_refs(raw)
+    documents = [ref for ref in refs if ref.kind == "document"]
+    chosen = documents[0] if documents else None
+    if chosen is None:
+        return None
+    return await runtime.file_repository.get_file_bytes(chosen.filename)
+
+
 def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
     """Keep only run-level lifecycle audit records (execute / revert).
 
@@ -295,14 +351,24 @@ async def clarify_prompt(prompt: str, user: str, password: str) -> PromptUnderst
     return await use_case.execute(prompt)
 
 
-async def create_and_generate(name: str, prompt: str, user: str, password: str, validated_prompt: str | None = None) -> None:
-    """Write the prompt + active-run pointer, then generate the script + manifest.
+async def create_and_generate(
+    name: str,
+    prompt: str,
+    user: str,
+    password: str,
+    validated_prompt: str | None = None,
+    budget: LlmBudget | None = None,
+) -> None:
+    """Write the prompt + active-run pointer, then generate the script + the table.
 
     ``prompt`` is the operator's original request; ``validated_prompt`` (when
     given) is the final, validated prompt actually sent to the generation LLM.
-    On failure the manifest is persisted with ``status=GENERATION_FAILED`` (the
-    prompt yaml stays on disk for retry) and :class:`GenerateError` is raised
-    so the caller shows a short toast; the full detail lives on the manifest.
+    ``budget`` is the operator-approved cap on the generated script's own
+    llm_complete/llm_map calls (the wizard's caps step); it governs the
+    automatic planning pass that fills the review table. On generation failure
+    the manifest is persisted with ``status=GENERATION_FAILED`` (the prompt
+    yaml stays on disk for retry) and :class:`GenerateError` is raised so the
+    caller shows a short toast; the full detail lives on the manifest.
     """
     PROMPTS_PATH.mkdir(parents=True, exist_ok=True)
     (PROMPTS_PATH / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
@@ -323,13 +389,14 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str, 
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
-        entity_repository=runtime.entity_repository,
     )
 
     final_prompt = validated_prompt or prompt
     try:
         script = await use_case.execute(final_prompt)
+        run_path.mkdir(parents=True, exist_ok=True)
         emit_generated_script(script, run_path)
+        _persist_generation_history(run_path, use_case)
     except Exception as exc:
         manifest = MigrationManifest(
             run_id=name,
@@ -356,43 +423,337 @@ async def create_and_generate(name: str, prompt: str, user: str, password: str, 
     )
     runtime.backup_store.save_manifest(name, manifest)
 
+    # The planning scan runs AUTOMATICALLY, unasked: the script cannot call the
+    # LLM in this pass (it is bound no-LLM dry-run namespace), so nothing here
+    # costs money — the review table's rows are simply built the moment the
+    # script exists.
+    await run_auto_scan(name, user, password, budget)
 
-async def execute_run(run_id: str, user: str, password: str, on_error: str | None = None) -> None:
-    """Execute a run's persisted script against real entities.
 
-    Raises :class:`GenerateError` when the run never generated a script,
-    :class:`ExecuteRefusedError` when the gate refuses, or
-    :class:`ScriptExecutionError`/:class:`CapExceededError` on script failure.
+async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget | None = None) -> int:
+    """Run the PLANNING pass over ``run_id``'s script and fill the review table.
+
+    The ONE generated script runs in the recorded-write namespace with the LLM
+    helpers bound under ``budget`` — the caps the operator approved at task
+    creation (the wizard's caps step); ``None`` falls back to the configured
+    script-caps defaults. A breach aborts the pass cleanly, keeping earlier
+    rows. It lands in the NEXT free attempt slot (a repair that regenerates
+    the script gets a fresh attempt; earlier attempts' rows and review
+    statuses are untouched). Returns the attempt number the pass used. Errors
+    propagate: the same path the wizard shows a toast for.
     """
-    policy = _resolve_on_error(on_error)
-    runtime = build_runtime(user=user, password=password)
-    manifest = runtime.backup_store.load_manifest(run_id)
-    if manifest.status == RunStatus.GENERATION_FAILED:
-        raise GenerateError("script generation failed; retry or delete the task")
-    script = (RUNS_PATH / run_id / "script.py").read_text(encoding="utf-8")
+    attempt = _next_suggestion_attempt(run_id)
+    await generate_predictions(run_id, user, password, attempt, budget or _script_caps_budget(), None)
+    return attempt
 
-    use_case = ExecuteScriptUseCase(
+
+def _next_suggestion_attempt(run_id: str) -> int:
+    """One past the highest recorded prediction attempt (1 when none exist)."""
+    return max((a.attempt for a in build_suggestion_store().list_attempts(run_id)), default=0) + 1
+
+
+def _script_caps_budget() -> LlmBudget:
+    """The configured default caps for the script's llm tool calls.
+
+    Used when the wizard's budget wasn't passed (older callers/CLI): the same
+    defaults the wizard's caps step prefills. The pass's ledger enforces them
+    ONLY against the script's llm_complete/llm_map usage.
+    """
+    from uwazi_admin_agent.configuration import SCRIPT_DEFAULT_MAX_COST, SCRIPT_DEFAULT_MAX_REQUESTS
+
+    return LlmBudget(
+        max_cost=SCRIPT_DEFAULT_MAX_COST,
+        max_requests=SCRIPT_DEFAULT_MAX_REQUESTS,
+        price=LlmPrice(
+            model="script-caps",
+            input_per_mtok=LLM_PRICE_INPUT_PER_MTOK,
+            output_per_mtok=LLM_PRICE_OUTPUT_PER_MTOK,
+        ),
+    )
+
+
+GENERATION_HISTORY_FILENAME: str = "generation_messages.json"
+
+
+def _persist_generation_history(run_path: Path, use_case: GenerateScriptUseCase) -> None:
+    """Write the generation conversation next to the run's script.
+
+    The review UI's "Improve prompt" loop needs the ORIGINAL discovery context to
+    repair the script without re-exploring; ``all_messages_json`` is that context
+    in a round-trippable form. Best-effort: a serialization failure only loses
+    the cheap-repair path (the loop falls back to a fresh generation).
+    """
+    payload = getattr(use_case, "_last_messages_json", None)
+    if not payload:
+        return
+    try:
+        (run_path / GENERATION_HISTORY_FILENAME).write_bytes(payload)
+    except OSError as exc:  # noqa: BLE001 — never fail a generation over this
+        logger.warning("could not persist generation history for {}: {}", run_path.name, exc)
+
+
+def has_generation_history(run_id: str) -> bool:
+    """True when a run has a persisted generation conversation (repair is cheap)."""
+    return (RUNS_PATH / run_id / GENERATION_HISTORY_FILENAME).is_file()
+
+
+def build_suggestion_store() -> SuggestionStorePort:
+    """Return the shared SQLite suggestion store (schema ensured on build)."""
+    return SqliteSuggestionStore(SUGGESTIONS_DB_PATH)
+
+
+def read_run_script(run_id: str, attempt: int | None = None) -> str:
+    """Read a run's script source (the attempt file when ``attempt`` is given).
+
+    Attempts are immutable history (``script_attempt_<N>.py``); ``script.py``
+    always holds the ORIGINAL generation, so an untouched run has no attempt
+    files at all and every attempt reads ``script.py``.
+    """
+    run_path = RUNS_PATH / run_id
+    if attempt is not None:
+        candidate = run_path / f"script_attempt_{attempt}.py"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    return (run_path / "script.py").read_text(encoding="utf-8")
+
+
+async def generate_predictions(
+    run_id: str,
+    user: str,
+    password: str,
+    attempt: int,
+    budget: LlmBudget,
+    shared_ids: list[str] | None = None,
+) -> None:
+    """Run the planning pass over a run's script and persist its rows.
+
+    A subset pass passes ``shared_ids``; None means the script discovers its own
+    scope. The pass cannot mutate Uwazi (every write is a recorded no-op). The
+    script's OWN llm_complete/llm_map calls ride the LLM runtime under the
+    ledger built from ``budget`` — the caps the operator approved at task
+    creation; a breach aborts the pass keeping earlier rows.
+    """
+    runtime = build_runtime(user=user, password=password)
+    script = read_run_script(run_id, attempt)
+    use_case = GeneratePredictionsUseCase(
+        entity_api=runtime.entity_api,
+        entity_repository=runtime.entity_repository,
+        file_repository=runtime.file_repository,
+        segmentation_repository=runtime.segmentation_repository,
+        url_fetcher=runtime.url_fetcher,
+        suggestion_store=build_suggestion_store(),
+        llm_runtime=PydanticAiLlmRuntime(runtime.llm),
+        default_language=DUMMY_LANGUAGE,
+        template_labels=runtime.template_labels,
+    )
+    await use_case.run(script, run_id=run_id, attempt=attempt, budget=budget, entity_scope=shared_ids)
+
+
+def get_suggestions(run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
+    """Return a page of suggestions + the filter's total (the review grid's read)."""
+    return build_suggestion_store().query(run_id, attempt, f)
+
+
+def get_attempt(run_id: str, attempt: int) -> PredictionAttempt | None:
+    """Return one prediction attempt row (the progress/abort badge source)."""
+    return build_suggestion_store().get_attempt(run_id, attempt)
+
+
+def list_attempts(run_id: str) -> list[PredictionAttempt]:
+    """Return every prediction attempt for a run, newest first."""
+    return build_suggestion_store().list_attempts(run_id)
+
+
+def get_suggestion_shared_ids(run_id: str, attempt: int, f: SuggestionFilter) -> list[str]:
+    """Return the distinct sharedIds matching a filter (subset re-predict/apply)."""
+    return build_suggestion_store().shared_ids(run_id, attempt, f)
+
+
+def get_suggestion_counts(run_id: str, attempt: int) -> dict[str, int]:
+    """Return the review header's aggregate counters (SQL-side group-bys)."""
+    return build_suggestion_store().counts(run_id, attempt)
+
+
+def get_suggestion_properties(run_id: str, attempt: int) -> list[str]:
+    """Return the distinct property names in a set (the property dropdown)."""
+    return build_suggestion_store().property_names(run_id, attempt)
+
+
+def get_entity_suggestions(run_id: str, attempt: int, shared_id: str) -> list[Suggestion]:
+    """Return every suggestion for one entity (the entity review window's read)."""
+    return build_suggestion_store().get_entity(run_id, attempt, shared_id)
+
+
+def get_entity_rows(run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
+    """Return a page of per-entity aggregate rows + the distinct-entity total.
+
+    The entity table's read: one row per affected entity (checkbox column feeds
+    the selection-driven actions), grouped in SQL like every other review read.
+    """
+    return build_suggestion_store().entity_rows(run_id, attempt, f)
+
+
+def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
+    """Wire the apply use case over a built runtime (the Run heuristic).
+
+    No LLM wiring: the heuristic executes precomputed rows only — no script
+    runs, no model calls, no budget to approve at write time.
+    """
+    return ApplySuggestionsUseCase(
         entity_api=runtime.entity_api,
         relationship_api=runtime.relationship_api,
         entity_repository=runtime.entity_repository,
         backup_store=runtime.backup_store,
         audit_log=runtime.audit_log,
-        cap=MAX_ENTITIES_PER_RUN,
-        revert_use_case=runtime.revert_use_case,
+        suggestion_store=build_suggestion_store(),
         file_repository=runtime.file_repository,
-        cache_stats=runtime.file_cache,
-        cache_control=runtime.file_cache,
         segmentation_repository=runtime.segmentation_repository,
         url_fetcher=runtime.url_fetcher,
+        cache_control=runtime.file_cache,
+        default_language=DUMMY_LANGUAGE,
     )
 
-    await use_case.execute(
-        script,
-        manifest,
-        run_id=run_id,
-        language=DUMMY_LANGUAGE,
-        on_error_policy=policy,
+
+async def apply_outcomes(
+    run_id: str,
+    attempt: int,
+    user: str,
+    password: str,
+    shared_ids: list[str],
+) -> list[str]:
+    """Execute the selected entities' rows into Uwazi (revertable).
+
+    The Run action: the deterministic heuristic over the precomputed rows —
+    property rows into per-entity update payloads, creates into create
+    payloads, delete/publish/unpublish/set_publish_status/relationship rows
+    through their dedicated intercepted helpers. The writes land in the run's
+    OWN accumulating manifest with pre-change snapshots: a Run adds no row to
+    the tasks table, it only changes the suggestion statuses and the run's
+    status, which is what lets one whole-task revert undo it.
+    Returns the run ids touched (the run itself).
+
+    The Run stands in for the row-level accept: the use case accepts the
+    selected entities' PENDING rows as it pushes them, so the rows the review
+    table shows (recorded by the planning pass) are what gets written.
+
+    Raises :class:`ApplyRefusedError` when there is nothing to run.
+    """
+    if not shared_ids:
+        raise ApplyRefusedError("nothing selected to run")
+
+    def _work() -> list[str]:
+        runtime = build_runtime(user=user, password=password)
+        use_case = _apply_use_case(runtime)
+        use_case.apply(run_id, attempt, shared_ids)
+        return [run_id]
+
+    return await asyncio.to_thread(_work)
+
+
+async def repair_predictions(
+    run_id: str,
+    feedback: str,
+    user: str,
+    password: str,
+    budget: LlmBudget,
+) -> str:
+    """Run a repair turn on the run's script and save it as a new attempt.
+
+    The review UI's prompt-revisit loop: the discard reasons and mismatch
+    samples become ``feedback``, and the script is regenerated with the ORIGINAL
+    generation context still in view (``repair`` reuses the persisted message
+    history, so discovery is not repeated). The new script is written as
+    ``script_attempt_<N>.py`` — the original ``script.py`` is never overwritten,
+    so attempts stay immutable history. Returns the new script path as a string.
+
+    When no history was persisted (a run generated before this feature), the
+    turn falls back to a FRESH generation over the original prompt, which the UI
+    reports so the operator knows re-discovery will be paid for.
+    """
+    runtime = build_runtime(user=user, password=password)
+    manifest = runtime.backup_store.load_manifest(run_id)
+    run_path = RUNS_PATH / run_id
+    use_case = GenerateScriptUseCase(
+        llm=runtime.llm,
+        deps=runtime.deps,
+        entity_repository=runtime.entity_repository,
     )
+    history_path = run_path / GENERATION_HISTORY_FILENAME
+    repaired_online = False
+    if history_path.is_file():
+        try:
+            use_case.load_history_json(history_path.read_bytes())
+            repaired_online = True
+        except Exception as exc:  # noqa: BLE001 — fall back to a fresh generation
+            logger.warning("could not restore generation history for {}: {}", run_id, exc)
+    try:
+        if repaired_online:
+            script = await use_case.repair(feedback)
+        else:
+            script = await use_case.execute(f"{manifest.validated_prompt or manifest.prompt}\n\n{feedback}")
+    except Exception as exc:  # noqa: BLE001 — surface as a generation error
+        raise GenerateError(str(exc)) from exc
+
+    attempt = _next_script_attempt(run_path)
+    (run_path / f"script_attempt_{attempt}.py").write_text(script.python_code, encoding="utf-8")
+    _persist_generation_history(run_path, use_case)
+    manifest.script = script.python_code
+    manifest.status = RunStatus.PLANNED
+    manifest.error = None
+    manifest.error_step = None
+    runtime.backup_store.save_manifest(run_id, manifest)
+    logger.info(
+        "repaired predictions run={} attempt={} reused_history={}",
+        run_id,
+        attempt,
+        repaired_online,
+    )
+    # The regenerated script needs a fresh planning scan to build its rows:
+    # it runs unasked into a new attempt slot.
+    await run_auto_scan(run_id, user, password)
+    return str(run_path / f"script_attempt_{attempt}.py")
+
+
+def _next_script_attempt(run_path: Path) -> int:
+    """The next attempt number for a run's script history (1 when none exist)."""
+    existing = [p for p in run_path.glob("script_attempt_*.py")]
+    numbers = []
+    for path in existing:
+        try:
+            numbers.append(int(path.stem.removeprefix("script_attempt_")))
+        except ValueError:
+            continue
+    return max(numbers, default=0) + 1
+
+
+# --- multistep tasks ---------------------------------------------------------
+
+
+def build_task_store() -> TaskStorePort:
+    """Return the YAML task store under ``TASKS_PATH``."""
+    return YamlTaskStore(TASKS_PATH)
+
+
+def _task_use_case() -> Any:
+    """Wire the task use case over the existing single-run functions.
+
+    The task layer is pure orchestration, so it is handed the very same
+    revert/create functions the single-run flow uses — one code
+    path for the actual work, no second implementation to keep in sync.
+    """
+    from uwazi_admin_agent.use_cases.task_use_case import TaskUseCase
+
+    return TaskUseCase(
+        task_store=build_task_store(),
+        backup_store=build_backup_store(),
+        revert_run=revert_run,
+        create_run=create_and_generate,
+    )
+
+
+def task_view(task_id: str) -> TaskView:
+    """A task's live view: steps, statuses, next executable step, revert plan."""
+    return _task_use_case().get_task(task_id)
 
 
 async def revert_run(run_id: str, user: str, password: str) -> None:
@@ -415,8 +776,11 @@ async def revert_run(run_id: str, user: str, password: str) -> None:
 
 
 def delete_run(run_id: str) -> None:
-    """Remove a run's entire folder from the backup store."""
+    """Remove a run's entire folder from the backup store + its suggestion rows."""
     build_backup_store().delete_run(run_id)
+    # The suggestion DB is one shared file, so a run's rows do not disappear
+    # with its folder: they are deleted explicitly here.
+    build_suggestion_store().delete_run(run_id)
 
 
 def clear_cache() -> int:
@@ -463,27 +827,34 @@ def rename_run(old_id: str, new_id: str) -> None:
     build_backup_store().rename_run(old_id, new_id)
 
 
-def _resolve_on_error(on_error: str | None) -> OnErrorPolicy:
-    raw = on_error if on_error is not None else DEFAULT_ON_ERROR_POLICY
-    return OnErrorPolicy(raw)
-
-
 __all__ = [
     "GenerateError",
     "RevertVerificationError",
     "RunDetail",
     "RunResults",
     "RunSummary",
+    "apply_outcomes",
+    "build_suggestion_store",
     "clarify_prompt",
-    "create_and_generate",
     "clear_cache",
+    "create_and_generate",
     "delete_run",
-    "rename_run",
-    "execute_run",
+    "generate_predictions",
+    "get_attempt",
+    "get_entity_rows",
     "get_entity_segmentation",
+    "get_entity_suggestions",
     "get_run",
     "get_run_audit",
     "get_run_results",
+    "get_suggestion_counts",
+    "get_suggestion_properties",
+    "get_suggestion_shared_ids",
+    "get_suggestions",
+    "list_attempts",
     "list_runs",
+    "read_run_script",
     "revert_run",
+    "rename_run",
+    "run_auto_scan",
 ]

@@ -24,9 +24,8 @@ translog right before the cleanup delete. The fix has two parts:
 
 This module holds the **pure** pieces (no I/O): the ``/api/v2/search`` response
 parser, the freshness-state assembler, the per-sharedId target builder, the
-skip-revert decision, and the warning formatter. The I/O polling loop lives in
-:class:`uwazi_admin_agent.use_cases.dummy_entity_harness.DummyEntityHarness.
-_wait_for_es_fresh` (validated live, not unit-tested).
+skip-revert decision, and the warning formatter. The I/O polling loop (the
+dummy cleanup this module was built for) is validated live, not unit-tested.
 """
 
 from __future__ import annotations

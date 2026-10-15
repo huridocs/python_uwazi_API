@@ -108,6 +108,76 @@ binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
 
+### Reviewing: selection scan → outcomes → accept
+
+Every task has a **review page** (`/review/<run_id>`, reachable from the runs
+table's `fact_check` action or its row menu). The review flow is built on the
+**two-script model** — a generation turn emits TWO scripts:
+
+1. **Selection script** (`script.py`, read-only) — discovers the affected
+   entities and declares one intended change per entity. Run it with **"Scan
+   entities"**: a dry pass (real reads, zero writes) whose records become the
+   review table's rows, one per affected entity, scored against the values
+   Uwazi currently holds (stored in a local SQLite file,
+   `data/suggestions.db`).
+2. **Apply script** (`apply_script.py`) — applies the change to EXACTLY ONE
+   entity via the bound `TARGET_SHARED_ID`. It is the only place LLM work
+   (`llm_complete`/`llm_map`) survives generation, so the expensive pass never
+   runs at task creation.
+
+On the review page:
+
+- the table lists ONE row per affected entity with a **checkbox** per row
+  (Ops / Properties / Changes / Match / Review badges summarize the entity's
+  rows); the entity window (click the title) shows the primary PDF beside the
+  per-property rows;
+- **Generate outcomes (N)** runs the apply script DRY once per checked entity
+  (budget-approved like every LLM pass) and stores each computed value under
+  the row — nothing is written to Uwazi;
+- **Accept selected (N)** writes the checked entities' accepted/edited values
+  to Uwazi through one accumulating, revertable *apply run* (`<run>-apply`).
+  Property rows are pushed as batched partial updates; whole-entity rows
+  (delete/publish/...) and creates are applied by running the apply script for
+  that one entity for real. Accepting again later adds to the same apply run;
+  **Revert task** (or the apply run's own revert) undoes everything in one
+  action;
+- **Reject selected (N)** marks the checked rows discarded (they are never
+  written);
+- **Improve the prompt** shows the run's current prompt editable plus this
+  round's discard/mismatch evidence; submitting regenerates BOTH scripts
+  (selection + apply) with the original discovery context still in view.
+
+CLI equivalences: `scan` = the selection scan; `apply` = accept everything of
+the latest attempt and push it into the apply run. There is deliberately no
+`execute` step: a task-scope script never executes whole-set.
+
+### Controlled LLM usage
+
+A script can call the LLM per entity through two helpers bound into the sandbox:
+`llm_complete(instruction, text)` and `llm_map(instruction, items)` (batched).
+Before any LLM-spending action — generating a script, a prediction pass, or a
+prompt-repair turn — a dialog shows the projected request/token counts and an
+*estimated* cost and lets you tighten the **hard limits** that are enforced at
+runtime. When a limit is hit the pass aborts cleanly: predictions never write to
+Uwazi, so everything recorded before the halt is kept and reviewable.
+
+Pricing is a placeholder and must be set for your provider via
+`LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK`; the enforced limits are
+request/token counts, not money.
+
+### Multistep tasks
+
+The New Task wizard accepts extra step prompts (one per line) to create a
+**multistep task** — one generated run (selection + apply scripts) per step
+(`/task/<task_id>`). Each step card shows the status, its selection scan's
+implication counts ("Refresh implications"), and a **"Review & apply"** link to
+the step's own review page — reviewing there is what writes; the task page has
+no whole-set Execute button. Reverting is **whole-task only**: a single
+"Revert task" button undoes every executed step AND every accept in reverse
+order (later steps first, a step's apply run before its own run), stopping at
+the first failure so the remainder stays visible for retry. Standalone runs
+keep their per-run revert in the runs table.
+
 ---
 
 ## Client Services

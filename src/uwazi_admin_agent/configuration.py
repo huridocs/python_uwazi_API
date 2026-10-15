@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 # The package directory (``src/uwazi_admin_agent/``). The admin agent's runtime
@@ -37,22 +38,9 @@ MAX_LLM_CALLS: int = 70
 # long merge script; it is a ceiling, not a target (shorter outputs cost nothing more).
 LLM_MAX_OUTPUT_TOKENS: int = 262144
 
-# Hard cap on ``run_validation_script`` calls per generation turn. The system
-# prompt asks the LLM to validate sparingly, but LLMs ignore prose limits and
-# loop; this counter (mirrors ``browser_agent``'s ``MAX_VALIDATION_ATTEMPTS``)
-# is the backstop that forces the agent to emit a final script instead of
-# retrying validation until the ``MAX_LLM_CALLS`` budget is exhausted.
-MAX_VALIDATION_ATTEMPTS: int = 5
-
-# Hard cap on ``run_dry_run_script`` calls per generation turn. The dry run is
-# the REAL-data rehearsal (real reads, recorded no-op writes) the agent uses to
-# prove extraction logic end-to-end before emitting; the counter backstops a
-# validation loop the same way MAX_VALIDATION_ATTEMPTS does for the dummy gate.
-MAX_DRY_RUN_ATTEMPTS: int = 3
-
 # UsageLimits request cap for the extractor subagent (author_html_extractor).
-# The extractor samples files, authors `def extract`, and self-proves it via
-# run_validation_script — fewer requests than a full generation run.
+# The extractor samples files, authors `def extract`, and self-proves it in
+# process — fewer requests than a full generation run.
 MAX_EXTRACTOR_LLM_CALLS: int = 40
 
 # Per-file character truncation for peek_file_text (generation-time HTML
@@ -110,6 +98,53 @@ ES_SETTLE_GRACE_PERIOD_MS: int = 3000
 # Delay (ms) before re-probing ES in the post-delete verification, to rule out
 # read-path lag (the delete's ``refresh: true`` not yet visible to ``/api/v2/search``).
 ES_VERIFY_RETRY_DELAY_MS: int = 1000
+
+# --- controlled LLM usage (prediction passes + script helpers) -----------------
+#
+# Generated scripts may call the LLM per entity (extraction/enrichment) through
+# the bound ``llm_complete`` / ``llm_map`` helpers. Every such call is charged
+# against a user-approved :class:`LlmBudget`: the DOLLAR cap is the
+# AUTHORITATIVE limit (enforced before each call against the price-derived
+# cost, aborting the pass cleanly); the request count is a backstop against
+# cheap-call runaway loops. The prices below convert usage into that money —
+# placeholders pending real ollama.com pricing, overridable via the environment.
+LLM_PRICE_INPUT_PER_MTOK: float = float(os.environ.get("LLM_PRICE_INPUT_PER_MTOK", "0.14"))
+LLM_PRICE_OUTPUT_PER_MTOK: float = float(os.environ.get("LLM_PRICE_OUTPUT_PER_MTOK", "0.55"))
+
+# Entities per ``llm_map`` call: the batch size the helper splits its input list
+# into, so one LLM request covers many entities (and the request cap is spent
+# per batch, not per entity).
+LLM_MAP_BATCH_SIZE: int = 10
+
+# Default ceilings for a prediction pass, shown in the cost dialog and used as
+# the enforced cap unless the operator tightens them before approving. The
+# dollar cap is the one the operator edits; the request backstop bounds a
+# pathological cheap-call loop.
+PREDICTION_DEFAULT_MAX_COST: float = 10.0
+PREDICTION_DEFAULT_MAX_REQUESTS: int = 2000
+
+# Hard caps on the GENERATED SCRIPT's own llm_complete/llm_map calls (the
+# wizard's caps step; enforced by the planning pass's LlmLedger). They apply
+# ONLY to the script's tool calls — never to script generation, which is
+# capped by MAX_LLM_CALLS/LLM_MAX_OUTPUT_TOKENS. A script that computes in
+# pure Python spends nothing under them.
+#
+# The defaults are ZERO on both dimensions (deny-by-default): a wizard run
+# leaves them untouched, so the script's LLM tools abort cleanly on their
+# first call. The operator opts in by raising either cap in the wizard.
+SCRIPT_DEFAULT_MAX_COST: float = 0.0
+SCRIPT_DEFAULT_MAX_REQUESTS: int = 0
+
+# Rows per page in the review table (server-side pagination over 10k+ rows).
+REVIEW_PAGE_SIZE: int = 25
+
+# The single SQLite file holding every run's predictions (suggestions) and
+# prediction-attempt rows. One DB (not per-run files) because the review grid
+# needs SQL-side filtering/pagination/aggregation over ~10k rows.
+SUGGESTIONS_DB_PATH: Path = DATA_DIR / "suggestions.db"
+
+# Multistep tasks: one YAML per task under this directory.
+TASKS_PATH: Path = DATA_DIR / "tasks"
 
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 10000

@@ -1,14 +1,11 @@
 """``uwazi-admin-agent generate`` — the generate step (§2.2, Phase 5 driver).
 
 Loads the active :class:`RunConfig`, resolves the run folder, builds the live
-:class:`Runtime`, runs :class:`GenerateScriptUseCase` (the agent calls
-``run_validation_script`` internally — simulate is folded into generate per
-§2.2/Phase 3), emits the script to ``<run_path>/script.py``, and persists an
-initial :class:`MigrationManifest` (``status=PLANNED``) so ``inspect-run`` works
-before ``execute`` populates it.
+:class:`Runtime`, runs :class:`GenerateScriptUseCase`, emits the ONE script to
+``<run_path>/script.py``, and persists an initial :class:`MigrationManifest`
+(``status=PLANNED``).
 
-Not unit-tested (needs an LLM + a real Uwazi instance); validated via the
-simulation run.
+Not unit-tested (needs an LLM + a real Uwazi instance).
 """
 
 from __future__ import annotations
