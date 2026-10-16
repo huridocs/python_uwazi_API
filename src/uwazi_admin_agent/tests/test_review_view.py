@@ -7,6 +7,8 @@ control values, so they are testable directly.
 from uwazi_admin_agent.domain.suggestion import EntityReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
     accuracy_label,
+    entity_language_key,
+    entity_open_url,
     entity_row,
     filter_from_controls,
     match_label,
@@ -143,6 +145,7 @@ def test_accuracy_label_is_na_when_nothing_compares() -> None:
 def _entity_row(
     *,
     shared_id: str = "s1",
+    language: str | None = None,
     entity_title: str = "One",
     template_names: list[str] | None = None,
     ops: list[str] | None = None,
@@ -158,6 +161,7 @@ def _entity_row(
 ) -> EntityReviewRow:
     return EntityReviewRow(
         shared_id=shared_id,
+        language=language,
         entity_title=entity_title,
         template_names=template_names if template_names is not None else ["Judgment"],
         ops=ops if ops is not None else ["update"],
@@ -205,6 +209,86 @@ def test_entity_row_match_column_is_gone() -> None:
     assert "properties" not in row
     assert "proposals" not in row
     assert "status_summary" not in row
+
+
+# --- the language column -----------------------------------------------------
+
+
+def test_entity_row_carries_the_language_and_a_row_key_per_language() -> None:
+    """Two languages of one entity are two ROWS: distinct keys, distinct checkboxes."""
+    spanish = entity_row(_entity_row(language="es"))
+    english = entity_row(_entity_row(language="en"))
+
+    assert (spanish["language"], english["language"]) == ("es", "en")
+    assert spanish["row_key"] != english["row_key"]
+    assert spanish["shared_id"] == english["shared_id"] == "s1"
+
+
+def test_a_language_independent_row_shows_an_empty_language() -> None:
+    """The '—' group renders as an empty string so the column never says 'None'."""
+    row = entity_row(_entity_row(language=None))
+
+    assert row["language"] == ""
+    assert row["row_key"] == entity_language_key("s1", None)
+
+
+def test_the_uwazi_link_opens_the_row_in_its_own_language() -> None:
+    """The /<language>/entity/<id> segment is the row's language, not a fixed 'en'."""
+    spanish = entity_row(_entity_row(language="es"), "http://localhost:3000")
+    agnostic = entity_row(_entity_row(language=None), "http://localhost:3000")
+
+    assert spanish["url"] == "http://localhost:3000/es/entity/s1"
+    assert agnostic["url"] == "http://localhost:3000/en/entity/s1"
+
+
+def test_run_confirmation_names_the_languages_it_will_write() -> None:
+    title, _message = run_confirmation(2, ["update"], ["es"])
+
+    assert title == "Run 2 rows (es)"
+
+
+def test_run_confirmation_without_languages_stays_plain() -> None:
+    title, _message = run_confirmation(1, ["delete"])
+
+    assert title == "Run 1 row"
+
+
+# --- open in Uwazi ------------------------------------------------------------
+
+
+def test_entity_open_url_points_at_the_instances_entity_page() -> None:
+    item = _entity_row(shared_id="abc", ops=["update"])
+
+    assert entity_open_url(item, "http://localhost:3000") == "http://localhost:3000/en/entity/abc"
+
+
+def test_entity_open_url_does_not_double_the_slash() -> None:
+    item = _entity_row(ops=["delete"])
+
+    assert entity_open_url(item, "http://localhost:3000/") == "http://localhost:3000/en/entity/s1"
+
+
+def test_entity_open_url_is_none_when_the_instance_is_not_configured() -> None:
+    """No UWAZI_URL means no link at all — never a broken one."""
+    assert entity_open_url(_entity_row(ops=["update"]), None) is None
+
+
+def test_entity_open_url_is_none_for_ops_with_nothing_to_open() -> None:
+    """A create row still holds its dry-created placeholder: nothing to open."""
+    for ops in (["create"], ["publish"], ["unpublish"], ["create_relationships"], ["set_publish_status"]):
+        assert entity_open_url(_entity_row(ops=ops), "http://localhost:3000") is None
+
+
+def test_entity_open_url_covers_a_mixed_row_through_its_existing_op() -> None:
+    item = _entity_row(ops=["create", "update"])
+
+    assert entity_open_url(item, "http://localhost:3000") == "http://localhost:3000/en/entity/s1"
+
+
+def test_entity_row_carries_the_open_url_only_when_there_is_one() -> None:
+    assert entity_row(_entity_row(ops=["update"]), "http://localhost:3000")["url"] == "http://localhost:3000/en/entity/s1"
+    assert entity_row(_entity_row(ops=["create"]), "http://localhost:3000")["url"] is None
+    assert entity_row(_entity_row(ops=["update"]))["url"] is None
 
 
 # --- run status --------------------------------------------------------------

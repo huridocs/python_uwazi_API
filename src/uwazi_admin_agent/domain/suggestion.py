@@ -93,6 +93,16 @@ class Suggestion(BaseModel):
         description="The entity's template name when the script recorded it (the review table's Template column).",
     )
     op: SuggestionOp = Field(description="Which recorded op produced this suggestion.")
+    language: str | None = Field(
+        default=None,
+        description=(
+            "The language this row's value is written in, when the property is a per-language one "
+            "(text, richtext): Uwazi stores those as [{'value', 'language'}] lists, and a translation "
+            "task records one row PER LANGUAGE. None means the value is language-independent — a "
+            "select/multiselect/link/date value, a title, or a whole-entity op — which is also how a "
+            "multi-language value that was never split reads (see records_to_suggestions)."
+        ),
+    )
     property_name: str | None = Field(
         default=None,
         description=(
@@ -117,18 +127,29 @@ class Suggestion(BaseModel):
 
 
 class EntityReviewRow(BaseModel):
-    """One affected entity, aggregated from its suggestions (the review table's row).
+    """One affected entity IN ONE LANGUAGE, aggregated from its suggestions.
 
-    The review table is one row per ENTITY (the checkbox feeds bulk accept /
-    discard / generate-outcomes), not one row per suggestion: a suggestion set
-    of thousands groups into a table of distinct entities. ``ops`` /
-    ``properties`` follow first-appearance order so the display mirrors the
-    script's own order; the counters are SQL ``SUM``s over the group's rows.
+    The review table is one row per affected entity (the checkbox feeds bulk
+    accept / discard / generate-outcomes), not one row per suggestion: a
+    suggestion set of thousands groups into a table of distinct entities.
+    ``ops`` / ``properties`` follow first-appearance order so the display
+    mirrors the script's own order; the counters are SQL ``SUM``s over the
+    group's rows.
+
+    ``language`` is part of the grouping key: a translation task updates the
+    same entity in several languages and the operator reviews each of them
+    separately, so the same sharedId can appear once per language. ``None`` is
+    the language-independent group (a select change, a title, a delete) and is
+    kept as its own row rather than repeated into every language group.
     """
 
     model_config = ConfigDict(frozen=True)
 
     shared_id: str = Field(description="The entity's sharedId (a create row keeps its dry-created-N placeholder).")
+    language: str | None = Field(
+        default=None,
+        description="The language this row is written in; None = language-independent (the '—' group).",
+    )
     entity_title: str = Field(default="", description="Display title, when any row recorded one.")
     template_names: list[str] = Field(
         default_factory=list,
@@ -191,8 +212,17 @@ class SuggestionFilter(BaseModel):
     shared_ids: list[str] | None = Field(
         default=None,
         description=(
-            "Restrict to these sharedIds (the table's checkbox selection). An explicit "
+            "Restrict to these sharedIds (every language of them). An explicit "
             "empty list matches NOTHING — 'nothing selected' is distinct from 'no constraint'."
+        ),
+    )
+    entity_languages: list[tuple[str, str | None]] | None = Field(
+        default=None,
+        description=(
+            "Restrict to these (sharedId, language) PAIRS — the table's checkbox "
+            "selection, whose rows are per language. A pair with None language "
+            "means the language-independent group. An explicit empty list matches "
+            "NOTHING, as with shared_ids."
         ),
     )
     limit: int = Field(default=25, ge=1, description="Page size (ignored by aggregate/projection queries).")
@@ -229,6 +259,17 @@ class PredictionAttempt(BaseModel):
     finished_at: datetime | None = Field(default=None, description="When the pass reached a terminal state.")
 
 
+def entity_language_key(shared_id: str, language: str | None) -> str:
+    """One review-table row's identity: the entity plus its language (pure).
+
+    The table's rows are per (entity, language), so the checkbox, the Quasar
+    ``row_key`` and the store's per-group projection all need the same flat key.
+    The language-independent group keys as an empty language, which keeps it a
+    distinct row rather than colliding with any language.
+    """
+    return f"{shared_id}|{language or ''}"
+
+
 __all__ = [
     "EntityReviewRow",
     "PredictionAttempt",
@@ -238,4 +279,5 @@ __all__ = [
     "SuggestionOp",
     "SuggestionStatus",
     "TITLE_PROPERTY",
+    "entity_language_key",
 ]

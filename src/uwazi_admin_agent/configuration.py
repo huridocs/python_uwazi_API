@@ -219,3 +219,5 @@ THROTTLE_PENALTY_PAUSE_SECONDS: float = 1.0
 # Entities per port call inside the parallel write helpers — the same "~50"
 # granularity the sequential contract teaches, now one task per chunk.
 PARALLEL_WRITE_BATCH_SIZE: int = EXECUTE_BATCH_SIZE
+
+AI_TRANSLATED_MARKER = "(AI translated) "

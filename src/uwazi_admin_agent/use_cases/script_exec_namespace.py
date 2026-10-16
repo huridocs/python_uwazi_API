@@ -54,6 +54,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import AI_TRANSLATED_MARKER
 from uwazi_admin_agent.domain.file_deletion import group_deletions_by_entity
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
@@ -62,6 +63,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort, UrlFetchError
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.llm_script_helpers import build_llm_script_helpers, selection_llm_refusal
@@ -958,6 +960,66 @@ def _build_get_url_text_real_helper(url_fetcher: UrlFetcherPort | None, loop: as
     return get_url_text
 
 
+def _build_translate_text_real_helper(translation_port: TranslationPort | None, loop: asyncio.AbstractEventLoop) -> Any:
+    """Build the real ``translate_text`` bound into the real exec namespace.
+
+    Calls :class:`TranslationPort` (Uwazi's ``POST /api/translationService``
+    proxy) and PREPENDS the instance marker: the same
+    ``AI_TRANSLATED_MARKER`` prefix Uwazi's own AI-translation flow appends to
+    translated metadata, so a translated value reads as AI-translated in the
+    UI exactly like a native Uwazi translation. The marker is part of the
+    recorded value: the review table shows the marked text and Run writes it
+    verbatim, so the applied metadata is already marked.
+
+    Raises :class:`~uwazi_api.domain.exceptions.TranslationError` on failure —
+    translation is NOT best-effort: a script asking for a translation of a
+    value must either get the genuine translation or fail the pass (a silent
+    unmarked fallback would write valueless text). Unwired ``translation_port``
+    -> a stub that raises a clear ``RuntimeError`` when the script calls it.
+    """
+    if translation_port is None:
+
+        def translate_text_unwired(text: str, language_from: str, language_to: str) -> str:
+            raise RuntimeError(
+                "translate_text requires a wired translation_port (got None). Wire "
+                "TranslationPort into the runtime/execute use case to enable "
+                "translations-endpoint translation."
+            )
+
+        return translate_text_unwired
+
+    def translate_text(text: str, language_from: str, language_to: str) -> str:
+        started = time.monotonic()
+        translated = loop.run_until_complete(translation_port.translate(text, language_from, language_to))
+        logger.debug(
+            "script translate_text: {} -> {} -> {} chars ({:.1f}s)",
+            language_from,
+            language_to,
+            len(translated),
+            time.monotonic() - started,
+        )
+        return f"{AI_TRANSLATED_MARKER}{translated}"
+
+    return translate_text
+
+
+def _translate_text_noop() -> Any:
+    """Build the dummy no-op ``translate_text`` (dummies are in-memory value objects).
+
+    The dummy gate cannot exercise real translation calls (dummies carry no
+    external translation service); like ``get_url_text`` the no-op returns the
+    marker + the source text UNCHANGED so the identical script still runs clean
+    in the gate and the recorded value shape (marker-prefixed string) matches
+    what the real mode records. The real endpoint path is exercised live only.
+    """
+
+    def translate_text(text: str, language_from: str, language_to: str) -> str:
+        _ = language_from, language_to  # ignored: dummies do not call the translation endpoint
+        return f"{AI_TRANSLATED_MARKER}{text}"
+
+    return translate_text
+
+
 def build_exec_namespace(
     entity_api: Any,
     relationship_api: Any,
@@ -992,6 +1054,7 @@ def build_exec_namespace(
         "get_file_bytes": _get_file_bytes_noop(),
         "get_segmentation": _get_segmentation_noop(),
         "get_url_text": _get_url_text_noop(),
+        "translate_text": _translate_text_noop(),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1264,6 +1327,7 @@ def build_real_exec_namespace(
     file_repository: FileRepositoryPort | None = None,
     segmentation_repository: SegmentationRepositoryPort | None = None,
     url_fetcher: UrlFetcherPort | None = None,
+    translation_port: TranslationPort | None = None,
     throttle: ThrottleController | None = None,
     llm_runtime: LlmRuntimePort | None = None,
     llm_ledger: LlmLedger | None = None,
@@ -1326,6 +1390,7 @@ def build_real_exec_namespace(
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
         "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
+        "translate_text": _build_translate_text_real_helper(translation_port, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),
@@ -1446,6 +1511,7 @@ def build_dry_run_namespace(
     entity_repository: EntityRepositoryPort | None = None,
     segmentation_repository: SegmentationRepositoryPort | None = None,
     url_fetcher: UrlFetcherPort | None = None,
+    translation_port: TranslationPort | None = None,
     throttle: ThrottleController | None = None,
     llm_runtime: LlmRuntimePort | None = None,
     llm_ledger: LlmLedger | None = None,
@@ -1520,6 +1586,7 @@ def build_dry_run_namespace(
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
         "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
+        "translate_text": _build_translate_text_real_helper(translation_port, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),

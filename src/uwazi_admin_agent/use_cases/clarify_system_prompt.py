@@ -9,13 +9,20 @@ agent (:data:`SYSTEM_PROMPT`) so it does not ask questions the contract already
 answers (how entities are discovered, which helpers exist, how templates/thesauri
 are inspected, how validation/dry-run work). Reusing the single source of truth
 avoids a parallel capability summary that would drift out of sync.
+
+The template carries an ``{instance_schema}`` slot: :class:`ClarifyPromptUseCase`
+replaces it at run time with the instance's REAL template + thesaurus
+definitions (fetched via the wired deps —
+:mod:`uwazi_admin_agent.use_cases.clarify_schema_context`), so the agent
+resolves property/template names against the schema instead of asking "which
+property do you mean?" about names the instance already answers.
 """
 
 from __future__ import annotations
 
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 
-CLARIFY_SYSTEM_PROMPT = f"""\
+CLARIFY_SYSTEM_PROMPT_TEMPLATE = f"""\
 {SYSTEM_PROMPT}
 
 ---
@@ -37,6 +44,18 @@ natural-language prompt:
    thesauri are inspected, how validation or dry-run works). If the prompt is
    already fully specified, return an empty questions list.
 
-Do not write any script. Do not invent facts about the instance. Keep the summary
-concise and the questions focused.
+INSTANCE SCHEMA (fetched live from the Uwazi instance):
+{{instance_schema}}
+
+The schema above lists every template's REAL property names, types and
+thesauri. Use it to RESOLVE, never to ask about: property names the prompt
+mentions or implies (match them against the schema — do NOT ask "which
+property do you mean" when one clearly matches), template names for the
+target set, and whether a property is filterable or thesaurus-backed. Ask a
+question ONLY when the prompt is genuinely ambiguous between SEVERAL schema
+entries (e.g. two templates both have a plausible property) or about
+something the schema cannot answer (desired VALUES, which entities, what to
+do with them). Do not write any script. Do not invent facts about the
+instance beyond the schema. Keep the summary concise and the questions
+focused.
 """

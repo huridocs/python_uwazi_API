@@ -22,6 +22,15 @@ _SIMPLE_PROPS: set[PropertyType] = {
     PropertyType.MEDIA,
 }
 
+# The types Uwazi stores PER LANGUAGE, as a list of ``{"value", "language"}``
+# entries — the only ones where a ``language`` key inside a value entry means
+# anything. Every other type is language-independent: there, the tag is metadata
+# about the write, not part of the value, and it must be dropped before coercion
+# (``_resolve_thesaurus_label`` looks a label up in a dict, so a tagged select
+# would otherwise fail on an unhashable type; a tagged date would be sent as a
+# dict).
+_PER_LANGUAGE_PROPS: set[PropertyType] = {PropertyType.TEXT, PropertyType.MARKDOWN}
+
 
 class EntityMapper:
     """Convert between API-side ``Entity`` (Uwazi) and ``AgentEntity`` (LLM-facing).
@@ -274,6 +283,12 @@ class EntityMapper:
 
     def _coerce_value(self, value: Any, prop, language: str) -> Any:
         prop_type = prop.type
+        if prop_type in _PER_LANGUAGE_PROPS:
+            # The entries stay whole: their ``language`` key IS the value's
+            # language, and it is what makes a per-language property hold one
+            # entry per language instead of one shared string.
+            return _to_value_list(value)
+        value = _unwrap_values(value) if _is_repeated_type(prop_type) else _unwrap_value(value)
         if prop_type in _SIMPLE_PROPS or prop_type == PropertyType.NUMERIC:
             return _to_value_list(value)
         if prop_type == PropertyType.DATE:
@@ -343,6 +358,31 @@ def _coerce_relationship(value: Any, prop_name: str = "") -> list[dict[str, Any]
             )
         result.append({"value": shared_id})
     return result
+
+
+def _unwrap_value(value: Any) -> Any:
+    """Strip ``{"value": ...}`` wrappers from a SINGLE value (pure).
+
+    A language-independent property stores a bare value, so the on-disk envelope
+    — and any ``language`` tag a caller attached while writing one language — is
+    removed before coercion. A single-element list wrapping that envelope (the
+    shape a partial update round-trips) collapses to the value; anything that is
+    not an envelope is returned untouched, so a relationship's
+    ``{"shared_id", "title"}`` read shape and a date range's ``{"from", "to"}``
+    survive intact.
+    """
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    while isinstance(value, dict) and "value" in value:
+        value = value["value"]
+    return value
+
+
+def _unwrap_values(value: Any) -> Any:
+    """Strip ``{"value": ...}`` wrappers from a REPEATED value, keeping the list (pure)."""
+    if not isinstance(value, list):
+        return _unwrap_value(value)
+    return [_unwrap_value(item) for item in value]
 
 
 def _to_list(value: Any) -> list[Any]:

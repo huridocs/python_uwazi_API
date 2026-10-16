@@ -441,6 +441,23 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       (and parse it with `htmlextract.*`) exactly like `get_file_bytes` bytes
       would be decoded and parsed.
 
+  translate_text(text, language_from, language_to)
+      Translate one text through Uwazi's OWN translation endpoint
+      (`POST /api/translationService` — the same service Uwazi's AI
+      translation flow uses; the tenant's configured external translation
+      service is behind it). Returns the translated string with the
+      `(AI translated) ` marker ALREADY PREPENDED — record it VERBATIM as the
+      property value (never strip or re-prefix the marker; the marker is how
+      Uwazi's UI knows the value is machine-translated). ISO 639-1 codes:
+          translated = translate_text(d["metadata"]["summary"], "en", "es")
+          updates.append({"shared_id": d["shared_id"], "template_name": tmpl,
+                          "metadata": {"summary": translated}})
+      Raises on failure (the instance has no translation service configured,
+      the service refused, a language pair is unsupported) — translation is
+      NOT best-effort: a failed translation must fail the pass, never write
+      unmarked or untranslated text. One call per text; batch the texts of
+      several entities only by looping (the endpoint takes one text).
+
   llm_complete(instruction, text)
       Call the LLM ONCE over one entity's text and return its reply as a string.
       Use this for per-entity extraction/enrichment the script itself cannot do

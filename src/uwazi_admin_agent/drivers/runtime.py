@@ -48,6 +48,7 @@ from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
+from uwazi_admin_agent.adapters.translation_repository_adapter import UwaziTranslationRepository
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
@@ -69,6 +70,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
+from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
@@ -103,6 +105,8 @@ class Runtime:
         file_cache: FileCacheStore | None,
         segmentation_repository: SegmentationRepositoryPort,
         url_fetcher: UrlFetcherPort,
+        settings_repository: Any = None,
+        translation_port: TranslationPort | None = None,
         template_labels: TemplateLabelPort | None = None,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
@@ -122,8 +126,15 @@ class Runtime:
         # port — the counters live on the store both decorators bump.
         self.file_cache: FileCacheStore | None = file_cache
         self.url_fetcher: UrlFetcherPort = url_fetcher
+        # Text translation through Uwazi's /api/translationService proxy
+        # (None = unwired; the sandbox helper raises loudly when called).
+        self.translation_port: TranslationPort | None = translation_port
         # Template id -> display label (a raw carries the id; people see the name).
         self.template_labels: TemplateLabelPort | None = template_labels
+        # The instance's settings (``/api/settings``): the configured languages,
+        # which the document/segmentation resolvers use as their fallback order
+        # when an entity holds its file in a language other than the requested one.
+        self.settings_repository: Any = settings_repository
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -200,6 +211,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     audit_log = build_audit_log()
     llm = OllamaAdapter()
     url_fetcher: UrlFetcherPort = HttpUrlFetcherAdapter()
+    translation_port: TranslationPort | None = UwaziTranslationRepository(api.client)
 
     deps = AdminAgentDeps(
         thesauri_api=api,
@@ -252,5 +264,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         file_cache=file_cache,
         segmentation_repository=segmentation_repository,
         url_fetcher=url_fetcher,
+        settings_repository=api.client.settings,
+        translation_port=translation_port,
         template_labels=template_labels,
     )

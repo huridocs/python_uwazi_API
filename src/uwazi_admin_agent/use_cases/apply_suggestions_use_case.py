@@ -27,12 +27,14 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from loguru import logger
 
 from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER_RUN
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, Suggestion, SuggestionFilter, SuggestionStatus
+from uwazi_admin_agent.domain.suggestion_scoring import value_languages
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
@@ -47,8 +49,18 @@ from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
 # The statuses a Run pushes: an accepted proposal, or an operator-edited one.
 _PUSHABLE: tuple[SuggestionStatus, ...] = (SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED)
 
-# Ops that carry per-property values (update/create expand to property rows).
-_PROPERTY_OPS: tuple[str, ...] = ("update", "create")
+# The op whose per-property rows the PARTIAL-UPDATE path groups. A ``create``
+# also expands to property rows when recorded, but its rows carry the
+# ``dry-created-N`` placeholder sharedId — an id Uwazi has never seen — so they
+# are grouped by :func:`build_apply_creates` and written as a create. Letting one
+# reach the update path made :meth:`ApplySuggestionsUseCase._enrich` read a raw
+# that cannot exist (a 404 by design) and abort the whole Run with a raw
+# ``get_raw_by_shared_id(dry-created-0) failed (404)``.
+_UPDATE_OP: str = "update"
+
+# What a Run acts on: the checked (sharedId, language) rows of the review
+# table. ``None`` (the CLI path) means the whole attempt.
+EntitySelection = list[tuple[str, str | None]] | None
 
 
 class ApplyRefusedError(RuntimeError):
@@ -82,20 +94,78 @@ def _decode_edited(text: str) -> object:
 # scalar and it rejects it — so the reviewed value is applied verbatim.
 
 
-def pushable_rows(suggestions: list[Suggestion], shared_ids: list[str] | None = None) -> list[Suggestion]:
+def _selected(suggestion: Suggestion, selection: EntitySelection | None) -> bool:
+    """Whether a row belongs to the Run's selection (pure).
+
+    The selection is the table's checked (sharedId, language) rows. ``None``
+    means "the whole attempt" (a CLI run); a row is in it when its exact
+    (sharedId, language) pair is listed — which is what lets the operator run
+    the ``es`` row of a translation task WITHOUT touching its ``en`` sibling.
+    """
+    if selection is None:
+        return True
+    return (suggestion.shared_id, suggestion.language) in selection
+
+
+def merge_language_value(current: Any, proposed: Any) -> Any:
+    """One property's value list with ``proposed``'s languages replacing current's (pure).
+
+    Uwazi's partial update merges at the PROPERTY level
+    (``merged_metadata.update(entity.metadata)``), so a payload carrying only the
+    ``es`` entry of a text property would DROP the ``en`` entry that is already
+    in Uwazi. Writing one language therefore means sending the whole list: the
+    current entries of the OTHER languages, kept as they are, plus the proposed
+    entries of the written ones.
+
+    A language-independent value (a select, a link, a date — or a current value
+    that is not a language list at all) is not merged: Uwazi replaces those
+    whole, which is what the recorded proposal already means.
+    """
+    if not isinstance(proposed, list) or not value_languages(proposed):
+        return proposed
+    if not isinstance(current, list):
+        return proposed
+    written = set(value_languages(proposed))
+    kept = [entry for entry in current if not (isinstance(entry, dict) and entry.get("language") in written)]
+    return [*kept, *proposed]
+
+
+def stamp_language(value: Any, language: str | None) -> Any:
+    """Tag a bare text value with the language the row writes it in (pure).
+
+    A row's language is the write's target language, so it has to REACH the value
+    Uwazi stores: Uwazi keeps text/richtext as a list of ``{"value",
+    "language"}`` entries and replaces a property's whole list on update, so a
+    bare ``"A/HRC/37/NGO/92 ES"`` written as-is lands as a language-AGNOSTIC
+    value — the Spanish row would overwrite the property instead of joining it,
+    and it would not read back as the Spanish text the operator approved.
+
+    Only a plain string is stamped, and only when the row names a language: a
+    value that already carries its own languages keeps them (they are the more
+    specific statement), and a language-independent value (a select label, a
+    date, a link) is left exactly as the script wrote it. A stray ``language`` on
+    such a property is dropped by the write adapter's coercion, not by guessing
+    here.
+    """
+    if language is None or not isinstance(value, str):
+        return value
+    return [{"value": value, "language": language}]
+
+
+def pushable_rows(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[Suggestion]:
     """The rows a Run would push, in order (pure).
 
     Only ``ACCEPTED``/``EDITED`` rows of executable ops (``update`` rows need a
     property name; ``create``/``delete``/``publish``/``unpublish``/
     ``set_publish_status``/``create_relationships`` rows are whole-entity).
-    ``shared_ids`` restricts to that subset when given.
+    ``selection`` restricts to the checked (sharedId, language) rows when given;
+    ``None`` means the whole set.
     """
-    allowed = set(shared_ids) if shared_ids is not None else None
     rows: list[Suggestion] = []
     for s in suggestions:
         if s.status not in _PUSHABLE:
             continue
-        if allowed is not None and s.shared_id not in allowed:
+        if not _selected(s, selection):
             continue
         if s.op == "update" and s.property_name is None:
             continue
@@ -104,7 +174,7 @@ def pushable_rows(suggestions: list[Suggestion], shared_ids: list[str] | None = 
 
 
 def partition_for_apply(
-    rows: list[Suggestion], shared_ids: list[str] | None = None
+    rows: list[Suggestion], selection: EntitySelection | None = None
 ) -> tuple[list[Suggestion], list[Suggestion]]:
     """(property_rows, whole_entity_rows) among pushable rows for the given subset (pure).
 
@@ -115,13 +185,12 @@ def partition_for_apply(
     update rows without a property, and all ``create`` rows (a create's
     sharedId is the ``dry-created-N`` placeholder until Run mints a real one).
     """
-    allowed = set(shared_ids) if shared_ids is not None else None
     property_rows: list[Suggestion] = []
     whole_entity_rows: list[Suggestion] = []
     for suggestion in rows:
         if suggestion.status not in _PUSHABLE:
             continue
-        if allowed is not None and suggestion.shared_id not in allowed:
+        if not _selected(suggestion, selection):
             continue
         if suggestion.op == "update" and suggestion.property_name is not None:
             property_rows.append(suggestion)
@@ -130,21 +199,33 @@ def partition_for_apply(
     return property_rows, whole_entity_rows
 
 
-def build_apply_updates(suggestions: list[Suggestion], shared_ids: list[str] | None = None) -> list[dict]:
+def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[dict]:
     """Group pushable property suggestions into per-entity update payloads (pure).
 
     Rows group by sharedId into ONE ``{"shared_id", "metadata": {...}}`` payload
     (plus ``"title"`` when a ``_title`` row is present, and ``"template_name"``
     when the recording carried one); an ``EDITED`` row overrides its proposal.
     Group and key order follow first appearance, so a batch is deterministic.
-    Only property-op rows (``update`` with a property name, plus the ``create``
-    rows' own grouping lives in :func:`build_apply_creates`) enter this
-    grouping; whole-entity rows are the executor's dedicated helpers.
+
+    Only ``update`` rows with a property name enter this grouping — the ops whose
+    sharedId already identifies a real entity. ``create`` rows are property rows
+    too, but their sharedId is the ``dry-created-N`` placeholder, so they are
+    grouped by :func:`build_apply_creates` (which needs no existing entity to
+    read) and written through ``create_entities``.
+
+    A value written in a language is stamped with it (:func:`stamp_language`)
+    BEFORE the per-language merge, which is what lets the merge keep the
+    entity's other languages and send one complete value list.
+
+    Two checked rows for the same property in DIFFERENT languages (the operator
+    took both halves of a translation) merge into ONE value list: a property
+    holds one value per language, so ``es`` and ``en`` are two entries, not one
+    row overwriting the other.
     """
     grouped: dict[str, dict] = {}
     order: list[str] = []
-    for suggestion in pushable_rows(suggestions, shared_ids):
-        if suggestion.op not in _PROPERTY_OPS or suggestion.property_name is None:
+    for suggestion in pushable_rows(suggestions, selection):
+        if suggestion.op != _UPDATE_OP or suggestion.property_name is None:
             continue
         if suggestion.shared_id not in grouped:
             grouped[suggestion.shared_id] = {"metadata": {}, "title": None, "template_name": None}
@@ -154,7 +235,11 @@ def build_apply_updates(suggestions: list[Suggestion], shared_ids: list[str] | N
         if suggestion.property_name == TITLE_PROPERTY:
             payload["title"] = value
         else:
-            payload["metadata"][suggestion.property_name] = value
+            value = stamp_language(value, suggestion.language)
+            existing = payload["metadata"].get(suggestion.property_name)
+            payload["metadata"][suggestion.property_name] = (
+                merge_language_value(existing, value) if existing is not None else value
+            )
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     updates: list[dict] = []
@@ -169,19 +254,22 @@ def build_apply_updates(suggestions: list[Suggestion], shared_ids: list[str] | N
     return updates
 
 
-def build_apply_creates(suggestions: list[Suggestion], shared_ids: list[str] | None = None) -> list[dict]:
+def build_apply_creates(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[dict]:
     """Group pushable create suggestions into per-entity create payloads (pure).
 
     A create's rows carry the same expansion an update does: one suggestion per
     metadata key + one ``_title`` row + the template per row. The FIRST row's
     ``template_name`` wins for the payload (a create is one template by
     definition); titles and metadata merge exactly like
-    :func:`build_apply_updates`. Rows whose ``template_name`` is missing raise
+    :func:`build_apply_updates` — including the language stamp
+    (:func:`stamp_language`) and the per-language merge, which is how a create
+    recorded with several languages in one property value writes them all in a
+    single payload. Rows whose ``template_name`` is missing raise
     :class:`ApplyRefusedError` — a create cannot be written without a template.
     """
     grouped: dict[str, dict] = {}
     order: list[str] = []
-    for suggestion in pushable_rows(suggestions, shared_ids):
+    for suggestion in pushable_rows(suggestions, selection):
         if suggestion.op != "create":
             continue
         if suggestion.shared_id not in grouped:
@@ -192,7 +280,11 @@ def build_apply_creates(suggestions: list[Suggestion], shared_ids: list[str] | N
         if suggestion.property_name == TITLE_PROPERTY:
             payload["title"] = value
         elif suggestion.property_name is not None:
-            payload["metadata"][suggestion.property_name] = value
+            value = stamp_language(value, suggestion.language)
+            existing = payload["metadata"].get(suggestion.property_name)
+            payload["metadata"][suggestion.property_name] = (
+                merge_language_value(existing, value) if existing is not None else value
+            )
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     creates: list[dict] = []
@@ -242,8 +334,8 @@ class ApplySuggestionsUseCase:
         # Set by _build_crud: the event loop the sync CRUD helpers ride.
         self._crud_loop = None
 
-    def apply(self, run_id: str, attempt: int, shared_ids: list[str] | None = None) -> str:
-        """Write the selected entities' rows (optionally restricted to ``shared_ids``).
+    def apply(self, run_id: str, attempt: int, selection: EntitySelection = None) -> str:
+        """Write the selected rows (optionally restricted to ``selection``).
 
         A Run accepts first (:meth:`_accept_pending`): the reviewed table
         commits through Run rather than per-row buttons, so the rows it pushes
@@ -255,17 +347,24 @@ class ApplySuggestionsUseCase:
         create_relationships rows issue their dedicated bulk helper. Returns the
         apply run's id — an ordinary run that appears in the runs table and
         reverts through the existing revert use case.
+
+        ``selection`` is the table's checked (sharedId, language) rows, so a
+        translation task writes ONLY the languages the operator checked; None
+        writes the whole attempt.
         """
-        self._accept_pending(run_id, attempt, shared_ids)
+        self._accept_pending(run_id, attempt, selection)
         rows = self._all_accepted(run_id, attempt)
-        to_push = pushable_rows(rows, shared_ids)
-        property_rows, whole_entity_rows = partition_for_apply(rows, shared_ids)
-        updates = build_apply_updates(rows, shared_ids)
-        creates = build_apply_creates(rows, shared_ids) if any(r.op == "create" for r in whole_entity_rows) else []
+        to_push = pushable_rows(rows, selection)
+        _, whole_entity_rows = partition_for_apply(rows, selection)
+        # Disjoint by construction: the update payloads hold real sharedIds
+        # only, the creates the ``dry-created-N`` placeholders. A create
+        # reaching ``updates`` would be enriched from a raw that does not
+        # exist, so the two payloads are built from their own row sets.
+        updates = self._enrich(build_apply_updates(rows, selection))
+        creates = build_apply_creates(rows, selection) if any(r.op == "create" for r in whole_entity_rows) else []
         if not updates and not creates and not whole_entity_rows:
             raise ApplyRefusedError("nothing to run for the selected rows")
 
-        updates = self._enrich(updates)
         manifest = self._prepare_apply_manifest(run_id, attempt, len(to_push))
         self._write(run_id, manifest, updates, creates, whole_entity_rows)
         self._store.set_status([row.id for row in to_push if row.id is not None], SuggestionStatus.APPLIED)
@@ -324,7 +423,7 @@ class ApplySuggestionsUseCase:
         )
 
     def _enrich(self, updates: list[dict]) -> list[dict]:
-        """Fill in the fields the write port requires (``template_name``) from each raw.
+        """Fill in the fields the write port requires, and keep other languages (pure-ish).
 
         Reviews only carry property values, but ``AgentEntity`` requires the
         entity's template, and a partial update must also carry the row locale.
@@ -332,6 +431,13 @@ class ApplySuggestionsUseCase:
         ``template_name`` wins when present) — and it is also what makes a
         suggestion pointing at a since-deleted entity fail with a clear error
         instead of silently writing nothing.
+
+        The raw is ALSO what keeps a per-language write from destroying its
+        siblings: Uwazi replaces a property's whole value list on update, so a
+        payload holding only the ``es`` text would drop the ``en`` text already
+        in the entity. Every per-language property is therefore merged with the
+        entity's current value through :func:`merge_language_value` before it is
+        sent, and only for the languages this Run actually wrote.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -345,10 +451,13 @@ class ApplySuggestionsUseCase:
                 template_name = update.get("template_name") or raw.get("template") or raw.get("template_name")
                 if not template_name:
                     raise ApplyRefusedError(f"cannot resolve a template for {shared_id!r}; nothing was applied to it")
+                raw_metadata = raw.get("metadata")
+                current: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+                metadata = {key: merge_language_value(current.get(key), value) for key, value in update["metadata"].items()}
                 entry = {
                     "shared_id": shared_id,
                     "template_name": template_name,
-                    "metadata": update["metadata"],
+                    "metadata": metadata,
                     "language": raw.get("language") or self._default_language,
                 }
                 if "title" in update:
@@ -358,7 +467,7 @@ class ApplySuggestionsUseCase:
         finally:
             loop.close()
 
-    def _accept_pending(self, run_id: str, attempt: int, shared_ids: list[str] | None) -> None:
+    def _accept_pending(self, run_id: str, attempt: int, selection: EntitySelection) -> None:
         """Accept the rows a Run is about to push — a Run IS the acceptance.
 
         The review UI commits through its Run action (the entity selection plus
@@ -372,16 +481,19 @@ class ApplySuggestionsUseCase:
         re-run a reverted row by row). DISCARDED rows stay refused, EDITED rows
         keep their edits, and APPLIED rows (still written) are never re-accepted.
 
-        Scope follows the selection (``shared_ids``): the whole attempt when
-        None, nothing when empty.
+        Scope follows the selection: the exact (sharedId, language) rows the operator
+        checked, so running the ``es`` row of a translation task accepts ONLY
+        that language's rows — its ``en`` sibling stays pending and is written
+        by a second, separate Run. The whole attempt when None, nothing when
+        empty.
         """
-        if shared_ids is not None and not shared_ids:
+        if selection is not None and not selection:
             return
         for status in (SuggestionStatus.PENDING, SuggestionStatus.REVERTED):
             self._store.set_status_by_filter(
                 run_id,
                 attempt,
-                SuggestionFilter(status=status, shared_ids=shared_ids),
+                SuggestionFilter(status=status, entity_languages=selection),
                 SuggestionStatus.ACCEPTED,
             )
 
@@ -507,9 +619,12 @@ class ApplySuggestionsUseCase:
 __all__ = [
     "ApplyRefusedError",
     "ApplySuggestionsUseCase",
+    "EntitySelection",
     "build_apply_creates",
     "build_apply_updates",
     "effective_value",
+    "merge_language_value",
     "partition_for_apply",
     "pushable_rows",
+    "stamp_language",
 ]

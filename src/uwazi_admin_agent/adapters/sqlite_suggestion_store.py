@@ -35,10 +35,11 @@ from uwazi_admin_agent.domain.suggestion import (
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
+    entity_language_key,
 )
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 
-_SCHEMA = """
+_TABLES = """
 CREATE TABLE IF NOT EXISTS prediction_attempt (
     run_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     entity_title TEXT NOT NULL DEFAULT '',
     template_name TEXT,
     op TEXT NOT NULL,
+    language TEXT,
     property_name TEXT,
     proposed_value TEXT,
     current_value TEXT,
@@ -72,12 +74,20 @@ CREATE TABLE IF NOT EXISTS suggestion (
     reviewed_at TEXT,
     created_at TEXT
 );
+"""
 
+# Indexes are kept apart from the tables because they name the *migrated*
+# columns: creating them before ``ensure_schema`` adds a missing column fails
+# with "no such column: language" on a database created by an older build.
+_INDEXES = """
 CREATE UNIQUE INDEX IF NOT EXISTS suggestion_identity
-    ON suggestion (run_id, attempt, shared_id, op, ifnull(property_name, ''));
+    ON suggestion (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''));
 
 CREATE INDEX IF NOT EXISTS suggestion_review
     ON suggestion (run_id, attempt, status, match_state);
+
+CREATE INDEX IF NOT EXISTS suggestion_entity_language
+    ON suggestion (run_id, attempt, shared_id, language);
 """
 
 # Statuses the apply path pushes (accepted, or accepted-then-edited).
@@ -172,6 +182,24 @@ def build_where(f: SuggestionFilter, run_id: str, attempt: int) -> tuple[str, li
         else:
             clause.append(f"shared_id IN ({', '.join('?' for _ in f.shared_ids)})")
             params.extend(f.shared_ids)
+    if f.entity_languages is not None:
+        # The table's rows are per language, so the selection is (sharedId,
+        # language) pairs: OR over pairs, each an AND of the two. A None
+        # language means the language-independent group, hence IS NULL.
+        if not f.entity_languages:
+            clause.append("1 = 0")
+        else:
+            parts = []
+            for shared_id, language in f.entity_languages:
+                if language is None:
+                    parts.append("(shared_id = ? AND language IS NULL)")
+                else:
+                    parts.append("(shared_id = ? AND language = ?)")
+            clause.append(f"({' OR '.join(parts)})")
+            for shared_id, language in f.entity_languages:
+                params.append(shared_id)
+                if language is not None:
+                    params.append(language)
     return " AND ".join(clause), params
 
 
@@ -186,6 +214,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         entity_title=row["entity_title"],
         template_name=row["template_name"],
         op=row["op"],
+        language=row["language"],
         property_name=row["property_name"],
         proposed_value=_value_from_json(row["proposed_value"]),
         current_value=_value_from_json(row["current_value"]),
@@ -233,16 +262,37 @@ class SqliteSuggestionStore(SuggestionStorePort):
     def ensure_schema(self) -> None:
         """Create the tables + indexes when missing (idempotent), and migrate.
 
-        Legacy stores (created before ``template_name``) get the column via
-        ``ALTER TABLE ADD COLUMN`` — a cheap additive migration; existing rows
-        read NULL ("" renders in the Template column) and the next planning
-        pass over the run fills it.
+        Two additive migrations, both safe on a live DB:
+
+        - ``template_name`` (created before the Template column existed);
+        - ``language`` — the language a per-language property's value is written
+          in. Rows recorded before this read NULL, which is exactly the
+          language-independent group, so a legacy run keeps one row per entity
+          (with its multi-language value shown whole) until the next planning
+          pass re-records it.
+
+        The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
+        ``suggestion_identity`` is recreated on every pass because it cannot
+        express a column added later — and ``suggestion_entity_language`` names
+        ``language`` directly, so on a database an older build created (no such
+        column yet) running the index script first dies with "no such column:
+        language", failing the whole store construction.
+
+        ``ALTER TABLE`` keeps a NULL default, so legacy rows migrate without a
+        table rewrite and their grouped queries read NULL exactly as intended.
         """
         with self._lock:
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_TABLES)
             columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(suggestion)")}
             if "template_name" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN template_name TEXT")
+            if "language" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN language TEXT")
+            # An index created before ``language`` joined it cannot express the
+            # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
+            # one: drop and let _INDEXES recreate it.
+            self._conn.execute("DROP INDEX IF EXISTS suggestion_identity")
+            self._conn.executescript(_INDEXES)
             self._conn.commit()
 
     def close(self) -> None:
@@ -328,6 +378,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 s.entity_title,
                 s.template_name,
                 s.op,
+                s.language,
                 s.property_name,
                 _json_or_none(s.proposed_value),
                 _json_or_none(s.current_value),
@@ -345,11 +396,12 @@ class SqliteSuggestionStore(SuggestionStorePort):
             self._conn.executemany(
                 """
                 INSERT INTO suggestion
-                    (run_id, attempt, shared_id, entity_title, template_name, op, property_name,
+                    (run_id, attempt, shared_id, entity_title, template_name, op, language, property_name,
                      proposed_value, current_value, match_state, status, edited_value,
                      discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_id, attempt, shared_id, op, ifnull(property_name, '')) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''))
+                DO UPDATE SET
                     entity_title = excluded.entity_title,
                     template_name = excluded.template_name,
                     proposed_value = excluded.proposed_value,
@@ -371,24 +423,34 @@ class SqliteSuggestionStore(SuggestionStorePort):
         return [_row_to_suggestion(row) for row in page_rows], total
 
     def entity_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
-        """One aggregate row per affected entity, SQL-grouped (the review table's read).
+        """One aggregate row per (entity, language), SQL-grouped (the review table's read).
 
-        One `GROUP BY shared_id` statement over the SAME ``build_where`` clause
-        computes the counts, the per-status sums, the match verdict and the
-        would-be-value flag under the page's LIMIT/OFFSET; a second statement
-        projects the DISTINCT ops/properties ONLY for the paged shared_ids
-        (an ``IN`` over that page, never the whole set). Ordered by MIN(id) —
-        first appearance in the selection scan's records. ``total`` is the
-        distinct-shared_id count over the WHOLE filter (paging ignored), so the
-        grid reads "N entities" without a Python-side pass.
+        One `GROUP BY shared_id, language` statement over the SAME ``build_where``
+        clause computes the counts, the per-status sums, the match verdict and
+        the would-be-value flag under the page's LIMIT/OFFSET; a second statement
+        projects the DISTINCT ops/properties ONLY for the paged groups (an ``IN``
+        over that page, never the whole set). Ordered by MIN(id) — first
+        appearance in the selection scan's records. ``total`` is the distinct
+        (shared_id, language) count over the WHOLE filter (paging ignored), so
+        the grid reads "N rows" without a Python-side pass.
+
+        The language is part of the key because a translation task updates the
+        same entity in several languages and the operator reviews each one
+        separately. ``language IS NULL`` is the language-independent group (a
+        select, a title, a delete) and is deliberately NOT merged into the
+        per-language groups: it is its own row, labelled "—".
         """
         where, params = build_where(f, run_id, attempt)
-        count_rows = self._query(f"SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion WHERE {where}", params)
+        count_rows = self._query(
+            f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE {where} GROUP BY shared_id, language)",
+            params,
+        )
         total = int(count_rows[0]["n"]) if count_rows else 0
         group_rows = self._query(
             f"""
             SELECT
                 shared_id,
+                language,
                 MIN(id) AS first_id,
                 MAX(entity_title) AS entity_title,
                 COUNT(*) AS proposal_count,
@@ -406,7 +468,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     AS has_outcome
             FROM suggestion
             WHERE {where}
-            GROUP BY shared_id
+            GROUP BY shared_id, language
             ORDER BY first_id
             LIMIT ? OFFSET ?
             """,
@@ -423,14 +485,16 @@ class SqliteSuggestionStore(SuggestionStorePort):
         )
         if not group_rows:
             return [], total
-        # The op/property projection covers ONLY this page's entities: the IN
-        # list is the grouped page, so its size stays the page size even when
-        # the whole filter selects thousands.
+        # The op/property projection covers ONLY this page's groups: the IN list
+        # is the grouped page, so its size stays the page size even when the
+        # whole filter selects thousands. Grouping the detail rows by
+        # (shared_id, language) keeps the projection from leaking one language's
+        # ops into another's row.
         page_ids = [str(row["shared_id"]) for row in group_rows]
         id_placeholders = ", ".join("?" for _ in page_ids)
         detail_rows = self._query(
             f"""
-            SELECT shared_id, op, property_name, template_name
+            SELECT shared_id, language, op, property_name, template_name
             FROM suggestion
             WHERE {where} AND shared_id IN ({id_placeholders})
             ORDER BY id
@@ -441,15 +505,18 @@ class SqliteSuggestionStore(SuggestionStorePort):
         rows: list[EntityReviewRow] = []
         for row in group_rows:
             shared_id = str(row["shared_id"])
+            language = row["language"]
+            key = entity_language_key(shared_id, language)
             verdicts = int(row["verdicts"] or 0)
             verdict_rows = int(row["verdict_rows"] or 0)
             rows.append(
                 EntityReviewRow(
                     shared_id=shared_id,
+                    language=language,
                     entity_title=str(row["entity_title"] or ""),
-                    template_names=fields_by_id[shared_id]["templates"],
-                    ops=fields_by_id[shared_id]["ops"],
-                    properties=fields_by_id[shared_id]["properties"],
+                    template_names=fields_by_id[key]["templates"],
+                    ops=fields_by_id[key]["ops"],
+                    properties=fields_by_id[key]["properties"],
                     proposal_count=int(row["proposal_count"]),
                     pending=int(row["pending"] or 0),
                     accepted=int(row["accepted"] or 0),
@@ -463,10 +530,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
         return rows, total
 
     def _detail_fields(self, detail_rows: list[sqlite3.Row]) -> dict[str, dict[str, list[str]]]:
-        """First-appearance ops, templates, + non-null property names per shared_id (pure)."""
+        """First-appearance ops, templates, + non-null property names per (id, language) (pure)."""
         fields: dict[str, dict[str, list[str]]] = {}
         for detail in detail_rows:
-            entry = fields.setdefault(str(detail["shared_id"]), {"ops": [], "properties": [], "templates": []})
+            key = entity_language_key(str(detail["shared_id"]), detail["language"])
+            entry = fields.setdefault(key, {"ops": [], "properties": [], "templates": []})
             op = str(detail["op"])
             if op not in entry["ops"]:
                 entry["ops"].append(op)
@@ -478,11 +546,22 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 entry["templates"].append(str(template))
         return fields
 
-    def get_entity(self, run_id: str, attempt: int, shared_id: str) -> list[Suggestion]:
-        rows = self._query(
-            "SELECT * FROM suggestion WHERE run_id = ? AND attempt = ? AND shared_id = ? ORDER BY id",
-            (run_id, attempt, shared_id),
-        )
+    def get_entity(self, run_id: str, attempt: int, shared_id: str, language: str | None = None) -> list[Suggestion]:
+        """Every suggestion for one entity IN ONE LANGUAGE group (the entity window).
+
+        The entity window opens a (entity, language) row, so it reads that
+        group's rows and no other: a ``es`` row shows the ``es`` values only, and
+        the language-independent group (``language=None`` — selects, titles,
+        whole-entity ops) is read with ``language IS NULL``.
+        """
+        where, params = build_where(SuggestionFilter(), run_id, attempt)
+        params.append(shared_id)
+        if language is None:
+            clause = f"{where} AND shared_id = ? AND language IS NULL"
+        else:
+            clause = f"{where} AND shared_id = ? AND language = ?"
+            params.append(language)
+        rows = self._query(f"SELECT * FROM suggestion WHERE {clause} ORDER BY id", params)
         return [_row_to_suggestion(row) for row in rows]
 
     def set_status(
@@ -580,9 +659,55 @@ class SqliteSuggestionStore(SuggestionStorePort):
         rows = self._query(f"SELECT DISTINCT shared_id FROM suggestion WHERE {where} ORDER BY shared_id", params)
         return [str(row["shared_id"]) for row in rows]
 
+    def entity_languages(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+        """Every (sharedId, language) pair matching a filter, in first-appearance order.
+
+        The entity window's Previous/Next walk THIS list, not the distinct
+        sharedIds: the table's rows are per language, so a translation task's
+        entity is one stop per language and navigation must land on the next
+        row, not the next entity.
+        """
+        where, params = build_where(f, run_id, attempt)
+        rows = self._query(
+            f"""
+            SELECT shared_id, language, MIN(id) AS first_id
+            FROM suggestion
+            WHERE {where}
+            GROUP BY shared_id, language
+            ORDER BY first_id
+            """,
+            params,
+        )
+        return [(str(row["shared_id"]), row["language"]) for row in rows]
+
     def counts(self, run_id: str, attempt: int) -> dict[str, int]:
+        """The review header's counters: entities per status (SQL-side group-bys).
+
+        The status keys count ENTITY-LANGUAGE GROUPS, exactly the rows the table
+        below the cards shows (``GROUP BY shared_id, language``, the same grouping
+        :meth:`entity_rows` uses): ``total`` is the distinct (sharedId, language)
+        count and each status is how many of those groups carry at least one row
+        in it. Counting suggestion ROWS instead made one entity's 17 property
+        rows read as "Total 17" above a table holding a single entity, and every
+        status card inflated by the same factor. A group whose rows span statuses
+        is therefore counted in each of them — the same round-trip the operator
+        gets by picking that status in the filter dropdown.
+
+        The ``match_*`` keys stay ROW-level: they are per-property comparison
+        verdicts feeding the accuracy figure, which has no entity-level
+        equivalent (one entity's rows can disagree — see
+        :func:`match_summary_of`).
+        """
         status_rows = self._query(
-            "SELECT status, COUNT(*) AS n FROM suggestion WHERE run_id = ? AND attempt = ? GROUP BY status",
+            """
+            SELECT status, COUNT(*) AS n FROM (
+                SELECT shared_id, language, status
+                FROM suggestion
+                WHERE run_id = ? AND attempt = ?
+                GROUP BY shared_id, language, status
+            )
+            GROUP BY status
+            """,
             (run_id, attempt),
         )
         match_rows = self._query(
@@ -607,7 +732,12 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 counts["match_exact"] += int(row["n"])
             else:
                 counts["match_mismatch"] += int(row["n"])
-        counts["total"] = sum(counts[status.value] for status in SuggestionStatus)
+        total_rows = self._query(
+            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? AND attempt = ? "
+            "GROUP BY shared_id, language)",
+            (run_id, attempt),
+        )
+        counts["total"] = int(total_rows[0]["n"]) if total_rows else 0
         return counts
 
     def delete_run(self, run_id: str) -> None:

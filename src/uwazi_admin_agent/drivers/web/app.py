@@ -1539,8 +1539,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
         with ui.stepper() as stepper:
             state["_dialog"] = dialog
             state["_stepper"] = stepper
-            _wizard_step_name(state, stepper, dialog, prefill=prefill_name)
-            _wizard_step_prompt(state, stepper, dialog, prefill=prefill_prompt)
+            _wizard_step_details(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
         _footer_close(dialog)
@@ -1550,60 +1549,61 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
             _show_generate_prompt(state)
 
 
-def _wizard_step_name(state: dict[str, str], stepper: Any, dialog: Any, prefill: str = "") -> None:
-    with ui.step(name="name", title="Name", icon="edit"):
-        ui.label("Name the run (a new folder will be created under data/runs/).").classes("text-body1 q-mb-md")
+def _wizard_step_details(
+    state: dict[str, Any],
+    stepper: Any,
+    dialog: Any,
+    prefill_name: str = "",
+    prefill_prompt: str = "",
+) -> None:
+    """Step 1: the run's name and its prompt, both on one panel.
+
+    The two inputs are shown together (rather than as two consecutive steps)
+    because neither is useful without the other: Next validates both and only
+    then advances, so an incomplete pair is caught before the validate step.
+    """
+    with ui.step(name="details", title="Task", icon="edit"):
+        ui.label("Name the run (a new folder will be created under data/runs/) and describe the migration.").classes(
+            "text-body1 q-mb-md"
+        )
         name_input = ui.input(
             "Run name",
             placeholder="e.g. merge-entities-2026",
-            value=prefill,
+            value=prefill_name,
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
-        with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Next", on_click=lambda: _wizard_name_next(state, name_input, stepper))
-
-
-def _wizard_name_next(state: dict[str, str], name_input: Any, stepper: Any) -> None:
-    value = (name_input.value or "").strip()
-    existing = {r.run_id for r in list_runs()}
-    if not value:
-        ui.notify("Name is required", type="warning")
-        return
-    if value in existing:
-        ui.notify(f"A run named {value!r} already exists", type="warning")
-        return
-    state["name"] = value
-    stepper.set_value("prompt")
-
-
-def _wizard_step_prompt(state: dict[str, str], stepper: Any, dialog: Any, prefill: str = "") -> None:
-    with ui.step(name="prompt", title="Prompt", icon="chat"):
-        ui.label("Describe the migration in natural language.").classes("text-body1 q-mb-md")
         prompt_input = (
             ui.textarea(
                 "Prompt",
                 placeholder="e.g. Merge duplicate entities sharing the title 'X'...",
-                value=prefill,
+                value=prefill_prompt,
                 validation={"Required": lambda v: bool(v and v.strip())},
             )
-            .classes("w-full")
+            .classes("w-full q-mt-md")
             .props("autogrow input-style='min-height: 200px;'")
             .style("width: 100%")
         )
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
-            ui.button("Next", on_click=lambda: _wizard_prompt_next(state, prompt_input, stepper))
+            ui.button("Next", on_click=lambda: _wizard_details_next(state, name_input, prompt_input, stepper))
 
 
-def _wizard_prompt_next(state: dict[str, Any], prompt_input: Any, stepper: Any) -> None:
-    value = (prompt_input.value or "").strip()
-    if not value:
+def _wizard_details_next(state: dict[str, Any], name_input: Any, prompt_input: Any, stepper: Any) -> None:
+    """Validate both inputs, store them, and advance to the validate step."""
+    name = (name_input.value or "").strip()
+    if not name:
+        ui.notify("Name is required", type="warning")
+        return
+    if name in {r.run_id for r in list_runs()}:
+        ui.notify(f"A run named {name!r} already exists", type="warning")
+        return
+    prompt = (prompt_input.value or "").strip()
+    if not prompt:
         ui.notify("Prompt is required", type="warning")
         return
-    state["prompt"] = value
-    state["final_prompt"] = value
+    state["name"] = name
+    state["prompt"] = prompt
+    state["final_prompt"] = prompt
     state["validated_prompt"] = None
     state["_validation_done"] = False
     _render_validate_idle(state, state["_validate_container"])
@@ -1624,7 +1624,7 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
         ui.label("Ask the LLM what it understood from your prompt before generating.").classes("text-body1 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("details")).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Validate", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
 
@@ -1664,7 +1664,7 @@ def _render_validation_error(state: dict[str, Any], container: Any, exc: Excepti
         ui.label(str(exc)).classes("text-body2 text-red-10 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("details")).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=primary")
 
 
@@ -1710,7 +1710,7 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
 
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: state["_stepper"].set_value("prompt")).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_stepper"].set_value("details")).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("color=primary")
 
@@ -1764,8 +1764,8 @@ def _show_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to validate (if it ran) or prompt (duplicate path)."""
-    target = "validate" if state.get("_validation_done") else "prompt"
+    """Back from the generate step: to validate (if it ran) or the details step."""
+    target = "validate" if state.get("_validation_done") else "details"
     state["_stepper"].set_value(target)
 
 
@@ -2064,15 +2064,17 @@ def _register_static_and_routes() -> None:
 
     The viewer is the proven pdf.js setup copied from ``uwazi_property_filler``
     (its own static dir and module scripts), pointed at this app's route: the
-    review window's iframe loads ``/static/pdfjs/review_viewer.html`` and the
-    viewer fetches ``/review-pdf?run=<run_id>&sid=<shared_id>``, which streams
-    the entity's PRIMARY document bytes through the cached file repository.
+    review window's iframe loads ``/static/pdfjs/review_viewer.html?src=…``
+    with this route already URL-encoded inside, which streams the entity's
+    PRIMARY document bytes through the cached file repository. ``lang`` is the
+    row's language; the resolver falls back to the instance's other configured
+    languages, since an entity often holds its PDF in another one.
     """
     _STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.add_static_files("/static", str(_STATIC_DIR))
 
     @app.get("/review-pdf")
-    def _review_pdf(run: str, sid: str) -> Response:
+    def _review_pdf(run: str, sid: str, lang: str | None = None) -> Response:
         # The viewer loads this route in an iframe, so the browser presents the
         # session cookie: authentication comes from the session, never the URL.
         user: str | None = None
@@ -2082,12 +2084,15 @@ def _register_static_and_routes() -> None:
             password = app.storage.user.get("password")
         except Exception as exc:  # noqa: BLE001 — no session ⇒ unauthenticated, not a crash
             logger.warning("review-pdf session read failed run={} sid={}: {}", run, sid, exc)
-        if not user or not password:
-            return Response(status_code=401)
+        if not user or not password or not sid:
+            return Response(status_code=400 if not sid else 401)
         try:
-            data = asyncio.run(fetch_entity_document_bytes(user, password, sid))
+            # ``lang`` is the row's language; the resolver falls back to the
+            # instance's other configured languages when the entity carries no
+            # document in that one.
+            data = asyncio.run(fetch_entity_document_bytes(user, password, sid, lang))
         except Exception as exc:  # noqa: BLE001 — a fetch failure is a 404 to the viewer
-            logger.warning("review-pdf fetch failed run={} sid={}: {}", run, sid, exc)
+            logger.warning("review-pdf fetch failed run={} sid={} lang={}: {}", run, sid, lang, exc)
             return Response(status_code=404)
         if data is None:
             return Response(status_code=404)

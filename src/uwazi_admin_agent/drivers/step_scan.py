@@ -43,6 +43,7 @@ async def _run_scan_async(run_name: str) -> int:
         cache_stats=runtime.file_cache,
         segmentation_repository=runtime.segmentation_repository,
         url_fetcher=runtime.url_fetcher,
+        translation_port=runtime.translation_port,
     )
 
     logger.info("scan: run={}", run_name)

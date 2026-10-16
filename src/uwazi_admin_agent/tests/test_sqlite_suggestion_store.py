@@ -4,6 +4,7 @@ Real database on a ``tmp_path`` (local, offline, deterministic), real domain
 models, plain assertions. No mocks, no monkeypatching, no network.
 """
 
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -36,6 +37,7 @@ def store(tmp_path) -> SqliteSuggestionStore:
 def _suggestion(
     *,
     shared_id: str = "s1",
+    language: str | None = None,
     op: str = "update",
     property_name: str | None = "excerpt",
     status: SuggestionStatus = SuggestionStatus.PENDING,
@@ -49,6 +51,7 @@ def _suggestion(
         run_id=run_id,
         attempt=attempt,
         shared_id=shared_id,
+        language=language,
         entity_title=title,
         op=op,  # type: ignore[arg-type]
         property_name=property_name,
@@ -378,6 +381,66 @@ def test_counts_on_an_empty_set(store: SqliteSuggestionStore) -> None:
     assert counts["pending"] == 0
 
 
+def test_counts_report_entities_not_property_rows(store: SqliteSuggestionStore) -> None:
+    """The cards must agree with the table below them, which holds one row per entity.
+
+    One entity with 17 property rows is ONE entity: counting rows made the header
+    read "Total 17" above a table showing a single entity.
+    """
+    store.add_suggestions(
+        [_suggestion(shared_id="dry-created-0", property_name=f"p{n}") for n in range(17)]
+        + [_suggestion(shared_id="s2", property_name="p0")]
+    )
+    counts = store.counts("run1", 1)
+    assert counts["total"] == 2
+    assert counts["pending"] == 2
+
+
+def test_counts_count_an_entity_once_per_status(store: SqliteSuggestionStore) -> None:
+    """Many rows in one status are one entity in that status."""
+    store.add_suggestions([_suggestion(shared_id="a", property_name=f"p{n}") for n in range(17)])
+    store.set_status_by_filter("run1", 1, SuggestionFilter(), SuggestionStatus.ACCEPTED)
+    counts = store.counts("run1", 1)
+    assert counts["accepted"] == 1
+    assert counts["pending"] == 0
+    assert counts["total"] == 1
+
+
+def test_counts_treat_languages_as_separate_entities(store: SqliteSuggestionStore) -> None:
+    """A translation task is one entity PER LANGUAGE — the table's row identity."""
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="s1", language="en"),
+            _suggestion(shared_id="s1", language="es"),
+            _suggestion(shared_id="s1", language=None),  # the language-independent group
+        ]
+    )
+    counts = store.counts("run1", 1)
+    assert counts["total"] == 3
+    assert counts["pending"] == 3
+
+
+def test_counts_report_a_group_in_each_status_it_spans(store: SqliteSuggestionStore) -> None:
+    """Accepting one property of an entity leaves the group in BOTH cards.
+
+    This is what picking that status in the filter dropdown shows, so a card and
+    the table under it always agree.
+    """
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="a", property_name="kept"),
+            _suggestion(shared_id="a", property_name="taken"),
+        ]
+    )
+    page, _ = store.query("run1", 1, SuggestionFilter())
+    store.set_status([page[1].id or 0], SuggestionStatus.ACCEPTED)  # type: ignore[attr-defined]
+    counts = store.counts("run1", 1)
+    assert counts["total"] == 1
+    assert counts["accepted"] == 1
+    assert counts["pending"] == 1
+    assert counts["discarded"] == 0
+
+
 # --- deletion ----------------------------------------------------------------
 
 
@@ -388,3 +451,89 @@ def test_delete_run_removes_suggestions_and_attempts(store: SqliteSuggestionStor
     assert store.query("run1", 1, SuggestionFilter())[1] == 0
     assert store.get_attempt("run1", 1) is None
     assert store.query("run2", 1, SuggestionFilter())[1] == 1
+
+
+# --- legacy migration ---------------------------------------------------------
+
+
+# The suggestion table as an older build created it: no ``template_name``, no
+# ``language``. Written out literally here so the migration is exercised against
+# the real historical shape (not a current-schema table with columns dropped).
+_LEGACY_SCHEMA = """
+CREATE TABLE suggestion (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    shared_id TEXT NOT NULL,
+    entity_title TEXT NOT NULL DEFAULT '',
+    op TEXT NOT NULL,
+    property_name TEXT,
+    proposed_value TEXT,
+    current_value TEXT,
+    match_state INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    edited_value TEXT,
+    discard_reason TEXT,
+    reviewed_at TEXT,
+    created_at TEXT
+);
+
+CREATE UNIQUE INDEX suggestion_identity
+    ON suggestion (run_id, attempt, shared_id, op, ifnull(property_name, ''));
+"""
+
+
+def _legacy_db(path) -> None:
+    """Build a pre-``language`` database holding one suggestion row."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(_LEGACY_SCHEMA)
+        conn.execute(
+            "INSERT INTO suggestion (run_id, attempt, shared_id, op, property_name, proposed_value) "
+            "VALUES ('run1', 1, 's1', 'update', 'title', '\"v\"')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_store_opens_a_legacy_database_and_adds_the_missing_columns(tmp_path) -> None:
+    """A pre-``language`` database migrates on construction instead of failing.
+
+    The indexes name the migrated columns, so they must be created after the
+    ALTERs: the reverse order aborts with "no such column: language", which took
+    the whole runtime (and with it the wizard's validation step) down.
+    """
+    path = tmp_path / "legacy.db"
+    _legacy_db(path)
+
+    store = SqliteSuggestionStore(path)
+    try:
+        columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(suggestion)")}  # noqa: SLF001
+        assert {"template_name", "language"} <= columns
+        indexes = {
+            row["name"]
+            for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")  # noqa: SLF001
+        }
+        assert {"suggestion_identity", "suggestion_review", "suggestion_entity_language"} <= indexes
+        # The legacy row survives, and reads NULL for both added columns — which
+        # is exactly the language-independent group the grouped queries expect.
+        rows, total = store.query("run1", 1, SuggestionFilter())
+        assert total == 1
+        assert rows[0].shared_id == "s1"
+        assert rows[0].language is None
+        assert rows[0].template_name is None
+    finally:
+        store.close()
+
+
+def test_ensure_schema_is_idempotent_on_a_migrated_database(tmp_path) -> None:
+    path = tmp_path / "legacy.db"
+    _legacy_db(path)
+    store = SqliteSuggestionStore(path)
+    try:
+        store.ensure_schema()
+        store.ensure_schema()
+        assert store.query("run1", 1, SuggestionFilter())[1] == 1
+    finally:
+        store.close()

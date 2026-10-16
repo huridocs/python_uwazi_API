@@ -24,6 +24,7 @@ from loguru import logger
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.pydantic_ai_runtime import PydanticAiLlmRuntime
 from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
+from uwazi_admin_agent.adapters.segmentation_repository_adapter import language_candidates
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.tasks_store import YamlTaskStore
 from uwazi_admin_agent.configuration import (
@@ -275,37 +276,83 @@ async def get_entity_segmentation(user: str, password: str, shared_id: str, lang
     return await runtime.deps.segmentation_repository.get_by_shared_id(shared_id, language)
 
 
-async def entity_document_filename(user: str, password: str, shared_id: str, language: str = DUMMY_LANGUAGE) -> str | None:
-    """The storage filename of an entity's PRIMARY document, or None (no bytes fetched).
+@dataclass(frozen=True)
+class EntityDocument:
+    """An entity's PRIMARY document and the language it was found in.
 
-    The review window uses this to decide between the pdf.js viewer and the
-    segmentation-text fallback before it renders either — cheaper than asking the
-    viewer to discover the absence itself.
+    ``language`` is the language whose entity row actually carries the file,
+    which is not necessarily the one that was asked for: an entity usually
+    holds its document in the language it was uploaded in.
+    """
+
+    filename: str
+    language: str
+
+
+def document_language_candidates(requested: str | None, configured: list[str]) -> list[str]:
+    """Order languages to try for an entity's document (pure).
+
+    The requested language first, then the instance's configured languages —
+    the same fallback the segmentation resolver uses, over the same pure
+    helper, so a document and its segmentation are always resolved in the same
+    language. With no request, the instance's languages are the whole order.
+    """
+    return language_candidates(requested or DUMMY_LANGUAGE, configured)
+
+
+async def _instance_languages(runtime: Any) -> list[str]:
+    """The instance's configured language keys (``[]`` when settings are unreadable)."""
+    settings = getattr(runtime, "settings_repository", None)
+    if settings is None:
+        return []
+    try:
+        languages = await asyncio.to_thread(settings.get_languages)
+    except Exception as exc:  # noqa: BLE001 — the fallback order is best-effort
+        logger.info("could not read the instance's configured languages: {}", exc)
+        return []
+    return [str(language.key) for language in languages if getattr(language, "key", None)]
+
+
+async def resolve_entity_document(
+    user: str, password: str, shared_id: str, language: str | None = None
+) -> EntityDocument | None:
+    """The entity's primary document (and the language it lives in), or None.
+
+    Resolution order: the requested language, then every language the instance
+    is configured for. A row's document is frequently uploaded in a language
+    other than the one the row is written in (a translated text is updated in
+    ``es`` while the PDF was uploaded in ``en``), so a single-language lookup
+    finds nothing and the reviewer sees a blank panel. None means the entity
+    has no uploaded primary document in ANY configured language — the caller
+    then falls back to the document text instead of showing an empty viewer.
     """
     runtime = build_runtime(user=user, password=password)
-    raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, language)
-    documents = [ref for ref in extract_file_refs(raw) if ref.kind == "document"]
-    return documents[0].filename if documents else None
+    candidates = document_language_candidates(language, await _instance_languages(runtime))
+    for candidate in candidates:
+        try:
+            raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, candidate)
+        except Exception as exc:  # noqa: BLE001 — no locale row for this language
+            logger.info("no entity raw for sharedId={} language={}: {}", shared_id, candidate, exc)
+            continue
+        documents = [ref for ref in extract_file_refs(raw) if ref.kind == "document"]
+        if documents:
+            return EntityDocument(documents[0].filename, candidate)
+    return None
 
 
-async def fetch_entity_document_bytes(
-    user: str, password: str, shared_id: str, language: str = DUMMY_LANGUAGE
-) -> bytes | None:
+async def fetch_entity_document_bytes(user: str, password: str, shared_id: str, language: str | None = None) -> bytes | None:
     """Fetch an entity's PRIMARY document bytes for the review window's viewer.
 
-    Resolves the file refs from the entity's raw, prefers a ``document`` kind,
-    and returns its bytes through the cached file repository (so re-opening the
-    same entity is free). ``None`` when the entity has no uploaded primary
-    document — the review window then falls back to the segmentation text.
+    Resolves the file the same way :func:`resolve_entity_document` does (so the
+    viewer's bytes and the window's viewer-or-text decision can never disagree)
+    and returns them through the cached file repository — re-opening the same
+    entity is free. ``None`` when the entity has no uploaded primary document.
     """
     runtime = build_runtime(user=user, password=password)
-    raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, language)
-    refs = extract_file_refs(raw)
-    documents = [ref for ref in refs if ref.kind == "document"]
-    chosen = documents[0] if documents else None
-    if chosen is None:
+    document = await resolve_entity_document(user, password, shared_id, language)
+    if document is None:
         return None
-    return await runtime.file_repository.get_file_bytes(chosen.filename)
+    return await runtime.file_repository.get_file_bytes(document.filename)
 
 
 def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
@@ -347,7 +394,7 @@ async def clarify_prompt(prompt: str, user: str, password: str) -> PromptUnderst
     can confirm/rephrase. Raises on LLM failure; the caller shows a skip affordance.
     """
     runtime = build_runtime(user=user, password=password)
-    use_case = ClarifyPromptUseCase(llm=runtime.llm)
+    use_case = ClarifyPromptUseCase(llm=runtime.llm, deps=runtime.deps)
     return await use_case.execute(prompt)
 
 
@@ -545,6 +592,7 @@ async def generate_predictions(
         llm_runtime=PydanticAiLlmRuntime(runtime.llm),
         default_language=DUMMY_LANGUAGE,
         template_labels=runtime.template_labels,
+        translation_port=runtime.translation_port,
     )
     await use_case.run(script, run_id=run_id, attempt=attempt, budget=budget, entity_scope=shared_ids)
 
@@ -564,33 +612,54 @@ def list_attempts(run_id: str) -> list[PredictionAttempt]:
     return build_suggestion_store().list_attempts(run_id)
 
 
-def get_suggestion_shared_ids(run_id: str, attempt: int, f: SuggestionFilter) -> list[str]:
-    """Return the distinct sharedIds matching a filter (subset re-predict/apply)."""
-    return build_suggestion_store().shared_ids(run_id, attempt, f)
+def current_attempt(run_id: str) -> PredictionAttempt | None:
+    """The run's NEWEST prediction attempt row, or None when none is recorded.
+
+    The review page no longer offers an attempt selector, so the review reads
+    below resolve the current attempt HERE — the page never carries an attempt
+    number. A later pass (a repair turn) becomes the current attempt by itself,
+    and that is the one the review surface follows.
+    """
+    return next(iter(build_suggestion_store().list_attempts(run_id)), None)
 
 
-def get_suggestion_counts(run_id: str, attempt: int) -> dict[str, int]:
-    """Return the review header's aggregate counters (SQL-side group-bys)."""
-    return build_suggestion_store().counts(run_id, attempt)
+def _current_attempt_number(run_id: str) -> int:
+    """The attempt number the review reads use (1 before anything is recorded)."""
+    attempt = current_attempt(run_id)
+    return attempt.attempt if attempt is not None else 1
 
 
-def get_suggestion_properties(run_id: str, attempt: int) -> list[str]:
+def get_suggestion_entity_languages(run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+    """Return every (sharedId, language) row matching a filter (the window's prev/next)."""
+    return build_suggestion_store().entity_languages(run_id, _current_attempt_number(run_id), f)
+
+
+def get_suggestion_counts(run_id: str) -> dict[str, int]:
+    """Return the review header's aggregate counters (SQL-side group-bys).
+
+    The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table shows
+    — so the cards and the table agree; ``match_*`` stay row-level.
+    """
+    return build_suggestion_store().counts(run_id, _current_attempt_number(run_id))
+
+
+def get_suggestion_properties(run_id: str) -> list[str]:
     """Return the distinct property names in a set (the property dropdown)."""
-    return build_suggestion_store().property_names(run_id, attempt)
+    return build_suggestion_store().property_names(run_id, _current_attempt_number(run_id))
 
 
-def get_entity_suggestions(run_id: str, attempt: int, shared_id: str) -> list[Suggestion]:
-    """Return every suggestion for one entity (the entity review window's read)."""
-    return build_suggestion_store().get_entity(run_id, attempt, shared_id)
+def get_entity_suggestions(run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
+    """Return the suggestions of one entity's language group (the entity window's read)."""
+    return build_suggestion_store().get_entity(run_id, _current_attempt_number(run_id), shared_id, language)
 
 
-def get_entity_rows(run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
+def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
     """Return a page of per-entity aggregate rows + the distinct-entity total.
 
     The entity table's read: one row per affected entity (checkbox column feeds
     the selection-driven actions), grouped in SQL like every other review read.
     """
-    return build_suggestion_store().entity_rows(run_id, attempt, f)
+    return build_suggestion_store().entity_rows(run_id, _current_attempt_number(run_id), f)
 
 
 def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
@@ -616,10 +685,9 @@ def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
 
 async def apply_outcomes(
     run_id: str,
-    attempt: int,
     user: str,
     password: str,
-    shared_ids: list[str],
+    selection: list[tuple[str, str | None]],
 ) -> list[str]:
     """Execute the selected entities' rows into Uwazi (revertable).
 
@@ -633,18 +701,20 @@ async def apply_outcomes(
     Returns the run ids touched (the run itself).
 
     The Run stands in for the row-level accept: the use case accepts the
-    selected entities' PENDING rows as it pushes them, so the rows the review
+    selected rows' PENDING state as it pushes them, so the rows the review
     table shows (recorded by the planning pass) are what gets written.
+    ``selection`` is the table's checked (sharedId, language) rows, so a
+    translation task writes only the languages the operator checked.
 
     Raises :class:`ApplyRefusedError` when there is nothing to run.
     """
-    if not shared_ids:
+    if not selection:
         raise ApplyRefusedError("nothing selected to run")
 
     def _work() -> list[str]:
         runtime = build_runtime(user=user, password=password)
         use_case = _apply_use_case(runtime)
-        use_case.apply(run_id, attempt, shared_ids)
+        use_case.apply(run_id, _current_attempt_number(run_id), selection)
         return [run_id]
 
     return await asyncio.to_thread(_work)
@@ -775,6 +845,17 @@ async def revert_run(run_id: str, user: str, password: str) -> None:
         raise RevertVerificationError(detail)
 
 
+def uwazi_base_url() -> str | None:
+    """The controlled Uwazi instance's base URL, or None when unconfigured.
+
+    The review table links an entity to its public page on that instance, which
+    needs the same ``UWAZI_URL`` the login screen caches. It lives here rather
+    than in ``app`` because ``app`` already imports the review page, so reading
+    the env var here avoids an import cycle.
+    """
+    return os.environ.get("UWAZI_URL") or None
+
+
 def delete_run(run_id: str) -> None:
     """Remove a run's entire folder from the backup store + its suggestion rows."""
     build_backup_store().delete_run(run_id)
@@ -828,6 +909,7 @@ def rename_run(old_id: str, new_id: str) -> None:
 
 
 __all__ = [
+    "EntityDocument",
     "GenerateError",
     "RevertVerificationError",
     "RunDetail",
@@ -838,7 +920,9 @@ __all__ = [
     "clarify_prompt",
     "clear_cache",
     "create_and_generate",
+    "current_attempt",
     "delete_run",
+    "document_language_candidates",
     "generate_predictions",
     "get_attempt",
     "get_entity_rows",
@@ -848,8 +932,8 @@ __all__ = [
     "get_run_audit",
     "get_run_results",
     "get_suggestion_counts",
+    "get_suggestion_entity_languages",
     "get_suggestion_properties",
-    "get_suggestion_shared_ids",
     "get_suggestions",
     "list_attempts",
     "list_runs",
@@ -857,4 +941,5 @@ __all__ = [
     "revert_run",
     "rename_run",
     "run_auto_scan",
+    "uwazi_base_url",
 ]

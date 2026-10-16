@@ -96,8 +96,18 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def get_entity(self, run_id: str, attempt: int, shared_id: str) -> list[Suggestion]:
-        """Every suggestion row for one entity (the entity review window)."""
+    def get_entity(self, run_id: str, attempt: int, shared_id: str, language: str | None = None) -> list[Suggestion]:
+        """Every suggestion row for one entity in ONE language group (the entity window).
+
+        ``language=None`` is the language-independent group (selects, titles,
+        whole-entity ops), not "every language" — the table's rows are per
+        language, so the window reads exactly the group it was opened for.
+        """
+        ...
+
+    @abstractmethod
+    def entity_languages(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+        """Every (sharedId, language) pair matching a filter, first-appearance order."""
         ...
 
     @abstractmethod
@@ -156,9 +166,15 @@ class SuggestionStorePort(ABC):
     def counts(self, run_id: str, attempt: int) -> dict[str, int]:
         """Aggregate counters for the header cards, computed in the store.
 
-        Keys: ``pending``/``accepted``/``edited``/``discarded``/``applied``/``reverted``,
-        plus ``match_exact``/``match_mismatch``/``match_new``/``match_none`` and
-        ``total``. Grouped SQL — never a Python pass over 10k rows.
+        The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table
+        itself shows — so the cards and the table always agree:
+        ``total`` is the distinct (sharedId, language) count and each of
+        ``pending``/``accepted``/``edited``/``discarded``/``applied``/``reverted``
+        counts the groups carrying at least one row in that status (a group whose
+        rows span statuses is counted in each). ``match_exact``/``match_mismatch``/
+        ``match_new`` stay row-level: they are per-property comparison verdicts.
+
+        Grouped SQL — never a Python pass over 10k rows.
         """
         ...
 

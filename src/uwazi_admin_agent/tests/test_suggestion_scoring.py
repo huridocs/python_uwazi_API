@@ -8,6 +8,7 @@ from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, Suggestion, Sugg
 from uwazi_admin_agent.domain.suggestion_scoring import (
     compare_values,
     records_to_suggestions,
+    row_language,
     score_accuracy,
 )
 
@@ -61,6 +62,75 @@ def test_update_record_with_no_metadata_and_no_title_emits_a_single_placeholder_
 def test_update_record_with_missing_metadata_key_still_emits_placeholder() -> None:
     rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1")])
     assert [r.property_name for r in rows] == [None]
+
+
+# --- records_to_suggestions: the record's language -----------------------------
+
+
+def test_a_scalar_value_files_under_the_language_the_script_passed() -> None:
+    """A bare-scalar per-language value takes the script's ``language`` argument.
+
+    The script contract writes ``text``/``markdown`` as a scalar and states the
+    target language in the write helper's argument
+    (``update_entities(updates, language="es")``), so that argument is the ONLY
+    carrier of the intent. Dropping it filed the Spanish row under the
+    language-agnostic "—" group of the review table.
+    """
+    records = [
+        _rec(
+            op="update",
+            shared_id="elfd96ccepk",
+            template_name="DOCUMENT",
+            metadata={"document_ref": "A/HRC/37/NGO/92 ES"},
+            title=None,
+            language="es",
+        )
+    ]
+    rows = records_to_suggestions("update", 1, records)
+    assert [(r.shared_id, r.language, r.proposed_value) for r in rows] == [("elfd96ccepk", "es", "A/HRC/37/NGO/92 ES")]
+
+
+def test_a_value_naming_its_own_languages_still_splits_per_language() -> None:
+    """The value's own languages win: the fallback only fills a gap."""
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            template_name="DOCUMENT",
+            language="es",
+            metadata={"document_ref": [{"value": "hola", "language": "es"}, {"value": "hello", "language": "en"}]},
+        )
+    ]
+    rows = records_to_suggestions("run1", 1, records)
+    assert [(r.language, r.proposed_value) for r in rows] == [
+        ("es", [{"value": "hola", "language": "es"}]),
+        ("en", [{"value": "hello", "language": "en"}]),
+    ]
+
+
+def test_a_record_without_a_language_files_under_none() -> None:
+    rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1", metadata={"document_ref": "x"})])
+    assert rows[0].language is None
+
+
+def test_a_blank_or_non_string_record_language_files_under_none() -> None:
+    for bogus in ("", None, 7, []):
+        rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1", metadata={"a": 1}, language=bogus)])
+        assert rows[0].language is None, bogus
+
+
+def test_whole_entity_rows_stay_language_agnostic() -> None:
+    """A delete carries no property value, so the write's language says nothing about it."""
+    rows = records_to_suggestions("run1", 1, [_rec(op="delete", shared_id="s1", language="es")])
+    assert rows[0].language is None
+
+
+def test_row_language_is_pure() -> None:
+    assert row_language("es", "en") == "es"  # the value wins
+    assert row_language(None, "es") == "es"  # the record fills the gap
+    assert row_language(None, None) is None
+    assert row_language("", "") is None
+    assert row_language(None, 7) is None
 
 
 # --- records_to_suggestions: create ------------------------------------------

@@ -40,24 +40,31 @@ from uwazi_admin_agent.domain.suggestion import (
     PredictionAttemptStatus,
     Suggestion,
 )
-from uwazi_admin_agent.domain.suggestion_scoring import compare_values, records_to_suggestions
+from uwazi_admin_agent.domain.suggestion_scoring import (
+    compare_values,
+    records_to_suggestions,
+    value_in_language,
+)
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
-from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
+from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 
 
-def _extract_property(raw: dict[str, Any], property_name: str) -> Any:
-    """Pull a property's current value out of a raw entity (pure).
+def _extract_property(raw: dict[str, Any], property_name: str, language: str | None = None) -> Any:
+    """Pull a property's current value for ONE LANGUAGE out of a raw entity (pure).
 
     ``_title`` reads the raw's ``title``; any other name reads
-    ``raw["metadata"][name]``. Both return None when absent — the "new value"
+    ``raw["metadata"][name]``, narrowed to ``language`` when the row is a
+    per-language one (so a translated row compares against its own language's
+    text, not the whole list). Both return None when absent — the "new value"
     case the accuracy score reports as neither match nor mismatch.
     """
     if property_name == TITLE_PROPERTY:
@@ -65,7 +72,7 @@ def _extract_property(raw: dict[str, Any], property_name: str) -> Any:
     metadata = raw.get("metadata")
     if not isinstance(metadata, dict):
         return None
-    return metadata.get(property_name)
+    return value_in_language(metadata.get(property_name), language)
 
 
 def _fetch_raws(
@@ -148,7 +155,7 @@ def hydrate_current_values(
         suggestion = suggestions[index]
         updates: dict[str, Any] = {}
         if suggestion.property_name is not None and suggestion.op in ("update", "create"):
-            current = _extract_property(raw, suggestion.property_name)
+            current = _extract_property(raw, suggestion.property_name, suggestion.language)
             updates["current_value"] = current
             updates["match"] = compare_values(suggestion.proposed_value, current)
         if not suggestion.entity_title:
@@ -173,6 +180,7 @@ class GeneratePredictionsUseCase:
         llm_runtime: LlmRuntimePort | None = None,
         default_language: str = "en",
         template_labels: TemplateLabelPort | None = None,
+        translation_port: TranslationPort | None = None,
     ) -> None:
         # The LLM runtime the script's llm_complete/llm_map helpers ride, under
         # the budgeted ledger built per pass below. None → loud refusal stubs.
@@ -185,6 +193,8 @@ class GeneratePredictionsUseCase:
         self._store: SuggestionStorePort = suggestion_store
         self._default_language = default_language
         self._template_labels = template_labels
+        # The script helpers' translate_text rides this; None → loud unwired stub.
+        self._translation_port = translation_port
 
     async def run(
         self,
@@ -320,6 +330,7 @@ class GeneratePredictionsUseCase:
                 entity_repository=self._entity_repository,
                 segmentation_repository=self._segmentation_repository,
                 url_fetcher=self._url_fetcher,
+                translation_port=self._translation_port,
                 throttle=ThrottleController(),
                 # apply_mode=True binds the REAL llm helpers when the runtime
                 # is wired — the script's own llm_complete/llm_map calls, under
