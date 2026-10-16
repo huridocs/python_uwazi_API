@@ -196,7 +196,6 @@ The `UwaziClient` provides access to these services:
 | CSV | `client.csv` | CSV import operations |
 | Relationships | `client.relationships` | Create entity relationships |
 | Exports | `client.exports` | Export entities to DataFrame |
-| Translations | `client.translations` | Translate text via Uwazi's translation service |
 
 ---
 
@@ -440,44 +439,6 @@ client.relationships.create(
 df = client.exports.to_dataframe(start_from=0, batch_size=100, template_name="template_name", language="en", published=False)
 ```
 
-### Translations
-
-Wraps Uwazi's `POST /api/translationService`. The endpoint is a proxy to the
-translation service configured on the instance, so it needs authenticated
-credentials (admin/editor/collaborator) and the `translationService` feature
-flag enabled on the tenant — otherwise Uwazi answers `403`.
-
-```python
-from uwazi_api.domain.exceptions import TranslationError, TranslationNotAvailableError
-
-# One language pair -> a Translation(text, language_from, language_to)
-translation = client.translations.translate(
-    text="Name here is an Egyptian human rights lawyer.",
-    language_from="en",
-    language_to="fr",
-)
-print(translation.text)
-
-# Several targets at once (sequential: this endpoint is rate limited)
-translations = client.translations.translate_to_many(
-    text="Name here is an Egyptian human rights lawyer.",
-    language_from="en",
-    languages_to=["ar", "fr", "ru", "es"],
-)
-print({t.language_to: t.text for t in translations})
-
-# Missing feature flag / not authenticated
-try:
-    client.translations.translate("Hello", "en", "ar")
-except TranslationNotAvailableError as error:  # subclass of TranslationError
-    print(error)
-```
-
-Failures raise `TranslationError`; a `401`/`403`/`404` from the endpoint raises
-the more specific `TranslationNotAvailableError`. Language codes are passed
-through to Uwazi as given — `client.settings.get_languages()` lists the codes
-installed on the instance.
-
 ### Relationship Properties in DataFrames
 
 When working with **relationship** properties in DataFrames, the format differs from other property types.
@@ -665,8 +626,6 @@ The library defines custom exceptions:
 - `UploadError` - Upload failed
 - `SearchError` - Search failed
 - `TemplateNotFoundError` - Template not found
-- `TranslationError` - Translation failed
-- `TranslationNotAvailableError` - Translation endpoint unavailable (not authenticated, or `translationService` feature flag disabled)
 - `DomainError` - Base exception for all domain errors
 
 ---
