@@ -204,5 +204,16 @@ class SuggestionStorePort(ABC):
         """Remove every suggestion + attempt row for a run (run deletion flow)."""
         ...
 
+    @abstractmethod
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        """Re-key every row of ``old_id`` to ``new_id`` (the run-rename flow).
+
+        The run's review table, its prediction attempts and its drift rows are
+        all keyed by ``run_id``; the backup store renames the run FOLDER, so
+        without this the review page of the renamed run opens empty and the old
+        name keeps orphaned rows. Idempotent when no rows exist for ``old_id``.
+        """
+        ...
+
 
 __all__ = ["SuggestionStorePort"]

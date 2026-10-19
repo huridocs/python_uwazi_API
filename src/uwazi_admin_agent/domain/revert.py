@@ -3,8 +3,10 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.connection_hubs import rows_to_delete
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.manifest import MigrationManifest
+from uwazi_admin_agent.domain.publish_state import PublishState
 from uwazi_admin_agent.domain.relationship_restore import (
     InboundRef,
     extract_inbound_refs_from_existing,
@@ -128,12 +130,75 @@ class RestoreDeletedFilesAction(BaseModel):
     files: list[DeletedFile] = Field(default_factory=list)
 
 
+class RestorePublishStateAction(BaseModel):
+    """Restore a modified entity's publish + permission grants to their before-state.
+
+    ``POST /api/entities`` is the content restore path, and Uwazi strips
+    ``published``/``permissions`` from it (the access policy lives in its own
+    collection). Without this action a revert of a publish/unpublish or a
+    permission change reported success while the entity stayed public (or
+    private). The captured grants are posted verbatim to
+    ``POST /api/entities/permissions``, whose handler derives ``isPublic`` from
+    the public grant's presence — so publishing, unpublishing and per-user
+    grants are all restored by the same call.
+
+    Emitted for every ``manifest.modified`` entity whose snapshot carries a
+    ``publish_state`` (legacy snapshots carry none and are skipped).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["restore_publish_state"] = "restore_publish_state"
+    shared_id: str
+    state: PublishState
+
+
+class RestoreConnectionHubsAction(BaseModel):
+    """Re-create the connection rows a metadata restore cannot reproduce.
+
+    Rows carrying ``file`` (file-cited connections) or ``reference`` (text
+    citations) belong to no relationship property, so ``POST /api/entities``
+    never rebuilds them. They are captured at first touch on the snapshot
+    (:attr:`EntitySnapshot.connection_hubs`) and replayed through
+    ``POST /api/relationships/bulk``.
+
+    For a MODIFIED entity the restore is exact: rows the run added are removed
+    and the captured set is re-saved. For a RE-CREATED (deleted) entity the
+    rows are remapped to the NEW sharedId and re-saved (nothing to remove — the
+    old rows died with the old entity).
+
+    Emitted after every ``RecreateEntityAction`` (a re-created entity's endpoints
+    must exist) and before ``DeleteEntityAction``s.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["restore_connection_hubs"] = "restore_connection_hubs"
+    shared_id: str = Field(description="The entity whose hubs are restored (OLD sharedId for a re-create).")
+    target_shared_id: str | None = Field(
+        default=None,
+        description="For a re-created entity: the NEW sharedId the captured rows are remapped onto.",
+    )
+    language: str | None = Field(default=None, description="Row language the rows were captured on.")
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    current_row_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For a MODIFIED entity: the connection-row _ids live at revert-build time that the "
+            "captured state does not contain — deleted to undo a hub the run created. Empty for "
+            "re-created entities (their old rows are already gone)."
+        ),
+    )
+
+
 RevertAction: TypeAlias = Annotated[
     RestoreRelationshipAction
     | RestoreEntityAction
     | RecreateEntityAction
     | ReapplyRelationshipRefsAction
     | RestoreDeletedFilesAction
+    | RestorePublishStateAction
+    | RestoreConnectionHubsAction
     | DeleteEntityAction,
     Field(discriminator="kind"),
 ]
@@ -142,6 +207,7 @@ RevertAction: TypeAlias = Annotated[
 def build_revert_actions(
     manifest: MigrationManifest,
     load_snapshot: Callable[[str], EntitySnapshot],
+    load_current_hubs: Callable[[str, str | None], list[dict[str, Any]]] | None = None,
 ) -> list[RevertAction]:
     """Build the ordered revert actions for a run (§2.6).
 
@@ -194,12 +260,42 @@ def build_revert_actions(
     for modified in manifest.modified:
         snapshot: EntitySnapshot = load_snapshot(modified.shared_id)
         actions.append(RestoreEntityAction(snapshot=snapshot))
+        # Publish/permissions are NOT part of the raw write path: Uwazi strips them
+        # from POST /api/entities, so a publish/unpublish or grant change needs its
+        # own restore call. Ordering is immaterial (separate collection).
+        if snapshot.publish_state is not None:
+            actions.append(RestorePublishStateAction(shared_id=modified.shared_id, state=snapshot.publish_state))
+        # Non-property connection rows (file-cited / text citations) are likewise
+        # invisible to the metadata restore; replay the captured set and drop any
+        # row the run added. Live row ids come from the injected seam; without it
+        # the replay is still exact for the captured rows but cannot delete extras.
+        if snapshot.connection_hubs:
+            current_rows = load_current_hubs(modified.shared_id, snapshot.language) if load_current_hubs else []
+            actions.append(
+                RestoreConnectionHubsAction(
+                    shared_id=modified.shared_id,
+                    language=snapshot.language,
+                    rows=list(snapshot.connection_hubs),
+                    current_row_ids=rows_to_delete(current_rows, snapshot.connection_hubs),
+                )
+            )
 
     deleted_snapshots: dict[str, EntitySnapshot] = {}
     for deleted in manifest.deleted:
         snap = load_snapshot(deleted.shared_id)
         deleted_snapshots[deleted.shared_id] = snap
         actions.append(RecreateEntityAction(snapshot=snap))
+        # A deleted entity took its non-property connection rows with it (Uwazi
+        # tears down every hub touching the sharedId). Replay them onto the NEW
+        # sharedId once the re-create has minted it — no live rows to delete.
+        if snap.connection_hubs:
+            actions.append(
+                RestoreConnectionHubsAction(
+                    shared_id=deleted.shared_id,
+                    language=snap.language,
+                    rows=list(snap.connection_hubs),
+                )
+            )
 
     deleted_ids = {deleted.shared_id for deleted in manifest.deleted}
     recreate_targets = [

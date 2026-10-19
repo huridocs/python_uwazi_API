@@ -741,6 +741,7 @@ def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
         url_fetcher=runtime.url_fetcher,
         cache_control=runtime.file_cache,
         default_language=DUMMY_LANGUAGE,
+        publish_state=getattr(runtime, "publish_state", None),
     )
 
 
@@ -964,6 +965,13 @@ class BulkRevertOutcome(BaseModel):
         default_factory=list,
         description="Selected entities the run itself created — their undo is a delete (run-level Revert), refused here.",
     )
+    skipped_deleted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Selected entities the run DELETED — their undo is a re-create, which only the ordered "
+            "run-level revert can do (fresh sharedId + files + connection rows), refused here."
+        ),
+    )
     skipped_no_backup: list[str] = Field(
         default_factory=list,
         description="Selected entities with no backup — the run never wrote to them.",
@@ -978,6 +986,8 @@ class BulkRevertOutcome(BaseModel):
         parts = [f"{len(self.reverted)} reverted"]
         if self.skipped_created:
             parts.append(f"{len(self.skipped_created)} created-by-run (revert at run level)")
+        if self.skipped_deleted:
+            parts.append(f"{len(self.skipped_deleted)} deleted-by-run (revert at run level)")
         if self.skipped_no_backup:
             parts.append(f"{len(self.skipped_no_backup)} without backup")
         if self.failures:
@@ -1001,10 +1011,11 @@ async def revert_entities_selection(
     covers exactly those entities' rows — a language the operator did NOT check
     still reads REVERTED when its entity was restored (its write is gone too).
 
-    Created entities and no-backup entities are skipped (reported, not fatal):
-    a created entity's undo is a deletion, which belongs to the run-level
-    Revert. Per-entity failures are collected: one bad restore neither aborts
-    the batch nor hides the restores that landed.
+    Created and deleted entities are skipped (reported, not fatal): a created
+    entity's undo is a deletion and a deleted one's undo is a re-create — both
+    are ordered run-level operations that only the run-level Revert performs.
+    No-backup entities are skipped too. Per-entity failures are collected: one
+    bad restore neither aborts the batch nor hides the restores that landed.
 
     Raises nothing for empty selection — the caller guards it.
     """
@@ -1021,8 +1032,13 @@ async def revert_entities_selection(
     for shared_id in seen:
         try:
             snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
-        except RevertRefusedError:
-            outcome.skipped_created.append(shared_id)
+        except RevertRefusedError as exc:
+            # The two refusals have different remedies (delete the created entity
+            # vs. re-create the deleted one), so they are reported apart.
+            if "deleted by the run" in str(exc):
+                outcome.skipped_deleted.append(shared_id)
+            else:
+                outcome.skipped_created.append(shared_id)
             continue
         except Exception as exc:  # noqa: BLE001 — one bad restore must not lose the rest
             logger.warning("bulk revert failed run={} sharedId={}: {}", run_id, shared_id, exc)
@@ -1122,6 +1138,10 @@ def rename_run(old_id: str, new_id: str) -> None:
             data["active_run"] = new_id
             RUNS_FILE.write_text(yaml.dump(data), encoding="utf-8")
     build_backup_store().rename_run(old_id, new_id)
+    # The review table, prediction attempts and drift rows live in the shared
+    # SQLite database keyed by run_id — renaming only the folder left the
+    # renamed run's review page empty and the old id's rows orphaned.
+    build_suggestion_store().rename_run(old_id, new_id)
 
 
 # --- drift -------------------------------------------------------------------

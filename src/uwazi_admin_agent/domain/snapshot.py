@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.publish_state import PublishState
+
 
 class FileRef(BaseModel):
     """Metadata for one uploaded file captured into the backup (delete-revert file restore).
@@ -143,5 +145,24 @@ class EntitySnapshot(BaseModel):
             "'back up the first time and keep the first backup': rows outside this "
             "set still get restored (they were captured), but the tooltip and the "
             "revert summary name the affected ones."
+        ),
+    )
+    publish_state: PublishState | None = Field(
+        default=None,
+        description=(
+            "The entity's publish + permission grants at capture time. `POST /api/entities` "
+            "never writes `published`/`permissions` (the access policy is a separate "
+            "collection), so without this a reverted publish/unpublish/permission change "
+            "stayed live. None on legacy snapshots (the restore is then skipped)."
+        ),
+    )
+    connection_hubs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The connection rows a metadata restore CANNOT reproduce: rows carrying "
+            "`file` (file-cited connections) or `reference` (text citations) instead "
+            "of a relationship-type `template`. `POST /api/entities` rebuilds hubs only "
+            "from relationship-property metadata, so a run that created such a row could "
+            "not undo it. See domain/connection_hubs.py."
         ),
     )

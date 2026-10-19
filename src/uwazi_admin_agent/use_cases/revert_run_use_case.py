@@ -29,12 +29,15 @@ Testable with an in-memory repo + in-memory backup store (the DoD's "with an
 in-memory repo").
 """
 
+import asyncio
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
 
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
+from uwazi_admin_agent.domain.connection_hubs import remap_hub_rows, rows_to_delete
 from uwazi_admin_agent.domain.create_payload import strip_deleted_entity_refs
 from uwazi_admin_agent.domain.file_restore import build_file_restore_actions
 from uwazi_admin_agent.domain.manifest import RunStatus
@@ -46,8 +49,10 @@ from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
     ReapplyRelationshipRefsAction,
     RecreateEntityAction,
+    RestoreConnectionHubsAction,
     RestoreDeletedFilesAction,
     RestoreEntityAction,
+    RestorePublishStateAction,
     RestoreRelationshipAction,
     build_revert_actions,
 )
@@ -58,8 +63,21 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
+from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.ports.template_property_port import TemplatePropertyLookupPort
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """True when a repository error means "this row/entity does not exist".
+
+    The adapters raise ``RuntimeError`` with Uwazi's status/body text, so the
+    match is textual (the previous behavior); kept in one place so the revert
+    path never again guesses at a 404 substring inline.
+    """
+    message = str(exc).lower()
+    return "not found" in message or "404" in message
 
 
 class RevertRunUseCase:
@@ -74,6 +92,8 @@ class RevertRunUseCase:
         template_property_lookup: TemplatePropertyLookupPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
         suggestion_store: SuggestionStorePort | None = None,
+        publish_state: PublishStatePort | None = None,
+        relationship_hubs: RelationshipHubPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -84,6 +104,13 @@ class RevertRunUseCase:
         # Optional: the review rows' status follows the revert so the review
         # table shows them runnable again (None = no store wired = no-op).
         self._suggestion_store: SuggestionStorePort | None = suggestion_store
+        # Publish/permission restore (None = unwired: snapshots without a
+        # publish_state carry nothing to restore, so the step is a no-op).
+        self._publish_state: PublishStatePort | None = publish_state
+        # Non-property connection rows (file-cited / text citations): captured on
+        # the snapshot, replayed through the bulk endpoint (None = unwired: the
+        # action is skipped and reported).
+        self._relationship_hubs: RelationshipHubPort | None = relationship_hubs
 
     async def revert(self, run_id: str) -> None:
         """Revert run ``run_id`` by restoring every backed-up entity and deleting created ones.
@@ -97,7 +124,11 @@ class RevertRunUseCase:
         if gate.action == "refuse":
             raise RevertRefusedError(gate.reason or "revert refused")
 
-        actions = build_revert_actions(manifest, lambda sid: self._backup_store.load_snapshot(run_id, sid))
+        actions = build_revert_actions(
+            manifest,
+            lambda sid: self._backup_store.load_snapshot(run_id, sid),
+            self._load_current_hubs,
+        )
 
         try:
             for action in actions:
@@ -159,12 +190,42 @@ class RevertRunUseCase:
             raise RevertRefusedError(
                 "this row's entity was created by the run — revert it from the run-level Revert (undo deletes the entity)"
             )
+        if shared_id in {e.shared_id for e in manifest.deleted}:
+            # A deleted entity has no row to update: its undo is a RE-CREATE
+            # (fresh sharedId + files + relationship rows), which only the
+            # ordered run-level revert can do. Attempting the per-entity update
+            # used to 404 against the dead id, skip silently, and report
+            # success while nothing was restored.
+            raise RevertRefusedError(
+                "this row's entity was deleted by the run — use the run-level Revert "
+                "(the undo re-creates the entity; an in-place restore is impossible)"
+            )
         try:
             snapshot = self._backup_store.load_snapshot(run_id, shared_id)
         except FileNotFoundError:
             return None
         action = RestoreEntityAction(snapshot=snapshot)
         await self._execute_action(action, run_id, manifest)
+        # An in-place restore must undo EVERYTHING the run changed on this entity
+        # — not just its content. Publishing and non-property connection rows are
+        # written outside the entity payload, so they need their own calls here
+        # exactly as they do on the run-level path.
+        if snapshot.publish_state is not None:
+            await self._restore_publish_state(
+                RestorePublishStateAction(shared_id=shared_id, state=snapshot.publish_state), run_id
+            )
+        if snapshot.connection_hubs:
+            current_rows = self._load_current_hubs(shared_id, snapshot.language)
+            await self._restore_connection_hubs(
+                RestoreConnectionHubsAction(
+                    shared_id=shared_id,
+                    language=snapshot.language,
+                    rows=list(snapshot.connection_hubs),
+                    current_row_ids=rows_to_delete(current_rows, snapshot.connection_hubs),
+                ),
+                run_id,
+                manifest,
+            )
         self._emit(run_id, "restore_entity", [shared_id])
         logger.info("revert entity: run={} sharedId={} languages={}", run_id, shared_id, [r.language for r in snapshot.rows])
         if self._suggestion_store is not None:
@@ -205,6 +266,10 @@ class RevertRunUseCase:
             await self._restore_deleted_files(action, run_id, manifest)
         elif isinstance(action, ReapplyRelationshipRefsAction):
             await self._reapply_relationship_refs(action, run_id, manifest)
+        elif isinstance(action, RestorePublishStateAction):
+            await self._restore_publish_state(action, run_id)
+        elif isinstance(action, RestoreConnectionHubsAction):
+            await self._restore_connection_hubs(action, run_id, manifest)
         elif isinstance(action, DeleteEntityAction):
             await self._entity_repository.delete_by_shared_id(action.shared_id)
             self._emit(run_id, "delete_created", [action.shared_id])
@@ -221,10 +286,13 @@ class RevertRunUseCase:
         snapshot (no ``rows``, captured by an older build) falls back to the
         single ``raw`` — the previous behavior.
 
-        A row that no longer exists is skipped: Uwazi only rejects the restore
-        if the whole entity is gone, and a missing row means there is nothing
-        under that language to restore (nothing the run could have written
-        either).
+        A row that no longer exists is skipped ONLY when another row of the same
+        entity still exists. "Not found" used to be swallowed unconditionally,
+        which is how a delete whose revert tried to UPDATE the dead sharedId
+        reported success while the entity stayed gone (the run then flipped to
+        REVERTED and the revert gate refused a retry). If no row of the entity
+        can be read, the restore is impossible in place: raise, so the run is
+        marked FAILED — a state the gate allows reverting again.
         """
         snapshot = action.snapshot
         if snapshot.rows:
@@ -243,8 +311,9 @@ class RevertRunUseCase:
             try:
                 await self._entity_repository.save_raw({**raw, "language": row_lang})
             except RuntimeError as exc:
-                message = str(exc)
-                if "not found" in message.lower() or "404" in message:
+                if not _is_not_found(exc):
+                    raise
+                if await self._entity_has_any_row(snapshot, rows):
                     logger.warning(
                         "revert: row absent sharedId={} language={} (skipped): {}",
                         snapshot.shared_id,
@@ -252,8 +321,26 @@ class RevertRunUseCase:
                         exc,
                     )
                     continue
-                raise
+                raise RuntimeError(
+                    f"revert cannot restore sharedId={snapshot.shared_id}: the entity no longer "
+                    f"exists (every language row is gone), so an in-place restore is impossible"
+                ) from exc
             logger.debug("revert: restored row sharedId={} language={}", snapshot.shared_id, row_lang)
+
+    async def _entity_has_any_row(self, snapshot: EntitySnapshot, rows: list[EntityRowSnapshot]) -> bool:
+        """True when at least one language row of ``snapshot``'s entity is readable.
+
+        Distinguishes "this locale's row was never materialized" (a legitimate
+        skip: nothing under that language to restore) from "the whole entity is
+        gone" (fatal — the raw update branch cannot bring it back).
+        """
+        for candidate in {row.language or snapshot.language or "en" for row in rows} | {"en"}:
+            try:
+                await self._entity_repository.get_raw_by_shared_id(snapshot.shared_id, candidate)
+            except Exception:  # noqa: BLE001 — a failed probe is simply not evidence of existence
+                continue
+            return True
+        return False
 
     @staticmethod
     def _record_restored_shared_id(manifest: Any, old_shared_id: str, new_shared_id: str) -> None:
@@ -459,6 +546,112 @@ class RevertRunUseCase:
             return title if isinstance(title, str) else ""
         except Exception:
             return ""
+
+    async def _restore_publish_state(self, action: RestorePublishStateAction, run_id: str) -> None:
+        """Restore an entity's publish + permission grants (the raw write skips both).
+
+        A missing port is a real gap, not a success: the run's writes changed
+        publishing, so the operator must see that this step did not run.
+        """
+        if self._publish_state is None:
+            self._emit(run_id, "restore_publish_state_skipped", [action.shared_id])
+            logger.warning(
+                "revert: publish state restore skipped sharedId={} (no publish_state port wired)", action.shared_id
+            )
+            return
+        await self._publish_state.restore(action.shared_id, action.state)
+        self._emit(run_id, "restore_publish_state", [action.shared_id])
+        logger.info(
+            "revert: publish state restored sharedId={} published={} grants={}",
+            action.shared_id,
+            action.state.published,
+            len(action.state.permissions),
+        )
+
+    async def _restore_connection_hubs(self, action: RestoreConnectionHubsAction, run_id: str, manifest: Any) -> None:
+        """Replay captured connection rows and drop the ones the run added.
+
+        Order matters inside the step: delete stale rows FIRST (a hub the run
+        created must not survive alongside its restored twin), then save the
+        captured set. A re-created entity's rows are remapped onto the NEW
+        sharedId; they carry no live row ids (the old ones died with the old
+        entity). Best-effort, like the other relationship restore paths: the
+        entity content is already restored and gaps surface in verification.
+        """
+        if self._relationship_hubs is None:
+            self._emit_rel_for_hubs(run_id, failed=True, detail=f"no relationship_hubs port wired for {action.shared_id}")
+            logger.warning(
+                "revert: connection hub restore skipped sharedId={} (no relationship_hubs port wired)",
+                action.shared_id,
+            )
+            return
+        id_map = {e.shared_id: e.restored_shared_id for e in manifest.deleted if e.restored_shared_id}
+        target = action.target_shared_id or id_map.get(action.shared_id) or action.shared_id
+        rows = remap_hub_rows(action.rows, id_map)
+        for row in rows:
+            if row.get("entity") == action.shared_id and target != action.shared_id:
+                row["entity"] = target
+        try:
+            if action.current_row_ids:
+                await self._relationship_hubs.delete_rows(action.current_row_ids, action.language)
+            await self._relationship_hubs.restore_rows(rows, action.language)
+        except Exception as exc:  # noqa: BLE001 — best-effort; verification reports the gap
+            self._emit_rel_for_hubs(run_id, failed=True, detail=f"connection hubs {action.shared_id}: {exc}")
+            logger.warning("revert: connection hub restore failed sharedId={}: {}", action.shared_id, exc)
+            return
+        self._emit(run_id, "restore_connection_hubs", [target])
+        logger.info(
+            "revert: connection rows restored sharedId={} rows={} deleted_stale={}",
+            target,
+            len(rows),
+            len(action.current_row_ids),
+        )
+
+    def _load_current_hubs(self, shared_id: str, language: str | None) -> list[dict[str, Any]]:
+        """Live connection rows for one entity at revert-build time ([] when unwired).
+
+        Called synchronously while building the action list, from inside the
+        revert coroutine — so the port's awaitable runs on a PRIVATE loop in a
+        worker thread (``asyncio.run`` in this thread would refuse: a loop is
+        already running). A failure degrades to ``[]`` — the captured rows are
+        still replayed; only the "delete what the run added" half is skipped,
+        and verification reports any remaining gap.
+        """
+        if self._relationship_hubs is None:
+            return []
+        port = self._relationship_hubs
+        captured: dict[str, Any] = {}
+
+        def _work() -> None:
+            try:
+                captured["rows"] = asyncio.run(port.list_for_entity(shared_id, language))
+            except Exception as exc:  # noqa: BLE001 — best-effort read
+                captured["error"] = exc
+
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        worker.join()
+        if "error" in captured:
+            logger.warning("revert: could not read live connection rows for {}: {}", shared_id, captured["error"])
+            return []
+        rows = captured.get("rows") or []
+        return rows if isinstance(rows, list) else []
+
+    def _emit_rel_for_hubs(self, run_id: str, *, failed: bool, detail: str | None = None) -> None:
+        """Append one connection-hub restore audit record (no-op if no audit log)."""
+        if self._audit_log is None:
+            return
+        self._audit_log.append(
+            run_id,
+            make_audit_record(
+                run_id=run_id,
+                step=AuditStep.REVERT,
+                op_kind="restore_connection_hubs_failed" if failed else "restore_connection_hubs",
+                shared_ids=[],
+                outcome=AuditOutcome.FAILURE if failed else AuditOutcome.SUCCESS,
+                detail=detail,
+            ),
+        )
 
     @staticmethod
     def _snapshot_language(snapshot: Any) -> str | None:

@@ -41,9 +41,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.connection_hubs import (
+    extract_connection_hubs as live_hub_groups,
+)
+from uwazi_admin_agent.domain.connection_hubs import (
+    hub_groups,
+    hub_signature,
+)
 from uwazi_admin_agent.domain.create_payload import CREATE_ALLOWED_FIELDS
 from uwazi_admin_agent.domain.deleted_file import to_file_ref
 from uwazi_admin_agent.domain.manifest import MigrationManifest
+from uwazi_admin_agent.domain.publish_state import PublishState, is_restored
 from uwazi_admin_agent.domain.relationship_restore import (
     CapturedHub,
     InboundRef,
@@ -54,7 +62,7 @@ from uwazi_admin_agent.domain.relationship_restore import (
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
 from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, PLATFORM_MANAGED_FIELDS
 
-MismatchKind = Literal["entity", "relationship", "created"]
+MismatchKind = Literal["entity", "relationship", "created", "publish", "connection"]
 
 # The file kind literals every file-gap check emits (typed so the builders
 # construct :class:`FileGap` with the exact Literal, not a widened str).
@@ -233,6 +241,8 @@ def verify_revert(
     snapshots: dict[str, EntitySnapshot],
     current_raws: dict[str, dict[str, Any] | None],
     deleted_file_gaps: list[FileGap] | None = None,
+    current_publish_states: dict[str, PublishState] | None = None,
+    current_hub_rows: dict[str, list[dict[str, Any]]] | None = None,
 ) -> RevertVerificationResult:
     """Pure: compare post-revert current raws against snapshots + before-states.
 
@@ -361,6 +371,46 @@ def verify_revert(
     inbound_refs = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=manifest_ids)
     if inbound_refs:
         relationship_gaps.extend(build_inbound_ref_gaps(inbound_refs, id_map, current_raws))
+
+    # Publish/permission state: the raw comparison above cannot see it (Uwazi
+    # strips `published`/`permissions` from the entity write and from the raw
+    # diff), so a revert that silently failed to undo a publish would otherwise
+    # verify as OK. Caller-supplied current states; absent ones are not checked.
+    for entry in manifest.modified:
+        snap = snapshots.get(entry.shared_id)
+        expected = getattr(snap, "publish_state", None) if snap is not None else None
+        actual = current_publish_states.get(entry.shared_id) if current_publish_states else None
+        if expected is None or actual is None:
+            continue
+        if not is_restored(expected, actual):
+            mismatches.append(
+                VerificationMismatch(
+                    shared_id=entry.shared_id,
+                    kind="publish",
+                    expected={"published": expected.published, "permissions": expected.permissions},
+                    actual={"published": actual.published, "permissions": actual.permissions},
+                )
+            )
+
+    # Captured non-property connection rows (file-cited / text citations): the
+    # raw diff cannot see them either — they are a separate collection. Compare
+    # hub signatures so a citation the run created (still live) or one it
+    # destroyed (not replayed) is reported.
+    for entry in manifest.modified:
+        snap = snapshots.get(entry.shared_id)
+        captured = getattr(snap, "connection_hubs", None) if snap is not None else None
+        current = current_hub_rows.get(entry.shared_id) if current_hub_rows else None
+        if not captured or current is None:
+            continue
+        if {hub_signature(g) for g in hub_groups(captured)} != {hub_signature(g) for g in live_hub_groups(current)}:
+            mismatches.append(
+                VerificationMismatch(
+                    shared_id=entry.shared_id,
+                    kind="connection",
+                    expected=captured,
+                    actual=current,
+                )
+            )
 
     ok = not mismatches and not file_gaps and not relationship_gaps
     return RevertVerificationResult(

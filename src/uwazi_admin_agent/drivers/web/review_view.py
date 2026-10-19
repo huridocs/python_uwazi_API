@@ -375,6 +375,12 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     holds a backup for this entity (a written-then-revertable row).
     """
     status_label, status_color = run_status(item)
+    # Per-entity revert is an IN-PLACE restore of the live row. It is therefore
+    # only offered for entities the run merely MODIFIED: a `delete` row's undo is
+    # a re-create (a fresh sharedId, files and connection rows) and a `create`
+    # row's undo is a deletion — both are ordered run-level operations. Offering
+    # the per-row button there made the UI promise a restore it cannot perform.
+    in_place_revertable = status_label in ("runned", "reverted") and not any(op in ("delete", "create") for op in item.ops)
     title = item.entity_title or item.shared_id
     # The sharedId rides the visible title (never a separate column) so the
     # operator can quote it; the tooltip keeps the uncut bare title.
@@ -397,7 +403,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
         "url": entity_open_url(item, uwazi_url),  # used by the title cell's open-in-Uwazi icon
         "run_status": status_label,
         "run_status_color": status_color,  # used by the slot
-        "revertable": status_label in ("runned", "reverted"),  # drives the Revert icon's visibility
+        "revertable": in_place_revertable,  # drives the Revert icon's visibility
         "revert_tooltip": revert_tooltip,  # drives the Revert icon's tooltip
     }
 

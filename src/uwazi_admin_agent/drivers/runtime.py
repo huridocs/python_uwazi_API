@@ -49,6 +49,8 @@ from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepo
 from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
+from uwazi_admin_agent.adapters.publish_state_adapter import UwaziPublishStateRepository
+from uwazi_admin_agent.adapters.relationship_hub_adapter import UwaziRelationshipHubs
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
@@ -71,6 +73,8 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.drift_probe_port import DriftProbePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
+from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
@@ -112,6 +116,8 @@ class Runtime:
         translation_port: TranslationPort | None = None,
         template_labels: TemplateLabelPort | None = None,
         drift_probe: DriftProbePort | None = None,
+        publish_state: PublishStatePort | None = None,
+        relationship_hubs: RelationshipHubPort | None = None,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -142,6 +148,11 @@ class Runtime:
         # EditDate/count probes backing the review UI's drift check (None = unwired,
         # the drift check then reports "unknown" instead of a verdict).
         self.drift_probe: DriftProbePort | None = drift_probe
+        # Publish/permission grants: captured into snapshots at first touch and
+        # restored on revert (Uwazi's entity write ignores them).
+        self.publish_state: PublishStatePort | None = publish_state
+        # Non-property connection rows (file-cited / text citations).
+        self.relationship_hubs: RelationshipHubPort | None = relationship_hubs
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -244,6 +255,11 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         # So a revert also flips the run's APPLIED review rows to REVERTED:
         # their writes are gone, and the review table must show them runnable.
         suggestion_store=SqliteSuggestionStore(SUGGESTIONS_DB_PATH),
+        # Publish/permissions and non-property connection rows: Uwazi's entity
+        # write ignores both, so the raw restore alone cannot undo a
+        # publish/unpublish or a file/text citation.
+        publish_state=UwaziPublishStateRepository(api.client),
+        relationship_hubs=UwaziRelationshipHubs(api.client),
     )
     verify_use_case = VerifyRevertUseCase(
         entity_repository=entity_repository,
@@ -254,6 +270,10 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         # Invalidate-then-refetch: verification never reads through a cache
         # entry our own writes could have made stale.
         cache_control=file_cache,
+        # Publish/permissions and non-property connection rows are restored
+        # outside the entity payload, so verification must read them separately.
+        publish_state=UwaziPublishStateRepository(api.client),
+        relationship_hubs=UwaziRelationshipHubs(api.client),
     )
 
     return Runtime(
@@ -275,4 +295,6 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         translation_port=translation_port,
         template_labels=template_labels,
         drift_probe=UwaziDriftProbe(api.client),
+        publish_state=UwaziPublishStateRepository(api.client),
+        relationship_hubs=UwaziRelationshipHubs(api.client),
     )

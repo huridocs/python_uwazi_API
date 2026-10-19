@@ -43,15 +43,18 @@ from uwazi_admin_agent.domain.backup_decision import (
     populate_manifest,
 )
 from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
+from uwazi_admin_agent.domain.connection_hubs import extract_connection_hubs
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
+from uwazi_admin_agent.domain.publish_state import PublishState
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 
 
 class BackupIntercept:
@@ -78,6 +81,7 @@ class BackupIntercept:
         already_backed_up: set[str] | None = None,
         settings_languages: list[str] | None = None,
         affected_languages: set[str] | None = None,
+        publish_state: PublishStatePort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -111,6 +115,13 @@ class BackupIntercept:
         # languages): recorded on the snapshot so revert summaries/tooltips can
         # name them.
         self._affected_languages: set[str] = set(affected_languages or ())
+        # Publish/permission capture (None = unwired: snapshots carry no
+        # publish_state and revert skips that restore, the previous behavior).
+        self._publish_state: PublishStatePort | None = publish_state
+        # First-touch snapshots taken in THIS session, by sharedId. Promotion
+        # (an update-then-delete, or a refused-then-retried delete) needs the
+        # snapshot to build the `deleted` entry without re-reading the row.
+        self._snapshots: dict[str, EntitySnapshot] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -152,6 +163,7 @@ class BackupIntercept:
             del language  # ignored: delete is by sharedId across ALL language rows
             self._backup_before_delete(shared_ids)
             result = delete_entities(shared_ids)
+            self._record_deleted_entities(shared_ids, result)
             self._invalidate(shared_ids)
             self._emit("delete", shared_ids)
             return result
@@ -256,7 +268,8 @@ class BackupIntercept:
         raws = self._fetch_raws(decision.snapshot_ids, language)
         snapshots = self._save_snapshots(decision.snapshot_ids, raws, capture_files=capture_files)
         self._raw_before.update({sid: raws[sid] for sid in snapshots})
-        _ = populate_manifest(self._manifest, decision, snapshots)
+        retained = {sid: self._snapshots[sid] for sid in decision.promote_to_deleted if sid in self._snapshots}
+        _ = populate_manifest(self._manifest, decision, {**retained, **snapshots})
         self._enforce_cap()
         logger.debug("backup decision: snapshotted {} entities", len(snapshots))
         return snapshots
@@ -518,11 +531,70 @@ class BackupIntercept:
                 )
             elif capture_files:
                 snapshot = snapshot.model_copy(update={"files": self._capture_files(sid, snapshot.raw)})
+            # Content is not the whole before-state: Uwazi's entity write ignores
+            # `published`/`permissions`, and relationship rows that carry a file or
+            # a text reference belong to no property. Capture both so revert can
+            # actually undo a publish or a citation the run created.
+            snapshot = snapshot.model_copy(
+                update={
+                    "publish_state": self._capture_publish_state(sid, snapshot.language),
+                    "connection_hubs": extract_connection_hubs(snapshot.raw.get("relations")),
+                }
+            )
             snapshot = snapshot.model_copy(update={"captured_at": now})
             self._backup_store.save_snapshot(self._run_id, snapshot)
             snapshots[sid] = snapshot
+            self._snapshots[sid] = snapshot
             self._backed_up.add(sid)
         return snapshots
+
+    def _capture_publish_state(self, shared_id: str, language: str | None) -> PublishState | None:
+        """Read the entity's publish + permission grants (None when unwired/unreadable).
+
+        Best-effort by design: this is an ADDITIONAL field on a snapshot whose
+        content restore must never be blocked by it. An unwired port (tests, an
+        older wiring) or a denied read degrades to ``None`` — revert then skips
+        the publish restore, exactly as before this field existed.
+        """
+        if self._publish_state is None:
+            return None
+        try:
+            return self._loop.run_until_complete(self._publish_state.read(shared_id, language))
+        except Exception as exc:  # noqa: BLE001 — a backup must not be blocked by this read
+            logger.warning("backup: publish state unavailable sharedId={}: {}", shared_id, exc)
+            return None
+
+    def _record_deleted_entities(self, shared_ids: list[str], results: list[dict]) -> None:
+        """Drop REFUSED entities back out of ``manifest.deleted``.
+
+        The snapshot decision runs BEFORE the delete (it must — the raw is only
+        available until the row is gone), so it records every requested id as
+        deleted. Uwazi can still refuse individual ids (permissions, a stale
+        id): the helper reports them as ``success=False`` and the entity
+        survives. Leaving them in ``manifest.deleted`` made revert RE-CREATE a
+        live entity — a duplicate with a fresh sharedId. Only ids the helper
+        explicitly reports as successful stay recorded; an id missing from the
+        result is assumed applied (the bulk endpoint answers 'ok' for the whole
+        batch and the per-id fallback reports every id).
+        """
+        refused = {
+            str(r.get("shared_id"))
+            for r in results
+            if isinstance(r, dict) and r.get("shared_id") and r.get("success") is False
+        }
+        if not refused:
+            return
+        manifest_ids = {e.shared_id for e in self._manifest.deleted}
+        removable = refused & manifest_ids
+        if not removable:
+            return
+        self._manifest.deleted = [e for e in self._manifest.deleted if e.shared_id not in removable]
+        self._emit("delete_refused", sorted(removable), outcome=AuditOutcome.FAILURE)
+        logger.warning(
+            "backup intercept: {} refused delete(s) removed from manifest.deleted: {}",
+            len(removable),
+            sorted(removable),
+        )
 
     def _capture_files(self, shared_id: str, raw: dict[str, Any]) -> list[FileRef]:
         """Fetch + persist the uploaded files for a to-be-deleted entity.

@@ -798,6 +798,27 @@ class SqliteSuggestionStore(SuggestionStorePort):
         self._execute("DELETE FROM drift_baseline WHERE run_id = ?", (run_id,))
         self._execute("DELETE FROM drift_state WHERE run_id = ?", (run_id,))
 
+    def rename_run(self, old_id: str, new_id: str) -> None:
+        """Re-key every row of ``old_id`` to ``new_id`` (see the port's contract).
+
+        The backup store renames the run's folder; the review table, attempts and
+        drift rows live in this shared database and are keyed by ``run_id``.
+        Renaming only the folder left the new run's review page empty and the old
+        id's rows orphaned. All four tables move together inside one locked
+        transaction, so a crash cannot leave half the run on each id.
+        """
+        if old_id == new_id:
+            return
+        with self._lock:
+            try:
+                for table in ("suggestion", "prediction_attempt", "drift_baseline", "drift_state"):
+                    self._conn.execute(f"UPDATE {table} SET run_id = ? WHERE run_id = ?", (new_id, old_id))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        logger.info("renamed suggestion-store rows run={} -> {}", old_id, new_id)
+
     # --- drift baseline & status -------------------------------------------
 
     def _dt_text(self, value: datetime | None) -> str | None:

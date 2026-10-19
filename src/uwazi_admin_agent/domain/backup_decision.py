@@ -51,6 +51,15 @@ class BackupDecision(BaseModel):
     add_deleted: list[str] = Field(default_factory=list, description="Add to manifest.deleted.")
     add_created: list[str] = Field(default_factory=list, description="Add to manifest.created (post-create).")
     remove_from_created: list[str] = Field(default_factory=list, description="Remove from manifest.created.")
+    promote_to_deleted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Entities already backed up earlier in THIS run (so already in `modified`) that this "
+            "delete now destroys. Their first-touch snapshot is reused — it is already the pre-run "
+            "state — but they must MOVE to `manifest.deleted` (and out of `modified`), or revert "
+            "would try to UPDATE a row that no longer exists instead of re-creating it."
+        ),
+    )
 
 
 def decide_backup(
@@ -88,10 +97,18 @@ def decide_backup(
     if op_kind == "delete":
         remove_from_created = [sid for sid in shared_ids if sid in created]
         snapshot_ids = [sid for sid in shared_ids if sid not in created and sid not in backed_up]
+        # A delete whose entity was ALREADY snapshotted by an earlier operation of
+        # this run (an update, a rewire) still needs a delete-revert entry. Without
+        # this the manifest kept it in `modified` only, and revert issued an update
+        # against a deleted row: the 404 was swallowed, the run reported REVERTED,
+        # and the entity stayed gone. The snapshot is reused (first touch is the
+        # pre-run truth); the entity just moves to `deleted`.
+        promote_to_deleted = [sid for sid in shared_ids if sid not in created and sid in backed_up]
         return BackupDecision(
             snapshot_ids=snapshot_ids,
             add_deleted=snapshot_ids,
             remove_from_created=remove_from_created,
+            promote_to_deleted=promote_to_deleted,
         )
 
     return BackupDecision()  # unreachable: OpKind is exhaustive
@@ -130,6 +147,28 @@ def populate_manifest(
     if decision.remove_from_created:
         remove_set = set(decision.remove_from_created)
         manifest.created = [e for e in manifest.created if e.shared_id not in remove_set]
+
+    if decision.promote_to_deleted:
+        # Re-use the entry the earlier operation already recorded (it carries the
+        # internal_id/language of the first-touch snapshot) and just move it to
+        # `deleted`: revert must re-create the entity, not update it. When no
+        # `modified` entry exists (it was dropped because an earlier delete was
+        # REFUSED, then a later one succeeded), rebuild it from the snapshot the
+        # caller passes in — otherwise that delete would be unrevertable.
+        promote_set = set(decision.promote_to_deleted)
+        moved = [e for e in manifest.modified if e.shared_id in promote_set]
+        manifest.modified = [e for e in manifest.modified if e.shared_id not in promote_set]
+        already_deleted = {e.shared_id for e in manifest.deleted}
+        manifest.deleted.extend(e for e in moved if e.shared_id not in already_deleted)
+        already_deleted |= {e.shared_id for e in moved}
+        for sid in decision.promote_to_deleted:
+            promoted: EntitySnapshot | None = snapshots.get(sid)
+            if promoted is None or sid in already_deleted:
+                continue
+            manifest.deleted.append(
+                EntityIdentity(shared_id=promoted.shared_id, internal_id=promoted.internal_id, language=promoted.language)
+            )
+            already_deleted.add(sid)
 
     return manifest
 

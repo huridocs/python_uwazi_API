@@ -57,6 +57,7 @@ from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
 from uwazi_admin_agent.use_cases.script_exec_namespace import _build_sync_crud_functions
@@ -454,6 +455,7 @@ class ApplySuggestionsUseCase:
         cache_control: CacheInvalidationPort | None = None,
         cap: int = MAX_ENTITIES_PER_RUN,
         default_language: str = "en",
+        publish_state: PublishStatePort | None = None,
     ) -> None:
         self._entity_api = entity_api
         self._relationship_api = relationship_api
@@ -467,6 +469,7 @@ class ApplySuggestionsUseCase:
         self._cache_control = cache_control
         self._cap = cap
         self._default_language = default_language
+        self._publish_state: PublishStatePort | None = publish_state
         # Set by _build_crud: the event loop the sync CRUD helpers ride.
         self._crud_loop = None
 
@@ -576,6 +579,7 @@ class ApplySuggestionsUseCase:
             already_backed_up=self._manifest_touched(manifest),
             settings_languages=self._configured_languages(),
             affected_languages=affected_languages,
+            publish_state=self._publish_state,
         )
 
     def _configured_languages(self) -> list[str]:

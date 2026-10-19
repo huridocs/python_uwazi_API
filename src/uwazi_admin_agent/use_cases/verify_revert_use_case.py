@@ -64,6 +64,7 @@ from loguru import logger
 
 from uwazi_admin_agent.domain.file_dedupe import file_digest
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.publish_state import PublishState
 from uwazi_admin_agent.domain.relationship_restore import extract_inbound_refs_from_existing
 from uwazi_admin_agent.domain.revert_verification import (
     FileContentSignature,
@@ -75,6 +76,8 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
+from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 
 
 class VerifyRevertUseCase:
@@ -86,11 +89,15 @@ class VerifyRevertUseCase:
         backup_store: BackupStorePort,
         file_repository: FileRepositoryPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
+        publish_state: PublishStatePort | None = None,
+        relationship_hubs: RelationshipHubPort | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
         self._file_repository: FileRepositoryPort | None = file_repository
         self._cache_control: CacheInvalidationPort | None = cache_control
+        self._publish_state: PublishStatePort | None = publish_state
+        self._relationship_hubs: RelationshipHubPort | None = relationship_hubs
 
     async def verify(self, run_id: str) -> RevertVerificationResult:
         """Load manifest + snapshots, fetch current raws, return the verification result."""
@@ -104,6 +111,8 @@ class VerifyRevertUseCase:
         try:
             current_raws = await self._fetch_current_raws(fetch_keys)
             deleted_file_gaps = await self._deleted_file_gaps(manifest, run_id)
+            current_publish_states = await self._current_publish_states(manifest, snapshots)
+            current_hub_rows = await self._current_hub_rows(manifest)
         finally:
             # Drop what our refetch just re-populated. Verification is a one-shot
             # audit, not a cache-warming read: the entities it checks are exactly the
@@ -113,7 +122,9 @@ class VerifyRevertUseCase:
             # cache empty costs one fetch and keeps that window closed by
             # construction. No-op without a wired cache port.
             self._invalidate_checks(fetch_keys, manifest)
-        result = verify_revert(manifest, snapshots, current_raws, deleted_file_gaps)
+        result = verify_revert(
+            manifest, snapshots, current_raws, deleted_file_gaps, current_publish_states, current_hub_rows
+        )
         logger.info(
             "verify run={} ok={} checked={} mismatches={} file_gaps={} relationship_gaps={}",
             run_id,
@@ -124,6 +135,44 @@ class VerifyRevertUseCase:
             len(result.relationship_gaps),
         )
         return result
+
+    async def _current_publish_states(self, manifest: Any, snapshots: dict[str, Any]) -> dict[str, PublishState] | None:
+        """Post-revert grants for every modified entity that captured some.
+
+        Keyed by sharedId. Unwired port or an unreadable entity (e.g. it was
+        deleted since) leaves that entity out — an absent entry is not checked,
+        so this can add evidence but never a false mismatch.
+        """
+        if self._publish_state is None:
+            return None
+        states: dict[str, PublishState] = {}
+        for entry in manifest.modified:
+            snapshot = snapshots.get(entry.shared_id)
+            if getattr(snapshot, "publish_state", None) is None:
+                continue
+            try:
+                states[entry.shared_id] = await self._publish_state.read(entry.shared_id, entry.language)
+            except Exception as exc:  # noqa: BLE001 — best-effort read
+                logger.warning("verify: publish state unreadable sharedId={}: {}", entry.shared_id, exc)
+        return states
+
+    async def _current_hub_rows(self, manifest: Any) -> dict[str, list[dict[str, Any]]] | None:
+        """Post-revert connection rows for every modified entity that captured some."""
+        if self._relationship_hubs is None:
+            return None
+        rows: dict[str, list[dict[str, Any]]] = {}
+        for entry in manifest.modified:
+            try:
+                snapshot = self._backup_store.load_snapshot(manifest.run_id, entry.shared_id)
+            except FileNotFoundError:
+                continue
+            if not snapshot.connection_hubs:
+                continue
+            try:
+                rows[entry.shared_id] = await self._relationship_hubs.list_for_entity(entry.shared_id, entry.language)
+            except Exception as exc:  # noqa: BLE001 — best-effort read
+                logger.warning("verify: connection rows unreadable sharedId={}: {}", entry.shared_id, exc)
+        return rows
 
     async def _deleted_file_gaps(self, manifest: Any, run_id: str) -> list[Any]:
         """Content-verify the deleted-file restores on STILL-EXISTING entities.
