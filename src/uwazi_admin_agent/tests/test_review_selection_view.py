@@ -12,7 +12,13 @@ Isolated: no mocks, no network, literal inputs only.
 from __future__ import annotations
 
 from uwazi_admin_agent.domain.suggestion import entity_language_key
-from uwazi_admin_agent.drivers.web.review_view import prune_selection, run_button_label
+from uwazi_admin_agent.drivers.web.review_view import (
+    prune_selection,
+    rows_excluding_keys,
+    run_button_label,
+    select_all_label,
+    selection_count,
+)
 
 
 def _row(shared_id: str, language: str | None = None, title: str = "Case 1") -> dict[str, str]:
@@ -24,6 +30,32 @@ def test_run_button_label_counts_the_live_selection() -> None:
     assert run_button_label(0) == "Run (0)"
     assert run_button_label(1) == "Run (1)"
     assert run_button_label(37) == "Run (37)"
+
+
+def test_select_all_label_names_the_whole_filtered_result_set() -> None:
+    """The header checkbox already selects the page; the button selects every
+    filtered result, and says how many there are."""
+    assert select_all_label(0, False) == "Select all results"
+    assert select_all_label(1, False) == "Select all 1 result"
+    assert select_all_label(2500, False) == "Select all 2,500 results"
+    assert select_all_label(2500, True) == "Clear selection"
+
+
+def test_selection_count_uses_the_whole_result_total_not_the_page_size() -> None:
+    """Page selection counts checked rows; whole-result mode counts the filter
+    total minus the rows unchecked afterwards."""
+    assert selection_count(all_selected=False, total=2500, page_selected=25, excluded=0) == 25
+    assert selection_count(all_selected=True, total=2500, page_selected=25, excluded=0) == 2500
+    assert selection_count(all_selected=True, total=2500, page_selected=24, excluded=1) == 2499
+    assert selection_count(all_selected=True, total=0, page_selected=0, excluded=3) == 0
+
+
+def test_rows_excluding_keys_keeps_the_checkboxes_of_unexcluded_rows() -> None:
+    """A whole-result selection re-checks each page except the excluded rows."""
+    rows = [_row("s1"), _row("s2"), _row("s3")]
+    excluded = {str(rows[1]["row_key"])}
+
+    assert rows_excluding_keys(rows, excluded) == [rows[0], rows[2]]
 
 
 def test_prune_selection_keeps_everything_when_the_page_is_unchanged() -> None:

@@ -53,8 +53,13 @@ so a cached selection goes stale.
 Selection count: the action bar's Run button reads ``Run (N)``, updated on the
 table's ``selection`` event (NiceGUI's ``on_select`` — the one event Quasar's
 QTable emits for a checkbox change; ``update:selection`` is not a real event
-and never fires). Reloading the rows prunes the selection to what is still
-visible, so the count never names rows the operator cannot see.
+and never fires). There are two selection scopes: the header checkbox selects
+the visible PAGE (reloading prunes the selection to those rows), while the
+"Select all N results" button selects every row matching the current filter
+across ALL pages. In whole-result mode ``Run (N)`` counts the filter total minus
+the rows the operator explicitly unchecked (the exclusions are row keys, so a
+translation's two languages stay independent). Run resolves those pairs from the
+store at click time; page flips never truncate the selection.
 
 One window at a time: the entity window is a single dialog that is closed and
 rebuilt on every open, because its content (the PDF) resolves in a background
@@ -80,6 +85,7 @@ so ``docker logs`` shows the traceback a toast cannot.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from urllib.parse import quote
 
@@ -87,14 +93,17 @@ from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, REVIEW_PAGE_SIZE
+from uwazi_admin_agent.domain.drift import DriftStatus
 from uwazi_admin_agent.domain.llm_budget import format_money
 from uwazi_admin_agent.domain.suggestion import (
     PredictionAttemptStatus,
     Suggestion,
     SuggestionFilter,
+    entity_language_key,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
     ACTIONS_COLUMN,
+    DRIFT_STATUS_COLORS,
     LANGUAGE_COLUMN,
     MATCH_COLORS,
     OPS_COLUMN,
@@ -102,20 +111,32 @@ from uwazi_admin_agent.drivers.web.review_view import (
     STATUS_COLUMN,
     TEMPLATE_COLUMN,
     TITLE_COLUMN,
+    bulk_revert_label,
+    drift_banner_text,
+    drift_banner_time,
     entity_row,
     filter_from_controls,
     match_label,
     property_caption,
     property_heading,
     prune_selection,
+    revert_entity_confirmation,
+    rows_excluding_keys,
     run_button_label,
     run_confirmation,
+    select_all_label,
+    selection_count,
     truncate,
+    unique_entities,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
+    _current_attempt_number,
     apply_outcomes,
+    build_backup_store,
     build_suggestion_store,
+    check_drift,
     current_attempt,
+    get_drift_state,
     get_entity_rows,
     get_entity_segmentation,
     get_entity_suggestions,
@@ -124,7 +145,10 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_suggestion_entity_languages,
     get_suggestion_properties,
     property_labels_for,
+    refresh_baseline_after_run,
     resolve_entity_document,
+    revert_entities_selection,
+    revert_entity_rows,
     uwazi_base_url,
 )
 
@@ -170,6 +194,13 @@ def _build_page(run_id: str) -> None:
         "match": "",
         "text": "",
         "loading": False,
+        # Whole-result selection (the button, not the page header checkbox):
+        # every row matching the current filter, across every page, minus any
+        # row the operator explicitly unchecks afterwards. ``_excluded`` holds
+        # row_key strings (entity+language), so a translation's two rows stay
+        # independent.
+        "_select_all": False,
+        "_excluded": set(),
     }
 
     with ui.header().classes("items-center justify-between"):
@@ -192,6 +223,7 @@ def _build_page(run_id: str) -> None:
             _summary_row(state)
             _filter_bar(state)
             _action_bar(state)
+            _drift_banner(state)
             _change_table(state)
 
     if current_attempt(run_id) is None:
@@ -300,11 +332,13 @@ def _filter_bar(state: dict[str, Any]) -> None:
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
     state[key] = value
     state["offset"] = 0
+    _reset_global_selection(state)
     _refresh_all(state)
 
 
 def _reset_filters(state: dict[str, Any]) -> None:
     state.update({"status": "", "op": "", "property": "", "match": "", "text": "", "offset": 0})
+    _reset_global_selection(state)
     _refresh_all(state)
 
 
@@ -324,21 +358,15 @@ def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> Su
 # --- actions -----------------------------------------------------------------
 
 
-def _selected_entities(state: dict[str, Any]) -> list[tuple[str, str | None]]:
-    """The checked rows as ``(sharedId, language)`` pairs (read LIVE from the table).
+def _pairs_of_rows(rows: list[Any]) -> list[tuple[str, str | None]]:
+    """The ``(sharedId, language)`` identity of checked table rows (pure).
 
     A table row is an entity IN ONE LANGUAGE, so a translation task contributes
-    two independent pairs and the operator can run one of them. ``language`` is
-    ``None`` for the language-independent group, which is exactly how the apply
-    path addresses it. ``_reload_table`` reassigns ``table.rows``, so the
-    selection is never cached: every action re-reads it at click time.
+    two independent pairs. ``language`` is ``None`` for the language-independent
+    group, which is exactly how the apply path addresses it.
     """
-    table = state.get("_table")
-    if table is None or table.is_deleted:
-        return []
-    selected = getattr(table, "selected", None) or []
     pairs: list[tuple[str, str | None]] = []
-    for row in selected:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         shared_id = row.get("shared_id")
@@ -350,27 +378,382 @@ def _selected_entities(state: dict[str, Any]) -> list[tuple[str, str | None]]:
     return pairs
 
 
+def _all_selected_rows(state: dict[str, Any]) -> list[Any]:
+    """Every entity-language group matching the filter, minus the exclusions.
+
+    The whole-result mode cannot read the ids from the table (it holds only the
+    current page), so Run resolves them from the store through the SAME filter
+    the page used. The aggregate rows are fetched in one page sized to ``total``
+    because Run also needs their ops for the confirmation wording.
+    """
+    total = int(state.get("total") or 0)
+    if total <= 0:
+        return []
+    f = _current_filter(state).model_copy(update={"offset": 0, "limit": total})
+    rows, _ = get_entity_rows(state["run_id"], f)
+    excluded = set(state.get("_excluded") or ())
+    return [row for row in rows if entity_language_key(row.shared_id, row.language) not in excluded]
+
+
+def _ops_of_entities(rows: list[Any]) -> list[str]:
+    """Distinct ops across aggregate entity rows, first-appearance order (pure)."""
+    ops: list[str] = []
+    for row in rows:
+        for op in row.ops:
+            if op not in ops:
+                ops.append(op)
+    return ops
+
+
+def _selection_snapshot(state: dict[str, Any]) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """What Run would act on right now: the selected pairs and their ops.
+
+    Page selection reads the table's own checkboxes; whole-result selection
+    re-reads the matching groups from the store so a page flip or a filter the
+    operator cannot see does not silently truncate the selection.
+    """
+    if state.get("_select_all"):
+        rows = _all_selected_rows(state)
+        return [(row.shared_id, row.language) for row in rows], _ops_of_entities(rows)
+    table = state.get("_table")
+    if table is None or table.is_deleted:
+        return [], []
+    selected = list(getattr(table, "selected", None) or [])
+    return _pairs_of_rows(selected), _ops_of_rows(selected)
+
+
+def _run_from_state(state: dict[str, Any]) -> None:
+    """Open the Run confirmation for the selection the button's count describes."""
+    selection, ops = _selection_snapshot(state)
+    _run_selected(state, selection, ops)
+
+
 def _action_bar(state: dict[str, Any]) -> None:
     """The selection-driven action bar (the checked rows carry the count)."""
     with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
         state["_run_button"] = ui.button(
             run_button_label(0),
             icon="play_arrow",
-            on_click=lambda: _run_selected(state, _selected_entities(state), _selected_ops(state)),
+            on_click=lambda: _run_from_state(state),
         ).props("dense color=primary")
+        state["_bulk_revert_button"] = ui.button(
+            bulk_revert_label(0),
+            icon="undo",
+            on_click=lambda: _revert_from_state(state),
+        ).props("dense flat color=indigo")
         state["_select_all_button"] = ui.button(
-            "Select all on page",
+            select_all_label(0, False),
             icon="select_all",
-            on_click=lambda: _select_all(state),
+            on_click=lambda: _toggle_select_all(state),
         ).props("dense flat")
 
 
-def _select_all(state: dict[str, Any]) -> None:
-    """Check every row currently on the page."""
+def _revert_from_state(state: dict[str, Any]) -> None:
+    """Open the bulk-Revert confirmation for the selection the button's count describes."""
+    selection, _ops = _selection_snapshot(state)
+    if not selection:
+        ui.notify("Nothing selected", type="warning")
+        return
+    entities = unique_entities(selection)
+
+    def _confirm() -> None:
+        # The client is captured HERE, inside the click's slot context (the same
+        # pattern _run_rows uses): the background task starts with an empty slot
+        # stack, so every UI call it makes must re-enter the client explicitly.
+        client = context.client
+        background_tasks.create(_revert_selected(state, entities, client), name=f"revert {state['run_id']}")
+
+    title = f"Revert {len(entities)} entit{'' if len(entities) == 1 else 'ies'}"
+    message = (
+        f"Restore {len(entities)} entit{'' if len(entities) == 1 else 'ies'} to the backup the run made "
+        "BEFORE any of its writes. ALL languages of each entity are restored (they share one backup); "
+        "only the checked entities are reverted."
+    )
+    _simple_confirm(title, message, _confirm)
+
+
+async def _revert_selected(state: dict[str, Any], entities: list[str], client: Any) -> None:
+    """Revert the selected entities (one restore each), then refresh the page."""
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        with client:
+            ui.notify("Not logged in to Uwazi", type="negative")
+        return
+    try:
+        outcome = await revert_entities_selection(state["run_id"], [(sid, None) for sid in entities], user, password)
+        with client:
+            ui.notify(
+                f"Revert done — {outcome.summary()}",
+                type="positive" if not outcome.failures else "warning",
+                multi_line=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+        logger.exception("bulk revert failed")
+        with client:
+            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+    finally:
+        with client:
+            _refresh_all(state)
+
+
+# --- per-row revert ----------------------------------------------------------
+
+
+def _backup_dates_for(rows: list[Any], run_id: str) -> dict[str, Any]:
+    """``sharedId -> backup captured_at`` for the page's entities (local files only).
+
+    One read attempt per entity (best-effort): an absent snapshot file means
+    the run never wrote to that entity, so no tooltip date. Errors are logged,
+    never raised — a missing date must not break the table render.
+    """
+    dates: dict[str, Any] = {}
+    store = build_backup_store()
+    for item in rows:
+        try:
+            snapshot = store.load_snapshot(run_id, item.shared_id)
+        except FileNotFoundError:
+            continue
+        except Exception as exc:  # noqa: BLE001 — a broken file degrades to no tooltip
+            logger.warning("could not load backup for tooltip shared_id={}: {}", item.shared_id, exc)
+            continue
+        dates[item.shared_id] = snapshot.captured_at
+    return dates
+
+
+async def _revert_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
+    """Revert one entity (all its languages) to its single backup, then refresh.
+
+    Confirm first: the restore overwrites the entity's rows in every language
+    the task touched, not just the clicked row's language.
+    """
+    shared_id, _language = _entity_of(row)
+
+    def _confirm() -> None:
+        client = context.client
+        background_tasks.create(_revert_entity_rows(state, shared_id, client), name=f"revert {shared_id}")
+
+    title, message = revert_entity_confirmation(shared_id, row.get("revert_tooltip") or "")
+    _simple_confirm(title, message, _confirm)
+
+
+async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any) -> None:
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        with client:
+            ui.notify("Not logged in to Uwazi", type="negative")
+        return
+    try:
+        info = await revert_entity_rows(state["run_id"], shared_id, user, password)
+        with client:
+            ui.notify(
+                f"Reverted {shared_id} to its backup"
+                + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
+                type="positive",
+            )
+    except Exception as exc:  # noqa: BLE001 — the toast reports, the page never crashes
+        logger.exception("per-entity revert failed")
+        with client:
+            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+    finally:
+        with client:
+            _refresh_all(state)
+
+
+# --- drift banner ------------------------------------------------------------
+
+
+def _drift_banner(state: dict[str, Any]) -> None:
+    """The status line above the table: what the last drift check concluded.
+
+    Renders the STORED verdict (or "not checked yet"); the open-page auto-check
+    and the manual button update it. One row: an icon + the text + (right) the
+    check-again button.
+    """
+    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
+        state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
+        state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
+            "text-body2 text-grey-7 grow"
+        )
+        state["_drift_button"] = ui.button(
+            "Check drift",
+            icon="sync",
+            on_click=lambda: background_tasks.create(
+                _check_drift_now(state, client=context.client),
+            ),
+        ).props("dense flat")
+
+    # The verdict's text is stored per run: apply it immediately, then let the
+    # open-page auto-check refresh it (a fresh page should not show a stale
+    # 'valid' while Uwazi moved — the check replaces the text in place).
+    stored = get_drift_state(state["run_id"])
+    _apply_drift_state(state, stored, checking=stored is None)
+    if stored is None or stored.status is DriftStatus.UNKNOWN or stored.checked_by == "sync":
+        background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+    elif stored.status is not DriftStatus.VALID:
+        # A previous page visit already found drift; re-check in the background
+        # so the operator sees CURRENT drift rather than yesterday's.
+        background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+
+
+def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = False) -> None:
+    """Paint one verdict (or the checking glyph) onto the banner elements."""
+    label = state.get("_drift_label")
+    icon = state.get("_drift_icon")
+    if label is None or label.is_deleted:
+        return
+    if checking:
+        label.text = drift_banner_text(status="unknown", detail=None, checking=True)
+        if icon is not None and not icon.is_deleted:
+            icon.name = "sync"
+            icon.classes("animate-spin text-body1")
+            icon.color = "blue"
+            icon.update()
+        return
+    if stored is None:
+        label.text = drift_banner_text(status="unknown", detail=None)
+        return
+    label.text = drift_banner_text(
+        status=stored.status.value,
+        detail=stored.detail,
+    ) + drift_banner_time(stored.checked_at)
+    color = DRIFT_STATUS_COLORS.get(stored.status.value, "grey-6")
+    icon_name = {
+        "unknown": "help_outline",
+        "valid": "check_circle",
+        "drifted": "warning",
+        "error": "error",
+    }.get(stored.status.value, "help_outline")
+    if icon is not None and not icon.is_deleted:
+        icon.name = icon_name
+        # ``classes(...)`` ADDS by default: without removing the checking
+        # stage's ``animate-spin`` here, the verdict icon would keep spinning
+        # forever. A fresh class list also drops stale text-color entries so
+        # the new verdict's color wins.
+        icon.classes(replace="text-body1")
+        icon.classes(f"text-{color}")
+        icon.update()
+
+
+async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: Any = None) -> None:
+    """Run the drift check in the background thread and repaint the banner.
+
+    ``client`` is captured by the caller INSIDE the page's slot context (the
+    same pattern ``_run_rows`` uses): a background task starts with an empty
+    slot stack, so every UI call it makes — the banner updates and the
+    toasts — must re-enter the client explicitly via ``with client:``.
+    """
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        _apply_drift_state(
+            state,
+            None,
+        )
+        state["_drift_label"].text = "Drift check failed — not logged in to Uwazi"
+        return
+    _apply_drift_state(state, None, checking=True)
+    try:
+        attempt_row = current_attempt(state["run_id"])
+        # ``check_drift`` is SYNCHRONOUS (it blocks on Uwazi HTTP calls), so it
+        # must run in a worker thread, like every other service call (the
+        # apply_outcomes/revert_run pattern) — awaiting it directly raised
+        # "object DriftStateRow can't be used in 'await' expression".
+        updated = await asyncio.to_thread(
+            check_drift,
+            state["run_id"],
+            user,
+            password,
+            attempt_row.attempt if attempt_row is not None else 1,
+            "auto" if not notify else "manual",
+        )
+    except Exception as exc:  # noqa: BLE001 — the banner reports; the page never crashes
+        logger.exception("drift check failed")
+        state["_drift_label"].text = f"Drift check failed — {exc}"
+        return
+    _apply_drift_state(state, updated)
+    if not notify or client is None:
+        return
+    try:
+        with client:
+            if updated.status.value == "drifted":
+                ui.notify(updated.detail or "Drift detected in Uwazi", type="warning")
+            elif updated.status.value == "valid":
+                ui.notify("No drift detected — table is current", type="positive")
+    except RuntimeError as exc:  # noqa: BLE001 — a disconnected client cannot show a toast
+        logger.debug("could not notify drift verdict (client gone): {}", exc)
+
+
+def _set_table_selection(state: dict[str, Any], rows: list[Any]) -> None:
+    """Replace the table's checkbox selection (server-side, no event round-trip)."""
     table = state.get("_table")
     if table is None or table.is_deleted:
         return
-    table.selected = list(table.rows)
+    table.selected = list(rows)
+    # Table's ``selected`` setter, unlike most NiceGUI props, does not push the
+    # change by itself; without this the checkboxes would not follow the mode.
+    table.update()
+
+
+def _clear_selection(state: dict[str, Any], *, clear_page: bool) -> None:
+    """Leave whole-result mode and (optionally) uncheck the visible page."""
+    state["_select_all"] = False
+    state["_excluded"] = set()
+    if clear_page:
+        _set_table_selection(state, [])
+    _refresh_selection_counts(state)
+
+
+def _reset_global_selection(state: dict[str, Any]) -> None:
+    """Drop a whole-result selection when the filter that defined it changes."""
+    if state.get("_select_all"):
+        _clear_selection(state, clear_page=True)
+
+
+def _toggle_select_all(state: dict[str, Any]) -> None:
+    """Select every row matching the filter across pages, or clear the selection."""
+    table = state.get("_table")
+    if table is None or table.is_deleted:
+        return
+    if state.get("_select_all"):
+        _clear_selection(state, clear_page=True)
+        return
+    if int(state.get("total") or 0) <= 0:
+        return
+    state["_select_all"] = True
+    state["_excluded"] = set()
+    # The current page shows the new mode immediately. Other pages pick it up in
+    # _reload_table, which re-applies the same selection after each page load.
+    _set_table_selection(state, list(table.rows))
+    _refresh_selection_counts(state)
+
+
+def _on_table_select(state: dict[str, Any], event: Any) -> None:
+    """Keep the page checkboxes and the whole-result mode consistent.
+
+    In whole-result mode the header checkbox still means "this page": unchecking
+    it excludes that page from the global selection (and re-checking a row puts
+    it back). The count therefore stays total-minus-exclusions rather than
+    collapsing to the visible page size.
+    """
+    table = state.get("_table")
+    if table is None or table.is_deleted:
+        return
+    if state.get("_select_all"):
+        selected = getattr(event, "selection", None)
+        if selected is None:
+            selected = getattr(table, "selected", None) or []
+        selected_keys = {str(row.get("row_key")) for row in selected if isinstance(row, dict)}
+        excluded: set[str] = state.setdefault("_excluded", set())
+        for row in table.rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("row_key"))
+            if key in selected_keys:
+                excluded.discard(key)
+            else:
+                excluded.add(key)
     _refresh_selection_counts(state)
 
 
@@ -389,14 +772,6 @@ def _ops_of_rows(rows: list[Any]) -> list[str]:
             if op and op not in ops:
                 ops.append(op)
     return ops
-
-
-def _selected_ops(state: dict[str, Any]) -> list[str]:
-    """The ops of the currently checked rows (the Run dialog's wording)."""
-    table = state.get("_table")
-    if table is None or table.is_deleted:
-        return []
-    return _ops_of_rows(list(getattr(table, "selected", None) or []))
 
 
 def _run_selected(
@@ -457,6 +832,9 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
         return
     try:
         await apply_outcomes(state["run_id"], user, password, selection)
+        # The writes bumped Uwazi editDates: re-sync the baseline so the run's
+        # own writes are the new reference, not drift.
+        refresh_baseline_after_run(state["run_id"], user, password, _current_attempt_number(state["run_id"]))
         with client:
             ui.notify(
                 f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
@@ -538,7 +916,7 @@ def _change_table(state: dict[str, Any]) -> None:
         row_key="row_key",
         selection="multiple",
         pagination={"rowsPerPage": 0},
-        on_select=lambda e: _refresh_selection_counts(state),
+        on_select=lambda e: _on_table_select(state, e),
     ).classes("w-full")
     # Colors arrive on the row (computed in Python): a Vue slot cannot reach
     # ``window.*``, so looking them up in the template renders empty badges.
@@ -574,6 +952,9 @@ def _change_table(state: dict[str, Any]) -> None:
     table.add_slot(
         "body-cell-actions",
         '<q-td :props="props" class="text-no-wrap">'
+        '<q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo" '
+        ":title=\"props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'\" "
+        "@click=\"$parent.$emit('revert_entity', props.row)\" />"
         '<q-btn dense flat icon="play_arrow" color="primary" title="Run this row (revertable; only its language)" '
         "@click=\"$parent.$emit('run_entity', props.row)\" />"
         '<q-btn dense flat icon="edit" color="teal" title="Open the entity window (see/edit its rows)" '
@@ -595,6 +976,7 @@ def _change_table(state: dict[str, Any]) -> None:
         lambda e: _run_selected(state, [_entity_of(_row_of(e))], _ops_of_rows([_row_of(e)])),
     )
     table.on("edit_entity", lambda e: _open_entity_window(state, *_entity_of(_row_of(e))))
+    table.on("revert_entity", lambda e: _revert_entity_clicked(state, _row_of(e)))
     state["_table"] = table
 
     with ui.row().classes("w-full items-center justify-between"):
@@ -643,13 +1025,24 @@ def _reload_table(state: dict[str, Any]) -> None:
         rows, total = get_entity_rows(state["run_id"], _current_filter(state))
         state["total"] = total
         base_url = uwazi_base_url()
+        # Per-row Revert tooltip: each page reads its entities' backup dates (a
+        # local file read per entity — no HTTP). Entities without a backup
+        # (never written) carry None and their Revert icon's tooltip falls back
+        # to the generic text.
+        tooltips = _backup_dates_for(rows, state["run_id"])
         table = state.get("_table")
         if table is not None and not table.is_deleted:
-            table.rows = [entity_row(item, base_url) for item in rows]
-            # New rows under the checkboxes: drop the selections that are no
-            # longer visible, so the count (and Run) describe what the operator
-            # can actually see. A poll reloads the same page, so those survive.
-            table.selected = prune_selection(list(getattr(table, "selected", None) or []), table.rows)
+            table.rows = [entity_row(item, base_url, backup_created_at=tooltips.get(item.shared_id)) for item in rows]
+            if state.get("_select_all"):
+                # Whole-result mode: every page shows its rows checked except the
+                # ones the operator explicitly excluded. The count is the filter
+                # total minus those exclusions, not the page size.
+                _set_table_selection(state, rows_excluding_keys(table.rows, set(state.get("_excluded") or ())))
+            else:
+                # New rows under the checkboxes: drop the selections that are no
+                # longer visible, so the count (and Run) describe what the operator
+                # can actually see. A poll reloads the same page, so those survive.
+                table.selected = prune_selection(list(getattr(table, "selected", None) or []), table.rows)
             table.update()
         label = state.get("_page_label")
         if label is not None and not label.is_deleted:
@@ -666,14 +1059,36 @@ def _reload_table(state: dict[str, Any]) -> None:
 
 
 def _refresh_selection_counts(state: dict[str, Any]) -> None:
-    """Update the selection-driven buttons' texts from the LIVE table selection."""
+    """Update the selection-driven buttons' texts from the LIVE selection.
+
+    In whole-result mode the Run count is the filter total minus the rows the
+    operator excluded, so it stays correct across page flips (where the table's
+    own ``selected`` list only ever holds the visible page).
+    """
     table = state.get("_table")
     if table is None or table.is_deleted:
         return
     selected = getattr(table, "selected", None) or []
+    all_selected = bool(state.get("_select_all"))
+    total = int(state.get("total") or 0)
+    excluded = len(state.get("_excluded") or ())
+    count = selection_count(
+        all_selected=all_selected,
+        total=total,
+        page_selected=len(selected),
+        excluded=excluded,
+    )
     button = state.get("_run_button")
     if button is not None and not button.is_deleted:
-        button.text = run_button_label(len(selected))
+        button.text = run_button_label(count)
+    revert_button = state.get("_bulk_revert_button")
+    if revert_button is not None and not revert_button.is_deleted:
+        revert_button.text = bulk_revert_label(count)
+        revert_button.set_enabled(count > 0)
+    select_button = state.get("_select_all_button")
+    if select_button is not None and not select_button.is_deleted:
+        select_button.text = select_all_label(total, all_selected)
+        select_button.set_enabled(all_selected or total > 0)
 
 
 def _refresh_all(state: dict[str, Any]) -> None:

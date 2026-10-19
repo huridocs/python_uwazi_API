@@ -55,7 +55,6 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_run_results,
     list_runs,
     rename_run,
-    revert_run,
 )
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 
@@ -319,11 +318,6 @@ def _columns() -> list[dict[str, Any]]:
     ]
 
 
-def _can_revert_js(status_var: str) -> str:
-    """JS expression: True when the run has changes that revert can undo."""
-    return f"({status_var} === 'executed' || {status_var} === 'failed')"
-
-
 def _run_rows() -> list[dict[str, Any]]:
     """Compute the current table rows (persisted runs + transient placeholders)."""
     runs = list_runs()
@@ -376,9 +370,6 @@ def _build_runs_table() -> ui.table:
         <q-td :props="props" class="text-no-wrap">
             <q-btn dense flat icon="fact_check" color="secondary" title="Review &amp; apply"
                    @click="$parent.$emit('review', props.row)" />
-            <q-btn dense flat icon="undo" color="warning"
-                   :disable="props.row.busy || {_IN_FLIGHT_JS} || !{_can_revert_js("props.row.status")}"
-                   @click="$parent.$emit('rollback', props.row)" />
             <q-btn dense flat icon="info" color="grey-8"
                    @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
@@ -390,7 +381,6 @@ def _build_runs_table() -> ui.table:
     table.add_slot("no-data", '<div class="text-body1 text-grey-7 q-pa-md">No tasks</div>')
 
     table.on("review", _on_review)
-    table.on("rollback", _on_rollback)
     table.on("info", _on_info)
     table.on("rowmenu", _on_rowmenu)
     table.on("history", _on_history)
@@ -532,17 +522,6 @@ def _broadcast_rows() -> None:
     for client in app.clients():
         with client:
             _refresh_rows_client()
-
-
-def _on_rollback(e: Any) -> None:
-    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    _confirm_dialog(
-        "Rollback run",
-        f"Revert run {run_id!r}? This restores every backed-up entity and deletes created ones.",
-        lambda: revert_run(run_id, app.storage.user["user"], app.storage.user["password"]),
-        success_msg=f"Reverted {run_id}",
-        run_id=run_id,
-    )
 
 
 def _on_review(e: Any) -> None:

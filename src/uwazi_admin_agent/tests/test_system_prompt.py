@@ -143,6 +143,18 @@ def test_prompt_teaches_string_key_dedupe() -> None:
     assert "json.dumps(v, sort_keys=True" in SYSTEM_PROMPT
 
 
+def test_prompt_pins_shared_id_is_language_independent() -> None:
+    """Uwazi uses ONE `sharedId` for every language row of an entity. The
+    clarification agent asked "which shared_id is the English entity and which
+    is the Spanish one?", treating the id as language-specific. The contract
+    must state the real model so neither agent invents a per-language id."""
+    assert "ENTITY / LANGUAGE MODEL" in SYSTEM_PROMPT
+    assert "language-INDEPENDENT" in SYSTEM_PROMPT
+    assert "ALL carry the SAME `sharedId`" in SYSTEM_PROMPT
+    assert "NEVER ask or infer" in SYSTEM_PROMPT
+    assert "which sharedId is the English entity" in SYSTEM_PROMPT
+
+
 # --- Dummy-spec rules (Fix B) ------------------------------------------------
 
 

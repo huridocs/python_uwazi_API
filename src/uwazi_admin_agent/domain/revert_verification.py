@@ -51,7 +51,7 @@ from uwazi_admin_agent.domain.relationship_restore import (
     extract_mutual_deleted_hubs,
     remap_metadata_refs,
 )
-from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
+from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
 from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, PLATFORM_MANAGED_FIELDS
 
 MismatchKind = Literal["entity", "relationship", "created"]
@@ -218,7 +218,8 @@ def format_verification_result(result: RevertVerificationResult) -> str:
     file gap; used verbatim as the operator-facing error detail.
     """
     lines = [
-        f"revert verification failed ({len(result.mismatches)} mismatch(es), {len(result.file_gaps)} file gap(s), checked={result.checked})"
+        f"revert verification failed ({len(result.mismatches)} mismatch(es), "
+        f"{len(result.file_gaps)} file gap(s), checked={result.checked})"
     ]
     for m in result.mismatches:
         lines.append(f"- {m.kind} {m.shared_id}: expected {_hint(m.expected)}, got {_hint(m.actual)}")
@@ -263,13 +264,23 @@ def verify_revert(
     id_map: dict[str, str] = {e.shared_id: e.restored_shared_id for e in manifest.deleted if e.restored_shared_id}
 
     for modified in manifest.modified:
-        checked += 1
+        # One comparison per snapshot ROW: the revert restores every language
+        # row the backup captured, so each one verifies against its own raw.
+        # A legacy (single-raw) snapshot falls back to the previous behavior.
         snap = snapshots[modified.shared_id]
-        actual = current_raws.get(modified.shared_id)
-        if _strip_platform_managed(actual) != _strip_platform_managed(snap.raw):
-            mismatches.append(
-                VerificationMismatch(shared_id=modified.shared_id, kind="entity", expected=snap.raw, actual=actual)
-            )
+        rows = (
+            snap.rows
+            if snap.rows
+            else [EntityRowSnapshot(language=snap.language or "", internal_id=snap.internal_id, raw=snap.raw)]
+        )
+        for index, row in enumerate(rows):
+            checked += 1
+            key = modified.shared_id if index == 0 else f"{modified.shared_id}|{row.language}"
+            actual = current_raws.get(key)
+            if _strip_platform_managed(actual) != _strip_platform_managed(row.raw):
+                mismatches.append(
+                    VerificationMismatch(shared_id=modified.shared_id, kind="entity", expected=row.raw, actual=actual)
+                )
 
     for deleted in manifest.deleted:
         checked += 1

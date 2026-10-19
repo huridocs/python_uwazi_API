@@ -44,6 +44,15 @@ natural-language prompt:
    thesauri are inspected, how validation or dry-run works). If the prompt is
    already fully specified, return an empty questions list.
 
+UWazi DATA MODEL - sharedId vs language (do NOT ask about this):
+A Uwazi entity has ONE `sharedId` shared by ALL of its language rows. The
+English and Spanish translations of the same entity have the SAME
+`sharedId`; the language is selected by the `language` parameter, never
+encoded in the id. So NEVER ask "which shared_id is the English entity and
+which is the Spanish one" - that is not a real ambiguity. Ids identify
+entities; a language the operator names selects which ROW of that entity to
+read or write. Restate that assumption instead of asking.
+
 INSTANCE SCHEMA (fetched live from the Uwazi instance):
 {{instance_schema}}
 

@@ -46,7 +46,7 @@ from uwazi_admin_agent.domain.cap_enforcement import enforce_cap
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
-from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
+from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
@@ -76,6 +76,8 @@ class BackupIntercept:
         file_repository: FileRepositoryPort | None = None,
         cache_control: CacheInvalidationPort | None = None,
         already_backed_up: set[str] | None = None,
+        settings_languages: list[str] | None = None,
+        affected_languages: set[str] | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -102,6 +104,13 @@ class BackupIntercept:
         # drops the snapshotted entities' cached raws first so every backup
         # captures live server truth, not the TTL window (see configuration).
         self._snapshot_fresh: bool = ENTITY_CACHE_FRESH_SNAPSHOTS
+        # Every configured language of the instance — the candidate set a
+        # snapshot's per-language row fetch tries (requested first).
+        self._settings_languages: list[str] = list(settings_languages or [])
+        # The languages this run's rows were selected in (the task's affected
+        # languages): recorded on the snapshot so revert summaries/tooltips can
+        # name them.
+        self._affected_languages: set[str] = set(affected_languages or ())
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -418,6 +427,61 @@ class BackupIntercept:
             raws[sid] = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(sid, language))
         return raws
 
+    def _fetch_all_language_rows(self, shared_id: str, language: str) -> EntitySnapshot | None:
+        """Fetch EVERY configured language's row for one sharedId (None = entity absent).
+
+        The first-touch snapshot must cover the whole entity, not one row: a
+        Run writes per (entity, language) ROW, so the same entity can be
+        written once per language across rows — and a revert that restores a
+        single row's raw leaves every OTHER language modified (the partial-
+        revert bug). The order is the requested language first (it is also the
+        ``raw``/``language`` fallback fields' row), then the instance's other
+        configured languages. Rows that do not exist in one language are absent
+        from ``rows`` (Uwazi keeps a row per language only when the entity was
+        translated into it).
+        """
+        candidates = self._language_order(language)
+        rows: list[EntityRowSnapshot] = []
+        primary_raw: dict[str, Any] | None = None
+        primary_language: str | None = None
+        for candidate in candidates:
+            try:
+                raw = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(shared_id, candidate))
+            except Exception as exc:  # noqa: BLE001 — a missing row is normal, not a failure
+                logger.debug("no row for sharedId={} language={}: {}", shared_id, candidate, exc)
+                continue
+            row_lang = raw.get("language") if isinstance(raw.get("language"), str) else candidate
+            rows.append(EntityRowSnapshot(language=row_lang or candidate, internal_id=raw.get("_id"), raw=raw))
+            if primary_raw is None:
+                primary_raw = raw
+                primary_language = row_lang or candidate
+        if primary_raw is None:
+            return None
+        return EntitySnapshot(
+            shared_id=shared_id,
+            internal_id=primary_raw.get("_id"),
+            language=primary_language,
+            raw=primary_raw,
+            captured_at=datetime.now(timezone.utc),
+            rows=rows,
+            affected_languages=sorted({r.language for r in rows} & set(self._affected_languages)),
+        )
+
+    def _language_order(self, requested: str) -> list[str]:
+        """The configured languages to try for one entity, requested first.
+
+        The instance's configured languages (via the settings repository) are
+        the whole candidate set — every language the instance could hold a row
+        for. Unreadable settings degrade to the requested language alone (the
+        previous single-row behavior, still first-touch-safe).
+        """
+        languages: list[str] = []
+        if self._settings_languages:
+            languages = [*self._settings_languages]
+        if requested in languages:
+            languages.remove(requested)
+        return [requested, *languages]
+
     def _save_snapshots(
         self, shared_ids: list[str], raws: dict[str, dict[str, Any]], capture_files: bool = False
     ) -> dict[str, EntitySnapshot]:
@@ -434,17 +498,29 @@ class BackupIntercept:
         now = datetime.now(timezone.utc)
         for sid in shared_ids:
             raw = raws[sid]
-            file_refs = self._capture_files(sid, raw) if capture_files else None
-            snap = EntitySnapshot(
-                shared_id=sid,
-                internal_id=raw.get("_id"),
-                language=raw.get("language"),
-                raw=raw,
-                captured_at=now,
-                files=file_refs,
-            )
-            self._backup_store.save_snapshot(self._run_id, snap)
-            snapshots[sid] = snap
+            # ONE first-touch snapshot per entity, carrying EVERY configured
+            # language's row: the first-touch semantic stays (the second write
+            # to another row of the same entity must not re-snapshot), but the
+            # single snapshot now covers all rows so a revert restores the
+            # entity whole. Falls back to the single fetched raw when the
+            # all-language fetch failed (settings unreadable etc.) so the
+            # backup never blocks the write.
+            snapshot = self._fetch_all_language_rows(sid, raw.get("language") or self._language)
+            if snapshot is None:
+                file_refs = self._capture_files(sid, raw) if capture_files else None
+                snapshot = EntitySnapshot(
+                    shared_id=sid,
+                    internal_id=raw.get("_id"),
+                    language=raw.get("language"),
+                    raw=raw,
+                    captured_at=now,
+                    files=file_refs,
+                )
+            elif capture_files:
+                snapshot = snapshot.model_copy(update={"files": self._capture_files(sid, snapshot.raw)})
+            snapshot = snapshot.model_copy(update={"captured_at": now})
+            self._backup_store.save_snapshot(self._run_id, snapshot)
+            snapshots[sid] = snapshot
             self._backed_up.add(sid)
         return snapshots
 

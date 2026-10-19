@@ -183,14 +183,14 @@ def _entity_row(
 def test_entity_row_flattens_the_entity_contract() -> None:
     row = entity_row(_entity_row(template_names=["Judgment"]))
     assert row["shared_id"] == "s1"
-    assert row["title"] == "One"
+    assert row["title"] == "(s1) One"
     assert row["ops"] == "update"
     assert row["op_colors"] == ["primary"]
     assert row["template"] == "Judgment"
 
 
 def test_entity_row_uses_shared_id_when_there_is_no_title() -> None:
-    assert entity_row(_entity_row(entity_title=""))["title"] == "s1"
+    assert entity_row(_entity_row(entity_title=""))["title"] == "(s1) s1"
 
 
 def test_entity_row_dashes_an_unknown_template() -> None:
@@ -303,14 +303,16 @@ def test_entity_row_trims_a_long_title_and_keeps_the_full_text() -> None:
 
     row = entity_row(_entity_row(entity_title=title))
 
-    assert row["title"] == title[:TITLE_CELL_CHARS] + "…"
-    assert row["title_full"] == title
+    expected = truncate(f"(s1) {title}", TITLE_CELL_CHARS)
+    assert row["title"] == expected
+    assert len(expected) == TITLE_CELL_CHARS + 1  # TITLE_CELL_CHARS chars + the ellipsis
+    assert row["title_full"] == f"(s1) {title}"
 
 
 def test_entity_row_leaves_a_short_title_untouched() -> None:
     row = entity_row(_entity_row(entity_title="A/HRC/37/NGO/9"))
 
-    assert row["title"] == row["title_full"] == "A/HRC/37/NGO/9"
+    assert row["title"] == row["title_full"] == "(s1) A/HRC/37/NGO/9"
 
 
 def test_entity_row_trims_the_template_list() -> None:

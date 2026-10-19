@@ -81,6 +81,24 @@ class EntityIdentity(BaseModel):
     )
 
 
+class EntityRowSnapshot(BaseModel):
+    """One entity-language ROW's exact raw, captured at backup time.
+
+    A sharedId has one row per configured language (Uwazi multilingual
+    entities); each row carries its own ``_id``, ``language`` and per-language
+    metadata values. A write to the entity's ``es`` row changes ONLY that row —
+    so a revert that restores just one row's raw leaves the other languages
+    modified (the partial-revert bug). A snapshot therefore captures EVERY
+    configured language's row, and a revert restores each in turn.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    language: str = Field(description="The row's locale (ISO 639-1, e.g. 'en'); '' when unknown.")
+    internal_id: str | None = Field(default=None, description="The row's Uwazi _id, when known.")
+    raw: dict[str, Any] = Field(description="The exact raw entity JSON Uwazi returned for this row.")
+
+
 class EntitySnapshot(BaseModel):
     """The exact raw entity JSON for one entity, captured at backup time.
 
@@ -104,5 +122,26 @@ class EntitySnapshot(BaseModel):
             "into the backup before a delete, so delete-revert can re-upload them to "
             "the re-created entity. None for modified/rewire snapshots (files are not "
             "torn down there) and for pre-change manifests → revert skips file restore."
+        ),
+    )
+    rows: list[EntityRowSnapshot] = Field(
+        default_factory=list,
+        description=(
+            "Every entity-language ROW captured at backup time (one per configured "
+            "language that has a row). ``raw``/``language`` keep the row the backup "
+            "was first fetched in (legacy shape, still the delete path's re-create "
+            "source); ``rows`` extends the revert to ALL languages so a write to "
+            "one language's row does not leave the others diverged after revert. "
+            "Empty on legacy snapshots (single-raw semantics apply)."
+        ),
+    )
+    affected_languages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The languages whose rows the run was about to write when this snapshot "
+            "was taken (the task's affected-language set for the entity). Drives "
+            "'back up the first time and keep the first backup': rows outside this "
+            "set still get restored (they were captured), but the tooltip and the "
+            "revert summary name the affected ones."
         ),
     )

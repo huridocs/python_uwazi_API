@@ -508,7 +508,11 @@ class ApplySuggestionsUseCase:
             raise ApplyRefusedError("nothing to run for the selected rows")
 
         manifest = self._prepare_apply_manifest(run_id, attempt, len(to_push))
-        failures = self._write(run_id, manifest, updates, creates, whole_entity_rows)
+        if selection is not None:
+            selection_languages = {lang for _sid, lang in selection if lang}
+        else:
+            selection_languages = {row.language for row in to_push if row.language}
+        failures = self._write(run_id, manifest, updates, creates, whole_entity_rows, selection_languages)
         # A refused write changed nothing, so its rows must NOT read as applied:
         # they stay ACCEPTED and the operator can run them again. Every refusal
         # carries an identity the rows share (a real sharedId, or a create's
@@ -545,13 +549,18 @@ class ApplySuggestionsUseCase:
             self._entity_api, self._relationship_api, self._default_language, self._crud_loop, ToolCallCache()
         )
 
-    def _build_intercept(self, run_id: str, manifest: MigrationManifest, loop) -> BackupIntercept:
+    def _build_intercept(
+        self, run_id: str, manifest: MigrationManifest, loop, affected_languages: set[str] | None = None
+    ) -> BackupIntercept:
         """Build the accumulating run's intercept, seeding the already-touched set.
 
         The touch set ALREADY in the manifest (an earlier Run against this same
         run) is passed as ``already_backed_up``: those entities keep their
         ORIGINAL first-touch snapshot, so a second write does not duplicate
-        manifest entries and the revert restores the pre-Run state.
+        manifest entries and the revert restores the pre-Run state. The
+        snapshot covers EVERY configured language's row of each entity (the
+        intercept fetches all of them), so a revert restores the entity in
+        every language — not just the first-touched row's.
         """
         return BackupIntercept(
             entity_repository=self._entity_repository,
@@ -565,7 +574,29 @@ class ApplySuggestionsUseCase:
             file_repository=self._file_repository,
             cache_control=self._cache_control,
             already_backed_up=self._manifest_touched(manifest),
+            settings_languages=self._configured_languages(),
+            affected_languages=affected_languages,
         )
+
+    def _configured_languages(self) -> list[str]:
+        """The instance's configured language keys via the settings port (0 entries when unresolvable).
+
+        Best-effort: the settings port may be unwired (older wirings) or
+        unreadable; an empty list degrades the snapshot to the single-row
+        behavior without failing the backup.
+        """
+        if self._entity_api is None:
+            return []
+        client = getattr(self._entity_api, "client", None)
+        settings = getattr(client, "settings", None)
+        if settings is None:
+            return []
+        try:
+            languages = settings.get_languages()
+        except Exception as exc:  # noqa: BLE001 — languages are best-effort
+            logger.warning("could not read configured languages for snapshots: {}", exc)
+            return []
+        return [str(lang.key) for lang in languages if getattr(lang, "key", None)]
 
     @staticmethod
     def _manifest_touched(manifest: MigrationManifest) -> set[str]:
@@ -703,6 +734,7 @@ class ApplySuggestionsUseCase:
         updates: list[dict],
         creates: list[dict],
         whole_entity_rows: list[Suggestion],
+        affected_languages: set[str] | None = None,
     ) -> list[dict[str, str]]:
         """Execute every row kind through ONE intercepted CRUD set, batched.
 
@@ -728,7 +760,7 @@ class ApplySuggestionsUseCase:
         """
         crud = self._build_crud()
         loop = self._crud_loop
-        intercept = self._build_intercept(run_id, manifest, loop)
+        intercept = self._build_intercept(run_id, manifest, loop, affected_languages)
         failures: list[dict[str, str]] = []
         try:
             decorated = intercept.decorate(crud)

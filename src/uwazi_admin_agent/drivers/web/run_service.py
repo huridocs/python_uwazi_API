@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.adapters.pydantic_ai_runtime import PydanticAiLlmRuntime
@@ -39,10 +40,22 @@ from uwazi_admin_agent.configuration import (
 )
 from uwazi_admin_agent.domain.audit_record import AuditRecord
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
+from uwazi_admin_agent.domain.drift import (
+    MISSING_LABEL,
+    MODIFIED_LABEL,
+    NEW_LABEL,
+    DriftBaselineRow,
+    DriftReport,
+    DriftStateRow,
+    DriftStatus,
+    build_probe_result,
+    build_report,
+)
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
+from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.domain.suggestion import (
@@ -501,6 +514,10 @@ async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget
     """
     attempt = _next_suggestion_attempt(run_id)
     await generate_predictions(run_id, user, password, attempt, budget or _script_caps_budget(), None)
+    # The rows just recorded are Uwazi's CURRENT state: capture their editDates
+    # as the drift baseline now, so a later manual edit is detectable. Failure
+    # is non-fatal (the table is still built).
+    refresh_baseline_after_run(run_id, user, password, attempt)
     return attempt
 
 
@@ -870,6 +887,161 @@ def task_view(task_id: str) -> TaskView:
     return _task_use_case().get_task(task_id)
 
 
+class EntityBackupInfo(BaseModel):
+    """A run's backup record for one entity (the revert button's tooltip source)."""
+
+    model_config = {"frozen": True}
+
+    shared_id: str = Field(description="The entity the backup covers.")
+    backup_created_at: datetime | None = Field(
+        default=None,
+        description="When the entity's single first-touch backup was captured (None = not backed up).",
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="The language rows the backup captured (the revert restores each of them).",
+    )
+    affected_languages: list[str] = Field(
+        default_factory=list,
+        description="The languages the run was writing when the backup was taken.",
+    )
+
+
+def entity_backup_info(run_id: str, shared_id: str) -> EntityBackupInfo:
+    """One entity's backup metadata for a run (the per-row revert tooltip).
+
+    Reads the snapshot file directly (no network). A legacy/missing snapshot
+    returns ``backup_created_at=None``, and the UI shows the revert button
+    without a tooltip date only when a backup actually exists.
+    """
+    store = build_backup_store()
+    try:
+        snapshot = store.load_snapshot(run_id, shared_id)
+    except FileNotFoundError:
+        return EntityBackupInfo(shared_id=shared_id, backup_created_at=None)
+    return EntityBackupInfo(
+        shared_id=shared_id,
+        backup_created_at=snapshot.captured_at,
+        languages=[row.language for row in snapshot.rows if row.language]
+        if snapshot.rows
+        else ([snapshot.language] if snapshot.language else []),
+        affected_languages=list(snapshot.affected_languages),
+    )
+
+
+async def revert_entity_rows(run_id: str, shared_id: str, user: str, password: str) -> EntityBackupInfo:
+    """Revert ONE entity of a run to its single first-touch backup (per-row action).
+
+    The restore rolls the WHOLE entity back — every language row the snapshot
+    captured — because the review table's rows are per-language but the writes
+    under one sharedId share one backup. Post-verification is skipped here (it
+    is the run-level revert's job); statuses flip so the entity's rows across
+    ALL languages read REVERTED and become runnable again.
+
+    Returns the entity's backup info (its ``backup_created_at`` shows in the
+    toast). Raises ``RevertRefusedError`` when there is no backup (nothing was
+    written by this run) or the entity was created by the run (reverting it
+    means deleting it — a run-level operation).
+    """
+    runtime = build_runtime(user=user, password=password)
+    snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
+    if snapshot is None:
+        raise RevertRefusedError("this row has no backup — the run has not written to this entity")
+    return entity_backup_info(run_id, shared_id)
+
+
+class BulkRevertOutcome(BaseModel):
+    """Result of reverting the checked rows' entities (the toast's summary)."""
+
+    model_config = {"frozen": True}
+
+    run_id: str = Field(description="The run the selected rows belong to.")
+    reverted: list[str] = Field(
+        default_factory=list,
+        description="The sharedIds restored to their backup, in the order they were processed.",
+    )
+    skipped_created: list[str] = Field(
+        default_factory=list,
+        description="Selected entities the run itself created — their undo is a delete (run-level Revert), refused here.",
+    )
+    skipped_no_backup: list[str] = Field(
+        default_factory=list,
+        description="Selected entities with no backup — the run never wrote to them.",
+    )
+    failures: list[str] = Field(
+        default_factory=list,
+        description="Entities whose restore raised (restores that DID land stay reverted).",
+    )
+
+    def summary(self) -> str:
+        """The operator-facing one-liner (pure)."""
+        parts = [f"{len(self.reverted)} reverted"]
+        if self.skipped_created:
+            parts.append(f"{len(self.skipped_created)} created-by-run (revert at run level)")
+        if self.skipped_no_backup:
+            parts.append(f"{len(self.skipped_no_backup)} without backup")
+        if self.failures:
+            parts.append(f"{len(self.failures)} failed")
+        return ", ".join(parts)
+
+
+async def revert_entities_selection(
+    run_id: str,
+    selection: list[tuple[str, str | None]],
+    user: str,
+    password: str,
+) -> BulkRevertOutcome:
+    """Revert the CHECKED rows' entities to their single first-touch backup.
+
+    The mirror of ``Run`` on the selection: the checked (sharedId, language)
+    rows collapse to their DISTINCT entities (one backup covers every language
+    row, so an entity in multiple checked languages reverts ONCE), each is
+    restored through the same per-entity path the row Revert uses
+    (:meth:`RevertRunUseCase.revert_entity`), and afterwards the status flip
+    covers exactly those entities' rows — a language the operator did NOT check
+    still reads REVERTED when its entity was restored (its write is gone too).
+
+    Created entities and no-backup entities are skipped (reported, not fatal):
+    a created entity's undo is a deletion, which belongs to the run-level
+    Revert. Per-entity failures are collected: one bad restore neither aborts
+    the batch nor hides the restores that landed.
+
+    Raises nothing for empty selection — the caller guards it.
+    """
+    outcome = BulkRevertOutcome(run_id=run_id)
+    seen: list[str] = []
+    for shared_id, _language in selection:
+        if shared_id and shared_id not in seen:
+            seen.append(shared_id)
+    if not seen:
+        return outcome
+    runtime = build_runtime(user=user, password=password)
+    store = build_suggestion_store()
+    reverted: list[str] = []
+    for shared_id in seen:
+        try:
+            snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
+        except RevertRefusedError:
+            outcome.skipped_created.append(shared_id)
+            continue
+        except Exception as exc:  # noqa: BLE001 — one bad restore must not lose the rest
+            logger.warning("bulk revert failed run={} sharedId={}: {}", run_id, shared_id, exc)
+            outcome.failures.append(f"{shared_id}: {exc}")
+            continue
+        if snapshot is None:
+            outcome.skipped_no_backup.append(shared_id)
+            continue
+        reverted.append(shared_id)
+        logger.info("bulk revert: restored run={} sharedId={}", run_id, shared_id)
+    outcome.reverted.extend(reverted)
+    if reverted and hasattr(store, "mark_applied_reverted_for"):
+        # Flip only the RESTORED entities' rows: an unselected sibling entity
+        # that was also written by this run stays APPLIED (still written).
+        assert isinstance(store, SqliteSuggestionStore)
+        store.mark_applied_reverted_for(run_id, reverted)
+    return outcome
+
+
 async def revert_run(run_id: str, user: str, password: str) -> None:
     """Revert a run and verify the restore.
 
@@ -952,6 +1124,333 @@ def rename_run(old_id: str, new_id: str) -> None:
     build_backup_store().rename_run(old_id, new_id)
 
 
+# --- drift -------------------------------------------------------------------
+
+# Probe page size: the fast check reads only the most recently edited entities.
+DRIFT_PROBE_LIMIT: int = 10
+
+
+def _check_template_id(runtime: Any, template_name: str | None) -> str | None:
+    """Resolve the run's template name to its id (None = unresolvable/untemplated)."""
+    if not template_name:
+        return None
+    try:
+        template = runtime.entity_api.client.templates.get_by_name(template_name)
+    except Exception as exc:  # noqa: BLE001 — an unresolvable template disables the probe
+        logger.warning("could not resolve template {}: {}", template_name, exc)
+        return None
+    return template.id if template is not None else None
+
+
+def _languages_for_run(run_id: str, store: SuggestionStorePort, attempt: int) -> list[str]:
+    """The DISTINCT languages among the run's rows (the languages the probe covers)."""
+    languages = [
+        lang
+        for (_sid, lang) in store.entity_languages(
+            run_id,
+            attempt,
+            _unfiltered(),
+        )
+        if lang
+    ]
+    if not languages:
+        return [DUMMY_LANGUAGE]
+    distinct: list[str] = []
+    for lang in languages:
+        if lang not in distinct:
+            distinct.append(lang)
+    return distinct
+
+
+def _unfiltered() -> SuggestionFilter:
+    return SuggestionFilter()
+
+
+def _baseline_rows_from_store(store: SqliteSuggestionStore, run_id: str) -> dict[str, int | None]:
+    """``sharedId -> max recorded editDate`` (None kept for never-seen entities)."""
+    out: dict[str, int | None] = {}
+    for row in store.drift_baseline(run_id):
+        current = out.get(row.shared_id)
+        if row.edit_date is not None and (current is None or row.edit_date > current):
+            out[row.shared_id] = row.edit_date
+        elif row.shared_id not in out:
+            out[row.shared_id] = None
+    return out
+
+
+def _baseline_max(store: SqliteSuggestionStore, run_id: str) -> int | None:
+    """The baseline's max editDate overall (None when empty or nothing recorded)."""
+    values = [row.edit_date for row in store.drift_baseline(run_id) if row.edit_date is not None]
+    return max(values) if values else None
+
+
+def sync_drift_baseline(
+    run_id: str,
+    user: str,
+    password: str,
+    attempt: int,
+) -> int:
+    """Record (sharedId, language) → editDate for the run's template snapshot.
+
+    Paged ``/api/v2/search`` per covered language, editDate + sharedId only.
+    Returns the number of baseline rows written. Called after generation and
+    after each apply, so the baseline never flags the run's own writes.
+    """
+    store = build_suggestion_store()
+    assert isinstance(store, SqliteSuggestionStore)
+    runtime = build_runtime(user=user, password=password)
+    if runtime.drift_probe is None:
+        logger.warning("drift probe not wired — baseline not synced for {}", run_id)
+        return 0
+    template_name = _dominant_template_name(store, run_id, attempt)
+    template_id = _check_template_id(runtime, template_name)
+    now = datetime.now(timezone.utc)
+    languages = _languages_for_run(run_id, store, attempt)
+    rows: list[DriftBaselineRow] = []
+    try:
+        if template_id:
+            for language in languages:
+                try:
+                    scanned = runtime.drift_probe.scan_template(template_id, language)
+                except Exception as exc:  # noqa: BLE001 — one language failing keeps the others
+                    logger.warning("drift baseline scan failed {}: {}", language, exc)
+                    continue
+                for shared_id, edit_date in scanned.items():
+                    rows.append(
+                        DriftBaselineRow(
+                            run_id=run_id,
+                            shared_id=shared_id,
+                            language=language,
+                            edit_date=edit_date,
+                            title=None,
+                            captured_at=now,
+                        )
+                    )
+            live_count = runtime.drift_probe.count_by_template(template_id)
+        else:
+            # No template in the rows: capture only the run's own (sharedId,
+            # language) rows with no editDate — a probe can then never flag
+            # them as drift (their baseline date is unknown, treated valid).
+            for shared_id, lang in store.entity_languages(run_id, attempt, _unfiltered()):
+                rows.append(
+                    DriftBaselineRow(
+                        run_id=run_id,
+                        shared_id=shared_id,
+                        language=lang,
+                        edit_date=None,
+                        title=None,
+                        captured_at=now,
+                    )
+                )
+            live_count = None
+    except Exception as exc:  # noqa: BLE001 — baseline failure leaves no drift verdict
+        logger.warning("drift baseline sync failed for {}: {}", run_id, exc)
+        return 0
+    store.replace_drift_baseline(run_id, rows)
+    # Reset knowledge of drift: the sync re-captured everything known.
+    store.set_drift_state(
+        run_id,
+        status=DriftStatus.UNKNOWN,
+        checked_at=now,
+        checked_by="sync",
+        live_count=live_count,
+        detail="baseline synced",
+    )
+    return len(rows)
+
+
+def _dominant_template_name(store: SuggestionStorePort, run_id: str, attempt: int) -> str | None:
+    """The most frequent template name among the run's rows (None when none)."""
+    rows, _total = store.entity_rows(run_id, attempt, _unfiltered())
+    tally: dict[str, int] = {}
+    for row in rows:
+        for name in row.template_names:
+            tally[name] = tally.get(name, 0) + 1
+    if not tally:
+        return None
+    return max(tally.items(), key=lambda kv: kv[1])[0]
+
+
+def get_drift_state(run_id: str) -> DriftStateRow | None:
+    """The run's last-check outcome (the banner reads this)."""
+    return build_suggestion_store().drift_state(run_id)
+
+
+def check_drift(
+    run_id: str,
+    user: str,
+    password: str,
+    attempt: int,
+    by: str = "auto",
+) -> DriftStateRow:
+    """Check whether Uwazi drifted since the baseline; persist + return the verdict.
+
+    Cheap first (probe + count, one request per language + one count); only a
+    flagged probe pays the full paged diff. Any failure flips the verdict to
+    ERROR — the banner says so and the check can be retried; correctness never
+    relies on a failed probe's silence.
+    """
+    store = build_suggestion_store()
+    assert isinstance(store, SqliteSuggestionStore)
+    runtime = build_runtime(user=user, password=password)
+    now = datetime.now(timezone.utc)
+    if runtime.drift_probe is None:
+        state = DriftStateRow(
+            run_id=run_id,
+            status=DriftStatus.UNKNOWN,
+            checked_at=now,
+            checked_by=by,
+            detail="drift probe not wired",
+        )
+        store.set_drift_state(
+            run_id,
+            status=state.status,
+            checked_at=now,
+            checked_by=by,
+            detail=state.detail,
+        )
+        return state
+    manifest = runtime.backup_store.load_manifest(run_id)
+    run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
+
+    baseline_max = _baseline_max(store, run_id)
+    template_name = _dominant_template_name(store, run_id, attempt)
+    template_id = _check_template_id(runtime, template_name)
+    if template_id is None:
+        state = DriftStateRow(
+            run_id=run_id,
+            status=DriftStatus.UNKNOWN,
+            checked_at=now,
+            checked_by=by,
+            detail="no template recorded — drift cannot be probed",
+        )
+        store.set_drift_state(
+            run_id,
+            status=state.status,
+            checked_at=now,
+            checked_by=by,
+            detail=state.detail,
+        )
+        return state
+    languages = _languages_for_run(run_id, store, attempt)
+    try:
+        probed: dict[str, int | None] = {}
+        languages_failed: list[str] = []
+        for language in languages:
+            try:
+                probed.update(runtime.drift_probe.probe_recent(template_id, language, DRIFT_PROBE_LIMIT))
+            except Exception as exc:  # noqa: BLE001 — one language failing keeps the others
+                logger.warning("drift probe failed {}: {}", language, exc)
+                languages_failed.append(language)
+        live_count: int | None = None
+        count_failed = False
+        try:
+            live_count = runtime.drift_probe.count_by_template(template_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("drift count failed: {}", exc)
+            count_failed = True
+
+        baseline_map = _baseline_rows_from_store(store, run_id)
+        entries = build_probe_result(probed, baseline_map, run_written)
+        baseline_count = store.drift_state(run_id)
+        baseline_count_value = baseline_count.live_count if baseline_count is not None else None
+        count_drift = live_count is not None and baseline_count_value is not None and live_count != baseline_count_value
+        if entries or count_drift:
+            # Flagged: pay the full diff for the precise classification + counts.
+            try:
+                live: list[dict[str, Any]] = []
+                scan_failed: list[str] = []
+                for language in [lang for lang in languages if lang not in languages_failed]:
+                    try:
+                        scanned = runtime.drift_probe.scan_template(template_id, language)
+                    except Exception:  # noqa: BLE001
+                        scan_failed.append(language)
+                        continue
+                    live.extend({"shared_id": sid, "edit_date": dt} for sid, dt in scanned.items())
+                report = build_report(
+                    live=live,
+                    baseline=baseline_map,
+                    excluded_ids=run_written,
+                    languages_failed=scan_failed,
+                    checked_at=now,
+                )
+                detail = _drift_detail(report)
+                status = DriftStatus.DRIFTED
+                live_count_stored = live_count if live_count is not None else baseline_count_value
+                store.set_drift_state(
+                    run_id,
+                    status=status,
+                    checked_at=now,
+                    checked_by=by,
+                    baseline_max_edit_date=baseline_max,
+                    live_count=live_count_stored,
+                    detail=detail,
+                )
+                return store.drift_state(run_id) or DriftStateRow(run_id=run_id, status=status, checked_at=now)
+            except Exception as exc:
+                logger.warning("drift scan failed: {}", exc)
+                store.set_drift_state(
+                    run_id,
+                    status=DriftStatus.DRIFTED,
+                    checked_at=now,
+                    checked_by=by,
+                    baseline_max_edit_date=baseline_max,
+                    live_count=live_count if live_count is not None else baseline_count_value,
+                    detail="drift detected (detail scan failed)",
+                )
+                return store.drift_state(run_id) or DriftStateRow(run_id=run_id, status=DriftStatus.DRIFTED, checked_at=now)
+
+        if languages_failed or count_failed:
+            status = DriftStatus.ERROR
+            detail = f"probe failed ({', '.join([*languages_failed] or ['count'])}) — retry"
+        else:
+            status = DriftStatus.VALID
+            detail = None
+        store.set_drift_state(
+            run_id,
+            status=status,
+            checked_at=now,
+            checked_by=by,
+            baseline_max_edit_date=baseline_max,
+            live_count=live_count if live_count is not None else baseline_count_value,
+            detail=detail,
+        )
+        final = store.drift_state(run_id)
+        return final or DriftStateRow(run_id=run_id, status=status, checked_at=now)
+    except Exception as exc:  # noqa: BLE001 — a crash in the check is an ERROR verdict, not a silence
+        logger.exception("drift check crashed")
+        store.set_drift_state(
+            run_id,
+            status=DriftStatus.ERROR,
+            checked_at=now,
+            checked_by=by,
+            detail=f"check crashed: {exc}",
+        )
+        final = store.drift_state(run_id)
+        return final or DriftStateRow(run_id=run_id, status=DriftStatus.ERROR, checked_at=now)
+
+
+def _drift_detail(report: DriftReport) -> str:
+    """The banner's one-line drift summary (pure)."""
+    parts: list[str] = []
+    if report.modified:
+        parts.append(f"{len(report.modified)} {MODIFIED_LABEL.lower()}")
+    if report.new:
+        parts.append(f"{len(report.new)} {NEW_LABEL.lower()}")
+    if report.missing:
+        parts.append(f"{len(report.missing)} {MISSING_LABEL.lower()}")
+    return ", ".join(parts)
+
+
+def refresh_baseline_after_run(run_id: str, user: str, password: str, attempt: int) -> None:
+    """After an apply: re-sync the baseline for the run's template (best effort)."""
+    try:
+        sync_drift_baseline(run_id, user, password, attempt)
+    except Exception as exc:  # noqa: BLE001 — the apply succeeded; drift bookkeeping must not fail it
+        logger.warning("post-run baseline sync failed for {}: {}", run_id, exc)
+        build_suggestion_store().drift_mark_stale(run_id)
+
+
 __all__ = [
     "EntityDocument",
     "GenerateError",
@@ -961,6 +1460,7 @@ __all__ = [
     "RunSummary",
     "apply_outcomes",
     "build_suggestion_store",
+    "check_drift",
     "clarify_prompt",
     "clear_cache",
     "create_and_generate",
@@ -969,6 +1469,7 @@ __all__ = [
     "document_language_candidates",
     "generate_predictions",
     "get_attempt",
+    "get_drift_state",
     "get_entity_rows",
     "get_entity_segmentation",
     "get_entity_suggestions",
@@ -983,8 +1484,11 @@ __all__ = [
     "list_runs",
     "property_labels_for",
     "read_run_script",
-    "revert_run",
+    "refresh_baseline_after_run",
     "rename_run",
+    "revert_entities_selection",
+    "revert_run",
     "run_auto_scan",
+    "sync_drift_baseline",
     "uwazi_base_url",
 ]

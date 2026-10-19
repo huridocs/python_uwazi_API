@@ -52,6 +52,7 @@ from uwazi_admin_agent.domain.revert import (
     build_revert_actions,
 )
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
+from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
@@ -133,6 +134,47 @@ class RevertRunUseCase:
             reverted_rows,
         )
 
+    async def revert_entity(self, run_id: str, shared_id: str) -> EntitySnapshot | None:
+        """Revert ONE entity of a run to its single first-touch snapshot (per-row revert).
+
+        The review table is one row per (entity, LANGUAGE): the same entity can
+        appear in several rows, each of which a separate Run may have written.
+        The rows share ONE snapshot per entity (first-touch — no backup
+        versions), and this restore rolls the ENTIRE entity back to it: every
+        language ROW the snapshot captured, in one pass — not just the row the
+        button sat on. Only snapshot-carrying entities (modified or deleted by
+        the run) are revertable; created entities revert by deletion and are
+        refused here.
+
+        Returns the snapshot restored (its ``captured_at`` feeds the tooltip),
+        or ``None`` when the run has no snapshot for this entity.
+
+        Flips the run's APPLIED rows of THIS sharedId to REVERTED (keep the
+        table honest across languages: all the entity's rows' writes — any
+        language — were undone by this single restore). Best-effort, like the
+        run-level path.
+        """
+        manifest = self._backup_store.load_manifest(run_id)
+        if shared_id in {e.shared_id for e in manifest.created}:
+            raise RevertRefusedError(
+                "this row's entity was created by the run — revert it from the run-level Revert (undo deletes the entity)"
+            )
+        try:
+            snapshot = self._backup_store.load_snapshot(run_id, shared_id)
+        except FileNotFoundError:
+            return None
+        action = RestoreEntityAction(snapshot=snapshot)
+        await self._execute_action(action, run_id, manifest)
+        self._emit(run_id, "restore_entity", [shared_id])
+        logger.info("revert entity: run={} sharedId={} languages={}", run_id, shared_id, [r.language for r in snapshot.rows])
+        if self._suggestion_store is not None:
+            try:
+                if hasattr(self._suggestion_store, "mark_applied_reverted_for"):
+                    self._suggestion_store.mark_applied_reverted_for(run_id, [shared_id])
+            except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
+                logger.warning("could not mark rows reverted for entity {}: {}", shared_id, exc)
+        return snapshot
+
     def _mark_rows_reverted(self, run_id: str) -> int:
         """Move the run's APPLIED review rows to REVERTED (best-effort, never fails a revert).
 
@@ -153,7 +195,7 @@ class RevertRunUseCase:
         if isinstance(action, RestoreRelationshipAction):
             await self._restore_relationship(action, run_id)
         elif isinstance(action, RestoreEntityAction):
-            await self._entity_repository.save_raw(action.snapshot.raw)
+            await self._restore_entity(action, run_id)
             self._emit(run_id, "restore_entity", [action.snapshot.shared_id])
             logger.debug("revert: restored entity sharedId={}", action.snapshot.shared_id)
         elif isinstance(action, RecreateEntityAction):
@@ -167,6 +209,51 @@ class RevertRunUseCase:
             await self._entity_repository.delete_by_shared_id(action.shared_id)
             self._emit(run_id, "delete_created", [action.shared_id])
             logger.debug("revert: deleted created entity sharedId={}", action.shared_id)
+
+    async def _restore_entity(self, action: Any, run_id: str) -> None:
+        """Restore ONE modified entity to its first-touch snapshot — every language row.
+
+        A Run writes per (entity, language) ROW; the same entity can carry
+        writes in several languages (a translation task's ``es`` and ``en``
+        rows), and a write to one row never touches the others. The snapshot
+        captures EVERY configured language's row of the entity at first touch,
+        so restoring ``rows`` in turn undoes the whole entity's writes. A legacy
+        snapshot (no ``rows``, captured by an older build) falls back to the
+        single ``raw`` — the previous behavior.
+
+        A row that no longer exists is skipped: Uwazi only rejects the restore
+        if the whole entity is gone, and a missing row means there is nothing
+        under that language to restore (nothing the run could have written
+        either).
+        """
+        snapshot = action.snapshot
+        if snapshot.rows:
+            rows = snapshot.rows
+        else:
+            rows = [
+                EntityRowSnapshot(
+                    language=snapshot.language or "",
+                    internal_id=snapshot.internal_id,
+                    raw=snapshot.raw,
+                )
+            ]
+        for row in rows:
+            raw = row.raw
+            row_lang = row.language or snapshot.language or "en"
+            try:
+                await self._entity_repository.save_raw({**raw, "language": row_lang})
+            except RuntimeError as exc:
+                message = str(exc)
+                if "not found" in message.lower() or "404" in message:
+                    logger.warning(
+                        "revert: row absent sharedId={} language={} (skipped): {}",
+                        snapshot.shared_id,
+                        row_lang,
+                        exc,
+                    )
+                    continue
+                raise
+            logger.debug("revert: restored row sharedId={} language={}", snapshot.shared_id, row_lang)
 
     @staticmethod
     def _record_restored_shared_id(manifest: Any, old_shared_id: str, new_shared_id: str) -> None:

@@ -182,10 +182,20 @@ class SuggestionStorePort(ABC):
     def mark_applied_reverted(self, run_id: str) -> int:
         """Mark every APPLIED row of ``run_id`` REVERTED; return how many moved.
 
-        Called after a successful revert: those writes no longer exist, so the
-        rows must read as reverted (runnable again) rather than applied. Scoped
-        to the run, across all its attempts, since one revert undoes the run's
-        whole accumulated manifest.
+        Called after a successful run-level revert: those writes no longer
+        exist, so the rows must read as reverted (runnable again) rather than
+        applied. Scoped to the run, across all its attempts, since one revert
+        undoes the run's whole accumulated manifest.
+        """
+        ...
+
+    @abstractmethod
+    def mark_applied_reverted_for(self, run_id: str, shared_ids: list[str]) -> int:
+        """Mark APPLIED rows REVERTED for exactly these sharedIds (any language, any attempt); return the count.
+
+        Called after a per-entity (per-row) revert: one restore rolled the WHOLE
+        entity back — every language row's write — so all the entity's APPLIED
+        rows move, across languages and attempts.
         """
         ...
 

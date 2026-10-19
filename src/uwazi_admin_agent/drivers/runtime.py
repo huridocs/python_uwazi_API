@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -43,16 +44,17 @@ from uwazi_admin_agent.adapters.backup_store_adapter import FilesystemBackupStor
 from uwazi_admin_agent.adapters.cached_entity_repository import CachedEntityRepository
 from uwazi_admin_agent.adapters.cached_file_repository import CachedFileRepository
 from uwazi_admin_agent.adapters.cached_segmentation_repository import CachedSegmentationRepository
+from uwazi_admin_agent.adapters.drift_probe_adapter import UwaziDriftProbe
 from uwazi_admin_agent.adapters.entity_repository_adapter import UwaziEntityRepository
 from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
-from uwazi_admin_agent.adapters.translation_repository_adapter import UwaziTranslationRepository
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
+from uwazi_admin_agent.adapters.translation_repository_adapter import UwaziTranslationRepository
 from uwazi_admin_agent.configuration import (
     ENTITY_CACHE_TTL_SECONDS,
     FILE_CACHE_DIR,
@@ -66,12 +68,13 @@ from uwazi_admin_agent.configuration import (
 from uwazi_admin_agent.domain.file_cache import instance_dir_name
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
+from uwazi_admin_agent.ports.drift_probe_port import DriftProbePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
+from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
-from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.revert_run_use_case import RevertRunUseCase
@@ -108,6 +111,7 @@ class Runtime:
         settings_repository: Any = None,
         translation_port: TranslationPort | None = None,
         template_labels: TemplateLabelPort | None = None,
+        drift_probe: DriftProbePort | None = None,
     ) -> None:
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
@@ -135,6 +139,9 @@ class Runtime:
         # which the document/segmentation resolvers use as their fallback order
         # when an entity holds its file in a language other than the requested one.
         self.settings_repository: Any = settings_repository
+        # EditDate/count probes backing the review UI's drift check (None = unwired,
+        # the drift check then reports "unknown" instead of a verdict).
+        self.drift_probe: DriftProbePort | None = drift_probe
 
 
 def build_backup_store(root: Path | None = None) -> BackupStorePort:
@@ -267,4 +274,5 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         settings_repository=api.client.settings,
         translation_port=translation_port,
         template_labels=template_labels,
+        drift_probe=UwaziDriftProbe(api.client),
     )

@@ -93,6 +93,21 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
     return title, f"{action} {count} {entities} in Uwazi now. Revertable from the task page."
 
 
+def revert_entity_confirmation(shared_id: str, tooltip: str = "") -> tuple[str, str]:
+    """``(title, message)`` for the per-row Revert dialog (pure).
+
+    The restore rolls the WHOLE entity back — every language row the backup
+    captured — because the rows share one backup per entity; the message says
+    so (and shows the backup's creation time when one exists) so reverting the
+    ``es`` row never silently rewrites the ``en`` text.
+    """
+    when = f" made {tooltip.removeprefix('entity backup creation ')}" if tooltip else ""
+    return (
+        "Revert entity",
+        f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup).",
+    )
+
+
 def run_button_label(count: int) -> str:
     """The Run button's text for a live selection of ``count`` rows (pure).
 
@@ -100,6 +115,61 @@ def run_button_label(count: int) -> str:
     act on without opening the dialog.
     """
     return f"Run ({count})"
+
+
+def bulk_revert_label(count: int) -> str:
+    """The Revert button's text for a live selection of ``count`` entities (pure).
+
+    Mirrors :func:`run_button_label`: the button carries the count so the
+    operator sees what Revert acts on without opening the dialog.
+    """
+    return f"Revert ({count})"
+
+
+def unique_entities(selection: list[tuple[str, str | None]]) -> list[str]:
+    """The DISTINCT sharedIds of a checked (sharedId, language) selection (pure).
+
+    A revert restores the WHOLE entity (its one backup covers every language
+    row), so two checked rows of the same entity revert it once — the button's
+    count and the confirm dialog speak entities, not rows.
+    """
+    seen: list[str] = []
+    for shared_id, _language in selection:
+        if shared_id and shared_id not in seen:
+            seen.append(shared_id)
+    return seen
+
+
+def select_all_label(total: int, all_selected: bool) -> str:
+    """The whole-result selection button's text (pure).
+
+    The table's header checkbox already selects the current PAGE, so this
+    button carries the other meaning: every row matching the current filter,
+    across every page. Once that mode is active the same button clears it.
+    """
+    if all_selected:
+        return "Clear selection"
+    if not total:
+        return "Select all results"
+    noun = "result" if total == 1 else "results"
+    return f"Select all {total:,} {noun}"
+
+
+def selection_count(*, all_selected: bool, total: int, page_selected: int, excluded: int) -> int:
+    """How many rows the Run button should report (pure).
+
+    A page selection counts the table's checked rows. A whole-result selection
+    counts every row matching the filter (``total``) minus the rows the
+    operator explicitly unchecked afterwards (``excluded``).
+    """
+    if all_selected:
+        return max(total - excluded, 0)
+    return page_selected
+
+
+def rows_excluding_keys(rows: list[Any], excluded: set[str]) -> list[dict[str, Any]]:
+    """The page rows whose ``row_key`` is not excluded from a whole-result selection (pure)."""
+    return [row for row in rows if isinstance(row, dict) and str(row.get("row_key")) not in excluded]
 
 
 def prune_selection(selected: list[Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -126,9 +196,11 @@ def truncate(value: Any, limit: int = 80) -> str:
 # cell clips with CSS too (a title has no length), but a long one has to be cut
 # in the payload as well: an untruncated 300-character document title was what
 # pushed the table's total width past the viewport and forced a horizontal
-# scroll on every row. 90 characters is roughly two average document references,
-# which is as much as the column can hold at the layout's own cap.
-TITLE_CELL_CHARS: int = 90
+# scroll on every row. 97 characters is roughly two average document references,
+# which is as much as the column can hold at the layout's own cap; 7 of those go
+# to the leading "(<sharedId>) " prefix the row shows before the title, so the
+# title itself keeps roughly 90 characters as before.
+TITLE_CELL_CHARS: int = 97
 
 # Column widths (CSS px) for the review table's fixed columns. The Entity column
 # takes whatever is left and absorbs the shrink; naming the rest here is what
@@ -278,32 +350,46 @@ def entity_open_url(item: EntityReviewRow, uwazi_url: str | None) -> str | None:
     return f"{uwazi_url.rstrip('/')}/{item.language or DUMMY_LANGUAGE}/entity/{item.shared_id}"
 
 
-def entity_row(item: EntityReviewRow, uwazi_url: str | None = None) -> dict[str, Any]:
+def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_created_at: Any = None) -> dict[str, Any]:
     """The entity table's row contract (pure). Colors resolved here, not in Vue.
 
     One row per affected entity IN ONE LANGUAGE (the table is the
     checkbox-selection surface the bulk Run action reads), aggregated from the
     entity's suggestion rows by the store. Columns: Entity (title, with the
     open-in-Uwazi icon at its end), Language, Template, Ops, Status
-    (runned/pending), and the Run/Edit row actions — no sharedId, no change-count
-    columns, and no separate Uwazi column.
+    (runned/pending), and the Run/Edit/Revert row actions — no sharedId, no
+    change-count columns, and no separate Uwazi column.
 
-    ``title`` is cut to :data:`TITLE_CELL_CHARS` and the untruncated text rides
-    along as ``title_full`` for the cell's tooltip: a full document title is far
-    wider than the column it sits in, and letting it size the cell is what made
-    the table overflow horizontally.
+    ``title`` is the sharedId in parentheses, then the entity title cut to
+    :data:`TITLE_CELL_CHARS`; the untruncated text rides along as ``title_full``
+    for the cell's tooltip: a full document title is far wider than the column
+    it sits in, and letting it size the cell is what made the table overflow
+    horizontally.
 
     ``uwazi_url`` is the controlled instance's base URL (None = unconfigured, so
     the row carries no link). ``row_key`` is the entity+language identity, so the
     same entity in two languages is two distinct checkable rows.
+
+    ``revert_tooltip`` is the per-row Revert button's tooltip: the backup's
+    creation date+time ("entity backup creation …"), present only when the run
+    holds a backup for this entity (a written-then-revertable row).
     """
     status_label, status_color = run_status(item)
     title = item.entity_title or item.shared_id
+    # The sharedId rides the visible title (never a separate column) so the
+    # operator can quote it; the tooltip keeps the uncut bare title.
+    titled = f"({item.shared_id}) {title}"
+    try:
+        revert_tooltip = (
+            f"entity backup creation {backup_created_at:%Y-%m-%d %H:%M}" if backup_created_at is not None else ""
+        )
+    except (ValueError, TypeError):
+        revert_tooltip = ""
     return {
         "row_key": entity_language_key(item.shared_id, item.language),
         "shared_id": item.shared_id,
-        "title": truncate(title, TITLE_CELL_CHARS),
-        "title_full": title,
+        "title": truncate(titled, TITLE_CELL_CHARS),
+        "title_full": titled,
         "language": item.language or "",
         "template": truncate(", ".join(item.template_names) or "—", 28),
         "ops": ", ".join(item.ops),
@@ -311,6 +397,8 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None) -> dict[str,
         "url": entity_open_url(item, uwazi_url),  # used by the title cell's open-in-Uwazi icon
         "run_status": status_label,
         "run_status_color": status_color,  # used by the slot
+        "revertable": status_label in ("runned", "reverted"),  # drives the Revert icon's visibility
+        "revert_tooltip": revert_tooltip,  # drives the Revert icon's tooltip
     }
 
 
@@ -320,9 +408,50 @@ def accuracy_label(exact: int, mismatch: int) -> str:
     return f"{100 * exact / denominator:.1f}%" if denominator else "n/a"
 
 
+# --- drift banner ------------------------------------------------------------
+
+DRIFT_STATUS_COLORS: dict[str, str] = {
+    "unknown": "grey-6",
+    "valid": "green",
+    "drifted": "orange",
+    "error": "red",
+    "checking": "blue",
+}
+
+
+def drift_banner_text(*, status: str, detail: str | None, checking: bool = False) -> str:
+    """The status line above the review table (pure).
+
+    ``checking=True`` wins over any stored verdict (a check is running right
+    now); otherwise the stored verdict speaks, with the check's detail after
+    an em dash.
+    """
+    if checking:
+        return "Checking drift…" if not detail else f"Checking drift… (last check: {detail})"
+    text = {
+        "unknown": "Drift not checked yet",
+        "valid": "Up to date — no changes in Uwazi since the last sync",
+        "drifted": "Out of date — Uwazi changed since the last sync",
+        "error": "Drift check failed",
+    }.get(status, "Drift not checked yet")
+    if detail:
+        return f"{text} — {detail}"
+    return text
+
+
+def drift_banner_time(checked_at: Any) -> str:
+    """The checked-at suffix ('· checked 12:34'), '' when never checked (pure)."""
+    if checked_at is None:
+        return ""
+    try:
+        return f" · checked {checked_at:%H:%M}"
+    except (ValueError, TypeError):
+        return ""
+
+
 __all__ = [
+    "DRIFT_STATUS_COLORS",
     "ACTIONS_COLUMN",
-    "LANGUAGE_COLUMN",
     "MATCH_COLORS",
     "OPENABLE_OPS",
     "OP_COLORS",
@@ -335,17 +464,25 @@ __all__ = [
     "TITLE_CELL_CHARS",
     "TITLE_COLUMN",
     "accuracy_label",
+    "drift_banner_text",
+    "drift_banner_time",
     "entity_row",
     "entity_open_url",
     "entity_language_key",
     "filter_from_controls",
     "match_label",
     "property_caption",
+    "bulk_revert_label",
     "property_heading",
     "prune_selection",
+    "revert_entity_confirmation",
+    "rows_excluding_keys",
+    "unique_entities",
     "run_button_label",
     "run_confirmation",
     "run_status",
+    "select_all_label",
+    "selection_count",
     "suggestion_to_row",
     "truncate",
 ]

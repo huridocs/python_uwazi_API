@@ -216,6 +216,32 @@ class VerifyRevertUseCase:
             current_raws[key] = await self._fetch_optional(target, language)
         return current_raws
 
+    def _fetch_keys_for(self, result_key: str, target: str, snapshots: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+        """One fetch key per language row of an entity's snapshot.
+
+        The primary row's key is the bare sharedId (legacy comparisons read
+        ``current_raws[shared_id]``); each additional captured row gets
+        ``sharedId|lang``. A legacy/single-row snapshot emits exactly one key —
+        the previous behavior. Deletes fetch by ``restored_shared_id`` (the
+        re-created entity exists only under the NEW id).
+        """
+        snapshot = snapshots.get(result_key)
+        rows = getattr(snapshot, "rows", None) if snapshot is not None else []
+        if rows:
+            keys: list[tuple[str, str, str | None]] = []
+            for index, row in enumerate(rows):
+                language = row.language or None
+                key = result_key if index == 0 else f"{result_key}|{language}"
+                keys.append((key, target, language))
+            return keys
+        return [(result_key, target, self._language_of_snapshot(snapshot, result_key))]
+
+    @staticmethod
+    def _language_of_snapshot(snapshot: Any, shared_id: str) -> str | None:
+        """The fallback row language when the snapshot has no ``rows`` list."""
+        language = getattr(snapshot, "language", None) if snapshot is not None else None
+        return language if isinstance(language, str) and language else None
+
     def _build_fetch_keys(self, manifest: Any, snapshots: dict[str, Any]) -> list[tuple[str, str, str | None]]:
         """The ``(result key, fetch target, row language)`` triples verification will read.
 
@@ -247,10 +273,13 @@ class VerifyRevertUseCase:
         """
         fetch_keys: list[tuple[str, str, str | None]] = []
         for entry in manifest.modified:
-            fetch_keys.append((entry.shared_id, entry.shared_id, self._language_of(entry, snapshots)))
+            # One fetch key PER snapshot row (the primary row keeps the bare
+            # sharedId; secondary languages are keyed ``sharedId|lang``) so a
+            # multi-language snapshot verifies every row the revert restored.
+            fetch_keys.extend(self._fetch_keys_for(entry.shared_id, entry.shared_id, snapshots))
         for entry in manifest.deleted:
             target = entry.restored_shared_id or entry.shared_id
-            fetch_keys.append((entry.shared_id, target, self._language_of(entry, snapshots)))
+            fetch_keys.extend(self._fetch_keys_for(entry.shared_id, target, snapshots))
         for entry in manifest.created:
             fetch_keys.append((entry.shared_id, entry.shared_id, entry.language))
 

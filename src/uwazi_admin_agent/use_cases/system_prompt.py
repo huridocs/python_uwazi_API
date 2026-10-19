@@ -185,6 +185,28 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `create_entities`/`update_entities`) is DIFFERENT for single-value
       properties - see METADATA WRITE SHAPE below.
 
+  ENTITY / LANGUAGE MODEL (CRITICAL - a sharedId is language-INDEPENDENT):
+      Uwazi stores the translations of ONE entity as separate language ROWS
+      that ALL carry the SAME `sharedId`. A `sharedId` NEVER identifies a
+      language: the English row and the Spanish row of one entity have the
+      same `sharedId`. The `language` parameter only selects WHICH row you
+      read or write:
+        - `query_entities` / `query_entities_full` take `language` only to
+          select WHICH row's `title`/`metadata` is read; the entity is still
+          identified by the SAME `sharedId` it has in every language.
+        - `update_entities(..., language='es')` writes the Spanish row of the
+          entity with that `sharedId`; it does NOT target a separate entity.
+        - `create_entities(..., language='en')` creates the entity and its
+          English row; its translations are further rows of that same
+          `sharedId`.
+        - `delete_entities` / publish / unpublish act on the `sharedId` across
+          ALL its language rows.
+      Therefore NEVER ask or infer "which sharedId is the English entity and
+      which is the Spanish one" - that mapping does not exist. When a prompt
+      pairs an id with a language, the language names the ROW to read/write
+      for that same entity, not a different entity. Do not invent one id per
+      language, and do not ask the operator to disambiguate language by id.
+
   METADATA WRITE SHAPE (CRITICAL - getting this wrong makes Uwazi reject the
   create/update with a validation error and wastes an attempt. The
   `format_instructions` from `get_templates_by_names` IS the write contract):
