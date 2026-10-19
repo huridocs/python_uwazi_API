@@ -432,7 +432,17 @@ async def create_and_generate(
     if prompt_snapshot.is_file():
         shutil.copy2(prompt_snapshot, run_path / prompt_snapshot.name)
 
-    runtime = build_runtime(user=user, password=password)
+    # Building the runtime LOGS IN: it logs into the controlled Uwazi instance, so
+    # an unreachable instance, a bad UWAZI_URL or bad credentials fail here —
+    # before the try below exists and before any manifest is written. Without the
+    # log the operator saw only the toast and the terminal stayed silent.
+    try:
+        runtime = build_runtime(user=user, password=password)
+    except Exception as exc:
+        logger.exception("run {}: could not build the Uwazi runtime", name)
+        raise GenerateError(
+            f"could not connect to the Uwazi instance ({exc}). Check UWAZI_URL and the Uwazi credentials."
+        ) from exc
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
@@ -651,6 +661,40 @@ def get_suggestion_properties(run_id: str) -> list[str]:
 def get_entity_suggestions(run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
     """Return the suggestions of one entity's language group (the entity window's read)."""
     return build_suggestion_store().get_entity(run_id, _current_attempt_number(run_id), shared_id, language)
+
+
+# Property labels belong to the TEMPLATE, not to a run, so they are resolved once
+# per (account, template) and reused: opening a second entity of the same template
+# — or coming back to the same one — costs no request and no login. Keyed by
+# account so two operators never read a map built with another one's credentials.
+_PROPERTY_LABELS: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def property_labels_for(template_name: str | None, user: str, password: str) -> dict[str, str]:
+    """``{property_name: label}`` for one template, cached; ``{}`` when unresolvable.
+
+    A suggestion row names its property by the template's property ``name``
+    (``document_ref``), which reads as an identifier on screen; Uwazi shows the
+    property's ``label`` ("Document Ref"), and so does the entity window. The
+    lookup goes through the template-label port (one cached ``/api/templates``
+    read behind it) and degrades to ``{}`` — the caller keeps showing the raw
+    names — whenever the instance cannot be reached or the template is unknown, so
+    a display path never depends on it.
+    """
+    if not template_name:
+        return {}
+    key = (user, template_name)
+    cached = _PROPERTY_LABELS.get(key)
+    if cached is not None:
+        return cached
+    labels: dict[str, str] = {}
+    try:
+        runtime = build_runtime(user=user, password=password)
+        labels = dict(runtime.template_labels.property_labels(template_name)) if runtime.template_labels else {}
+    except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the window
+        logger.warning("could not resolve property labels for template {}: {}", template_name, exc)
+    _PROPERTY_LABELS[key] = labels
+    return labels
 
 
 def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
@@ -937,6 +981,7 @@ __all__ = [
     "get_suggestions",
     "list_attempts",
     "list_runs",
+    "property_labels_for",
     "read_run_script",
     "revert_run",
     "rename_run",

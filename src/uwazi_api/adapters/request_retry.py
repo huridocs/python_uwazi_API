@@ -70,6 +70,19 @@ _MAINTENANCE_BODY_MARKERS: tuple[str, ...] = (
 # only the fallback.
 DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 30.0)
 
+# Timeout for the LOGIN handshake (connect, read). Login is the one call every
+# single operation depends on: it runs before anything else, so a remote instance
+# that takes a while over TLS (or is momentarily busy) failed the WHOLE run on
+# the shared DEFAULT_TIMEOUT's read budget. It gets a generous read budget of its
+# own, and — unlike the API calls — transport retries, so a slow handshake costs
+# seconds instead of failing the run.
+LOGIN_TIMEOUT: tuple[float, float] = (10.0, 60.0)
+
+# Transport retries for login only. STATUS retries stay 0 on purpose: a wrong
+# scheme/URL or a 401 must fail fast (the agent's ``login_url_candidates`` owns
+# scheme fallback), but a connect/read timeout is pure bad luck and is retried.
+LOGIN_TRANSPORT_RETRIES: int = 2
+
 
 def with_default_timeout(kwargs: dict) -> dict:
     """Inject ``DEFAULT_TIMEOUT`` into request kwargs unless already set.
@@ -77,6 +90,12 @@ def with_default_timeout(kwargs: dict) -> dict:
     Pure: ``setdefault`` keeps an explicit per-call timeout untouched.
     """
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    return kwargs
+
+
+def with_login_timeout(kwargs: dict) -> dict:
+    """Inject ``LOGIN_TIMEOUT`` into request kwargs unless already set (pure)."""
+    kwargs.setdefault("timeout", LOGIN_TIMEOUT)
     return kwargs
 
 
@@ -162,6 +181,40 @@ def requests_retry_session(
         backoff_max=RETRY_BACKOFF_MAX,
         backoff_jitter=RETRY_BACKOFF_JITTER,
         status_forcelist=status_forcelist,
+        allowed_methods=RETRY_ALLOWED_METHODS,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+class _LoginSession(TimeoutSession):
+    """A session for the login handshake: long read budget, transport retries.
+
+    Mounted with a retry that allows connect/read retries but NO status retries,
+    so a slow or momentarily unreachable instance is ridden out while a wrong URL
+    or bad credentials still fail immediately (the point of the fail-fast login
+    policy in :meth:`HttpClientAdapter._get_connect_sid`).
+    """
+
+    def request(self, method: str, url: str, **kwargs):  # type: ignore[override]
+        return super().request(method, url, **with_login_timeout(kwargs))
+
+
+def requests_login_session(retries: int = LOGIN_TRANSPORT_RETRIES) -> requests.Session:
+    """Build the login session: ``retries`` transport retries, 0 status retries."""
+    session = _LoginSession()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        status=0,
+        status_forcelist=(),
+        backoff_factor=RETRY_BACKOFF_FACTOR,
+        backoff_max=RETRY_BACKOFF_MAX,
+        backoff_jitter=RETRY_BACKOFF_JITTER,
         allowed_methods=RETRY_ALLOWED_METHODS,
         respect_retry_after_header=True,
     )

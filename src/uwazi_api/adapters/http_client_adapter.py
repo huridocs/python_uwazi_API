@@ -1,9 +1,10 @@
 import logging
 from typing import Optional
 
+import requests
 from requests.cookies import merge_cookies
 
-from uwazi_api.adapters.request_retry import requests_retry_session
+from uwazi_api.adapters.request_retry import requests_login_session, requests_retry_session
 from uwazi_api.domain.exceptions import AuthenticationError
 from uwazi_api.iso_639_choices import iso_639_choices
 from uwazi_api.ports.http_port import HttpClientPort
@@ -69,18 +70,35 @@ class HttpClientAdapter(HttpClientPort):
 
     def _get_connect_sid(self) -> str:
         # Login is a handshake, not a maintenance-window call: use a session
-        # WITHOUT the exponential-backoff retry policy. That policy (up to
-        # ~10 minutes of sleeps) exists to ride out 502s on API calls; on
-        # login it only turns a wrong scheme/URL into a multi-minute stall of
-        # whatever thread is logging in. Scheme fallback lives in the agent's
+        # WITHOUT the exponential-backoff status-retry policy. That policy (up to
+        # ~10 minutes of sleeps) exists to ride out 502s on API calls; on login
+        # it only turns a wrong scheme/URL into a multi-minute stall of whatever
+        # thread is logging in. Scheme fallback lives in the agent's
         # ``login_url_candidates``, so a failed attempt here must fail fast.
-        login_session = requests_retry_session(retries=0)
+        #
+        # It still gets LOGIN_TIMEOUT and a couple of TRANSPORT retries: login is
+        # the one call every operation depends on, and a remote instance that is
+        # merely slow to answer it (TLS handshake, a busy box, a 30s+ auth hash)
+        # must not fail the whole run. Status retries stay 0 so a wrong URL or
+        # bad credentials still fail immediately.
+        login_session = requests_login_session()
         try:
-            response = login_session.post(
-                f"{self.url}/api/login",
-                headers=self.headers,
-                json={"username": self.user, "password": self.password, **({"token": self.token} if self.token else {})},
-            )
+            try:
+                response = login_session.post(
+                    f"{self.url}/api/login",
+                    headers=self.headers,
+                    json={"username": self.user, "password": self.password, **({"token": self.token} if self.token else {})},
+                )
+            except requests.exceptions.RequestException as exc:
+                # A transport failure here is UNActionable as a raw urllib3
+                # string ("Max retries exceeded ... Read timed out"); name the
+                # instance, the cause, and what to check so whoever reads the
+                # failure — terminal, toast or error dialog — knows the next step.
+                self.graylog.error(f"Login into {self.url} failed: {exc}")
+                raise AuthenticationError(
+                    f"cannot reach the Uwazi instance at {self.url} ({type(exc).__name__}: {exc}). "
+                    f"Check that the URL is correct and reachable from this service, and that it serves HTTPS."
+                ) from exc
             if response.status_code != 200:
                 raise AuthenticationError(f"Login failed: {response.status_code}")
             cookie = response.cookies.get("connect.sid")

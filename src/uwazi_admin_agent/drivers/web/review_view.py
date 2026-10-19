@@ -2,8 +2,10 @@
 
 Both the review page and its entity window render the same values, so the
 formatting rules live here once: how a proposed/current value is truncated, how
-a match verdict is labelled, how a suggestion flattens into a table row, and how
-the page's control values become a store filter.
+a match verdict is labelled, how a suggestion flattens into a table row, how a
+property is named for a human (its label, with the raw name as a caption), and
+how the page's control values become a store filter. The table's column widths
+live here too, next to the row contract they belong to.
 
 Keeping this module free of NiceGUI imports is what makes it directly testable.
 """
@@ -15,6 +17,7 @@ from typing import Any
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
+    TITLE_PROPERTY,
     EntityReviewRow,
     Suggestion,
     SuggestionFilter,
@@ -54,6 +57,10 @@ RUN_STATUS_COLORS: dict[str, str] = {"runned": "blue", "reverted": "indigo", "pe
 # public page. A create row still holds its dry-created placeholder, so
 # opening it would land on nothing.
 OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete"})
+
+# ``_title`` is the review table's synthetic name for a title change — no
+# template property carries it, so it gets the same human word Uwazi uses.
+TITLE_LABELS: dict[str, str] = {TITLE_PROPERTY: "Title"}
 
 # How each recorded op reads in the Run dialog ("what changes in Uwazi?").
 RUN_OP_PHRASES: dict[str, str] = {
@@ -113,6 +120,58 @@ def truncate(value: Any, limit: int = 80) -> str:
     """Render any value as one display line, truncated with an ellipsis (pure)."""
     text = format_metadata_value(value)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+# How much of an entity title the review table prints before the ellipsis. The
+# cell clips with CSS too (a title has no length), but a long one has to be cut
+# in the payload as well: an untruncated 300-character document title was what
+# pushed the table's total width past the viewport and forced a horizontal
+# scroll on every row. 90 characters is roughly two average document references,
+# which is as much as the column can hold at the layout's own cap.
+TITLE_CELL_CHARS: int = 90
+
+# Column widths (CSS px) for the review table's fixed columns. The Entity column
+# takes whatever is left and absorbs the shrink; naming the rest here is what
+# stops a long Template/Status cell from widening the table past its container.
+LANGUAGE_COLUMN: str = "width: 84px"
+TEMPLATE_COLUMN: str = "width: 170px"
+OPS_COLUMN: str = "width: 190px"
+STATUS_COLUMN: str = "width: 110px"
+ACTIONS_COLUMN: str = "width: 96px"
+# The Entity column takes the remainder: ``max-width: 0`` is what lets the column
+# actually shrink under the browser's default table layout (a bare percentage does
+# not), and the cell's link carries the ellipsis.
+TITLE_COLUMN: str = "max-width: 0; width: 100%"
+
+
+def property_heading(property_name: str | None, op: str, labels: dict[str, str]) -> str:
+    """The heading a suggestion's property row shows to the operator (pure).
+
+    A row names its property by the template's property ``name``
+    (``document_ref``), which is an identifier; Uwazi — and every operator — reads
+    it as the property's ``label`` ("Document Ref"), so the label wins whenever
+    the template's properties were resolved. Falls back to the name when they were
+    not (an unreachable instance, an unknown template), and to the op for a
+    whole-entity row, which has no property at all.
+    """
+    if property_name is None:
+        return op
+    if property_name == TITLE_PROPERTY:
+        return TITLE_LABELS[TITLE_PROPERTY]
+    return labels.get(property_name) or property_name
+
+
+def property_caption(property_name: str | None, labels: dict[str, str]) -> str:
+    """The raw property name shown under the heading, or ``""`` when it adds nothing (pure).
+
+    The caption is what keeps a row identifiable: "Document Ref" is readable, but
+    an operator comparing the review against a CSV still needs ``document_ref``,
+    so the name rides along — and is dropped when the heading IS the name (no
+    label resolved), where a repeat would be noise.
+    """
+    if property_name is None:
+        return ""
+    return "" if property_heading(property_name, "update", labels) == property_name else property_name
 
 
 def match_label(match: bool | None) -> str:
@@ -224,23 +283,32 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None) -> dict[str,
 
     One row per affected entity IN ONE LANGUAGE (the table is the
     checkbox-selection surface the bulk Run action reads), aggregated from the
-    entity's suggestion rows by the store. Columns: Entity (title), Language,
-    Template, Ops, Status (runned/pending), the Run/Edit row actions, and the
-    Open-in-Uwazi link — no sharedId, no change-count columns.
+    entity's suggestion rows by the store. Columns: Entity (title, with the
+    open-in-Uwazi icon at its end), Language, Template, Ops, Status
+    (runned/pending), and the Run/Edit row actions — no sharedId, no change-count
+    columns, and no separate Uwazi column.
+
+    ``title`` is cut to :data:`TITLE_CELL_CHARS` and the untruncated text rides
+    along as ``title_full`` for the cell's tooltip: a full document title is far
+    wider than the column it sits in, and letting it size the cell is what made
+    the table overflow horizontally.
+
     ``uwazi_url`` is the controlled instance's base URL (None = unconfigured, so
     the row carries no link). ``row_key`` is the entity+language identity, so the
     same entity in two languages is two distinct checkable rows.
     """
     status_label, status_color = run_status(item)
+    title = item.entity_title or item.shared_id
     return {
         "row_key": entity_language_key(item.shared_id, item.language),
         "shared_id": item.shared_id,
-        "title": item.entity_title or item.shared_id,
+        "title": truncate(title, TITLE_CELL_CHARS),
+        "title_full": title,
         "language": item.language or "",
-        "template": ", ".join(item.template_names) or "—",
+        "template": truncate(", ".join(item.template_names) or "—", 28),
         "ops": ", ".join(item.ops),
         "op_colors": [OP_COLORS.get(op, "grey") for op in item.ops],  # used by the slot
-        "url": entity_open_url(item, uwazi_url),  # used by the Open column's slot
+        "url": entity_open_url(item, uwazi_url),  # used by the title cell's open-in-Uwazi icon
         "run_status": status_label,
         "run_status_color": status_color,  # used by the slot
     }
@@ -253,18 +321,27 @@ def accuracy_label(exact: int, mismatch: int) -> str:
 
 
 __all__ = [
+    "ACTIONS_COLUMN",
+    "LANGUAGE_COLUMN",
     "MATCH_COLORS",
     "OPENABLE_OPS",
     "OP_COLORS",
+    "OPS_COLUMN",
     "RUN_OP_PHRASES",
     "RUN_STATUS_COLORS",
+    "STATUS_COLUMN",
     "STATUS_COLORS",
+    "TEMPLATE_COLUMN",
+    "TITLE_CELL_CHARS",
+    "TITLE_COLUMN",
     "accuracy_label",
     "entity_row",
     "entity_open_url",
     "entity_language_key",
     "filter_from_controls",
     "match_label",
+    "property_caption",
+    "property_heading",
     "prune_selection",
     "run_button_label",
     "run_confirmation",

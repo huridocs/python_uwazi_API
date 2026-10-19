@@ -13,6 +13,7 @@ contains no business logic, matching the ``drivers/`` layer convention.
 import asyncio
 import json
 import os
+import sys
 import threading
 from collections import deque
 from pathlib import Path
@@ -246,8 +247,21 @@ def _broadcast_notify(message: str, type: str = "positive", **kwargs: Any) -> No
 
 
 def _notify_error(title: str, detail: str, type_: str = "negative") -> None:
-    """Short headline toast; the full detail lives in the run's error dialog."""
+    """Short headline toast; the full detail lives in the run's error dialog.
+
+    Also LOGS. Every failure toast is raised from inside an ``except`` block of a
+    NiceGUI background task, whose exceptions never reach the uvicorn error
+    handler — so without this the container terminal stayed silent and the only
+    trace of a failed generation was a toast that vanished with the page. Loguru
+    writes to stderr (the ``docker logs`` stream) AND to the ring buffer behind the
+    in-app Logs dialog, and ``logger.exception`` attaches the traceback while one
+    is active, which is what makes the failure debuggable from the terminal alone.
+    """
     first_line = (detail or "").strip().splitlines()[0] if (detail or "").strip() else title
+    if sys.exc_info()[0] is not None:
+        logger.exception("{}: {}", title, detail)
+    else:
+        logger.error("{}: {}", title, detail)
     _broadcast_notify(title, type=type_, caption=first_line)
 
 

@@ -81,6 +81,17 @@ def test_value_in_language_passes_a_language_independent_value_through() -> None
     assert value_in_language(TRANSLATION_VALUE, None) == TRANSLATION_VALUE
 
 
+def test_value_in_language_reads_an_untagged_value_as_the_rows_own() -> None:
+    """Uwazi stores one value per entity-language ROW, with no ``language`` tag.
+
+    The ``locale`` cookie already picked the row, so the whole list IS this
+    language's value. Narrowing it against a tag no entry carries would report
+    every real text row as "new" instead of comparing it.
+    """
+    assert value_in_language([{"value": "A/HRC/37/NGO/9 ES"}], "es") == [{"value": "A/HRC/37/NGO/9 ES"}]
+    assert value_in_language(["A/HRC/37/NGO/9 ES"], "es") == ["A/HRC/37/NGO/9 ES"]
+
+
 # --- records_to_suggestions --------------------------------------------------
 
 

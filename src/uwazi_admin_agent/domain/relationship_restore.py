@@ -108,11 +108,43 @@ class InboundRef(BaseModel):
         default=None,
         description="The deleted entity's template id — the property `content` filter for name resolution.",
     )
+    existing_language: str | None = Field(
+        default=None,
+        description=(
+            "The still-existing entity's ROW language, read from the hub row's embedded "
+            "`entityData.language`. A sharedId can have one row per configured language "
+            "(Uwazi multilingual entities), and both the inbound-ref restore (which "
+            "`save_raw`s this entity) and post-revert verification must target the SAME "
+            "row the ref was captured on — otherwise the write/save lands on the wrong "
+            "locale or the verification compares two different rows. None when the hub row "
+            "carries no `entityData.language`."
+        ),
+    )
 
 
 def _endpoint_ids(rows: list[dict[str, Any]]) -> set[str]:
     """The set of endpoint sharedIds in a hub's relation rows."""
     return {str(r["entity"]) for r in rows if isinstance(r, dict) and r.get("entity") is not None}
+
+
+def _row_language(rows: list[dict[str, Any]], shared_id: str) -> str | None:
+    """The row language of ``shared_id`` as embedded in a hub's relation rows.
+
+    ``getByDocument`` → ``processRelationshipCollection`` spreads the connected
+    entity onto each row as ``entityData``, which carries that row's own
+    ``language`` — the only place a still-existing endpoint's language is
+    available without an extra fetch (these entities are NOT in the manifest, so
+    they have no recorded :class:`EntityIdentity`). None when the row carries no
+    ``entityData``/``language``.
+    """
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("entity")) != str(shared_id):
+            continue
+        data = row.get("entityData")
+        language = data.get("language") if isinstance(data, dict) else None
+        if isinstance(language, str) and language:
+            return language
+    return None
 
 
 def _split_from_to(rows: list[dict[str, Any]]) -> tuple[str | None, str | None, str | None]:
@@ -250,7 +282,10 @@ def extract_inbound_refs_from_existing(
     itself in the manifest (modified/deleted/created) — those stale-id cases are
     a documented limitation, out of scope for this restore. Dedups by
     ``(existing, deleted, relation_type)`` (the same hub appears in both
-    endpoints' snapshots). Pure: reads snapshot.raw without mutating it.
+    endpoints' snapshots). Each ref also carries ``existing_language``, read from
+    the hub row's embedded ``entityData.language``, so the restore targets the
+    right locale row on a multilingual (one-row-per-language) entity. Pure:
+    reads snapshot.raw without mutating it.
     """
     deleted_ids = {str(sid) for sid in deleted_ids}
     excluded = {str(sid) for sid in (excluded_existing or set())}
@@ -292,6 +327,7 @@ def extract_inbound_refs_from_existing(
                 deleted_shared_id=to_sid,
                 relation_type=rel_type,
                 deleted_template_id=deleted_template_id if isinstance(deleted_template_id, str) else None,
+                existing_language=_row_language(rows, from_sid),
             )
         )
     return refs

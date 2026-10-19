@@ -2,6 +2,12 @@
 
 Pure: literal :class:`Suggestion` lists in, payload dicts out. No mocks, no I/O,
 no instance.
+
+The grouping is per (entity, LANGUAGE) because that is what Uwazi stores: a
+translation is a separate entity-language row, selected by the write's ``locale``
+cookie, and a text property holds ONE value entry on that row. The tests below
+therefore state the two rules that a per-language Run depends on — one payload
+per row, and one value entry per payload — alongside the per-entity rules.
 """
 
 import pytest
@@ -9,13 +15,17 @@ import pytest
 from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, Suggestion, SuggestionStatus
 from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
     ApplyRefusedError,
+    ApplyWriteError,
     build_apply_creates,
     build_apply_updates,
     effective_value,
-    merge_language_value,
+    format_write_failures,
+    language_groups,
+    language_scoped_value,
     partition_for_apply,
     pushable_rows,
     stamp_language,
+    write_failures,
 )
 
 
@@ -127,8 +137,8 @@ def test_groups_rows_by_shared_id_into_one_payload() -> None:
         ]
     )
     assert updates == [
-        {"shared_id": "s1", "metadata": {"excerpt": "e", "topic": ["t"]}},
-        {"shared_id": "s2", "metadata": {"excerpt": "other"}},
+        {"shared_id": "s1", "language": None, "metadata": {"excerpt": "e", "topic": ["t"]}},
+        {"shared_id": "s2", "language": None, "metadata": {"excerpt": "other"}},
     ]
 
 
@@ -150,7 +160,7 @@ def test_title_row_becomes_a_top_level_title_field() -> None:
             _s(shared_id="s1", property_name="excerpt", proposed="e"),
         ]
     )
-    assert updates == [{"shared_id": "s1", "metadata": {"excerpt": "e"}, "title": "New Title"}]
+    assert updates == [{"shared_id": "s1", "language": None, "metadata": {"excerpt": "e"}, "title": "New Title"}]
 
 
 def test_no_title_key_when_there_is_no_title_row() -> None:
@@ -180,11 +190,16 @@ def test_subset_restricts_the_payload() -> None:
     assert [u["shared_id"] for u in updates] == ["b"]
 
 
-# --- per-language payloads ---------------------------------------------------
+# --- one payload per entity-language ROW --------------------------------------
 
 
-def test_two_checked_languages_of_one_property_merge_into_one_value_list() -> None:
-    """A property holds one value PER LANGUAGE: checking both writes both, not the last."""
+def test_two_checked_languages_of_one_property_are_two_payloads() -> None:
+    """One payload per ROW: Uwazi stores a translation as a separate entity row.
+
+    Merging the two halves into ONE payload carrying a two-entry value list is
+    what Uwazi refuses with *"Text Property only accepts a single value."* — the
+    review then reported a completed Run over an entity it never changed.
+    """
     rows = [
         _s(language="es", proposed=[{"value": "hola", "language": "es"}]),
         _s(language="en", proposed=[{"value": "hello", "language": "en"}]),
@@ -192,10 +207,9 @@ def test_two_checked_languages_of_one_property_merge_into_one_value_list() -> No
 
     updates = build_apply_updates(rows, [("s1", "es"), ("s1", "en")])
 
-    assert updates[0]["metadata"]["excerpt"] == [
-        {"value": "hola", "language": "es"},
-        {"value": "hello", "language": "en"},
-    ]
+    assert [(u["shared_id"], u["language"]) for u in updates] == [("s1", "es"), ("s1", "en")]
+    assert updates[0]["metadata"]["excerpt"] == [{"value": "hola", "language": "es"}]
+    assert updates[1]["metadata"]["excerpt"] == [{"value": "hello", "language": "en"}]
 
 
 def test_one_checked_language_writes_only_that_language() -> None:
@@ -206,34 +220,53 @@ def test_one_checked_language_writes_only_that_language() -> None:
 
     updates = build_apply_updates(rows, [("s1", "es")])
 
+    assert len(updates) == 1
+    assert updates[0]["language"] == "es"
     assert updates[0]["metadata"]["excerpt"] == [{"value": "hola", "language": "es"}]
 
 
-# --- merge_language_value ----------------------------------------------------
-
-
-def test_merge_keeps_the_other_languages_already_in_the_entity() -> None:
-    """The whole point: writing es must not delete the en already in Uwazi."""
-    current = [{"value": "hello", "language": "en"}, {"value": "hola", "language": "es"}]
-    proposed = [{"value": "hola nuevo", "language": "es"}]
-
-    assert merge_language_value(current, proposed) == [
-        {"value": "hello", "language": "en"},
-        {"value": "hola nuevo", "language": "es"},
+def test_a_multi_language_proposal_collapses_to_the_rows_own_entry() -> None:
+    """A single row carrying both languages still writes ONE entry — its own."""
+    rows = [
+        _s(
+            language="es",
+            proposed=[
+                {"value": "hola", "language": "es"},
+                {"value": "hello", "language": "en"},
+            ],
+        )
     ]
 
+    updates = build_apply_updates(rows)
 
-def test_merge_adds_the_language_the_entity_did_not_have() -> None:
-    assert merge_language_value([{"value": "hello", "language": "en"}], [{"value": "hola", "language": "es"}]) == [
-        {"value": "hello", "language": "en"},
-        {"value": "hola", "language": "es"},
-    ]
+    assert updates[0]["metadata"]["excerpt"] == [{"value": "hola", "language": "es"}]
 
 
-def test_merge_replaces_a_language_independent_value_wholesale() -> None:
+# --- language_scoped_value ----------------------------------------------------
+
+
+def test_language_scoped_value_keeps_the_languages_own_entry() -> None:
+    """The point: writing es must send ONE entry — the entity's en row is another row."""
+    value = [{"value": "hello", "language": "en"}, {"value": "hola", "language": "es"}]
+
+    assert language_scoped_value(value, "es") == [{"value": "hola", "language": "es"}]
+
+
+def test_language_scoped_value_never_widens_a_value_list() -> None:
+    assert len(language_scoped_value([{"value": "a", "language": "en"}, {"value": "b", "language": "es"}], "es")) == 1
+
+
+def test_language_scoped_value_falls_back_to_the_first_entry() -> None:
+    """A row naming a language the value does not carry still stores one entry."""
+    assert language_scoped_value([{"value": "hello", "language": "en"}], "de") == [{"value": "hello", "language": "en"}]
+    assert language_scoped_value([{"value": "hola", "language": "es"}], None) == [{"value": "hola", "language": "es"}]
+
+
+def test_language_scoped_value_leaves_a_language_independent_value_alone() -> None:
     """A select is not a language list: Uwazi replaces it whole, which is the proposal's meaning."""
-    assert merge_language_value("Open", "Closed") == "Closed"
-    assert merge_language_value(None, [{"value": "x", "language": "es"}]) == [{"value": "x", "language": "es"}]
+    assert language_scoped_value("Open", "es") == [{"value": "Open", "language": "es"}]
+    assert language_scoped_value([{"label": "T1", "value": "t1"}], "es") == [{"label": "T1", "value": "t1"}]
+    assert language_scoped_value({"label": "S", "url": "u"}, None) == {"label": "S", "url": "u"}
 
 
 def test_list_values_pass_through_unchanged() -> None:
@@ -286,10 +319,10 @@ def test_metadata_key_order_follows_row_order() -> None:
 def test_create_rows_never_become_update_payloads() -> None:
     """A create's sharedId is a ``dry-created-N`` placeholder Uwazi has never seen.
 
-    Enriching an update payload reads that entity's raw to resolve its template
-    and its other languages, so a create reaching this grouping aborted the whole
-    Run with ``get_raw_by_shared_id(dry-created-0) failed (404)`` before a single
-    entity was created. Creates are grouped by :func:`build_apply_creates` only.
+    Enriching an update payload reads that entity's raw to resolve its template,
+    so a create reaching this grouping aborted the whole Run with
+    ``get_raw_by_shared_id(dry-created-0) failed (404)`` before a single entity was
+    created. Creates are grouped by :func:`build_apply_creates` only.
     """
     rows = [
         _s(shared_id="dry-created-0", op="create", property_name="excerpt", proposed="e", template_name="DOCUMENT"),
@@ -304,8 +337,20 @@ def test_create_rows_never_become_update_payloads() -> None:
     ]
     assert build_apply_updates(rows) == []
     assert build_apply_creates(rows) == [
-        {"title": "Created", "template_name": "DOCUMENT", "metadata": {"excerpt": "e"}},
-        {"title": "", "template_name": "DOCUMENT", "metadata": {"excerpt": "f"}},
+        {
+            "title": "Created",
+            "template_name": "DOCUMENT",
+            "metadata": {"excerpt": "e"},
+            "language": None,
+            "source_shared_id": "dry-created-0",
+        },
+        {
+            "title": "",
+            "template_name": "DOCUMENT",
+            "metadata": {"excerpt": "f"},
+            "language": None,
+            "source_shared_id": "dry-created-1",
+        },
     ]
 
 
@@ -324,11 +369,17 @@ def test_update_and_create_rows_group_into_disjoint_payload_sets() -> None:
     ]
     assert [u["shared_id"] for u in build_apply_updates(rows)] == ["s1"]
     assert build_apply_creates(rows) == [
-        {"title": "Created", "template_name": "DOCUMENT", "metadata": {"excerpt": "new value"}}
+        {
+            "title": "Created",
+            "template_name": "DOCUMENT",
+            "metadata": {"excerpt": "new value"},
+            "language": None,
+            "source_shared_id": "dry-created-0",
+        }
     ]
 
 
-def test_create_rows_merge_their_languages_into_one_payload() -> None:
+def test_create_rows_become_one_payload_per_language() -> None:
     rows = [
         _s(
             shared_id="dry-created-0",
@@ -346,9 +397,9 @@ def test_create_rows_merge_their_languages_into_one_payload() -> None:
         ),
     ]
     creates = build_apply_creates(rows, [("dry-created-0", "es"), ("dry-created-0", "en")])
-    assert creates[0]["metadata"]["excerpt"] == [
-        {"value": "hola", "language": "es"},
-        {"value": "hello", "language": "en"},
+    assert [(c["language"], c["metadata"]["excerpt"]) for c in creates] == [
+        ("es", [{"value": "hola", "language": "es"}]),
+        ("en", [{"value": "hello", "language": "en"}]),
     ]
 
 
@@ -364,10 +415,9 @@ def test_a_create_without_a_template_is_refused() -> None:
 def test_a_scalar_value_is_written_with_the_row_language() -> None:
     """A bare text value must carry the language it is approved for.
 
-    Uwazi stores text as a list of ``{"value", "language"}`` entries and
-    REPLACES a property's whole list on update, so writing the bare scalar would
-    land a language-agnostic value: the Spanish row would overwrite the property
-    instead of joining it, and would not read back as Spanish.
+    Uwazi keeps text as a single ``{"value": ...}`` entry on the entity-language
+    ROW the write targets, so writing the bare scalar — or a value list tagged
+    with another language — would land the wrong text on the row.
     """
     updates = build_apply_updates(
         [_s(shared_id="elfd96ccepk", property_name="document_ref", proposed="A/HRC/37/NGO/92 ES", language="es")]
@@ -411,16 +461,16 @@ def test_the_title_is_never_stamped() -> None:
     assert "metadata" in updates[0]
 
 
-def test_two_languages_of_one_property_write_one_value_list() -> None:
-    """Checked ``es`` + ``en`` merge into ONE payload, tagged per language."""
+def test_two_languages_of_one_property_write_two_payloads() -> None:
+    """Checked ``es`` + ``en``: one payload each, targeting one entity row each."""
     rows = [
         _s(shared_id="s1", language="es", property_name="document_ref", proposed="hola"),
         _s(shared_id="s1", language="en", property_name="document_ref", proposed="hello"),
     ]
     updates = build_apply_updates(rows, [("s1", "es"), ("s1", "en")])
-    assert updates[0]["metadata"]["document_ref"] == [
-        {"value": "hola", "language": "es"},
-        {"value": "hello", "language": "en"},
+    assert [(u["language"], u["metadata"]["document_ref"]) for u in updates] == [
+        ("es", [{"value": "hola", "language": "es"}]),
+        ("en", [{"value": "hello", "language": "en"}]),
     ]
 
 
@@ -509,3 +559,122 @@ def test_partition_empty_selection() -> None:
 def test_partition_ignores_applied_rows() -> None:
     rows = [_s(shared_id="a", status=SuggestionStatus.APPLIED)]
     assert partition_for_apply(rows) == ([], [])
+
+
+# --- write_failures: the read that makes a refusal visible --------------------
+
+
+UPLOAD_422 = "Error uploading entity 422 {&#34;prettyMessage&#34;: &#34;/: Text Property only accepts a single value.&#34;}"
+
+
+def test_write_failures_reports_a_refused_update() -> None:
+    """A ``success=False`` result is the only trace of a write Uwazi rejected.
+
+    Ignoring it is what let a 422 be reported to the operator as a completed Run
+    over an entity that was never changed.
+    """
+    results = [{"shared_id": "ok", "success": True}, {"shared_id": "hq6qzufxwud", "success": False, "error": UPLOAD_422}]
+
+    assert write_failures(results) == [{"shared_id": "hq6qzufxwud", "error": UPLOAD_422}]
+
+
+def test_write_failures_reads_the_publish_summary_shape() -> None:
+    summary = {
+        "success_count": 1,
+        "failure_count": 1,
+        "rate_limited": [],
+        "permission_denied": [],
+        "not_found": [],
+        "errors": [{"shared_id": "a", "error": "not found"}],
+    }
+    assert write_failures(summary) == [{"shared_id": "a", "error": "not found"}]
+
+
+def test_write_failures_counts_a_summary_without_error_rows() -> None:
+    assert write_failures({"success_count": 1, "failure_count": 2, "errors": []}) == [
+        {"shared_id": "", "error": "2 entity/entities could not be updated"}
+    ]
+
+
+def test_write_failures_attributes_a_refused_create_to_its_placeholder() -> None:
+    """Uwazi mints no sharedId on failure, so the placeholder is the only identity."""
+    results = [{"shared_id": "", "success": False, "error": "boom"}]
+
+    assert write_failures(results, ["dry-created-3"]) == [{"shared_id": "dry-created-3", "error": "boom"}]
+
+
+def test_write_failures_is_empty_for_a_clean_result() -> None:
+    assert write_failures([{"shared_id": "a", "success": True}]) == []
+    assert write_failures({"success_count": 3, "failure_count": 0, "errors": []}) == []
+    assert write_failures([]) == []
+    assert write_failures(None) == []
+
+
+def test_write_failures_trims_uwazis_response_body() -> None:
+    """Uwazi returns the whole JSON validation dump; a toast cannot show it."""
+    failure = write_failures([{"shared_id": "a", "success": False, "error": "x" * 1000}])[0]
+
+    assert failure["error"].endswith("…")
+    assert len(failure["error"]) < 500
+
+
+def test_write_failures_falls_back_to_the_error_code() -> None:
+    assert write_failures([{"shared_id": "a", "success": False, "error_code": "RATE_LIMITED"}])[0]["error"] == (
+        "RATE_LIMITED"
+    )
+
+
+# --- format_write_failures / ApplyWriteError ----------------------------------
+
+
+def test_format_write_failures_names_each_refused_write() -> None:
+    message = format_write_failures([{"shared_id": "a", "error": "boom"}])
+
+    assert "1 write(s) refused by Uwazi" in message
+    assert "a: boom" in message
+
+
+def test_format_write_failures_caps_the_listing() -> None:
+    failures = [{"shared_id": f"s{i}", "error": "boom"} for i in range(5)]
+
+    message = format_write_failures(failures)
+
+    assert "(+2 more)" in message
+    assert "s4" not in message
+
+
+def test_apply_write_error_carries_the_failures_and_reads_as_one_line() -> None:
+    error = ApplyWriteError([{"shared_id": "a", "error": "boom"}])
+
+    assert error.failures == [{"shared_id": "a", "error": "boom"}]
+    assert "a: boom" in str(error)
+
+
+# --- language_groups: one write call per entity-language row -------------------
+
+
+def test_language_groups_splits_the_call_per_language() -> None:
+    """``locale`` picks the ROW, so both halves of a translation need two calls."""
+    payloads = [
+        {"shared_id": "s1", "language": "es"},
+        {"shared_id": "s1", "language": "en"},
+        {"shared_id": "s2", "language": "es"},
+    ]
+
+    groups = language_groups(payloads, "en")
+
+    assert [language for language, _batch in groups] == ["es", "en"]
+    assert [p["shared_id"] for p in groups[0][1]] == ["s1", "s2"]
+    assert [p["shared_id"] for p in groups[1][1]] == ["s1"]
+
+
+def test_language_groups_falls_back_to_the_run_default_and_stamps_it() -> None:
+    """The entity models declare ``language`` as a plain string, so it must be set."""
+    groups = language_groups([{"shared_id": "s1"}, {"shared_id": "s2", "language": None}], "en")
+
+    assert [language for language, _batch in groups] == ["en"]
+    assert groups[0][1][0]["language"] == "en"
+
+
+def test_language_groups_on_empty_input() -> None:
+    assert language_groups([], "en") == []

@@ -25,3 +25,19 @@ class TemplateLabelPort(ABC):
         field without caring which it is.
         """
         ...
+
+    @abstractmethod
+    def property_labels(self, template_id_or_name: str) -> dict[str, str]:
+        """Return ``{property_name: property_label}`` for one template (``{}`` if unknown).
+
+        A suggestion row names its property by the template's property NAME
+        (``document_ref``), which is an identifier, not something an operator can
+        read. The same document calls it "Document Ref" — the property's ``label``,
+        which is what every Uwazi surface shows and what the review window has to
+        show too. ``{}`` (never a partial guess) for an unknown template: the
+        caller keeps the names it already has.
+        """
+        ...
+
+
+__all__ = ["TemplateLabelPort"]

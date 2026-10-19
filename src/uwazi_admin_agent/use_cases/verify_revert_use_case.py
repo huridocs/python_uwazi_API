@@ -36,8 +36,21 @@ port (the runtime wires the shared cache) drops every cached raw the checks
 are about to fetch BEFORE fetching them — verification correctness
 outweighs cache hits (the same rationale ``ENTITY_CACHE_FRESH_SNAPSHOTS``
 documents for backups), so verification can never read through an entry our
-own writes could have made stale. The pure :func:`verify_revert` decision
-stays pure; only the fetches change.
+own writes could have made stale. The same invalidation runs again AFTER the
+fetches (in a ``finally``), because the refetch repopulated those very keys
+and verification is an audit, not a cache warm-up. The pure
+:func:`verify_revert` decision stays pure; only the fetches change.
+
+**Every fetch carries the recorded ROW language.** A sharedId can have one
+entity row per configured language (Uwazi multilingual entities), each with
+its own ``_id``, its own ``language`` and its own i18n-TRANSLATED metadata
+``label`` values. Fetching without a locale lets the server return whichever
+row it picks first (Uwazi's default locale), and comparing, say, a Spanish
+snapshot against the English row flags a false mismatch on ``_id``,
+``language`` and every translated label — on EVERY multilingual entity in
+the run. The language comes from the manifest entry (recorded from the
+snapshot at backup time) or, for the non-manifest inbound-ref endpoints, the
+hub row's embedded ``entityData.language``.
 
 Thin I/O orchestrator over the pure decisions; tested with the in-memory
 repo + store pattern.
@@ -88,8 +101,18 @@ class VerifyRevertUseCase:
         }
         fetch_keys = self._build_fetch_keys(manifest, snapshots)
         self._invalidate_checks(fetch_keys, manifest)  # invalidate-then-refetch
-        current_raws = await self._fetch_current_raws(fetch_keys)
-        deleted_file_gaps = await self._deleted_file_gaps(manifest, run_id)
+        try:
+            current_raws = await self._fetch_current_raws(fetch_keys)
+            deleted_file_gaps = await self._deleted_file_gaps(manifest, run_id)
+        finally:
+            # Drop what our refetch just re-populated. Verification is a one-shot
+            # audit, not a cache-warming read: the entities it checks are exactly the
+            # ones a NEXT task's discovery would read, and a cached raw carries the
+            # files JOIN (documents/attachments) at refetch time, so a later
+            # file-delete could read a view the cache never invalidates. Leaving the
+            # cache empty costs one fetch and keeps that window closed by
+            # construction. No-op without a wired cache port.
+            self._invalidate_checks(fetch_keys, manifest)
         result = verify_revert(manifest, snapshots, current_raws, deleted_file_gaps)
         logger.info(
             "verify run={} ok={} checked={} mismatches={} file_gaps={} relationship_gaps={}",
@@ -133,8 +156,21 @@ class VerifyRevertUseCase:
         """One still-existing entity's deleted-file restore gaps (containment)."""
         records = [r for r in manifest.deleted_files if r.shared_id == shared_id]
         expected = [await self._expected_signature(record, run_id) for record in records]
-        actual = await self._actual_signatures(shared_id)
+        actual = await self._actual_signatures(shared_id, self._records_language(records))
         return build_deleted_file_gaps(shared_id, expected, actual)
+
+    @staticmethod
+    def _records_language(records: list[Any]) -> str | None:
+        """The entity row language its deleted-file records were captured on.
+
+        Every record for one entity was read from (and will be re-uploaded to) the
+        same row, so the first known language is the row to verify against.
+        """
+        for record in records:
+            language = getattr(record, "language", None)
+            if isinstance(language, str) and language:
+                return language
+        return None
 
     async def _expected_signature(self, record: Any, run_id: str) -> FileContentSignature:
         """One record's content signature from its captured bytes (wildcard on load failure)."""
@@ -144,10 +180,10 @@ class VerifyRevertUseCase:
             return (record.kind, record.originalname, None)
         return (record.kind, record.originalname, file_digest(data))
 
-    async def _actual_signatures(self, shared_id: str) -> list[FileContentSignature]:
+    async def _actual_signatures(self, shared_id: str, language: str | None = None) -> list[FileContentSignature]:
         """The entity's CURRENT uploaded files' content signatures (wildcard on fetch failure)."""
         assert self._file_repository is not None  # guarded by _deleted_file_gaps
-        raw = await self._fetch_optional(shared_id)
+        raw = await self._fetch_optional(shared_id, language)
         if raw is None:
             return []  # the entity vanished post-revert: every expected file is a gap
         signatures: list[FileContentSignature] = []
@@ -157,7 +193,7 @@ class VerifyRevertUseCase:
             signatures.append((ref.kind, ref.originalname, digest))
         return signatures
 
-    def _invalidate_checks(self, fetch_keys: list[tuple[str, str]], manifest: Any) -> None:
+    def _invalidate_checks(self, fetch_keys: list[tuple[str, str, str | None]], manifest: Any) -> None:
         """Drop every cached raw the checks are about to fetch (no-op without a cache port).
 
         Belt-and-suspenders freshness: our writes invalidate as they happen,
@@ -168,20 +204,31 @@ class VerifyRevertUseCase:
         """
         if self._cache_control is None:
             return
-        ids = {target for _key, target in fetch_keys}
+        ids = {target for _key, target, _language in fetch_keys}
         ids.update(_distinct_file_entity_ids(manifest))
         if ids:
             self._cache_control.invalidate_entities(sorted(ids))
 
-    async def _fetch_current_raws(self, fetch_keys: list[tuple[str, str]]) -> dict[str, dict[str, Any] | None]:
+    async def _fetch_current_raws(self, fetch_keys: list[tuple[str, str, str | None]]) -> dict[str, dict[str, Any] | None]:
         """Fetch the current raw for every fetch key (``None`` if absent)."""
         current_raws: dict[str, dict[str, Any] | None] = {}
-        for key, target in fetch_keys:
-            current_raws[key] = await self._fetch_optional(target)
+        for key, target, language in fetch_keys:
+            current_raws[key] = await self._fetch_optional(target, language)
         return current_raws
 
-    def _build_fetch_keys(self, manifest: Any, snapshots: dict[str, Any]) -> list[tuple[str, str]]:
-        """The (result key, fetch target) pairs verification will read.
+    def _build_fetch_keys(self, manifest: Any, snapshots: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+        """The ``(result key, fetch target, row language)`` triples verification will read.
+
+        A sharedId can have **one row per configured language** (Uwazi multilingual
+        entities), and each row has its own ``_id``, its own ``language`` and its own
+        i18n-TRANSLATED metadata ``label`` values. A snapshot is therefore only
+        comparable against the SAME row — fetching without a language lets the server
+        return whichever row it likes first (Uwazi's default locale), and comparing the
+        Spanish snapshot against the English row flags a false mismatch on ``_id``,
+        ``language`` and every translated label. So each fetch carries the language the
+        state was recorded/reverted in: the manifest entry's ``language`` (populated
+        from the snapshot's row at backup time) for modified/deleted/created, and the
+        hub row's ``entityData.language`` for the inbound-ref endpoints.
 
         Modified/created entries are fetched by their manifest ``shared_id``. A
         **deleted** entry is fetched by its recorded ``restored_shared_id`` (the
@@ -198,14 +245,14 @@ class VerifyRevertUseCase:
         entities that are themselves manifest members are excluded (documented
         stale-id limitation).
         """
-        fetch_keys: list[tuple[str, str]] = []
+        fetch_keys: list[tuple[str, str, str | None]] = []
         for entry in manifest.modified:
-            fetch_keys.append((entry.shared_id, entry.shared_id))
+            fetch_keys.append((entry.shared_id, entry.shared_id, self._language_of(entry, snapshots)))
         for entry in manifest.deleted:
             target = entry.restored_shared_id or entry.shared_id
-            fetch_keys.append((entry.shared_id, target))
+            fetch_keys.append((entry.shared_id, target, self._language_of(entry, snapshots)))
         for entry in manifest.created:
-            fetch_keys.append((entry.shared_id, entry.shared_id))
+            fetch_keys.append((entry.shared_id, entry.shared_id, entry.language))
 
         deleted_ids = {e.shared_id for e in manifest.deleted}
         deleted_snapshots = {sid: snapshots[sid] for sid in deleted_ids if sid in snapshots}
@@ -216,20 +263,52 @@ class VerifyRevertUseCase:
         )
         inbound_refs = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=manifest_ids)
         for ref in inbound_refs:
-            fetch_keys.append((ref.existing_shared_id, ref.existing_shared_id))
+            fetch_keys.append((ref.existing_shared_id, ref.existing_shared_id, ref.existing_language))
 
         return fetch_keys
 
-    async def _fetch_optional(self, shared_id: str) -> dict[str, Any] | None:
-        """Fetch a raw by sharedId; return ``None`` if the entity is absent (deleted)."""
+    @staticmethod
+    def _language_of(entry: Any, snapshots: dict[str, Any]) -> str | None:
+        """The row language a manifest entry's before-state was captured on.
+
+        Prefers the entry's own ``language`` (recorded from the snapshot at backup
+        time), falling back to the loaded snapshot's — older manifests may predate
+        the field. None keeps the fetch language-agnostic (last resort).
+        """
+        language = getattr(entry, "language", None)
+        if isinstance(language, str) and language:
+            return language
+        snapshot = snapshots.get(entry.shared_id)
+        snapshot_language = getattr(snapshot, "language", None)
+        return snapshot_language if isinstance(snapshot_language, str) and snapshot_language else None
+
+    async def _fetch_optional(self, shared_id: str, language: str | None = None) -> dict[str, Any] | None:
+        """Fetch a raw by sharedId + row language; ``None`` if the entity is absent (deleted).
+
+        The language is passed through as the request's ``locale`` so a
+        multilingual entity resolves to the SAME row the snapshot was captured on.
+        Uwazi falls back to its default locale when that row does not exist; a
+        returned row in a different language is logged, because the comparison it
+        feeds can then never match (and the operator deserves to know the row the
+        revert targeted is gone rather than guessing from a multi-KB diff).
+        """
         try:
-            return await self._entity_repository.get_raw_by_shared_id(shared_id)
+            raw = await self._entity_repository.get_raw_by_shared_id(shared_id, language)
         except Exception:
             # A not-found entity is expected for created (revert deleted them) and
             # for a deleted-entity whose re-create failed (a mismatch the verifier
             # reports). Any other fetch error is also surfaced as "absent" so the
             # verifier flags it rather than crashing the run.
             return None
+        row_language = raw.get("language") if isinstance(raw, dict) else None
+        if language and isinstance(row_language, str) and row_language and row_language != language:
+            logger.warning(
+                "verify: sharedId={} has no {} row (server returned the {} row)",
+                shared_id,
+                language,
+                row_language,
+            )
+        return raw
 
 
 def _distinct_file_entity_ids(manifest: Any) -> list[str]:

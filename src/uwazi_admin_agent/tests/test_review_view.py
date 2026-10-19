@@ -4,14 +4,17 @@ No NiceGUI import, no I/O: the helpers are pure transforms of domain objects and
 control values, so they are testable directly.
 """
 
-from uwazi_admin_agent.domain.suggestion import EntityReviewRow, Suggestion, SuggestionStatus
+from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, EntityReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
+    TITLE_CELL_CHARS,
     accuracy_label,
     entity_language_key,
     entity_open_url,
     entity_row,
     filter_from_controls,
     match_label,
+    property_caption,
+    property_heading,
     run_confirmation,
     run_status,
     suggestion_to_row,
@@ -289,6 +292,72 @@ def test_entity_row_carries_the_open_url_only_when_there_is_one() -> None:
     assert entity_row(_entity_row(ops=["update"]), "http://localhost:3000")["url"] == "http://localhost:3000/en/entity/s1"
     assert entity_row(_entity_row(ops=["create"]), "http://localhost:3000")["url"] is None
     assert entity_row(_entity_row(ops=["update"]))["url"] is None
+
+
+# --- the title cell ------------------------------------------------------------
+
+
+def test_entity_row_trims_a_long_title_and_keeps_the_full_text() -> None:
+    """A document title is far wider than its column: cut it, keep the tooltip."""
+    title = "A/HRC/37/NGO/9 " + ("x" * 400)
+
+    row = entity_row(_entity_row(entity_title=title))
+
+    assert row["title"] == title[:TITLE_CELL_CHARS] + "…"
+    assert row["title_full"] == title
+
+
+def test_entity_row_leaves_a_short_title_untouched() -> None:
+    row = entity_row(_entity_row(entity_title="A/HRC/37/NGO/9"))
+
+    assert row["title"] == row["title_full"] == "A/HRC/37/NGO/9"
+
+
+def test_entity_row_trims_the_template_list() -> None:
+    names = ", ".join(f"TEMPLATE-{index}" for index in range(10))
+
+    row = entity_row(_entity_row(template_names=names.split(", ")))
+
+    assert len(row["template"]) < len(names)
+    assert row["template"].endswith("…")
+
+
+def test_entity_row_carries_the_url_for_the_title_cell() -> None:
+    """The link is the title cell's trailing icon now — the row still carries it."""
+    assert entity_row(_entity_row(ops=["update"]), "http://localhost:3000")["url"].endswith("/en/entity/s1")
+
+
+# --- property labels -----------------------------------------------------------
+
+
+def test_property_heading_prefers_the_templates_label() -> None:
+    """``document_ref`` is an identifier; Uwazi — and the operator — reads "Document Ref"."""
+    labels = {"document_ref": "Document Ref"}
+
+    assert property_heading("document_ref", "update", labels) == "Document Ref"
+
+
+def test_property_heading_falls_back_to_the_name_without_labels() -> None:
+    """An unreachable instance keeps the names it always showed."""
+    assert property_heading("document_ref", "update", {}) == "document_ref"
+
+
+def test_property_heading_names_a_title_change() -> None:
+    """``_title`` is the review table's synthetic name; the operator reads "Title"."""
+    assert property_heading(TITLE_PROPERTY, "update", {}) == "Title"
+
+
+def test_property_heading_names_a_whole_entity_row_by_its_op() -> None:
+    assert property_heading(None, "delete", {}) == "delete"
+
+
+def test_property_caption_keeps_the_name_beside_the_label() -> None:
+    assert property_caption("document_ref", {"document_ref": "Document Ref"}) == "document_ref"
+
+
+def test_property_caption_is_empty_when_the_heading_is_the_name() -> None:
+    assert property_caption("document_ref", {}) == ""
+    assert property_caption(None, {"document_ref": "Document Ref"}) == ""
 
 
 # --- run status --------------------------------------------------------------

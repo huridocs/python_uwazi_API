@@ -93,10 +93,12 @@ class EntityValidator:
                 label_to_id = {v.label: v.id for v in thesaurus.values}
                 valid_ids = {v.id for v in thesaurus.values}
                 parent_label_to_id = {}
+                parent_id_to_label = {}
                 parent_label_to_children: dict[str, dict[str, str]] = {}
                 for v in thesaurus.values:
                     if v.values:
                         parent_label_to_id[v.label] = v.id
+                        parent_id_to_label[v.id] = v.label
                         parent_label_to_children[v.label] = {child.label: child.id for child in v.values}
                         for child in v.values:
                             valid_ids.add(child.id)
@@ -104,10 +106,13 @@ class EntityValidator:
                     label_to_id,
                     valid_ids,
                     parent_label_to_id,
+                    parent_id_to_label,
                     parent_label_to_children,
                 )
             else:
-                label_to_id, valid_ids, parent_label_to_id, parent_label_to_children = thesauri_cache[thesaurus_id]
+                label_to_id, valid_ids, parent_label_to_id, parent_id_to_label, parent_label_to_children = thesauri_cache[
+                    thesaurus_id
+                ]
             for item in values:
                 if not isinstance(item, dict) or "value" not in item:
                     continue
@@ -116,9 +121,10 @@ class EntityValidator:
                     continue
                 parent_info = item.get("parent")
                 if isinstance(parent_info, dict):
-                    parent_label = parent_info.get("label", "")
+                    parent_label = self._parent_group_label(parent_info, parent_id_to_label)
                     if parent_label not in parent_label_to_children:
-                        raise SearchError(f"Parent group '{parent_label}' not found in thesaurus for property '{key}'")
+                        known = parent_info.get("label") or parent_info.get("value")
+                        raise SearchError(f"Parent group '{known}' not found in thesaurus for property '{key}'")
                     child_map = parent_label_to_children[parent_label]
                     if val in child_map:
                         item["value"] = child_map[val]
@@ -136,6 +142,33 @@ class EntityValidator:
                     item["value"] = label_to_id[val]
                 elif val not in valid_ids and not uuid_pattern.match(val):
                     raise SearchError(f"Value '{val}' not found in thesaurus for property '{key}'")
+
+    @staticmethod
+    def _parent_group_label(parent_info: dict, parent_id_to_label: dict[str, str]) -> str:
+        """The thesaurus label of the group a select/multiselect value sits under (pure).
+
+        Uwazi stores a group reference as ``{"value": <group uuid>, "label":
+        <display text>}`` and translates the LABEL while the uuid stays shared —
+        thesauri themselves are served untranslated, so the same group reads
+        "United Nations" in every locale. A row translated in the Uwazi UI
+        therefore carries a parent label such as "Naciones Unidas" that the
+        thesaurus does not contain, and resolving the group by that label made
+        the validator refuse the WHOLE entity — including writes that touched a
+        completely different property (a Spanish ``document_ref`` update died on
+        an unrelated ``document_type`` group).
+
+        The group's ``value`` is the authoritative identifier, so it is resolved
+        first and the label is only the fallback — which is what the
+        LLM-facing shape ``{"label": "Group: Child"}`` needs, since it carries
+        no value at all. An unresolvable group returns whatever the caller sent,
+        so the existing "not found in thesaurus" error still fires for a group
+        that genuinely does not exist.
+        """
+        parent_value = str(parent_info.get("value") or "")
+        by_value = parent_id_to_label.get(parent_value)
+        if by_value:
+            return by_value
+        return str(parent_info.get("label") or "")
 
     def _get_property_type_map(self, template_id: str) -> dict:
         template = self._template_repo.get_by_id(template_id) if self._template_repo else None

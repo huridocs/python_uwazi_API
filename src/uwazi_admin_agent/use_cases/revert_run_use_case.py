@@ -255,11 +255,19 @@ class RevertRunUseCase:
           ``saveEntityBasedReferences`` (``updateEntities=false``) rebuilds the
           outgoing hub(s) from the remapped metadata — no self-refs.
         - ``inbound_targets``: for each still-existing entity that referenced a
-          deleted entity (cascade-stripped), fetch its current raw, resolve the
-          property name on its template, append the remapped ``{value: NEW,
-          label}`` entry, and ``save_raw`` it. Grouped by existing entity so each
-          is fetched + saved once. A missing lookup port or unresolved property
-          skips that ref (logged + audited).
+          deleted entity (cascade-stripped), fetch its current raw **in the row
+          language the ref was captured on** (``InboundRef.existing_language`` —
+          a sharedId has one row per configured language), resolve the property
+          name on its template, append the remapped ``{value: NEW, label}``
+          entry, and ``save_raw`` it. Grouped by (existing entity, language) so
+          each row is fetched + saved once. A missing lookup port or unresolved
+          property skips that ref (logged + audited).
+
+        Threading the language through both the fetch and the ``save_raw`` (whose
+        ``locale`` cookie selects the written row) is what keeps the restore on
+        the right locale: without it a multilingual entity's ref is re-added to
+        whichever row the server returns first, and the row it was stripped from
+        stays broken.
         """
         id_map = {e.shared_id: e.restored_shared_id for e in manifest.deleted if e.restored_shared_id}
         await self._reapply_recreated_refs(action.recreate_targets, id_map, run_id)
@@ -273,7 +281,7 @@ class RevertRunUseCase:
                 continue
             try:
                 snapshot = self._backup_store.load_snapshot(run_id, old_sid)
-                current = await self._entity_repository.get_raw_by_shared_id(new_sid)
+                current = await self._entity_repository.get_raw_by_shared_id(new_sid, self._snapshot_language(snapshot))
             except Exception as exc:  # noqa: BLE001 - best-effort
                 self._emit_rel(run_id, failed=True, detail=f"reapply recreate {old_sid}: {exc}")
                 logger.warning("revert: reapply recreate load failed old={}: {}", old_sid, exc)
@@ -303,12 +311,17 @@ class RevertRunUseCase:
             )
             self._emit_rel(run_id, failed=True, detail="no template_property_lookup port wired")
             return
-        grouped: dict[str, list[InboundRef]] = {}
+        # Grouped by (existing entity, ROW language): a sharedId has one row per
+        # configured language (Uwazi multilingual entities) and the fetch + the
+        # subsequent save_raw must both target the row the ref was captured on —
+        # otherwise the re-added ref lands on a different locale than the one the
+        # delete cascade stripped it from. The locale cookie picks the write's row.
+        grouped: dict[tuple[str, str | None], list[InboundRef]] = {}
         for ref in inbound_targets:
-            grouped.setdefault(ref.existing_shared_id, []).append(ref)
-        for existing_sid, refs in grouped.items():
+            grouped.setdefault((ref.existing_shared_id, ref.existing_language), []).append(ref)
+        for (existing_sid, language), refs in grouped.items():
             try:
-                current = await self._entity_repository.get_raw_by_shared_id(existing_sid)
+                current = await self._entity_repository.get_raw_by_shared_id(existing_sid, language)
             except Exception as exc:  # noqa: BLE001 - best-effort
                 self._emit_rel(run_id, failed=True, detail=f"inbound fetch {existing_sid}: {exc}")
                 logger.warning("revert: inbound fetch failed existing={}: {}", existing_sid, exc)
@@ -359,6 +372,22 @@ class RevertRunUseCase:
             return title if isinstance(title, str) else ""
         except Exception:
             return ""
+
+    @staticmethod
+    def _snapshot_language(snapshot: Any) -> str | None:
+        """The row language a snapshot was captured on (falls back to the raw's own).
+
+        A sharedId can have one row per configured language (Uwazi multilingual
+        entities). Every read/save in the restore path must address the SAME row
+        the snapshot came from, so the locale is threaded through instead of being
+        left to the server's default.
+        """
+        language = getattr(snapshot, "language", None)
+        if isinstance(language, str) and language:
+            return language
+        raw = getattr(snapshot, "raw", None)
+        raw_language = raw.get("language") if isinstance(raw, dict) else None
+        return raw_language if isinstance(raw_language, str) and raw_language else None
 
     async def _resolve_property_name(self, existing_raw: dict[str, Any], ref: InboundRef) -> str | None:
         """Resolve the relationship property name on the existing entity's template."""

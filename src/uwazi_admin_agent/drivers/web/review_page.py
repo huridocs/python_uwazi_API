@@ -15,25 +15,33 @@ Scale rules this module obeys:
 - selection-driven actions resolve to an explicit (sharedId, language) id list
   read live from the table — never a Python pass over the whole set.
 
-The table's **Language** column is part of a row's identity: Uwazi stores text
-and richtext as one value PER LANGUAGE while a select or a date has none, so a
-translation task records the same entity once per language and each of those is
-its own row, checkbox and Run. A change with no language at all (a select, a
-title, a delete) is its own row labelled "—" rather than being repeated into
-every language. Running the ``es`` row writes ONLY the Spanish text: the apply
-path merges the entity's other languages back in, because Uwazi replaces a
-property's whole value list on write.
+The table's **Language** column is part of a row's identity: Uwazi keeps one
+entity-language ROW per translation (a text/richtext property holds a single
+value on it) while a select or a date has none, so a translation task records the
+same entity once per language and each of those is its own row, checkbox and Run.
+A change with no language at all (a select, a title, a delete) is its own row
+labelled "—" rather than being repeated into every language. Running the ``es``
+row writes ONLY the Spanish row: the apply path issues one write per language,
+and the ``en`` row is a different entity row this write never touches.
 
 The table's **Status** column is the Run state, per entity: "runned" once every
 recorded row of that entity is APPLIED, "pending" while any row is left (the
 label and its color come from the same aggregate the row already carries, so
 the column costs no extra query).
 
-The table's **Uwazi** column opens the entity's public page on the controlled
-instance in a NEW tab (a plain anchor, as in the results window) in the row's
-own language. It appears only for ops whose entity already exists there —
+The **Entity** column carries the open-in-Uwazi link as an icon at the END of
+the (trimmed, ellipsised) title rather than as a column of its own: a plain
+anchor opens the entity's public page on the controlled instance in a NEW tab
+(the row's own language), only for ops whose entity already exists there —
 ``update``/``delete`` — and only when ``UWAZI_URL`` is configured; the URL is
-built from the row's sharedId with no extra request.
+built from the row's sharedId with no extra request. Titles are cut in the row
+payload as well as in the cell, because a document title is unbounded and a cell
+that sizes to its content is what made the table scroll sideways.
+
+The entity window's rows are headed by the property's human LABEL ("Document
+Ref"), resolved once per template from ``/api/templates``, with the raw property
+name beneath it; nothing is resolved when the instance is unreachable, and the
+names are shown exactly as before.
 
 Write timing: the selection scan never mutates Uwazi — it runs AUTOMATICALLY
 right after generation completes (the selection script cannot call the LLM, so
@@ -63,6 +71,11 @@ run's newest prediction pass) is resolved inside the read functions, so the
 page has no attempt state to carry; the header's Spent/budget card and the
 progress poll read that same attempt, which is why they still describe the
 pass that produced the rows on screen.
+
+The header carries the controlled instance's URL as a link — the same widget the
+runs table shows — because the rows being reviewed are about to be written there,
+and every failure in a background task (generation, apply) is logged server-side
+so ``docker logs`` shows the traceback a toast cannot.
 """
 
 from __future__ import annotations
@@ -81,11 +94,19 @@ from uwazi_admin_agent.domain.suggestion import (
     SuggestionFilter,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
+    ACTIONS_COLUMN,
+    LANGUAGE_COLUMN,
     MATCH_COLORS,
+    OPS_COLUMN,
     STATUS_COLORS,
+    STATUS_COLUMN,
+    TEMPLATE_COLUMN,
+    TITLE_COLUMN,
     entity_row,
     filter_from_controls,
     match_label,
+    property_caption,
+    property_heading,
     prune_selection,
     run_button_label,
     run_confirmation,
@@ -102,6 +123,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_suggestion_counts,
     get_suggestion_entity_languages,
     get_suggestion_properties,
+    property_labels_for,
     resolve_entity_document,
     uwazi_base_url,
 )
@@ -156,6 +178,13 @@ def _build_page(run_id: str) -> None:
             ui.label(f"Review — {detail.run_id}").classes("text-h6 q-ml-sm")
             ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
         with ui.row().classes("items-center"):
+            # The controlled instance this run writes to — the same header link
+            # the runs table carries, so the operator always knows which instance
+            # the rows they are about to write belong to.
+            instance_url = uwazi_base_url()
+            if instance_url:
+                ui.icon("link", color="secondary").classes("q-mr-xs")
+                ui.link(instance_url, instance_url, new_tab=True).classes("text-white")
             ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
 
     with ui.column().classes("w-full items-center"):
@@ -449,21 +478,57 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
 def _change_table(state: dict[str, Any]) -> None:
     """The ENTITY table: one row per affected entity, with a checkbox column.
 
-    Columns: Entity (title, opens the entity window), Template, Ops, Status
-    (runned/pending), Actions (Run / Edit), and Open — a small icon that opens
-    the entity's public page on the controlled Uwazi instance in a new tab,
-    shown only for rows that already exist there (``update``/``delete``; see
-    ``entity_open_url``). No sharedId or change-count columns — the rows are
-    precomputed actions and the Run heuristic executes them.
+    Columns: Entity (the trimmed title, opening the entity window, with the
+    open-in-Uwazi icon at its end), Language, Template, Ops, Status
+    (runned/pending) and Actions (Run / Edit). No sharedId or change-count
+    columns — the rows are precomputed actions and the Run heuristic executes
+    them.
+
+    The widths are explicit (:mod:`review_view`'s column constants) and the
+    Entity column clips with an ellipsis: document titles are arbitrarily long,
+    and a cell that sizes to its content is what pushed the table wider than its
+    card and made every page a horizontal scroll.
+
+    The open-in-Uwazi link is a plain anchor at the END of the title rather than
+    its own column (see :func:`entity_open_url` for when the row carries one):
+    it is a per-row shortcut to the same entity the title already opens, and as a
+    column it cost a full column of width for a 16px icon.
     """
     columns = [
-        {"name": "title", "label": "Entity", "field": "title", "align": "left", "sortable": False},
-        {"name": "language", "label": "Language", "field": "language", "align": "left", "sortable": False},
-        {"name": "template", "label": "Template", "field": "template", "align": "left", "sortable": False},
-        {"name": "ops", "label": "Ops", "field": "ops", "align": "left", "sortable": False},
-        {"name": "run_status", "label": "Status", "field": "run_status", "align": "left", "sortable": False},
-        {"name": "actions", "label": "Actions", "field": "actions", "align": "center", "sortable": False},
-        {"name": "open", "label": "Uwazi", "field": "url", "align": "center", "sortable": False},
+        {"name": "title", "label": "Entity", "field": "title", "align": "left", "sortable": False, "style": TITLE_COLUMN},
+        {
+            "name": "language",
+            "label": "Language",
+            "field": "language",
+            "align": "left",
+            "sortable": False,
+            "style": LANGUAGE_COLUMN,
+        },
+        {
+            "name": "template",
+            "label": "Template",
+            "field": "template",
+            "align": "left",
+            "sortable": False,
+            "style": TEMPLATE_COLUMN,
+        },
+        {"name": "ops", "label": "Ops", "field": "ops", "align": "left", "sortable": False, "style": OPS_COLUMN},
+        {
+            "name": "run_status",
+            "label": "Status",
+            "field": "run_status",
+            "align": "left",
+            "sortable": False,
+            "style": STATUS_COLUMN,
+        },
+        {
+            "name": "actions",
+            "label": "Actions",
+            "field": "actions",
+            "align": "center",
+            "sortable": False,
+            "style": ACTIONS_COLUMN,
+        },
     ]
     table = ui.table(
         rows=[],
@@ -487,10 +552,24 @@ def _change_table(state: dict[str, Any]) -> None:
         '<q-td :props="props"><q-badge :color="props.row.run_status_color" '
         'class="q-mr-xs">{{ props.row.run_status }}</q-badge></q-td>',
     )
+    # The title cell: the trimmed title as the entity-window link, then the
+    # open-in-Uwazi anchor pinned at its END (not its own column). The link
+    # carries the ellipsis AND ``min-width: 0`` — inside the flex row that is what
+    # actually lets it shrink instead of widening the whole table — while the icon
+    # is ``flex: 0 0 auto`` so it never does. ``title_full`` is the uncut text for
+    # the tooltip, since the cell can only show the first ~90 characters.
     table.add_slot(
         "body-cell-title",
-        '<q-td :props="props"><a href="#" class="text-primary" '
-        "@click.prevent=\"$parent.$emit('open_entity', props.row)\">{{ props.row.title }}</a></q-td>",
+        '<q-td :props="props">'
+        '<div class="row items-center no-wrap" style="width: 100%;">'
+        '<a href="#" class="text-primary" :title="props.row.title_full" '
+        'style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;" '
+        "@click.prevent=\"$parent.$emit('open_entity', props.row)\">{{ props.row.title }}</a>"
+        '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
+        'class="q-ml-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi">'
+        '<q-icon name="open_in_new" size="15px" color="primary" /></a>'
+        "</div>"
+        "</q-td>",
     )
     table.add_slot(
         "body-cell-actions",
@@ -501,20 +580,12 @@ def _change_table(state: dict[str, Any]) -> None:
         "@click=\"$parent.$emit('edit_entity', props.row)\" />"
         "</q-td>",
     )
-    # A plain anchor (not a q-btn emit): the browser opens the entity's public
-    # page on the controlled instance in a NEW tab, leaving the review page and
-    # its selection untouched. The URL rides on the row (None -> no icon), for
-    # the same reason as the colors above.
-    table.add_slot(
-        "body-cell-open",
-        '<q-td :props="props" class="text-no-wrap">'
-        '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
-        'title="Open this entity in Uwazi"><q-icon name="open_in_new" size="16px" color="primary" /></a>'
-        "</q-td>",
-    )
     table.add_slot(
         "body-cell-language",
-        '<q-td :props="props"><q-badge v-if="props.row.language" color="teal-1" '
+        # A DARK badge: Quasar renders badge text white, so a light palette entry
+        # (``teal-1``) put white text on a near-white pill and the language was
+        # invisible. ``teal-9`` keeps the tint and restores the contrast.
+        '<q-td :props="props"><q-badge v-if="props.row.language" color="teal-9" '
         'class="q-mr-xs">{{ props.row.language }}</q-badge>'
         '<span v-else class="text-grey-6">—</span></q-td>',
     )
@@ -692,6 +763,7 @@ def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | N
         return
     title = suggestions[0].entity_title or shared_id
     label = f"{title} — {shared_id}" + (f" · {language}" if language else "")
+    labels = _property_labels(suggestions)
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
@@ -700,7 +772,7 @@ def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | N
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
                     with ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto"):
-                        _entity_suggestions(state, suggestions)
+                        _entity_suggestions(state, suggestions, labels)
                 with ui.row().classes("w-full justify-between shrink-0"):
                     with ui.row().classes("items-center"):
                         ui.button(
@@ -827,17 +899,44 @@ def _entity_header(
             ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat dense")
 
 
-def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion]) -> None:
+def _property_labels(suggestions: list[Suggestion]) -> dict[str, str]:
+    """The entity's template property labels for the window's headings (cached, best-effort).
+
+    A row names its property by the template's property ``name``
+    (``document_ref``); the operator reads it as "Document Ref". The lookup is
+    cached per (account, template) behind :func:`property_labels_for`, so it costs
+    one ``/api/templates`` read the first time a template's entity is opened and
+    nothing after. An unreachable instance yields ``{}`` and the window shows the
+    raw names — the same thing it always showed.
+    """
+    template_name = next((s.template_name for s in suggestions if s.template_name), None)
+    if not template_name:
+        return {}
+    return property_labels_for(template_name, app.storage.user.get("user") or "", app.storage.user.get("password") or "")
+
+
+def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], labels: dict[str, str] | None = None) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
     Read-only view (see the row's op, property, current and proposed values,
     and the operator's edit when one was saved via the inline editor); the
     commit happens through the header's Run button, not per-row buttons.
+
+    Each card is headed by the property's LABEL — what Uwazi calls it and what
+    the operator knows it by — with the raw property name beneath it, so a row is
+    both readable and still matchable against the template or a CSV
+    (:func:`property_heading` / :func:`property_caption`). ``labels`` is the
+    template's label map; without it the heading falls back to the raw name.
     """
+    resolved = labels or {}
     for suggestion in suggestions:
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center justify-between no-wrap"):
-                ui.label(suggestion.property_name or suggestion.op).classes("text-subtitle2")
+                with ui.column().classes("items-start no-wrap").style("min-width: 0"):
+                    ui.label(property_heading(suggestion.property_name, suggestion.op, resolved)).classes("text-subtitle2")
+                    caption = property_caption(suggestion.property_name, resolved)
+                    if caption:
+                        ui.label(caption).classes("text-caption text-grey-6")
                 ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
             if suggestion.op in ("update", "create"):
                 ui.label(f"Current: {truncate(suggestion.current_value, 200)}").classes("text-body2 text-grey-7")

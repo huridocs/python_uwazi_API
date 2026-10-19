@@ -179,8 +179,19 @@ def value_in_language(value: Any, language: str | None) -> Any:
     yields None, which the match computation reads as "new" (nothing to
     compare) rather than a difference. ``language=None`` (a language-independent
     row) gets the value untouched.
+
+    Uwazi stores a translated property as ONE entity-language ROW whose value
+    entry carries no ``language`` key (the ``locale`` cookie already picked the
+    row), so a value with no tagged entry is the row's own value and is returned
+    whole. Narrowing it against a ``language`` no entry carries would report
+    every real text row as "new" — i.e. as an addition rather than the
+    comparison it is. A value that DOES tag its entries (a recorded multi-language
+    proposal, a legacy store) keeps the per-language narrowing.
     """
     if language is None or not isinstance(value, (list, tuple)):
+        return value
+    tagged = [entry for entry in value if isinstance(entry, dict) and entry.get("language")]
+    if not tagged:
         return value
     entries = [entry for entry in value if isinstance(entry, dict) and entry.get("language") == language]
     return entries or None
