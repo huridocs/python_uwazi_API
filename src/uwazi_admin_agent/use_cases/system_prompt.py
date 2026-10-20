@@ -6,6 +6,10 @@ set of CRUD helpers + a small stdlib subset are *bound* — the script must NOT
 import them or anything else; (b) the script must discover its target set at
 runtime via ``query_entities`` rather than hardcoded ids — it is target-agnostic;
 (c) it must set ``result``; (d) it must do ONLY what the prompt asks.
+
+The static contract carries NO language list: the instance's configured
+languages are instance-specific, so :class:`GenerateScriptUseCase` appends them
+at run time (see :mod:`uwazi_admin_agent.use_cases.instance_languages`).
 """
 
 from __future__ import annotations
@@ -206,6 +210,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       pairs an id with a language, the language names the ROW to read/write
       for that same entity, not a different entity. Do not invent one id per
       language, and do not ask the operator to disambiguate language by id.
+      The instance's CONFIGURED language keys are listed in the INSTANCE
+      LANGUAGES section appended to this contract: those keys are the only
+      valid `language=` values. Never hardcode or invent a candidate list of
+      ISO codes (e.g. `CANDIDATE_LANGS`), and never write a language the
+      instance does not have.
 
   METADATA WRITE SHAPE (CRITICAL - getting this wrong makes Uwazi reject the
   create/update with a validation error and wastes an attempt. The

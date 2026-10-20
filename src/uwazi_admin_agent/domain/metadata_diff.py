@@ -36,6 +36,18 @@ class PropertyChange(BaseModel):
     changed: bool = Field(description="Whether the two formatted values differ.")
 
 
+def render_metadata_value(value: Any) -> str:
+    """Render one metadata value as display text, WITHOUT truncation (pure).
+
+    Same shape handling as :func:`format_metadata_value` (Uwazi ``{"value",
+    "label"}`` list entries, other lists/tuples, booleans, scalars) but keeps
+    the whole value. Newlines inside a text/richtext value are preserved, so a
+    caller rendering it with CSS ``white-space: pre-wrap`` shows the complete
+    paragraph instead of one clipped line.
+    """
+    return _render(value)
+
+
 def format_metadata_value(value: Any) -> str:
     """Render one metadata value (either shape) as a single display line.
 
@@ -44,9 +56,10 @@ def format_metadata_value(value: Any) -> str:
     operator reads), other lists/tuples, booleans (lowercase), and scalars.
     ``None`` renders as an em dash. Long output is truncated to
     :data:`MAX_VALUE_CHARS` with a trailing ellipsis, matching the touch-set
-    table's formatting.
+    table's formatting. Use :func:`render_metadata_value` where the FULL value
+    must be shown (the review entity window).
     """
-    text = _render(value)
+    text = render_metadata_value(value)
     return text if len(text) <= MAX_VALUE_CHARS else text[:MAX_VALUE_CHARS] + "…"
 
 
@@ -102,4 +115,10 @@ def build_property_changes(write: AppliedWrite) -> list[PropertyChange]:
     return changes
 
 
-__all__ = ["MAX_VALUE_CHARS", "PropertyChange", "build_property_changes", "format_metadata_value"]
+__all__ = [
+    "MAX_VALUE_CHARS",
+    "PropertyChange",
+    "build_property_changes",
+    "format_metadata_value",
+    "render_metadata_value",
+]

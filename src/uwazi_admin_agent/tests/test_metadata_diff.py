@@ -6,7 +6,7 @@ No I/O, no mocks: :func:`build_property_changes` and
 """
 
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
-from uwazi_admin_agent.domain.metadata_diff import build_property_changes, format_metadata_value
+from uwazi_admin_agent.domain.metadata_diff import build_property_changes, format_metadata_value, render_metadata_value
 
 
 def _write(**kwargs: object) -> AppliedWrite:
@@ -79,6 +79,14 @@ def test_format_metadata_value_shapes() -> None:
 
     truncated = format_metadata_value("x" * 201)
     assert truncated == "x" * 200 + "…"
+
+
+def test_render_metadata_value_keeps_the_whole_paragraph() -> None:
+    paragraph = "line one\nline two\n" + "x" * 500
+
+    assert render_metadata_value(paragraph) == paragraph
+    assert render_metadata_value([{"value": paragraph}]) == paragraph
+    assert render_metadata_value(None) == "—"
 
 
 def test_manifest_legacy_load_defaults_applied_writes() -> None:

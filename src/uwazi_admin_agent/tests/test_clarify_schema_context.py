@@ -8,9 +8,14 @@ validation path as the other live-wired use cases).
 """
 
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding  # noqa: F401 — import sanity
-from uwazi_admin_agent.use_cases.clarify_schema_context import fetch_schema_context, render_schema, render_template
+from uwazi_admin_agent.use_cases.clarify_schema_context import (
+    fetch_schema_context,
+    render_schema,
+    render_template,
+)
 from uwazi_agent.domain.agent_property import AgentProperty
 from uwazi_agent.domain.agent_template import AgentTemplate
+from uwazi_api.domain.language import Language
 
 
 def _template(name: str, *props: AgentProperty) -> AgentTemplate:
@@ -44,6 +49,28 @@ def test_render_schema_lists_templates_and_thesauri() -> None:
     assert "- A: x (text)" in block
     assert "THESAURI NAMES" in block
     assert "- Types" in block
+
+
+def test_render_schema_lists_configured_languages() -> None:
+    block = render_schema(
+        [],
+        [],
+        [Language(key="en", label="English", default=True), Language(key="es", label="Spanish")],
+    )
+    assert "INSTANCE LANGUAGES" in block
+    assert "- en (English) [default]" in block
+    assert "- es (Spanish)" in block
+    assert "unavailable" not in block
+
+
+def test_render_schema_language_section_distinguishes_unavailable_from_empty() -> None:
+    unavailable = render_schema([], [], None)
+    assert "INSTANCE LANGUAGES" in unavailable
+    assert "(unavailable: the instance's language list could not be read)" in unavailable
+
+    empty = render_schema([], [], [])
+    assert "- (none configured)" in empty
+    assert "unavailable" not in empty
 
 
 def test_render_schema_empty_sections_renders_none_placeholders() -> None:

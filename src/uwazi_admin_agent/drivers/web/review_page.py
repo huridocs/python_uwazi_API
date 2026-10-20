@@ -134,6 +134,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     drift_banner_time,
     entity_row,
     filter_from_controls,
+    full_value,
     match_label,
     property_caption,
     property_heading,
@@ -1135,9 +1136,9 @@ def _change_table(state: dict[str, Any]) -> None:
         '<q-td :props="props"><q-badge :color="props.row.run_status_color" '
         'class="q-mr-xs">{{ props.row.run_status }}</q-badge></q-td>',
     )
-    # The Entity cell: the sharedId as PLAIN TEXT, then the entity title as the
-    # entity-window link, then the open-in-Uwazi anchor pinned at its END (not
-    # its own column).
+    # The Entity cell: the sharedId as PLAIN TEXT, then the open-in-Uwazi icon,
+    # then the entity title as the entity-window link. The icon sits BETWEEN
+    # them (not at the END, not as its own column).
     #
     # Plain text, not links: an anchor is draggable, so a drag over it is a LINK
     # DRAG and never a text selection — that is what made the sharedId so hard
@@ -1147,26 +1148,26 @@ def _change_table(state: dict[str, Any]) -> None:
     # text: a drag ends with a click, and a click that opened the dialog would
     # throw the selection away.
     #
-    # The pair (id, space, title) shares ONE clipping wrapper, so the id stays
-    # visible and the title takes the ellipsis; ``title_full`` is the uncut
-    # title for the tooltip, since the cell can only show part of it.
+    # Three flex items: id, icon, title. The title takes the remaining width and
+    # the ellipsis (``min-width: 0`` is what lets it shrink); ``title_full`` is
+    # the uncut title for the tooltip, since the cell can only show part of it.
     table.add_slot(
         "body-cell-title",
         '<q-td :props="props">'
         '<div class="row items-center no-wrap" style="width: 100%;">'
-        '<span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; '
-        'white-space: nowrap; user-select: text;">'
-        '<span class="text-grey-7">{{ props.row.shared_id }}</span> '
-        '<span class="text-primary" style="cursor: pointer;" :title="props.row.title_full" '
+        '<span class="text-grey-7 q-mr-xs" style="flex: 0 1 auto; min-width: 0; overflow: hidden; '
+        'text-overflow: ellipsis; white-space: nowrap; user-select: text;">{{ props.row.shared_id }}</span>'
+        '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
+        'class="q-mr-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">'
+        '<q-icon name="open_in_new" size="15px" color="primary" /></a>'
+        '<span class="text-primary" style="flex: 1 1 auto; min-width: 0; overflow: hidden; '
+        'text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: text;" '
+        ':title="props.row.title_full" '
         '@click="$event => { const sel = $event.target.ownerDocument.getSelection(); '
         "if (sel && !sel.isCollapsed && sel.rangeCount && "
         "($event.target.contains(sel.getRangeAt(0).startContainer) || "
         "$event.target.contains(sel.getRangeAt(0).endContainer))) return; "
         "$parent.$emit('open_entity', props.row); }\">{{ props.row.title }}</span>"
-        "</span>"
-        '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
-        'class="q-ml-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">'
-        '<q-icon name="open_in_new" size="15px" color="primary" /></a>'
         "</div>"
         "</q-td>",
     )
@@ -1587,6 +1588,17 @@ def _property_labels(suggestions: list[Suggestion]) -> dict[str, str]:
     return property_labels_for(template_name, app.storage.user.get("user") or "", app.storage.user.get("password") or "")
 
 
+def _entity_value_label(text: str, classes: str) -> None:
+    """One value line in the entity window, rendered IN FULL (wrapped, newlines kept).
+
+    The review table truncates to keep cells on one line; the detail window must
+    not — a ten-line paragraph has to be readable there. ``pre-wrap`` preserves
+    the value's own line breaks and ``overflow-wrap`` stops a long word from
+    widening the pane.
+    """
+    ui.label(text).classes(classes).style("white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word")
+
+
 def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], labels: dict[str, str] | None = None) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
@@ -1612,10 +1624,10 @@ def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], la
                         ui.label(caption).classes("text-caption text-grey-6")
                 ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
             if suggestion.op in PROPERTY_OPS:
-                ui.label(f"Current: {truncate(suggestion.current_value, 200)}").classes("text-body2 text-grey-7")
-                ui.label(f"Proposed: {truncate(suggestion.proposed_value, 200)}").classes("text-body2")
+                _entity_value_label(f"Current: {full_value(suggestion.current_value)}", "text-body2 text-grey-7")
+                _entity_value_label(f"Proposed: {full_value(suggestion.proposed_value)}", "text-body2")
             if suggestion.edited_value is not None:
-                ui.label(f"Edited: {suggestion.edited_value}").classes("text-body2 text-teal")
+                _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
             if suggestion.merge_source_ids and not shown_merge_sources:
                 shown_merge_sources = True
                 ui.label(

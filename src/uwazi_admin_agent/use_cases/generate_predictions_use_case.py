@@ -78,29 +78,39 @@ def _extract_property(raw: dict[str, Any], property_name: str, language: str | N
 
 def _fetch_raws(
     entity_repository: EntityRepositoryPort,
-    shared_ids: set[str],
-    default_language: str,
-) -> dict[str, dict[str, Any]]:
-    """Fetch each entity's raw once, batched, through the cached repository.
+    pairs: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Fetch each ``(sharedId, language)`` raw once, batched, through the cached repository.
 
-    A failed entity is skipped (logged), never fatal: hydration is display and
-    comparison context, and a row without it still records and still runs.
+    A row must read ITS OWN language: Uwazi picks the entity-language row with
+    the ``locale`` cookie, so fetching every entity with the default language
+    made a Spanish suggestion compare against — and display — the English
+    value. The pair is the cache key for the same reason.
+
+    A failed entity/language is skipped (logged), never fatal: hydration is
+    display and comparison context, and a row without it still records and
+    still runs.
     """
-    raws: dict[str, dict[str, Any]] = {}
-    ordered = sorted(shared_ids)
+    raws: dict[tuple[str, str], dict[str, Any]] = {}
+    ordered = sorted(pairs)
     loop = asyncio.new_event_loop()
     try:
         for offset in range(0, len(ordered), EXECUTE_BATCH_SIZE):
-            for shared_id in ordered[offset : offset + EXECUTE_BATCH_SIZE]:
+            for shared_id, language in ordered[offset : offset + EXECUTE_BATCH_SIZE]:
                 try:
-                    raws[shared_id] = loop.run_until_complete(
-                        entity_repository.get_raw_by_shared_id(shared_id, default_language)
+                    raws[(shared_id, language)] = loop.run_until_complete(
+                        entity_repository.get_raw_by_shared_id(shared_id, language)
                     )
                 except Exception as exc:  # noqa: BLE001 — a missing entity is not fatal here
-                    logger.warning("prediction hydration failed for shared_id={}: {}", shared_id, exc)
+                    logger.warning("prediction hydration failed for shared_id={} language={}: {}", shared_id, language, exc)
     finally:
         loop.close()
     return raws
+
+
+def _raw_language(suggestion: Suggestion, default_language: str) -> str:
+    """The entity-language row a suggestion's current value lives on (pure)."""
+    return suggestion.language or default_language
 
 
 def _template_label(
@@ -123,6 +133,44 @@ def _template_label(
     return template_labels.label_for(value) or value
 
 
+def _apply_hydration(
+    suggestions: list[Suggestion],
+    raws: dict[tuple[str, str], dict[str, Any]],
+    default_language: str,
+    template_labels: TemplateLabelPort | None = None,
+) -> None:
+    """Fill each row from the raw of ITS OWN entity-language pair (pure).
+
+    Split out from :func:`hydrate_current_values` so the language pairing is
+    testable without I/O: ``raws`` is keyed ``(sharedId, language)`` and a
+    Spanish row reads the ``es`` raw. When Uwazi answers a missing language
+    with its default row (the raw says ``language="en"``), that value belongs
+    to another language and must not be shown as this row's current value — the
+    row is a new translation, so ``current_value`` stays ``None``.
+    """
+    for index, suggestion in enumerate(suggestions):
+        if not suggestion.shared_id or suggestion.shared_id.startswith("dry-created-"):
+            continue
+        raw = raws.get((suggestion.shared_id, _raw_language(suggestion, default_language)))
+        if raw is None:
+            continue
+        updates: dict[str, Any] = {}
+        if suggestion.property_name is not None and suggestion.op in PROPERTY_OPS:
+            raw_language = raw.get("language")
+            answered_other_row = bool(
+                suggestion.language and isinstance(raw_language, str) and raw_language != suggestion.language
+            )
+            current = None if answered_other_row else _extract_property(raw, suggestion.property_name, suggestion.language)
+            updates["current_value"] = current
+            updates["match"] = compare_values(suggestion.proposed_value, current)
+        if not suggestion.entity_title:
+            updates["entity_title"] = str(raw.get("title") or "")
+        if not suggestion.template_name:
+            updates["template_name"] = _template_label(template_labels, raw)
+        if updates:
+            suggestions[index] = suggestion.model_copy(update=updates)
+
+
 def hydrate_current_values(
     entity_repository: EntityRepositoryPort | None,
     suggestions: list[Suggestion],
@@ -132,39 +180,26 @@ def hydrate_current_values(
     """Fill each row's before-state and its display identity from the live raws.
 
     Records carry no before-state, so the pass fetches the touched entities
-    (batched, through the cached repository) and reads the same key the row
-    proposes. EVERY row that names a real entity is hydrated, not only the
-    property ones: whole-entity records (``delete``/``publish``/
-    ``set_publish_status``/``create_relationships``) carry no title and no
-    template at all, so skipping them is what left the review table showing a
-    bare sharedId and an empty Template column. Titles and template labels come
-    from the raw (the template id resolved through ``template_labels``); a
-    title/template the record already carried always wins — hydration only fills
-    the gaps. Mutates the rows in place — they are about to be persisted.
-    Module-level so other dry-run passes reuse the exact same hydration.
+    (batched, through the cached repository) — one fetch per entity-language
+    pair — and reads the same key the row proposes IN THE ROW'S language.
+    EVERY row that names a real entity is hydrated, not only the property ones:
+    whole-entity records (``delete``/``publish``/``set_publish_status``/
+    ``create_relationships``) carry no title and no template at all, so
+    skipping them is what left the review table showing a bare sharedId and an
+    empty Template column. Titles and template labels come from the raw (the
+    template id resolved through ``template_labels``); a title/template the
+    record already carried always wins — hydration only fills the gaps.
+    Mutates the rows in place — they are about to be persisted. Module-level so
+    other dry-run passes reuse the exact same hydration.
     """
     if entity_repository is None:
         return
     indexes = [index for index, s in enumerate(suggestions) if s.shared_id and not s.shared_id.startswith("dry-created-")]
     if not indexes:
         return
-    raws = _fetch_raws(entity_repository, {suggestions[index].shared_id for index in indexes}, default_language)
-    for index in indexes:
-        raw = raws.get(suggestions[index].shared_id)
-        if raw is None:
-            continue
-        suggestion = suggestions[index]
-        updates: dict[str, Any] = {}
-        if suggestion.property_name is not None and suggestion.op in PROPERTY_OPS:
-            current = _extract_property(raw, suggestion.property_name, suggestion.language)
-            updates["current_value"] = current
-            updates["match"] = compare_values(suggestion.proposed_value, current)
-        if not suggestion.entity_title:
-            updates["entity_title"] = str(raw.get("title") or "")
-        if not suggestion.template_name:
-            updates["template_name"] = _template_label(template_labels, raw)
-        if updates:
-            suggestions[index] = suggestion.model_copy(update=updates)
+    pairs = {(suggestions[index].shared_id, _raw_language(suggestions[index], default_language)) for index in indexes}
+    raws = _fetch_raws(entity_repository, pairs)
+    _apply_hydration(suggestions, raws, default_language, template_labels)
 
 
 class GeneratePredictionsUseCase:

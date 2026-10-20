@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
-from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
+from uwazi_admin_agent.domain.metadata_diff import format_metadata_value, render_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
     PROPERTY_OPS,
     TITLE_PROPERTY,
@@ -226,6 +226,17 @@ def truncate(value: Any, limit: int = 80) -> str:
     """Render any value as one display line, truncated with an ellipsis (pure)."""
     text = format_metadata_value(value)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def full_value(value: Any) -> str:
+    """Render any value in FULL, newlines preserved (pure; the entity window).
+
+    The review TABLE truncates (its cells are one line), but the entity detail
+    window must show the whole paragraph: truncating there cut text/richtext
+    values after 200 characters. Rendering is untruncated; the caller wraps the
+    label with ``white-space: pre-wrap`` so line breaks survive.
+    """
+    return render_metadata_value(value)
 
 
 # How much of an entity title the review table prints before the ellipsis. The

@@ -17,7 +17,9 @@ The model comes from the injected :class:`LlmPort` (reused from
 ``uwazi_agent``); the live :class:`AdminAgentDeps` (entity API, entity store,
 ...) is stored on the use case. The system prompt instructs the generator to
 avoid the LLM tools in the script whenever pure computation suffices, so the
-caps are a ceiling, not a quota.
+caps are a ceiling, not a quota. The instance's configured language keys are
+appended to that prompt at run time: the script must only write languages the
+instance actually has, never an invented candidate list.
 
 Not unit-tested (needs an LLM); validated by import + agent construction with a
 ``TestModel`` and by the review-table flow.
@@ -35,6 +37,7 @@ from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
+from uwazi_admin_agent.use_cases.instance_languages import fetch_instance_languages, system_prompt_with_languages
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.segmentation_tools import peek_segmentation, peek_segmentation_by_entity
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
@@ -73,8 +76,16 @@ class GenerateScriptUseCase:
         deps.extractor_agent = build_extractor_agent(self._llm.get_model())
 
     @staticmethod
-    def _build_agent(model: Model, max_output_tokens: int = LLM_MAX_OUTPUT_TOKENS) -> Agent[AdminAgentDeps, GeneratedScript]:
+    def _build_agent(
+        model: Model,
+        max_output_tokens: int = LLM_MAX_OUTPUT_TOKENS,
+        system_prompt: str = SYSTEM_PROMPT,
+    ) -> Agent[AdminAgentDeps, GeneratedScript]:
         """Construct the pydantic-ai agent (no deps/llm instance needed).
+
+        ``system_prompt`` defaults to the static contract; :meth:`execute` and
+        :meth:`repair` pass the contract plus the instance's configured
+        languages so the script never invents language keys.
 
         ``model_settings`` raises the per-call OUTPUT token budget above the
         provider default so a long script + the ``GeneratedScript`` JSON
@@ -88,7 +99,7 @@ class GenerateScriptUseCase:
         """
         return Agent(
             model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             deps_type=AdminAgentDeps,
             output_type=GeneratedScript,
             tools=[
@@ -120,9 +131,20 @@ class GenerateScriptUseCase:
             model_settings={"max_tokens": max_output_tokens},
         )
 
+    async def _system_prompt(self) -> str:
+        """The contract PLUS this instance's configured language keys.
+
+        The generator writes ``language=`` arguments, so it must know the real
+        set. Without it the model invents candidate lists of ISO codes and the
+        script plans writes into languages the instance does not have. The
+        fetch is best-effort: on failure the prompt says the list is
+        unavailable and forbids inventing one.
+        """
+        return system_prompt_with_languages(SYSTEM_PROMPT, await fetch_instance_languages(self._deps))
+
     async def execute(self, prompt: str) -> GeneratedScript:
         """Run the agent once on ``prompt`` and return the generated script."""
-        agent = self._build_agent(self._llm.get_model(), self._max_output_tokens)
+        agent = self._build_agent(self._llm.get_model(), self._max_output_tokens, await self._system_prompt())
         run = await agent.run(
             prompt,
             deps=self._deps,
@@ -152,7 +174,7 @@ class GenerateScriptUseCase:
         Reuses the discovery + generation context from the prior ``execute`` so
         the agent can fix the script without re-exploring.
         """
-        agent = self._build_agent(self._llm.get_model(), self._max_output_tokens)
+        agent = self._build_agent(self._llm.get_model(), self._max_output_tokens, await self._system_prompt())
         run = await agent.run(
             feedback,
             deps=self._deps,

@@ -12,6 +12,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     entity_open_url,
     entity_row,
     filter_from_controls,
+    full_value,
     match_label,
     property_caption,
     property_heading,
@@ -51,6 +52,14 @@ def test_truncate_renders_metadata_shapes() -> None:
 def test_truncate_appends_an_ellipsis_past_the_limit() -> None:
     assert truncate("x" * 200, limit=10) == "x" * 10 + "…"
     assert truncate("short", limit=10) == "short"
+
+
+def test_full_value_keeps_long_text_and_newlines() -> None:
+    paragraph = "\n".join(f"line {index}" for index in range(10)) + "\n" + "x" * 400
+
+    assert full_value(paragraph) == paragraph
+    assert full_value([{"value": paragraph}]) == paragraph
+    assert full_value(None) == "—"
 
 
 # --- match_label ------------------------------------------------------------

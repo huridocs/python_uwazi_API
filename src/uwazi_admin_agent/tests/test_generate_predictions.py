@@ -17,10 +17,14 @@ import pytest
 
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmPrice, LlmUsage
-from uwazi_admin_agent.domain.suggestion import PredictionAttemptStatus, SuggestionFilter, SuggestionStatus
+from uwazi_admin_agent.domain.suggestion import PredictionAttemptStatus, Suggestion, SuggestionFilter, SuggestionStatus
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmBatchResult, LlmCallResult, LlmRuntimePort
-from uwazi_admin_agent.use_cases.generate_predictions_use_case import GeneratePredictionsUseCase, _extract_property
+from uwazi_admin_agent.use_cases.generate_predictions_use_case import (
+    GeneratePredictionsUseCase,
+    _apply_hydration,
+    _extract_property,
+)
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
 from uwazi_agent.domain.agent_entity_mutation_result import AgentEntityMutationResult
@@ -197,6 +201,71 @@ def test_extract_property_reads_title_and_metadata() -> None:
     assert _extract_property(raw, "a") == [{"value": "x"}]
     assert _extract_property(raw, "missing") is None
     assert _extract_property({"metadata": "not a dict"}, "a") is None
+
+
+def test_hydration_reads_each_rows_current_value_from_its_own_language() -> None:
+    suggestions = [
+        Suggestion(
+            run_id="r",
+            attempt=1,
+            shared_id="s1",
+            op="update",
+            property_name="excerpt",
+            language="es",
+            proposed_value=[{"value": "nuevo"}],
+        ),
+        Suggestion(
+            run_id="r",
+            attempt=1,
+            shared_id="s1",
+            op="update",
+            property_name="excerpt",
+            language="en",
+            proposed_value=[{"value": "new"}],
+        ),
+        Suggestion(
+            run_id="r",
+            attempt=1,
+            shared_id="s1",
+            op="update",
+            property_name="case_status",
+            proposed_value="Closed",
+        ),
+    ]
+    raws = {
+        ("s1", "es"): {"sharedId": "s1", "language": "es", "title": "T es", "metadata": {"excerpt": [{"value": "viejo"}]}},
+        ("s1", "en"): {"sharedId": "s1", "language": "en", "title": "T en", "metadata": {"excerpt": [{"value": "old"}]}},
+    }
+
+    _apply_hydration(suggestions, raws, default_language="en")
+
+    assert suggestions[0].current_value == [{"value": "viejo"}]
+    assert suggestions[0].match is False
+    assert suggestions[1].current_value == [{"value": "old"}]
+    assert suggestions[1].match is False
+
+
+def test_hydration_does_not_use_a_fallback_row_of_another_language() -> None:
+    suggestions = [
+        Suggestion(
+            run_id="r",
+            attempt=1,
+            shared_id="s1",
+            op="update",
+            property_name="excerpt",
+            language="es",
+            proposed_value=[{"value": "nuevo"}],
+        )
+    ]
+    # Uwazi answered the missing `es` row with the default `en` one.
+    raws = {
+        ("s1", "es"): {"sharedId": "s1", "language": "en", "title": "T en", "metadata": {"excerpt": [{"value": "english"}]}},
+    }
+
+    _apply_hydration(suggestions, raws, default_language="en")
+
+    assert suggestions[0].current_value is None
+    assert suggestions[0].match is None
 
 
 # --- whole-instance pass -----------------------------------------------------

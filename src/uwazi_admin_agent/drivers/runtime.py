@@ -237,6 +237,9 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         template_mapper=api.template_mapper,
         entity_api=api,
         relationship_api=api,
+        # The clarification pass embeds the instance's configured languages so
+        # it never asks which languages exist.
+        settings_api=api,
         search_probe=search_probe,
         file_repository=file_repository,
         segmentation_repository=segmentation_repository,

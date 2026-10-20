@@ -12,10 +12,11 @@ avoids a parallel capability summary that would drift out of sync.
 
 The template carries an ``{instance_schema}`` slot: :class:`ClarifyPromptUseCase`
 replaces it at run time with the instance's REAL template + thesaurus
-definitions (fetched via the wired deps —
+definitions AND its configured languages (fetched via the wired deps —
 :mod:`uwazi_admin_agent.use_cases.clarify_schema_context`), so the agent
-resolves property/template names against the schema instead of asking "which
-property do you mean?" about names the instance already answers.
+resolves property/template names AND language keys against the instance
+instead of asking "which property do you mean?" or "which languages should I
+translate into?" about things the instance already answers.
 """
 
 from __future__ import annotations
@@ -67,4 +68,16 @@ something the schema cannot answer (desired VALUES, which entities, what to
 do with them). Do not write any script. Do not invent facts about the
 instance beyond the schema. Keep the summary concise and the questions
 focused.
+
+INSTANCE LANGUAGES (do NOT ask which languages exist):
+The INSTANCE LANGUAGES section of the schema above lists every language KEY
+the instance is configured with — those are exactly the values the `language`
+parameter accepts. When that section lists keys, NEVER ask "which languages
+does the instance support?" or state that the instance's language set is
+unknown/not visible in the schema; that set IS provided. Restate it when
+relevant. If the prompt does not say which language(s) to write to, ask that
+ONE question and offer the configured keys listed above as the concrete
+suggested answers. Never offer or suggest a language key that is not in that
+list. Only if the section explicitly says the language list is unavailable
+may you ask the operator to name the language keys themselves.
 """
