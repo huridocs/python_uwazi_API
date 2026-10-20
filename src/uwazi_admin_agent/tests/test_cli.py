@@ -39,6 +39,7 @@ def test_build_parser_help_lists_all_subcommands() -> None:
         "verify",
         "list-runs",
         "inspect-run",
+        "text-property-e2e",
     ):
         assert subcommand in help_text, f"subcommand {subcommand!r} missing from --help"
 
@@ -82,6 +83,33 @@ def test_build_parser_verify_subcommand_parses() -> None:
     args = build_parser().parse_args(["verify", "--run", "r"])
     assert args.command == "verify"
     assert args.run == "r"
+
+
+# --- text-property-e2e (the live end-to-end exercise) -----------------------
+
+
+def test_build_parser_text_property_e2e_parses() -> None:
+    """The live exercise takes its own options — it selects a template, a
+    property and a batch size, not a run name."""
+    args = build_parser().parse_args(
+        ["text-property-e2e", "--template", "DOCUMENT", "--property", "document_ref", "--entities", "4"]
+    )
+
+    assert args.command == "text-property-e2e"
+    assert args.template == "DOCUMENT"
+    assert args.property == "document_ref"
+    assert args.entities == 4
+    assert args.keep_runs is False
+
+
+def test_build_parser_text_property_e2e_defaults_to_no_explicit_scope() -> None:
+    """Without options the step resolves the template and property itself."""
+    args = build_parser().parse_args(["text-property-e2e"])
+
+    assert args.template is None
+    assert args.property is None
+    assert args.entities is None
+    assert args.keep_runs is False
 
 
 # --- list-runs DoD -----------------------------------------------------------

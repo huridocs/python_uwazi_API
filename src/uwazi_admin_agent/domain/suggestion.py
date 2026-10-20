@@ -26,7 +26,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmUsage
 
 # The ops a recorded would-be write can carry. Mirrors the dry-run recorder's
-# labels verbatim (no translation layer between the recorder and the review UI).
+# labels verbatim (no translation layer between the recorder and the review UI),
+# plus the two MERGE ops the conversion derives when a script's update/create
+# record is paired with the source deletes of a file move.
 SuggestionOp = Literal[
     "update",
     "create",
@@ -35,7 +37,18 @@ SuggestionOp = Literal[
     "unpublish",
     "set_publish_status",
     "create_relationships",
+    "update_and_delete",
+    "create_and_delete",
 ]
+
+# Ops whose table rows carry a proposed property value (and so get current-value
+# hydration, inline editing, and the update/create apply payloads).
+UPDATE_OPS: frozenset[str] = frozenset({"update", "update_and_delete"})
+CREATE_OPS: frozenset[str] = frozenset({"create", "create_and_delete"})
+PROPERTY_OPS: frozenset[str] = UPDATE_OPS | CREATE_OPS
+# A merge is ONE review row that writes a target (new or existing) and removes
+# every source in the same Run; the sources are never separate table rows.
+MERGE_OPS: frozenset[str] = frozenset({"update_and_delete", "create_and_delete"})
 
 # Synthetic property name used for a whole-entity title change on an
 # update/create record (metadata keys use their own name).
@@ -108,6 +121,14 @@ class Suggestion(BaseModel):
         description=(
             "The metadata key this row proposes (or `_title` for a title change); "
             "None for whole-entity ops (delete/publish/...)."
+        ),
+    )
+    merge_source_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "For the two merge ops (update_and_delete/create_and_delete): the source "
+            "entities the same Run deletes after writing the target. Empty for every "
+            "other op. The sources are part of THIS row's action, not separate rows."
         ),
     )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
@@ -190,6 +211,16 @@ class SuggestionFilter(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: SuggestionStatus | None = Field(default=None, description="Only rows in this status.")
+    discarded: bool | None = Field(
+        default=None,
+        description=(
+            "Only rows in this discard state: True = only DISCARDED rows, False = only rows "
+            "NOT discarded. None = no constraint. The review table's 'Discarded' filter: the "
+            "operator marks whole operations as discarded ('the end user does not want this "
+            "executed') and then works on the rest — so the filter reads both halves of that "
+            "decision, which the plain status filter cannot express."
+        ),
+    )
     op: str | None = Field(default=None, description="Only rows of this op.")
     property_name: str | None = Field(default=None, description="Only rows for this property (or '_title').")
     match: Literal["exact", "mismatch", "new"] | None = Field(
@@ -271,7 +302,10 @@ def entity_language_key(shared_id: str, language: str | None) -> str:
 
 
 __all__ = [
+    "CREATE_OPS",
     "EntityReviewRow",
+    "MERGE_OPS",
+    "PROPERTY_OPS",
     "PredictionAttempt",
     "PredictionAttemptStatus",
     "Suggestion",
@@ -279,5 +313,6 @@ __all__ = [
     "SuggestionOp",
     "SuggestionStatus",
     "TITLE_PROPERTY",
+    "UPDATE_OPS",
     "entity_language_key",
 ]

@@ -149,6 +149,37 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
+    def discard_by_filter(
+        self,
+        run_id: str,
+        attempt: int,
+        f: SuggestionFilter,
+        reason: str | None = None,
+    ) -> int:
+        """Mark every row matching the filter DISCARDED; return how many moved.
+
+        The discard is the operator's "do NOT execute this": the review table's
+        per-operation Discard action and its bulk Discard over the selection both
+        land here, with the reason the operator typed.
+
+        The rows ALREADY WRITTEN (APPLIED) keep their status: a discard says
+        what must not be executed, and un-writing what Uwazi already holds is
+        the REVERT's job. Flipping an applied row to discarded would also hide
+        it from the run's revert, which finds its rows by that status.
+        """
+        ...
+
+    @abstractmethod
+    def restore_by_filter(self, run_id: str, attempt: int, f: SuggestionFilter) -> int:
+        """Return the filter's DISCARDED rows to PENDING (undo a discard); return the count.
+
+        The counterpart of :meth:`discard_by_filter`: an operation the operator
+        marked as discarded can be brought back, and its rows become runnable
+        again. Rows in any other status are untouched.
+        """
+        ...
+
+    @abstractmethod
     def property_names(self, run_id: str, attempt: int) -> list[str]:
         """Distinct property names present in the set (the property dropdown)."""
         ...

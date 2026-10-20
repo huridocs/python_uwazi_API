@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     proposed_value TEXT,
     current_value TEXT,
     match_state INTEGER,
+    merge_source_ids TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     edited_value TEXT,
     discard_reason TEXT,
@@ -182,6 +183,13 @@ def build_where(f: SuggestionFilter, run_id: str, attempt: int) -> tuple[str, li
     if f.status is not None:
         clause.append("status = ?")
         params.append(f.status.value)
+    if f.discarded is not None:
+        # The review table's "Discarded" filter: the operator marks whole
+        # operations as discarded and then works on the rest, so the filter has
+        # to read BOTH halves of that decision (the plain status filter can only
+        # say "discarded", never "not discarded").
+        clause.append("status = ?" if f.discarded else "status != ?")
+        params.append(SuggestionStatus.DISCARDED.value)
     if f.accepted_only:
         clause.append(f"status IN ({', '.join('?' for _ in APPLYABLE_STATUSES)})")
         params.extend(APPLYABLE_STATUSES)
@@ -244,6 +252,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         proposed_value=_value_from_json(row["proposed_value"]),
         current_value=_value_from_json(row["current_value"]),
         match=None if match_state is None else bool(match_state),
+        merge_source_ids=_value_from_json(row["merge_source_ids"]) or [],
         status=SuggestionStatus(row["status"]),
         edited_value=row["edited_value"],
         discard_reason=row["discard_reason"],
@@ -295,6 +304,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
           language-independent group, so a legacy run keeps one row per entity
           (with its multi-language value shown whole) until the next planning
           pass re-records it.
+        - ``merge_source_ids`` — the source entities a merge row deletes. Legacy
+          rows read NULL, which the model turns into an empty list (no merge).
 
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
@@ -313,6 +324,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN template_name TEXT")
             if "language" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN language TEXT")
+            if "merge_source_ids" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_source_ids TEXT")
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
             # one: drop and let _INDEXES recreate it.
@@ -408,6 +421,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 _json_or_none(s.proposed_value),
                 _json_or_none(s.current_value),
                 None if s.match is None else (1 if s.match else 0),
+                _json_or_none(s.merge_source_ids) if s.merge_source_ids else None,
                 s.status.value,
                 s.edited_value,
                 s.discard_reason,
@@ -422,16 +436,17 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 """
                 INSERT INTO suggestion
                     (run_id, attempt, shared_id, entity_title, template_name, op, language, property_name,
-                     proposed_value, current_value, match_state, status, edited_value,
+                     proposed_value, current_value, match_state, merge_source_ids, status, edited_value,
                      discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''))
                 DO UPDATE SET
                     entity_title = excluded.entity_title,
                     template_name = excluded.template_name,
                     proposed_value = excluded.proposed_value,
                     current_value = excluded.current_value,
-                    match_state = excluded.match_state
+                    match_state = excluded.match_state,
+                    merge_source_ids = excluded.merge_source_ids
                 """,
                 rows,
             )
@@ -486,10 +501,12 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS discarded,
                 COUNT(DISTINCT match_state) AS verdicts,
                 SUM(CASE WHEN match_state IS NULL
-                          AND op IN ('update','create') AND proposed_value IS NOT NULL
+                          AND op IN ('update','create','update_and_delete','create_and_delete')
+                          AND proposed_value IS NOT NULL
                      THEN 1 ELSE 0 END) AS verdict_rows,
                 MAX(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS has_mismatch,
-                MAX(CASE WHEN op IN ('update','create') AND proposed_value IS NOT NULL THEN 1 ELSE 0 END)
+                MAX(CASE WHEN op IN ('update','create','update_and_delete','create_and_delete')
+                              AND proposed_value IS NOT NULL THEN 1 ELSE 0 END)
                     AS has_outcome
             FROM suggestion
             WHERE {where}
@@ -641,6 +658,64 @@ class SqliteSuggestionStore(SuggestionStorePort):
             """,
             [SuggestionStatus.PENDING.value, now, *ids, SuggestionStatus.DISCARDED.value],
         )
+
+    def discard_by_filter(
+        self,
+        run_id: str,
+        attempt: int,
+        f: SuggestionFilter,
+        reason: str | None = None,
+    ) -> int:
+        """Mark the filter's rows DISCARDED (the ones not written yet); return the count.
+
+        One statement, so the bulk Discard over a whole selection costs a single
+        UPDATE rather than a Python loop over ids. The APPLIED rows are left
+        alone on purpose: they are already in Uwazi, and a discard says what
+        must NOT be executed — un-writing is the revert's job. Flipping them
+        would also hide them from the run's revert, which finds its rows by
+        that status.
+        """
+        where, params = build_where(f, run_id, attempt)
+        cursor = self._execute(
+            f"""
+            UPDATE suggestion
+               SET status = ?, discard_reason = ?, reviewed_at = ?
+             WHERE {where} AND status != ?
+            """,
+            [
+                SuggestionStatus.DISCARDED.value,
+                reason,
+                _dt_to_text(datetime.now().astimezone()),
+                *params,
+                SuggestionStatus.APPLIED.value,
+            ],
+        )
+        logger.info("discarded {} suggestion row(s) for run={}", cursor.rowcount, run_id)
+        return int(cursor.rowcount)
+
+    def restore_by_filter(self, run_id: str, attempt: int, f: SuggestionFilter) -> int:
+        """Return the filter's DISCARDED rows to PENDING (undo a discard); return the count.
+
+        The counterpart of :meth:`discard_by_filter`: an operation the operator
+        marked as discarded goes back to the review queue. Rows in any other
+        status keep theirs, so an undo never resurrects an applied write.
+        """
+        where, params = build_where(f, run_id, attempt)
+        cursor = self._execute(
+            f"""
+            UPDATE suggestion
+               SET status = ?, discard_reason = NULL, reviewed_at = ?
+             WHERE {where} AND status = ?
+            """,
+            [
+                SuggestionStatus.PENDING.value,
+                _dt_to_text(datetime.now().astimezone()),
+                *params,
+                SuggestionStatus.DISCARDED.value,
+            ],
+        )
+        logger.info("restored {} discarded suggestion row(s) for run={}", cursor.rowcount, run_id)
+        return int(cursor.rowcount)
 
     def mark_applied_reverted(self, run_id: str) -> int:
         """Mark the run's APPLIED rows REVERTED after a revert; return the count.

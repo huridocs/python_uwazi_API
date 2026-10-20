@@ -50,6 +50,18 @@ run); Reject only sets a row status. The selection is re-read from the table on
 EVERY action (``table.selected``) — ``_reload_table`` reassigns ``table.rows``,
 so a cached selection goes stale.
 
+Discard: the operator can refuse to execute an operation — "the end user does
+not want this" — with the Discard button in the table's Actions cell (and the
+bulk Discard over the checked selection). A discard MARKS the operation's rows
+(DISCARDED, with the reason the operator typed): a Run accepts only PENDING and
+REVERTED rows, so a discarded operation is never written, and the Undo button
+brings it back to the review queue. The rows ALREADY written keep their status
+(a discard says what must not be executed; un-writing is the Revert's job), and
+the "Discarded" filter reads both halves of the decision — "discarded" (the
+refused operations) and "not discarded" (what is left to execute) — which the
+plain Status filter cannot express. The Status and Discarded filters exclude
+each other: "discarded" plus "not discarded" would be an empty table.
+
 Selection count: the action bar's Run button reads ``Run (N)``, updated on the
 table's ``selection`` event (NiceGUI's ``on_select`` — the one event Quasar's
 QTable emits for a checkbox change; ``update:selection`` is not a real event
@@ -96,9 +108,11 @@ from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
 from uwazi_admin_agent.domain.llm_budget import format_money
 from uwazi_admin_agent.domain.suggestion import (
+    PROPERTY_OPS,
     PredictionAttemptStatus,
     Suggestion,
     SuggestionFilter,
+    SuggestionStatus,
     entity_language_key,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
@@ -106,12 +120,16 @@ from uwazi_admin_agent.drivers.web.review_view import (
     DRIFT_STATUS_COLORS,
     LANGUAGE_COLUMN,
     MATCH_COLORS,
+    OP_COLORS,
     OPS_COLUMN,
     STATUS_COLORS,
     STATUS_COLUMN,
     TEMPLATE_COLUMN,
     TITLE_COLUMN,
+    bulk_discard_label,
     bulk_revert_label,
+    counterpart_filter,
+    discard_confirmation,
     drift_banner_text,
     drift_banner_time,
     entity_row,
@@ -136,6 +154,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     build_suggestion_store,
     check_drift,
     current_attempt,
+    discard_rows,
     get_drift_state,
     get_entity_rows,
     get_entity_segmentation,
@@ -147,6 +166,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     property_labels_for,
     refresh_baseline_after_run,
     resolve_entity_document,
+    restore_rows,
     revert_entities_selection,
     revert_entity_rows,
     uwazi_base_url,
@@ -189,6 +209,7 @@ def _build_page(run_id: str) -> None:
         "offset": 0,
         "total": 0,
         "status": "",
+        "discarded": "",
         "op": "",
         "property": "",
         "match": "",
@@ -201,6 +222,11 @@ def _build_page(run_id: str) -> None:
         # independent.
         "_select_all": False,
         "_excluded": set(),
+        # Set while a filter control is reset programmatically: assigning a
+        # control's value fires its own change handler, and the reset must not
+        # re-enter the filter logic (the State and Discarded filters reset each
+        # other).
+        "_suppress_filter_events": False,
     }
 
     with ui.header().classes("items-center justify-between"):
@@ -284,23 +310,32 @@ def _card(label: str, value: str, color: str = "primary") -> None:
 
 def _filter_bar(state: dict[str, Any]) -> None:
     with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
+        state["_status_select"] = (
+            ui.select(
+                {"": "any status", **{s: s for s in STATUS_COLORS}},
+                value=state["status"],
+                label="Status",
+                on_change=lambda e: _set_filter(state, "status", e.value or ""),
+            )
+            .props("dense outlined")
+            .classes("min-w-[140px]")
+        )
+        # The Discarded filter: the operator marks whole operations as discarded
+        # ("the end user does not want this executed") and then works on what is
+        # left, so the filter has to read BOTH halves of that decision — the
+        # Status dropdown above can only say "discarded", never "not discarded".
+        state["_discarded_select"] = (
+            ui.select(
+                {"": "any discard state", "no": "not discarded", "yes": "discarded"},
+                value=state["discarded"],
+                label="Discarded",
+                on_change=lambda e: _set_filter(state, "discarded", e.value or ""),
+            )
+            .props("dense outlined")
+            .classes("min-w-[160px]")
+        )
         ui.select(
-            {"": "any status", **{s: s for s in STATUS_COLORS}},
-            value=state["status"],
-            label="Status",
-            on_change=lambda e: _set_filter(state, "status", e.value or ""),
-        ).props("dense outlined").classes("min-w-[140px]")
-        ui.select(
-            {
-                "": "any op",
-                "update": "update",
-                "create": "create",
-                "delete": "delete",
-                "publish": "publish",
-                "unpublish": "unpublish",
-                "set_publish_status": "set_publish_status",
-                "create_relationships": "create_relationships",
-            },
+            {"": "any op", **{op: op for op in OP_COLORS}},
             value=state["op"],
             label="Op",
             on_change=lambda e: _set_filter(state, "op", e.value or ""),
@@ -330,14 +365,61 @@ def _filter_bar(state: dict[str, Any]) -> None:
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
+    if state.get("_suppress_filter_events"):
+        # A programmatic reset of another control (see _reset_filter_widget).
+        return
     state[key] = value
+    # The Status and the Discarded filter both speak about the discarded rows,
+    # so they exclude each other: "discarded" + "not discarded" would be an
+    # empty table nobody can read. Picking one resets the other.
+    if value:
+        other = counterpart_filter(key)
+        if other:
+            _reset_filter_widget(state, other)
     state["offset"] = 0
     _reset_global_selection(state)
     _refresh_all(state)
 
 
+def _reset_filter_widget(state: dict[str, Any], key: str) -> None:
+    """Clear one filter and its control (the two discard filters exclude each other).
+
+    Assigning a control's value fires its own change handler, which would
+    re-enter :func:`_set_filter` and refresh the table a second time — so the
+    events are suppressed while the control is reset. The filter's state is set
+    here, because the suppressed handler does not do it.
+    """
+    state[key] = ""
+    widget = state.get(f"_{key}_select")
+    if widget is None or widget.is_deleted:
+        return
+    state["_suppress_filter_events"] = True
+    try:
+        widget.value = ""
+    finally:
+        state["_suppress_filter_events"] = False
+
+
 def _reset_filters(state: dict[str, Any]) -> None:
-    state.update({"status": "", "op": "", "property": "", "match": "", "text": "", "offset": 0})
+    state.update(
+        {
+            "status": "",
+            "discarded": "",
+            "op": "",
+            "property": "",
+            "match": "",
+            "text": "",
+            "offset": 0,
+        }
+    )
+    for key in ("status", "discarded"):
+        widget = state.get(f"_{key}_select")
+        if widget is not None and not widget.is_deleted:
+            state["_suppress_filter_events"] = True
+            try:
+                widget.value = ""
+            finally:
+                state["_suppress_filter_events"] = False
     _reset_global_selection(state)
     _refresh_all(state)
 
@@ -345,6 +427,7 @@ def _reset_filters(state: dict[str, Any]) -> None:
 def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> SuggestionFilter:
     return filter_from_controls(
         status=state["status"],
+        discarded=state["discarded"],
         op=state["op"],
         property_name=state["property"],
         match=state["match"],
@@ -441,6 +524,14 @@ def _action_bar(state: dict[str, Any]) -> None:
             icon="undo",
             on_click=lambda: _revert_from_state(state),
         ).props("dense flat color=indigo")
+        # The bulk Discard: marking the checked operations as "will not be
+        # executed" one by one is not workable on a table of thousands, so the
+        # selection carries it too.
+        state["_bulk_discard_button"] = ui.button(
+            bulk_discard_label(0),
+            icon="block",
+            on_click=lambda: _discard_from_state(state),
+        ).props("dense flat color=negative")
         state["_select_all_button"] = ui.button(
             select_all_label(0, False),
             icon="select_all",
@@ -492,6 +583,120 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
         logger.exception("bulk revert failed")
         with client:
             ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+    finally:
+        with client:
+            _refresh_all(state)
+
+
+# --- discard ------------------------------------------------------------------
+
+
+def _discard_from_state(state: dict[str, Any]) -> None:
+    """Open the bulk-Discard dialog for the selection the button's count describes.
+
+    The dialog asks for the reason too: the operator discards an operation
+    because the end user does not want it executed, and WHY is worth keeping
+    with the rows (it is stored as the rows' discard reason).
+    """
+    selection, _ops = _selection_snapshot(state)
+    if not selection:
+        ui.notify("Nothing selected", type="warning")
+        return
+
+    def _submit(reason: str | None) -> None:
+        # The client is captured HERE, inside the click's slot context (the same
+        # pattern _run_rows uses): the background task starts with an empty slot
+        # stack, so every UI call it makes must re-enter the client explicitly.
+        client = context.client
+        background_tasks.create(
+            _discard_rows(state, selection, reason, client),
+            name=f"discard {state['run_id']}",
+        )
+
+    title, message = discard_confirmation(len(selection))
+    _reason_dialog(
+        message,
+        _submit,
+        title=title,
+        confirm_label="Discard",
+        reason_label="Reason (optional — why the end user does not want these executed)",
+    )
+
+
+def _discard_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
+    """Mark ONE operation as discarded (the row's own Discard button).
+
+    The operation is the table's row: an entity in one language. A translation
+    task's two languages are two operations, so discarding the ``es`` row
+    leaves the ``en`` one untouched.
+    """
+    shared_id, language = _entity_of(row)
+    pairs = [(shared_id, language)]
+
+    def _submit(reason: str | None) -> None:
+        client = context.client
+        background_tasks.create(
+            _discard_rows(state, pairs, reason, client),
+            name=f"discard {shared_id}",
+        )
+
+    _reason_dialog(
+        "Mark this operation as discarded? It will NOT be executed by a Run. The reason is stored with it.",
+        _submit,
+        title="Discard operation",
+        confirm_label="Discard",
+        reason_label="Reason (optional — why the end user does not want this executed)",
+    )
+
+
+async def _discard_rows(
+    state: dict[str, Any],
+    pairs: list[tuple[str, str | None]],
+    reason: str | None,
+    client: Any,
+) -> None:
+    """Mark the given operations as discarded, then refresh the page."""
+    try:
+        count = await asyncio.to_thread(discard_rows, state["run_id"], pairs, reason)
+        with client:
+            ui.notify(
+                f"Discarded {count} row(s) — a Run will not execute them",
+                type="positive",
+                multi_line=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+        logger.exception("discard failed")
+        with client:
+            ui.notify(f"Discard failed: {exc}", type="negative", multi_line=True)
+    finally:
+        with client:
+            _refresh_all(state)
+
+
+def _restore_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
+    """Undo the discard of ONE operation (its rows go back to pending).
+
+    No dialog: an undo only ever widens what a Run may execute, so it is the
+    safe direction — the operator can discard it again.
+    """
+    shared_id, language = _entity_of(row)
+    client = context.client
+    background_tasks.create(
+        _restore_rows(state, [(shared_id, language)], client),
+        name=f"restore {shared_id}",
+    )
+
+
+async def _restore_rows(state: dict[str, Any], pairs: list[tuple[str, str | None]], client: Any) -> None:
+    """Return the given operations' discarded rows to pending, then refresh."""
+    try:
+        count = await asyncio.to_thread(restore_rows, state["run_id"], pairs)
+        with client:
+            ui.notify(f"Restored {count} row(s) — they can be run again", type="positive")
+    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+        logger.exception("restore failed")
+        with client:
+            ui.notify(f"Restore failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
             _refresh_all(state)
@@ -856,11 +1061,11 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
 def _change_table(state: dict[str, Any]) -> None:
     """The ENTITY table: one row per affected entity, with a checkbox column.
 
-    Columns: Entity (the trimmed title, opening the entity window, with the
-    open-in-Uwazi icon at its end), Language, Template, Ops, Status
-    (runned/pending) and Actions (Run / Edit). No sharedId or change-count
-    columns — the rows are precomputed actions and the Run heuristic executes
-    them.
+    Columns: Entity (the sharedId as plain selectable text, then the title that
+    opens the entity window, with the open-in-Uwazi icon at its end), Language,
+    Template, Ops, Status (runned/pending) and Actions (Run / Edit). No
+    sharedId or change-count columns — the rows are precomputed actions and the
+    Run heuristic executes them.
 
     The widths are explicit (:mod:`review_view`'s column constants) and the
     Entity column clips with an ellipsis: document titles are arbitrarily long,
@@ -930,21 +1135,37 @@ def _change_table(state: dict[str, Any]) -> None:
         '<q-td :props="props"><q-badge :color="props.row.run_status_color" '
         'class="q-mr-xs">{{ props.row.run_status }}</q-badge></q-td>',
     )
-    # The title cell: the trimmed title as the entity-window link, then the
-    # open-in-Uwazi anchor pinned at its END (not its own column). The link
-    # carries the ellipsis AND ``min-width: 0`` — inside the flex row that is what
-    # actually lets it shrink instead of widening the whole table — while the icon
-    # is ``flex: 0 0 auto`` so it never does. ``title_full`` is the uncut text for
-    # the tooltip, since the cell can only show the first ~90 characters.
+    # The Entity cell: the sharedId as PLAIN TEXT, then the entity title as the
+    # entity-window link, then the open-in-Uwazi anchor pinned at its END (not
+    # its own column).
+    #
+    # Plain text, not links: an anchor is draggable, so a drag over it is a LINK
+    # DRAG and never a text selection — that is what made the sharedId so hard
+    # to select with the mouse (and what made the whole cell behave like a
+    # trigger). The title is a span for the same reason and opens the window
+    # through a click handler that steps aside while the operator is selecting
+    # text: a drag ends with a click, and a click that opened the dialog would
+    # throw the selection away.
+    #
+    # The pair (id, space, title) shares ONE clipping wrapper, so the id stays
+    # visible and the title takes the ellipsis; ``title_full`` is the uncut
+    # title for the tooltip, since the cell can only show part of it.
     table.add_slot(
         "body-cell-title",
         '<q-td :props="props">'
         '<div class="row items-center no-wrap" style="width: 100%;">'
-        '<a href="#" class="text-primary" :title="props.row.title_full" '
-        'style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;" '
-        "@click.prevent=\"$parent.$emit('open_entity', props.row)\">{{ props.row.title }}</a>"
+        '<span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; '
+        'white-space: nowrap; user-select: text;">'
+        '<span class="text-grey-7">{{ props.row.shared_id }}</span> '
+        '<span class="text-primary" style="cursor: pointer;" :title="props.row.title_full" '
+        '@click="$event => { const sel = $event.target.ownerDocument.getSelection(); '
+        "if (sel && !sel.isCollapsed && sel.rangeCount && "
+        "($event.target.contains(sel.getRangeAt(0).startContainer) || "
+        "$event.target.contains(sel.getRangeAt(0).endContainer))) return; "
+        "$parent.$emit('open_entity', props.row); }\">{{ props.row.title }}</span>"
+        "</span>"
         '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
-        'class="q-ml-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi">'
+        'class="q-ml-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">'
         '<q-icon name="open_in_new" size="15px" color="primary" /></a>'
         "</div>"
         "</q-td>",
@@ -959,6 +1180,16 @@ def _change_table(state: dict[str, Any]) -> None:
         "@click=\"$parent.$emit('run_entity', props.row)\" />"
         '<q-btn dense flat icon="edit" color="teal" title="Open the entity window (see/edit its rows)" '
         "@click=\"$parent.$emit('edit_entity', props.row)\" />"
+        # The discard: the operator refuses to execute this operation ("the end
+        # user does not want this"). A discarded row offers the undo instead —
+        # the same cell, one button, so the action is where the operator
+        # expects it.
+        '<q-btn v-if="props.row.discarded" dense flat icon="restore" color="orange" '
+        'title="Undo the discard — this operation goes back to the review queue" '
+        "@click=\"$parent.$emit('restore_entity', props.row)\" />"
+        '<q-btn v-else dense flat icon="block" color="negative" '
+        'title="Mark this operation as discarded — it will NOT be executed by a Run" '
+        "@click=\"$parent.$emit('discard_entity', props.row)\" />"
         "</q-td>",
     )
     table.add_slot(
@@ -977,6 +1208,8 @@ def _change_table(state: dict[str, Any]) -> None:
     )
     table.on("edit_entity", lambda e: _open_entity_window(state, *_entity_of(_row_of(e))))
     table.on("revert_entity", lambda e: _revert_entity_clicked(state, _row_of(e)))
+    table.on("discard_entity", lambda e: _discard_entity_clicked(state, _row_of(e)))
+    table.on("restore_entity", lambda e: _restore_entity_clicked(state, _row_of(e)))
     state["_table"] = table
 
     with ui.row().classes("w-full items-center justify-between"):
@@ -1085,6 +1318,10 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     if revert_button is not None and not revert_button.is_deleted:
         revert_button.text = bulk_revert_label(count)
         revert_button.set_enabled(count > 0)
+    discard_button = state.get("_bulk_discard_button")
+    if discard_button is not None and not discard_button.is_deleted:
+        discard_button.text = bulk_discard_label(count)
+        discard_button.set_enabled(count > 0)
     select_button = state.get("_select_all_button")
     if select_button is not None and not select_button.is_deleted:
         select_button.text = select_all_label(total, all_selected)
@@ -1136,16 +1373,30 @@ def _fire(dialog: Any, on_confirm: Any) -> None:
     on_confirm()
 
 
-def _reason_dialog(message: str, on_submit: Any) -> None:
-    """Confirm dialog with an optional reason (the reason feeds the revisit loop)."""
+def _reason_dialog(
+    message: str,
+    on_submit: Any,
+    *,
+    title: str = "",
+    confirm_label: str = "Discard",
+    reason_label: str = "Reason (optional — used to improve the prompt)",
+) -> None:
+    """Confirm dialog with an optional reason (the reason is stored with the rows).
+
+    The reason is not decoration: the operator discards an operation because
+    the end user does not want it executed, and WHY is kept with the rows so the
+    decision can be read back later.
+    """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+            if title:
+                ui.label(title).classes("text-h6")
             ui.label(message).classes("text-body1")
-            reason_input = ui.textarea("Reason (optional — used to improve the prompt)").classes("w-full")
+            reason_input = ui.textarea(reason_label).classes("w-full")
             with ui.row().classes("w-full justify-end"):
                 ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
                 ui.button(
-                    "Discard",
+                    confirm_label,
                     color="negative",
                     on_click=lambda: _submit_reason(dialog, reason_input, on_submit),
                 )
@@ -1179,11 +1430,14 @@ def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | N
     title = suggestions[0].entity_title or shared_id
     label = f"{title} — {shared_id}" + (f" · {language}" if language else "")
     labels = _property_labels(suggestions)
+    # A discarded operation says so in its own window too: the operator who
+    # opened it needs to know a Run will not execute its rows.
+    discarded = all(s.status is SuggestionStatus.DISCARDED for s in suggestions)
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _entity_header(state, dialog, label, shared_id, [s.op for s in suggestions], language)
+                _entity_header(state, dialog, label, shared_id, [s.op for s in suggestions], language, discarded)
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
                     with ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto"):
@@ -1301,11 +1555,14 @@ def _entity_header(
     shared_id: str,
     ops: list[str] | None = None,
     language: str | None = None,
+    discarded: bool = False,
 ) -> None:
     """The window's title row: Run this row (its language only), or Close."""
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         ui.label(label).classes("text-h6")
         with ui.row().classes("items-center no-wrap"):
+            if discarded:
+                ui.badge("discarded").props("color=negative").classes("q-mr-sm")
             ui.button(
                 "Run this row",
                 icon="play_arrow",
@@ -1344,6 +1601,7 @@ def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], la
     template's label map; without it the heading falls back to the raw name.
     """
     resolved = labels or {}
+    shown_merge_sources = False
     for suggestion in suggestions:
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center justify-between no-wrap"):
@@ -1353,11 +1611,17 @@ def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], la
                     if caption:
                         ui.label(caption).classes("text-caption text-grey-6")
                 ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
-            if suggestion.op in ("update", "create"):
+            if suggestion.op in PROPERTY_OPS:
                 ui.label(f"Current: {truncate(suggestion.current_value, 200)}").classes("text-body2 text-grey-7")
                 ui.label(f"Proposed: {truncate(suggestion.proposed_value, 200)}").classes("text-body2")
             if suggestion.edited_value is not None:
                 ui.label(f"Edited: {suggestion.edited_value}").classes("text-body2 text-teal")
+            if suggestion.merge_source_ids and not shown_merge_sources:
+                shown_merge_sources = True
+                ui.label(
+                    f"Also deletes {len(suggestion.merge_source_ids)} merged source(s): "
+                    f"{truncate(', '.join(suggestion.merge_source_ids), 200)}"
+                ).classes("text-body2 text-negative")
 
 
 def _navigate_entity(state: dict[str, Any], current: str, language: str | None, direction: int) -> None:

@@ -723,6 +723,41 @@ def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReview
     return build_suggestion_store().entity_rows(run_id, _current_attempt_number(run_id), f)
 
 
+def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:
+    """Mark the given entity-language groups' rows DISCARDED; return how many moved.
+
+    The review table's Discard action, per row and over the checked selection:
+    "the end user does not want this executed". The rows are marked, not
+    deleted — a Run skips a discarded row (it accepts only PENDING/REVERTED
+    ones), and the operator can bring the operation back with the Undo button.
+
+    The groups are addressed as ``(sharedId, language)`` pairs, the table's own
+    row identity, so discarding a translation's ``es`` row leaves its ``en``
+    sibling alone. An empty list discards nothing.
+    """
+    store = build_suggestion_store()
+    return store.discard_by_filter(
+        run_id,
+        _current_attempt_number(run_id),
+        SuggestionFilter(entity_languages=pairs),
+        reason,
+    )
+
+
+def restore_rows(run_id: str, pairs: list[tuple[str, str | None]]) -> int:
+    """Undo a discard: the groups' DISCARDED rows go back to PENDING; return the count.
+
+    The counterpart of :func:`discard_rows` — an operation the operator marked
+    as discarded becomes runnable again.
+    """
+    store = build_suggestion_store()
+    return store.restore_by_filter(
+        run_id,
+        _current_attempt_number(run_id),
+        SuggestionFilter(entity_languages=pairs),
+    )
+
+
 def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
     """Wire the apply use case over a built runtime (the Run heuristic).
 

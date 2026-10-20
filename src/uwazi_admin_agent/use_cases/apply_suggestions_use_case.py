@@ -14,7 +14,11 @@ operator's Run action executes them with this module's DETERMINISTIC HEURISTIC
 - ``delete`` rows: ``delete_entities`` through the intercept;
 - ``publish``/``unpublish``/``set_publish_status`` rows: ``set_publish_status``
   through the intercept;
-- ``create_relationships`` rows: ``create_relationships`` through the intercept.
+- ``create_relationships`` rows: ``create_relationships`` through the intercept;
+- ``update_and_delete``/``create_and_delete`` (merge) rows: the target's
+  property rows go through the update/create paths above, its sources' uploaded
+  files are moved onto the target (the same ``move_files_for_target`` flow a
+  scripted merge runs), and THEN the sources are deleted in the same Run.
 
 Every write goes through :class:`BackupIntercept`, so each affected entity is
 snapshotted BEFORE it changes — and those snapshots accumulate on the RUN'S OWN
@@ -51,7 +55,14 @@ from loguru import logger
 
 from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER_RUN
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
-from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, Suggestion, SuggestionFilter, SuggestionStatus
+from uwazi_admin_agent.domain.suggestion import (
+    CREATE_OPS,
+    TITLE_PROPERTY,
+    UPDATE_OPS,
+    Suggestion,
+    SuggestionFilter,
+    SuggestionStatus,
+)
 from uwazi_admin_agent.domain.suggestion_scoring import value_languages
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -60,6 +71,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
+from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
 from uwazi_admin_agent.use_cases.script_exec_namespace import _build_sync_crud_functions
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
@@ -68,14 +80,20 @@ from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
 # The statuses a Run pushes: an accepted proposal, or an operator-edited one.
 _PUSHABLE: tuple[SuggestionStatus, ...] = (SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED)
 
-# The op whose per-property rows the PARTIAL-UPDATE path groups. A ``create``
+# The ops whose per-property rows the PARTIAL-UPDATE path groups. A ``create``
 # also expands to property rows when recorded, but its rows carry the
 # ``dry-created-N`` placeholder sharedId — an id Uwazi has never seen — so they
 # are grouped by :func:`build_apply_creates` and written as a create. Letting one
 # reach the update path made :meth:`ApplySuggestionsUseCase._enrich` read a raw
 # that cannot exist (a 404 by design) and abort the whole Run with a raw
 # ``get_raw_by_shared_id(dry-created-0) failed (404)``.
-_UPDATE_OP: str = "update"
+#
+# ``update_and_delete``/``create_and_delete`` are the merge ops: the target's
+# rows go through the SAME update/create grouping, and the source ids ride on
+# each row (``merge_source_ids``) so :func:`merge_deletions` can issue their
+# deletes in the same Run.
+_UPDATE_OPS: frozenset[str] = UPDATE_OPS
+_CREATE_OPS: frozenset[str] = CREATE_OPS
 
 # What a Run acts on: the checked (sharedId, language) rows of the review
 # table. ``None`` (the CLI path) means the whole attempt.
@@ -288,9 +306,10 @@ def pushable_rows(suggestions: list[Suggestion], selection: EntitySelection | No
 
     Only ``ACCEPTED``/``EDITED`` rows of executable ops (``update`` rows need a
     property name; ``create``/``delete``/``publish``/``unpublish``/
-    ``set_publish_status``/``create_relationships`` rows are whole-entity).
-    ``selection`` restricts to the checked (sharedId, language) rows when given;
-    ``None`` means the whole set.
+    ``set_publish_status``/``create_relationships`` rows are whole-entity; the
+    merge ops behave as their target's op, with the source deletes carried in
+    ``merge_source_ids``). ``selection`` restricts to the checked (sharedId,
+    language) rows when given; ``None`` means the whole set.
     """
     rows: list[Suggestion] = []
     for s in suggestions:
@@ -309,12 +328,13 @@ def partition_for_apply(
 ) -> tuple[list[Suggestion], list[Suggestion]]:
     """(property_rows, whole_entity_rows) among pushable rows for the given subset (pure).
 
-    ``property_rows`` = ACCEPTED/EDITED ``update`` rows with a ``property_name``
-    — the partial-update path (``build_apply_updates`` groups them per entity).
-    ``whole_entity_rows`` = everything else pushable: rows of the whole-entity
-    ops (delete/publish/unpublish/set_publish_status/create_relationships),
-    update rows without a property, and all ``create`` rows (a create's
-    sharedId is the ``dry-created-N`` placeholder until Run mints a real one).
+    ``property_rows`` = ACCEPTED/EDITED ``update``/``update_and_delete`` rows
+    with a ``property_name`` — the partial-update path (``build_apply_updates``
+    groups them per entity). ``whole_entity_rows`` = everything else pushable:
+    rows of the whole-entity ops (delete/publish/unpublish/set_publish_status/
+    create_relationships), propertyless update rows, and all
+    ``create``/``create_and_delete`` rows (a create's sharedId is the
+    ``dry-created-N`` placeholder until Run mints a real one).
     """
     property_rows: list[Suggestion] = []
     whole_entity_rows: list[Suggestion] = []
@@ -323,11 +343,64 @@ def partition_for_apply(
             continue
         if not _selected(suggestion, selection):
             continue
-        if suggestion.op == "update" and suggestion.property_name is not None:
+        if suggestion.op in _UPDATE_OPS and suggestion.property_name is not None:
             property_rows.append(suggestion)
         else:
             whole_entity_rows.append(suggestion)
     return property_rows, whole_entity_rows
+
+
+def merge_deletions(rows: list[Suggestion]) -> list[tuple[str, list[str]]]:
+    """The merge targets and the source ids each Run deletes, in first-appearance order (pure).
+
+    Every merge row of one target carries the same ``merge_source_ids`` (the
+    target's property rows each name them so any subset of rows still describes
+    the whole action), so the pairs are deduped by target and the source order
+    is kept. A non-merge row, or a merge row without sources, contributes
+    nothing.
+    """
+    order: list[str] = []
+    sources_by_target: dict[str, list[str]] = {}
+    for row in rows:
+        if row.op not in ("update_and_delete", "create_and_delete") or not row.merge_source_ids:
+            continue
+        if row.shared_id not in sources_by_target:
+            sources_by_target[row.shared_id] = []
+            order.append(row.shared_id)
+        for source in row.merge_source_ids:
+            if source and source not in sources_by_target[row.shared_id]:
+                sources_by_target[row.shared_id].append(source)
+    return [(target, sources_by_target[target]) for target in order]
+
+
+def merge_moves(
+    merges: list[tuple[str, list[str]]],
+    failed_targets: set[str] | None = None,
+    created_ids: dict[str, str] | None = None,
+) -> list[tuple[str, list[str]]]:
+    """The file moves a Run performs for its merges, in order (pure).
+
+    Each ``(target, sources)`` from :func:`merge_deletions` becomes the
+    ``(real_target, sources)`` the file mover needs:
+
+    - a merge target written by a CREATE is still keyed by the ``dry-created-N``
+      placeholder its rows carry (a create has no real sharedId until Run), so
+      ``created_ids`` resolves it to the sharedId Uwazi minted — without this
+      the mover would fetch a target that does not exist;
+    - a target whose own write was REFUSED is dropped: the merge never
+      happened, so nothing is moved (and :func:`merge_deletions` likewise skips
+      its source deletes).
+
+    A merge with no sources contributes no move.
+    """
+    failed = failed_targets or set()
+    resolved = created_ids or {}
+    moves: list[tuple[str, list[str]]] = []
+    for target, sources in merges:
+        if not sources or target in failed:
+            continue
+        moves.append((resolved.get(target, target), list(sources)))
+    return moves
 
 
 def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[dict]:
@@ -339,8 +412,9 @@ def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelectio
     ``EDITED`` row overrides its proposal. Group and key order follow first
     appearance, so a batch is deterministic.
 
-    Only ``update`` rows with a property name enter this grouping — the ops whose
-    sharedId already identifies a real entity. ``create`` rows are property rows
+    Only ``update``/``update_and_delete`` rows with a property name enter this
+    grouping — the ops whose sharedId already identifies a real entity.
+    ``create``/``create_and_delete`` rows are property rows
     too, but their sharedId is the ``dry-created-N`` placeholder, so they are
     grouped by :func:`build_apply_creates` (which needs no existing entity to
     read) and written through ``create_entities``.
@@ -358,7 +432,7 @@ def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelectio
     grouped: dict[tuple[str, str | None], dict] = {}
     order: list[tuple[str, str | None]] = []
     for suggestion in pushable_rows(suggestions, selection):
-        if suggestion.op != _UPDATE_OP or suggestion.property_name is None:
+        if suggestion.op not in _UPDATE_OPS or suggestion.property_name is None:
             continue
         key = (suggestion.shared_id, suggestion.language)
         if key not in grouped:
@@ -407,7 +481,7 @@ def build_apply_creates(suggestions: list[Suggestion], selection: EntitySelectio
     grouped: dict[tuple[str, str | None], dict] = {}
     order: list[tuple[str, str | None]] = []
     for suggestion in pushable_rows(suggestions, selection):
-        if suggestion.op != "create":
+        if suggestion.op not in _CREATE_OPS:
             continue
         key = (suggestion.shared_id, suggestion.language)
         if key not in grouped:
@@ -484,8 +558,11 @@ class ApplySuggestionsUseCase:
         property rows group into per-(entity, language) update payloads; create
         rows group into create payloads; delete/publish/unpublish/
         set_publish_status/create_relationships rows issue their dedicated bulk
-        helper. Returns the apply run's id — an ordinary run that appears in the
-        runs table and reverts through the existing revert use case.
+        helper. A merge row (`update_and_delete`/`create_and_delete`) writes its
+        target, moves the sources' uploaded files onto it, and deletes the
+        sources — all in this Run. Returns the apply run's id — an ordinary run
+        that appears in the runs table and reverts through the existing revert
+        use case.
 
         ``selection`` is the table's checked (sharedId, language) rows, so a
         translation task writes ONLY the languages the operator checked; None
@@ -506,8 +583,22 @@ class ApplySuggestionsUseCase:
         # reaching ``updates`` would be enriched from a raw that does not
         # exist, so the two payloads are built from their own row sets.
         updates = self._enrich(build_apply_updates(rows, selection))
-        creates = build_apply_creates(rows, selection) if any(r.op == "create" for r in whole_entity_rows) else []
-        if not updates and not creates and not whole_entity_rows:
+        creates = build_apply_creates(rows, selection) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
+        # Merge rows write the target above and, in this SAME Run, delete their
+        # sources — the part that makes a merge one action instead of a target
+        # row plus N delete rows.
+        merges = merge_deletions(to_push)
+        if merges and self._file_repository is None:
+            # Refuse BEFORE any write: a merge moves the sources' files onto the
+            # target and only THEN deletes the sources, so without a file
+            # repository the deletes would destroy files the operator approved
+            # moving. Failing loudly here is the same no-loss bias the script
+            # helper keeps when it is called unwired.
+            raise ApplyRefusedError(
+                "merge rows need a wired file repository to move the sources' files before deleting them; "
+                "wire FileRepositoryPort into the runtime to run a merge"
+            )
+        if not updates and not creates and not whole_entity_rows and not merges:
             raise ApplyRefusedError("nothing to run for the selected rows")
 
         manifest = self._prepare_apply_manifest(run_id, attempt, len(to_push))
@@ -515,7 +606,7 @@ class ApplySuggestionsUseCase:
             selection_languages = {lang for _sid, lang in selection if lang}
         else:
             selection_languages = {row.language for row in to_push if row.language}
-        failures = self._write(run_id, manifest, updates, creates, whole_entity_rows, selection_languages)
+        failures = self._write(run_id, manifest, updates, creates, whole_entity_rows, selection_languages, merges)
         # A refused write changed nothing, so its rows must NOT read as applied:
         # they stay ACCEPTED and the operator can run them again. Every refusal
         # carries an identity the rows share (a real sharedId, or a create's
@@ -525,11 +616,12 @@ class ApplySuggestionsUseCase:
         written = [row for row in to_push if row.shared_id not in refused]
         self._store.set_status([row.id for row in written if row.id is not None], SuggestionStatus.APPLIED)
         logger.info(
-            "run={} pushed {} update payload(s), {} create(s), {} whole-entity row(s); {} write(s) refused",
+            "run={} pushed {} update payload(s), {} create(s), {} whole-entity row(s), {} merge(s); {} write(s) refused",
             run_id,
             len(updates),
             len(creates),
             len(whole_entity_rows),
+            len(merges),
             len(failures),
         )
         if failures:
@@ -731,6 +823,54 @@ class ApplySuggestionsUseCase:
         self._backup_store.save_manifest(run_id, manifest)
         return manifest
 
+    def _move_merge_files(self, moves: list[tuple[str, list[str]]]) -> None:
+        """Copy each merge's source files onto its target before the sources are deleted.
+
+        The apply-path twin of the script's ``move_files_to_entity``: it runs the
+        SAME :func:`move_files_for_target` flow, so a UI merge preserves uploaded
+        files exactly like the scripted one (re-upload each source document +
+        uploaded attachment, SKIP byte-identical duplicates so merging duplicate
+        entities never multiplies a shared file). ``moves`` is the pure
+        ``(real_target, sources)`` list from :func:`merge_moves`, already filtered
+        to targets whose own write landed.
+
+        Failure policy mirrors the script mover: a soft per-file failure is
+        counted + logged but does NOT stop the run (the sources are still deleted,
+        the target keeps whatever moved), while a hard port exception propagates
+        to :meth:`_write`'s handler — the run is marked FAILED and the source
+        deletes never run, so a merge whose files could not move keeps its
+        sources. A missing file repository is a no-op here; :meth:`apply` refuses
+        the Run up front instead, so this guard only serves direct ``_write``
+        callers.
+        """
+        if not moves or self._file_repository is None:
+            return
+        run = self._crud_loop.run_until_complete
+        totals = {"moved": 0, "skipped": 0, "failed": 0}
+        for target, sources in moves:
+            counts = move_files_for_target(
+                self._entity_repository,
+                self._file_repository,
+                sources,
+                target,
+                self._default_language,
+                run,
+            )
+            for key in totals:
+                totals[key] += int(counts.get(key, 0))
+            logger.info(
+                "merge file move: target={} sources={} moved={} skipped={} failed={}",
+                target,
+                len(sources),
+                counts.get("moved"),
+                counts.get("skipped"),
+                counts.get("failed"),
+            )
+        if totals["failed"]:
+            logger.warning(
+                "merge file move finished with {} un-moved file(s); their sources are still deleted", totals["failed"]
+            )
+
     def _write(
         self,
         run_id: str,
@@ -739,6 +879,7 @@ class ApplySuggestionsUseCase:
         creates: list[dict],
         whole_entity_rows: list[Suggestion],
         affected_languages: set[str] | None = None,
+        merges: list[tuple[str, list[str]]] | None = None,
     ) -> list[dict[str, str]]:
         """Execute every row kind through ONE intercepted CRUD set, batched.
 
@@ -754,6 +895,14 @@ class ApplySuggestionsUseCase:
         row: a single call carrying both halves of a translation would write the
         Spanish text onto the English row.
 
+        ``merges`` is the ``(target, source ids)`` list from
+        :func:`merge_deletions`: the target's files are moved onto it first
+        (:meth:`_move_merge_files`), then each merge's sources are deleted in the
+        SAME Run (one bulk call with every other delete). A target whose own
+        write was refused does NOT have its sources moved or deleted — the merge
+        never happened, so removing the sources would lose data the operator only
+        approved moving.
+
         Returns the REFUSED writes (see :func:`write_failures`) instead of
         swallowing them. The helpers report a Uwazi rejection as ``success=False``
         rather than by raising, so a Run that ignored their return value reported
@@ -766,6 +915,10 @@ class ApplySuggestionsUseCase:
         loop = self._crud_loop
         intercept = self._build_intercept(run_id, manifest, loop, affected_languages)
         failures: list[dict[str, str]] = []
+        failed_targets: set[str] = set()
+        # placeholder (`dry-created-N`) -> the sharedId Uwazi minted for it, so a
+        # create-merge can move files onto the entity that was actually created.
+        created_ids: dict[str, str] = {}
         try:
             decorated = intercept.decorate(crud)
             update_entities = decorated["update_entities"]
@@ -777,14 +930,29 @@ class ApplySuggestionsUseCase:
             for language, group in language_groups(updates, self._default_language):
                 for offset in range(0, len(group), EXECUTE_BATCH_SIZE):
                     batch = group[offset : offset + EXECUTE_BATCH_SIZE]
-                    failures.extend(write_failures(update_entities(batch, language)))
+                    batch_failures = write_failures(update_entities(batch, language))
+                    failures.extend(batch_failures)
+                    failed_targets.update(failure["shared_id"] for failure in batch_failures)
             for language, group in language_groups(creates, self._default_language):
                 placeholders = [str(payload.get("source_shared_id") or "") for payload in group]
                 for offset in range(0, len(group), EXECUTE_BATCH_SIZE):
                     batch = group[offset : offset + EXECUTE_BATCH_SIZE]
-                    failures.extend(
-                        write_failures(create_entities(batch, language), placeholders[offset : offset + len(batch)])
-                    )
+                    batch_placeholders = placeholders[offset : offset + len(batch)]
+                    results = create_entities(batch, language)
+                    batch_failures = write_failures(results, batch_placeholders)
+                    failures.extend(batch_failures)
+                    failed_targets.update(failure["shared_id"] for failure in batch_failures)
+                    for placeholder, result in zip(batch_placeholders, results if isinstance(results, list) else []):
+                        if isinstance(result, dict) and result.get("success") and result.get("shared_id"):
+                            created_ids[placeholder] = str(result["shared_id"])
+
+            # Move each merge's source files onto its target BEFORE the sources
+            # are deleted — the whole point of a merge: the sources' uploaded
+            # files must survive their deletion. Runs after the target writes
+            # (the merge script's order: update -> move -> delete) and before
+            # any delete. A hard port failure raises here (caught below), so the
+            # run is marked FAILED and NO source is deleted, keeping its files.
+            self._move_merge_files(merge_moves(merges or [], failed_targets, created_ids))
 
             delete_ids: list[str] = []
             publish_ids: list[str] = []
@@ -803,6 +971,11 @@ class ApplySuggestionsUseCase:
                     rel = row.proposed_value if isinstance(row.proposed_value, dict) else None
                     if rel is not None:
                         relationships.append(rel)
+            for target, sources in merges or []:
+                if target in failed_targets:
+                    continue
+                delete_ids.extend(sources)
+            delete_ids = list(dict.fromkeys(delete_ids))
             if delete_ids:
                 failures.extend(write_failures(delete_entities(delete_ids)))
             if publish_ids:
@@ -844,6 +1017,8 @@ __all__ = [
     "format_write_failures",
     "language_groups",
     "language_scoped_value",
+    "merge_deletions",
+    "merge_moves",
     "partition_for_apply",
     "pushable_rows",
     "stamp_language",

@@ -17,6 +17,7 @@ from typing import Any
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
+    PROPERTY_OPS,
     TITLE_PROPERTY,
     EntityReviewRow,
     Suggestion,
@@ -43,20 +44,29 @@ OP_COLORS: dict[str, str] = {
     "unpublish": "orange",
     "set_publish_status": "orange",
     "create_relationships": "purple",
+    "update_and_delete": "deep-purple",
+    "create_and_delete": "indigo",
 }
 
 MATCH_COLORS: dict[str, str] = {"exact": "green", "mismatch": "red", "new": "grey-6", "mixed": "orange", "n/a": "grey-4"}
 
 # The entity table's Run column: has this entity's recorded work been written
 # to Uwazi yet? Reuses the per-row statuses' colors ('applied' blue, 'pending'
-# grey, 'reverted' indigo) so one state reads the same everywhere.
-RUN_STATUS_COLORS: dict[str, str] = {"runned": "blue", "reverted": "indigo", "pending": "grey"}
+# grey, 'reverted' indigo) so one state reads the same everywhere — plus the
+# 'discarded' red, the state an operation the operator refused to execute ends
+# up in.
+RUN_STATUS_COLORS: dict[str, str] = {
+    "runned": "blue",
+    "reverted": "indigo",
+    "pending": "grey",
+    "discarded": "red",
+}
 
 
 # Ops whose entity ALREADY EXISTS in Uwazi, so the review row can link to its
 # public page. A create row still holds its dry-created placeholder, so
 # opening it would land on nothing.
-OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete"})
+OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete"})
 
 # ``_title`` is the review table's synthetic name for a title change — no
 # template property carries it, so it gets the same human word Uwazi uses.
@@ -71,6 +81,8 @@ RUN_OP_PHRASES: dict[str, str] = {
     "unpublish": "Unpublish",
     "set_publish_status": "Change publishing",
     "create_relationships": "Relink",
+    "update_and_delete": "Merge (update + delete)",
+    "create_and_delete": "Merge (create + delete)",
 }
 
 
@@ -124,6 +136,30 @@ def bulk_revert_label(count: int) -> str:
     operator sees what Revert acts on without opening the dialog.
     """
     return f"Revert ({count})"
+
+
+def bulk_discard_label(count: int) -> str:
+    """The Discard button's text for a live selection of ``count`` rows (pure).
+
+    The same shape as :func:`run_button_label`: the count on the button says
+    how many checked operations the Discard will mark as not-to-be-executed.
+    """
+    return f"Discard ({count})"
+
+
+def discard_confirmation(count: int) -> tuple[str, str]:
+    """``(title, message)`` for the bulk Discard dialog (pure).
+
+    The dialog is consent, not explanation: it says how many checked operations
+    will be marked as discarded and that a Run will not execute them. The reason
+    itself is asked in the same dialog (it is stored with the rows), so the
+    operator can say WHY the end user does not want these executed.
+    """
+    rows = "operation" if count == 1 else "operations"
+    return (
+        f"Discard {count} {rows}",
+        f"Mark {count} checked {rows} as discarded. They will NOT be executed by a Run, and the reason is stored with them.",
+    )
 
 
 def unique_entities(selection: list[tuple[str, str | None]]) -> list[str]:
@@ -197,9 +233,9 @@ def truncate(value: Any, limit: int = 80) -> str:
 # in the payload as well: an untruncated 300-character document title was what
 # pushed the table's total width past the viewport and forced a horizontal
 # scroll on every row. 97 characters is roughly two average document references,
-# which is as much as the column can hold at the layout's own cap; 7 of those go
-# to the leading "(<sharedId>) " prefix the row shows before the title, so the
-# title itself keeps roughly 90 characters as before.
+# which is as much as the column can hold at the layout's own cap. The sharedId
+# is rendered NEXT to the title (not inside it) and the cell clips the pair, so
+# the title itself keeps the whole budget.
 TITLE_CELL_CHARS: int = 97
 
 # Column widths (CSS px) for the review table's fixed columns. The Entity column
@@ -209,7 +245,8 @@ LANGUAGE_COLUMN: str = "width: 84px"
 TEMPLATE_COLUMN: str = "width: 170px"
 OPS_COLUMN: str = "width: 190px"
 STATUS_COLUMN: str = "width: 110px"
-ACTIONS_COLUMN: str = "width: 96px"
+# Four flat icon buttons (Discard/Undo, Revert, Run, Edit) at ~32px each.
+ACTIONS_COLUMN: str = "width: 128px"
 # The Entity column takes the remainder: ``max-width: 0`` is what lets the column
 # actually shrink under the browser's default table layout (a bare percentage does
 # not), and the cell's link carries the ellipsis.
@@ -277,13 +314,25 @@ def suggestion_to_row(suggestion: Suggestion) -> dict[str, Any]:
         "match_color": MATCH_COLORS.get(label, "grey"),
         "status": suggestion.status.value,
         "status_color": STATUS_COLORS.get(suggestion.status.value, "grey"),
-        "editable": suggestion.op in ("update", "create"),
+        "editable": suggestion.op in PROPERTY_OPS,
     }
+
+
+def counterpart_filter(key: str) -> str:
+    """The filter control a pick RESETS, because the two exclude each other (pure).
+
+    The Status dropdown and the Discarded dropdown both speak about the
+    discarded rows: "discarded" plus "not discarded" is an empty table nobody
+    can read, so picking one clears the other. Any other key has no
+    counterpart (""), and its filter stands alone.
+    """
+    return {"status": "discarded", "discarded": "status"}.get(key, "")
 
 
 def filter_from_controls(
     *,
     status: str = "",
+    discarded: str = "",
     op: str = "",
     property_name: str = "",
     match: str = "",
@@ -297,11 +346,14 @@ def filter_from_controls(
 
     Empty strings mean "no constraint" — the UI's select controls use "" for
     their "all" option, and translating that here keeps the page's handlers
-    trivial. ``shared_ids`` is the table's checkbox selection passed through
-    verbatim (``None`` = no constraint, ``[]`` = match nothing).
+    trivial. ``discarded`` is the page's tri-state "Discarded" select: "" (any),
+    "yes" (only the discarded rows) or "no" (only the rows still to execute).
+    ``shared_ids`` is the table's checkbox selection passed through verbatim
+    (``None`` = no constraint, ``[]`` = match nothing).
     """
     return SuggestionFilter(
         status=SuggestionStatus(status) if status else None,
+        discarded={"yes": True, "no": False}.get(discarded),
         op=op or None,
         property_name=property_name or None,
         match=match or None,  # type: ignore[arg-type] — validated by the pydantic Literal
@@ -313,19 +365,35 @@ def filter_from_controls(
     )
 
 
+def entity_is_discarded(item: EntityReviewRow) -> bool:
+    """True when EVERY row of the entity group is discarded (pure).
+
+    The review table's rows are OPERATIONS (one entity in one language), and the
+    Discard action marks a whole operation: "the end user does not want this
+    executed". A group whose rows merely SPAN states (some discarded, some
+    still pending) is not discarded — work remains, so the operator has to see
+    it under "not discarded" too.
+    """
+    return item.proposal_count > 0 and item.discarded >= item.proposal_count
+
+
 def run_status(item: EntityReviewRow) -> tuple[str, str]:
     """The entity's Run state as ``(label, color)`` — the table's Status column (pure).
 
     ``runned`` once EVERY recorded row of the entity is APPLIED (written to
     Uwazi); ``reverted`` once every row is REVERTED — a revert undid the writes,
-    so the operator can run the entity again, row by row or whole. Anything else
-    (a row still to review, a mix of applied and reverted) is ``pending``: work
+    so the operator can run the entity again, row by row or whole. ``discarded``
+    once every row is DISCARDED — the operator refused to execute this
+    operation, so it must not read as work still to do. Anything else (a row
+    still to review, a mix of applied and reverted) is ``pending``: work
     remains.
     """
     if item.applied >= item.proposal_count:
         label = "runned"
     elif item.reverted >= item.proposal_count:
         label = "reverted"
+    elif entity_is_discarded(item):
+        label = "discarded"
     else:
         label = "pending"
     return label, RUN_STATUS_COLORS[label]
@@ -355,16 +423,20 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
 
     One row per affected entity IN ONE LANGUAGE (the table is the
     checkbox-selection surface the bulk Run action reads), aggregated from the
-    entity's suggestion rows by the store. Columns: Entity (title, with the
-    open-in-Uwazi icon at its end), Language, Template, Ops, Status
-    (runned/pending), and the Run/Edit/Revert row actions — no sharedId, no
-    change-count columns, and no separate Uwazi column.
+    entity's suggestion rows by the store. Columns: Entity (the sharedId and
+    the title, with the open-in-Uwazi icon at its end), Language, Template,
+    Ops, Status (runned/pending), and the Run/Edit/Revert row actions — no
+    separate sharedId column, no change-count columns, and no separate Uwazi
+    column.
 
-    ``title`` is the sharedId in parentheses, then the entity title cut to
-    :data:`TITLE_CELL_CHARS`; the untruncated text rides along as ``title_full``
-    for the cell's tooltip: a full document title is far wider than the column
-    it sits in, and letting it size the cell is what made the table overflow
-    horizontally.
+    ``title`` is the entity title cut to :data:`TITLE_CELL_CHARS`; the
+    untruncated text rides along as ``title_full`` for the cell's tooltip: a
+    full document title is far wider than the column it sits in, and letting it
+    size the cell is what made the table overflow horizontally. The sharedId is
+    a field of its own (``shared_id``): the cell shows it as plain text BESIDE
+    the title, so the operator can select and copy the id on its own — it used
+    to be glued to the title inside parentheses, which made both the copy and
+    the mouse selection awkward.
 
     ``uwazi_url`` is the controlled instance's base URL (None = unconfigured, so
     the row carries no link). ``row_key`` is the entity+language identity, so the
@@ -373,18 +445,22 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     ``revert_tooltip`` is the per-row Revert button's tooltip: the backup's
     creation date+time ("entity backup creation …"), present only when the run
     holds a backup for this entity (a written-then-revertable row).
+
+    ``discarded`` says whether the OPERATION was marked as discarded (every one
+    of its rows discarded): the Actions cell swaps its Discard button for the
+    Undo one, and the operator can filter the table by this state.
     """
     status_label, status_color = run_status(item)
     # Per-entity revert is an IN-PLACE restore of the live row. It is therefore
     # only offered for entities the run merely MODIFIED: a `delete` row's undo is
     # a re-create (a fresh sharedId, files and connection rows) and a `create`
-    # row's undo is a deletion — both are ordered run-level operations. Offering
-    # the per-row button there made the UI promise a restore it cannot perform.
-    in_place_revertable = status_label in ("runned", "reverted") and not any(op in ("delete", "create") for op in item.ops)
+    # row's undo is a deletion — both are ordered run-level operations. A merge
+    # row's undo is likewise ordered: the target was modified/created AND its
+    # sources deleted, so restoring the target alone would not restore them.
+    in_place_revertable = status_label in ("runned", "reverted") and not any(
+        op in ("delete", "create", "update_and_delete", "create_and_delete") for op in item.ops
+    )
     title = item.entity_title or item.shared_id
-    # The sharedId rides the visible title (never a separate column) so the
-    # operator can quote it; the tooltip keeps the uncut bare title.
-    titled = f"({item.shared_id}) {title}"
     try:
         revert_tooltip = (
             f"entity backup creation {backup_created_at:%Y-%m-%d %H:%M}" if backup_created_at is not None else ""
@@ -394,8 +470,8 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     return {
         "row_key": entity_language_key(item.shared_id, item.language),
         "shared_id": item.shared_id,
-        "title": truncate(titled, TITLE_CELL_CHARS),
-        "title_full": titled,
+        "title": truncate(title, TITLE_CELL_CHARS),
+        "title_full": title,
         "language": item.language or "",
         "template": truncate(", ".join(item.template_names) or "—", 28),
         "ops": ", ".join(item.ops),
@@ -403,6 +479,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
         "url": entity_open_url(item, uwazi_url),  # used by the title cell's open-in-Uwazi icon
         "run_status": status_label,
         "run_status_color": status_color,  # used by the slot
+        "discarded": entity_is_discarded(item),  # drives the Discard/Undo button
         "revertable": in_place_revertable,  # drives the Revert icon's visibility
         "revert_tooltip": revert_tooltip,  # drives the Revert icon's tooltip
     }
@@ -470,8 +547,12 @@ __all__ = [
     "TITLE_CELL_CHARS",
     "TITLE_COLUMN",
     "accuracy_label",
+    "bulk_discard_label",
+    "counterpart_filter",
+    "discard_confirmation",
     "drift_banner_text",
     "drift_banner_time",
+    "entity_is_discarded",
     "entity_row",
     "entity_open_url",
     "entity_language_key",

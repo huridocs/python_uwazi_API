@@ -1425,6 +1425,10 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
             records.append(
                 {
                     "op": "create",
+                    # The placeholder this call returns: a later move/delete in
+                    # the SAME script addresses the new entity through it, so the
+                    # record has to carry it (merge detection pairs them).
+                    "shared_id": f"dry-created-{i}",
                     "title": d.get("title", ""),
                     "template_name": d.get("template_name", ""),
                     "metadata": d.get("metadata", {}),

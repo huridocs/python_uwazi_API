@@ -17,6 +17,7 @@ literal record dicts with no ports, no I/O, and no running instance.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,7 +25,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
+    CREATE_OPS,
+    PROPERTY_OPS,
     TITLE_PROPERTY,
+    UPDATE_OPS,
     Suggestion,
     SuggestionOp,
     SuggestionStatus,
@@ -36,6 +40,85 @@ _WHOLE_ENTITY_OPS: frozenset[str] = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class MergeOperation:
+    """One scripted merge: a target write plus the sources deleted by that write.
+
+    ``target_op`` is the base record op the target was written with (``update``
+    or ``create``) — it decides which of the two merge ops the review row gets.
+    """
+
+    target_shared_id: str
+    target_op: str
+    source_shared_ids: tuple[str, ...]
+
+
+def _record_shared_id(record: dict[str, Any], index: int) -> str:
+    """The sharedId a record addresses, resolving a create's placeholder (pure).
+
+    A create record has no real sharedId before the write, so the dry-run
+    recorder stamps its return placeholder (``dry-created-N``); records from
+    older scripts without that field fall back to the record's position, which
+    is the same placeholder the recorder minted.
+    """
+    shared_id = str(record.get("shared_id") or "")
+    if not shared_id and record.get("op") == "create":
+        return f"dry-created-{index}"
+    return shared_id
+
+
+def merge_operations(records: list[dict[str, Any]]) -> dict[str, MergeOperation]:
+    """The merge actions a script's records describe, keyed by target sharedId (pure).
+
+    A merge script writes the target (``update_entities``/``create_entities``),
+    moves the sources' files to it (``move_files``), then deletes the sources.
+    The file move is the composition's explicit grouping signal: its
+    ``to_shared_id`` names the target and its ``from_shared_ids`` the sources.
+    Only a target that ALSO has an update/create record is a merge — a bare
+    move+delete stays an ordinary delete plan, because no target is written.
+
+    Several moves/targets in one script (a multi-group merge) yield one entry
+    per target, preserving the script's move order.
+    """
+    normalized: list[tuple[dict[str, Any], str]] = [
+        (record, _record_shared_id(record, index)) for index, record in enumerate(records)
+    ]
+    sources_by_target: dict[str, list[str]] = {}
+    order: list[str] = []
+    for record, _shared_id in normalized:
+        if record.get("op") != "move_files":
+            continue
+        target = str(record.get("to_shared_id") or "")
+        raw_sources = record.get("from_shared_ids")
+        if not target or not isinstance(raw_sources, (list, tuple)):
+            continue
+        if target not in sources_by_target:
+            sources_by_target[target] = []
+            order.append(target)
+        for source in raw_sources:
+            source_id = str(source)
+            if source_id and source_id != target and source_id not in sources_by_target[target]:
+                sources_by_target[target].append(source_id)
+
+    target_ops: dict[str, str] = {}
+    for record, shared_id in normalized:
+        op = str(record.get("op") or "")
+        if op not in ("update", "create") or shared_id not in sources_by_target:
+            continue
+        # First target record wins; a normal merge has exactly one.
+        target_ops.setdefault(shared_id, op)
+
+    return {
+        target: MergeOperation(
+            target_shared_id=target,
+            target_op=target_ops[target],
+            source_shared_ids=tuple(sources_by_target[target]),
+        )
+        for target in order
+        if target in target_ops and sources_by_target[target]
+    }
+
+
 def _as_op(raw: Any) -> SuggestionOp | None:
     """Coerce a record's ``op`` label into a known :data:`SuggestionOp` (None = unknown).
 
@@ -45,7 +128,17 @@ def _as_op(raw: Any) -> SuggestionOp | None:
     preview instead).
     """
     value = str(raw or "")
-    if value in ("update", "create", "delete", "publish", "unpublish", "set_publish_status", "create_relationships"):
+    if value in (
+        "update",
+        "create",
+        "delete",
+        "publish",
+        "unpublish",
+        "set_publish_status",
+        "create_relationships",
+        "update_and_delete",
+        "create_and_delete",
+    ):
         return value  # type: ignore[return-value] — the literal set above matches SuggestionOp exactly
     return None
 
@@ -84,16 +177,25 @@ def records_to_suggestions(
 
     Per-op expansion:
 
-    - ``update``: one row per metadata key, SPLIT per language for a per-language
-      property (a value list carrying several ``{"value", "language"}`` entries
-      becomes one row per language, each holding just its own entry), plus one
-      ``_title`` row when the record carries a non-None ``title``. Records with
-      no metadata and no title produce a single row with ``property_name=None``
-      so the operator still sees the no-op touch.
-    - ``create``: the same expansion, with the recorder's placeholder
-      ``dry-created-N`` sharedId (creates have no real sharedId until applied).
+    - ``update`` / ``update_and_delete``: one row per metadata key, SPLIT per
+      language for a per-language property (a value list carrying several
+      ``{"value", "language"}`` entries becomes one row per language, each
+      holding just its own entry), plus one ``_title`` row when the record
+      carries a non-None ``title``. Records with no metadata and no title
+      produce a single row with ``property_name=None`` so the operator still
+      sees the no-op touch.
+    - ``create`` / ``create_and_delete``: the same expansion, with the
+      recorder's placeholder ``dry-created-N`` sharedId (creates have no real
+      sharedId until applied).
     - ``delete`` / ``publish`` / ``unpublish`` / ``set_publish_status`` /
       ``create_relationships``: one row each, ``property_name=None``.
+
+    A scripted merge (a target update/create plus a file move plus the source
+    deletes) is collapsed HERE: the target's rows carry the merge op
+    (``update_and_delete``/``create_and_delete``) and the moved sources, and the
+    source delete records are dropped. That is what makes a merge ONE table row
+    — one target, however many sources it absorbs — instead of a target row
+    followed by one delete row per source. See :func:`merge_operations`.
 
     The split is what makes a translation task reviewable: the operator sees one
     row per language, checks the one they want written, and Run pushes only that
@@ -119,14 +221,22 @@ def records_to_suggestions(
     titles = entity_titles or {}
     created = now or datetime.now(timezone.utc)
     suggestions: list[Suggestion] = []
+    merges = merge_operations(records)
+    merge_sources = {source for merge in merges.values() for source in merge.source_shared_ids}
 
     for index, record in enumerate(records):
         op = _as_op(record.get("op"))
         if op is None:
             continue
-        shared_id = str(record.get("shared_id") or "")
-        if op == "create" and not shared_id:
-            shared_id = f"dry-created-{index}"
+        shared_id = _record_shared_id(record, index)
+        if op == "delete" and shared_id in merge_sources:
+            # The source is absorbed by its target's merge row: a second delete
+            # row would offer the operator a partial action that cannot run on
+            # its own (the target write is what makes the merge meaningful).
+            continue
+        merge = merges.get(shared_id)
+        if merge is not None and op in UPDATE_OPS | CREATE_OPS:
+            op = "update_and_delete" if merge.target_op == "update" else "create_and_delete"
         title = titles.get(shared_id, "") or str(record.get("title") or "")
         base: dict[str, Any] = {
             "run_id": run_id,
@@ -137,9 +247,10 @@ def records_to_suggestions(
             "op": op,
             "status": SuggestionStatus.PENDING,
             "created_at": created,
+            "merge_source_ids": list(merge.source_shared_ids) if merge is not None else [],
         }
 
-        if op == "update" or op == "create":
+        if op in PROPERTY_OPS:
             record_metadata = record.get("metadata")
             metadata: dict[str, Any] = record_metadata if isinstance(record_metadata, dict) else {}
             record_language = record.get("language")
@@ -324,8 +435,10 @@ def score_accuracy(suggestions: list[Suggestion]) -> AccuracySummary:
 
 __all__ = [
     "AccuracySummary",
+    "MergeOperation",
     "PropertyAccuracy",
     "compare_values",
+    "merge_operations",
     "per_language_split",
     "records_to_suggestions",
     "row_language",

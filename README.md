@@ -143,6 +143,14 @@ On the review page:
   action;
 - **Reject selected (N)** marks the checked rows discarded (they are never
   written);
+- **Discard (N)** (and the row's own **Discard** button in the Actions column)
+  marks the checked operations as discarded — "the end user does not want this
+  executed". A discard is a MARK, not a delete: a Run never writes a discarded
+  row, the reason the operator typed is stored with it, and the row's **Undo**
+  button brings the operation back into the review queue. The **Discarded**
+  filter reads both halves of that decision ("discarded" / "not discarded"), so
+  the refused operations can be reviewed on their own while the rest keep being
+  executed;
 - **Improve the prompt** shows the run's current prompt editable plus this
   round's discard/mismatch evidence; submitting regenerates BOTH scripts
   (selection + apply) with the original discovery context still in view.
@@ -177,6 +185,60 @@ no whole-set Execute button. Reverting is **whole-task only**: a single
 order (later steps first, a step's apply run before its own run), stopping at
 the first failure so the remainder stays visible for retry. Standalone runs
 keep their per-run revert in the runs table.
+
+### End-to-end check: per-language text properties
+
+`uwazi-admin-agent text-property-e2e` exercises the per-language text-property
+path against the **live** instance, driving the UI's own steps in the UI's own
+order (create the task → plan → Run → revert → verify). It is the regression
+harness for the case where one entity carries a `text` property in two
+languages (`en` and `es`) with a **different value per language** — Uwazi
+stores one entity-language ROW per translation (same `sharedId`, different
+`_id`), a text property holds exactly ONE value per row, and the write's
+`locale` cookie picks the row.
+
+```bash
+uv run uwazi-admin-agent text-property-e2e --user admin --password admin
+```
+
+It creates **three** tasks, each a different angle on the same use case:
+
+| task | shape | what it proves |
+|------|-------|----------------|
+| 1 | two steps — one per language, over the same entities | the two language rows are written independently, and the whole-task revert undoes both |
+| 2 | one step covering both languages of every entity | a single run can write both rows without merging them |
+| 3 | one step with a different batch size per language (2 vs 4) | the language groups are independent in count too |
+
+Every task writes real values into real entities, so the driver is
+**idempotent**: it captures the current values first, reverts through the
+ordinary revert path, and restores anything the revert did not cover through a
+direct write to the same endpoint. A second run therefore starts from the same
+state as the first, and the report ends with an explicit
+`idempotency: property values unchanged=True whole entities unchanged=True`
+line. The run folders and the task files are deleted at the end unless
+`--keep-runs` is passed.
+
+### What it checks beyond the value itself
+
+The driver compares the **whole entity raw** (every metadata property and
+every top-level field), not just the property under test, so it answers the
+data-loss question directly:
+
+- **no data loss on the write** — "the run changed ONLY the target property",
+  "the run changed no other field of the entity (title, files, ...)" and "the
+  run changed NOTHING on the rows it did not select" (the sibling language's
+  row is byte-identical);
+- **the revert really restores** — "the task's revert restored the WHOLE
+  entity (every property)" and "the task's revert restored every other field",
+  plus the agent's own post-revert verification (`ok=True mismatches=0`).
+
+`editDate` (server-managed, advances on every save) and `relations` (a
+read-only denormalized view) are excluded from the comparison — exactly like
+the agent's own verification does.
+
+Options: `--template` (default `DOCUMENT`), `--property` (default: the
+template's first non-title `text` property), `--entities` (entities per
+language for tasks 1 and 2, default 2), `--keep-runs`.
 
 ---
 

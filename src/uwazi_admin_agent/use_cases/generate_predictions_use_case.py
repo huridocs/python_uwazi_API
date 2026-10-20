@@ -35,6 +35,7 @@ from loguru import logger
 from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger
 from uwazi_admin_agent.domain.suggestion import (
+    PROPERTY_OPS,
     TITLE_PROPERTY,
     PredictionAttempt,
     PredictionAttemptStatus,
@@ -154,7 +155,7 @@ def hydrate_current_values(
             continue
         suggestion = suggestions[index]
         updates: dict[str, Any] = {}
-        if suggestion.property_name is not None and suggestion.op in ("update", "create"):
+        if suggestion.property_name is not None and suggestion.op in PROPERTY_OPS:
             current = _extract_property(raw, suggestion.property_name, suggestion.language)
             updates["current_value"] = current
             updates["match"] = compare_values(suggestion.proposed_value, current)
