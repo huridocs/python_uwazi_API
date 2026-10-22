@@ -245,6 +245,25 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `update_entities` (e.g. a merge), keep its read array-envelope as-is - it
       already carries the platform-coerced numeric/id inside.
 
+  WHICH PROPERTIES ARE PER-LANGUAGE (do NOT loop over languages for the rest):
+      Only the FREE-TEXT types are stored per language row: `text` and
+      `richtext`. Every OTHER type - `select`, `multiselect`, `date`,
+      `daterange`, `multidate`, `multidaterange`, `numeric`, `link`,
+      `geolocation`, `relationship`, `image`, `media` - holds ONE value that is
+      SHARED by every language row of the entity. The entity's `title` is
+      per-language, like a text property.
+      So when you change a `multiselect` (or a date, a select, a link, ...):
+        - write it ONCE, in ONE language row. Do NOT loop over the instance's
+          languages writing the same shared value into each of them - that
+          duplicates one change and leaves the operator with several identical
+          rows to review.
+        - the `language=` argument of `update_entities` selects the ROW the
+          write lands on; for a shared value it does not change WHAT is
+          written, so any configured language is equally correct. Pick the
+          default one and move on.
+      Only a `text`/`richtext` value, or a `title`, genuinely differs per
+      language - those are the ones to write once per language.
+
   create_entities(entities_dicts, language='en')
       Create new entities. Each dict needs `title` and `template_name`
       (plus any `metadata`/`shared_id` you want to set). Returns a list of
@@ -487,7 +506,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       the service refused, a language pair is unsupported) — translation is
       NOT best-effort: a failed translation must fail the pass, never write
       unmarked or untranslated text. One call per text; batch the texts of
-      several entities only by looping (the endpoint takes one text).
+      several entities only by looping (the endpoint takes one text). The
+      WHOLE text is sent in that one call — do not pre-truncate it and do not
+      split it yourself.
 
   llm_complete(instruction, text)
       Call the LLM ONCE over one entity's text and return its reply as a string.

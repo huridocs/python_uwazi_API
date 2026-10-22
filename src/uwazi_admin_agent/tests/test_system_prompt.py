@@ -155,6 +155,22 @@ def test_prompt_pins_shared_id_is_language_independent() -> None:
     assert "which sharedId is the English entity" in SYSTEM_PROMPT
 
 
+def test_prompt_pins_which_properties_are_per_language() -> None:
+    """Only the free-text types are stored per language row.
+
+    A script that looped over the instance's languages writing the same
+    multiselect into each row produced one recorded change PER LANGUAGE — the
+    operator then saw two suboperations for one shared value, and the second
+    write replaced the first with the same value. The contract must say which
+    types are per-language so the script writes a shared value ONCE.
+    """
+    assert "WHICH PROPERTIES ARE PER-LANGUAGE" in SYSTEM_PROMPT
+    assert "`text` and\n      `richtext`" in SYSTEM_PROMPT
+    assert "ONE value that is\n      SHARED by every language row" in SYSTEM_PROMPT
+    assert "write it ONCE, in ONE language row" in SYSTEM_PROMPT
+    assert "Do NOT loop over the instance's" in SYSTEM_PROMPT
+
+
 # --- Dummy-spec rules (Fix B) ------------------------------------------------
 
 

@@ -1,9 +1,9 @@
-"""Isolated unit tests for the review UI's discard action + discard filter (per AGENTS.md).
+"""Isolated unit tests for the review UI's discard action (per AGENTS.md).
 
 Real SQLite on a ``tmp_path`` and real domain models, plain assertions: no
 mocks, no network, no Uwazi instance. The discard is the operator's "the end
 user does not want this executed" — it marks the operation's rows, and the
-table can then be filtered by that state.
+Status filter reads them back (there is no separate "Discarded" filter).
 """
 
 from datetime import datetime, timezone
@@ -14,7 +14,6 @@ from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionS
 from uwazi_admin_agent.domain.suggestion import EntityReviewRow, Suggestion, SuggestionFilter, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
     bulk_discard_label,
-    counterpart_filter,
     discard_confirmation,
     entity_is_discarded,
     entity_row,
@@ -79,25 +78,16 @@ def _entity_row(*, proposal_count: int = 2, discarded: int = 0, applied: int = 0
 # --- the filter control --------------------------------------------------------
 
 
-def test_filter_from_controls_reads_the_discarded_tri_state() -> None:
-    """The 'Discarded' select: any / not discarded / discarded."""
-    assert filter_from_controls().discarded is None
-    assert filter_from_controls(discarded="yes").discarded is True
-    assert filter_from_controls(discarded="no").discarded is False
+def test_the_status_filter_translates_the_discarded_state() -> None:
+    """There is no separate 'Discarded' filter: the Status one carries it."""
+    f = filter_from_controls(status="discarded")
+    assert f.status is SuggestionStatus.DISCARDED
 
 
 def test_filter_from_controls_keeps_the_other_filters_intact() -> None:
-    f = filter_from_controls(status="pending", discarded="no", op="update")
+    f = filter_from_controls(status="pending", op="update")
     assert f.status is SuggestionStatus.PENDING
-    assert f.discarded is False
     assert f.op == "update"
-
-
-def test_the_status_and_discarded_filters_exclude_each_other() -> None:
-    """'discarded' plus 'not discarded' would be an empty table nobody can read."""
-    assert counterpart_filter("discarded") == "status"
-    assert counterpart_filter("status") == "discarded"
-    assert counterpart_filter("op") == ""
 
 
 # --- the row contract ----------------------------------------------------------
@@ -214,7 +204,7 @@ def test_restore_by_filter_touches_only_the_discarded_rows(store: SqliteSuggesti
 # --- the store: filtering by the discard state ------------------------------------
 
 
-def test_the_discarded_filter_reads_the_discarded_rows(store: SqliteSuggestionStore) -> None:
+def test_the_status_filter_reads_the_discarded_rows(store: SqliteSuggestionStore) -> None:
     store.add_suggestions(
         [
             _suggestion(shared_id="a", property_name="x", status=SuggestionStatus.DISCARDED),
@@ -222,13 +212,13 @@ def test_the_discarded_filter_reads_the_discarded_rows(store: SqliteSuggestionSt
         ]
     )
 
-    rows, total = store.query("run1", 1, SuggestionFilter(discarded=True))
+    rows, total = store.query("run1", 1, SuggestionFilter(status=SuggestionStatus.DISCARDED))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["a"]
 
 
-def test_the_not_discarded_filter_reads_the_rest(store: SqliteSuggestionStore) -> None:
+def test_the_status_filter_reads_the_rest_away_from_the_discarded_rows(store: SqliteSuggestionStore) -> None:
     store.add_suggestions(
         [
             _suggestion(shared_id="a", property_name="x", status=SuggestionStatus.DISCARDED),
@@ -236,14 +226,14 @@ def test_the_not_discarded_filter_reads_the_rest(store: SqliteSuggestionStore) -
         ]
     )
 
-    rows, total = store.query("run1", 1, SuggestionFilter(discarded=False))
+    rows, total = store.query("run1", 1, SuggestionFilter(status=SuggestionStatus.PENDING))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["b"]
 
 
 def test_the_entity_table_filters_the_operations_by_their_discard_state(store: SqliteSuggestionStore) -> None:
-    """The table's rows are operations: a discarded one drops out of 'not discarded'."""
+    """The table's rows are operations: the Status filter splits them."""
     store.add_suggestions(
         [
             _suggestion(shared_id="a", property_name="x", status=SuggestionStatus.DISCARDED),
@@ -251,8 +241,8 @@ def test_the_entity_table_filters_the_operations_by_their_discard_state(store: S
         ]
     )
 
-    discarded_rows, discarded_total = store.entity_rows("run1", 1, SuggestionFilter(discarded=True))
-    kept_rows, kept_total = store.entity_rows("run1", 1, SuggestionFilter(discarded=False))
+    discarded_rows, discarded_total = store.entity_rows("run1", 1, SuggestionFilter(status=SuggestionStatus.DISCARDED))
+    kept_rows, kept_total = store.entity_rows("run1", 1, SuggestionFilter(status=SuggestionStatus.PENDING))
 
     assert (discarded_total, [row.shared_id for row in discarded_rows]) == (1, ["a"])
     assert (kept_total, [row.shared_id for row in kept_rows]) == (1, ["b"])

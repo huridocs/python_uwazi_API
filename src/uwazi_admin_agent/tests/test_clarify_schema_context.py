@@ -35,8 +35,14 @@ def test_render_template_lists_properties_with_type_and_thesaurus() -> None:
         )
     )
     assert "Judgment" in line
-    assert "summary (text)" in line
-    assert "document_type (multiselect; thesaurus: Document types) [filterable]" in line
+    assert "summary (text; per-language)" in line
+    assert "document_type (multiselect; thesaurus: Document types; all languages) [filterable]" in line
+
+
+def test_render_template_marks_a_shared_property_as_all_languages() -> None:
+    """The agent must see at a glance that a multiselect needs no language."""
+    line = render_template(_template("Case", _prop("languages", type_="multiselect")))
+    assert "all languages" in line
 
 
 def test_render_template_without_properties_shows_placeholder() -> None:
@@ -46,9 +52,18 @@ def test_render_template_without_properties_shows_placeholder() -> None:
 def test_render_schema_lists_templates_and_thesauri() -> None:
     block = render_schema([_template("A", _prop("x"))], ["Types"])
     assert "INSTANCE TEMPLATES" in block
-    assert "- A: x (text)" in block
+    assert "- A: x (text; per-language)" in block
     assert "THESAURI NAMES" in block
     assert "- Types" in block
+
+
+def test_render_schema_states_the_property_language_scope_rule() -> None:
+    """The rule the agent needs to stop asking about a shared value's language."""
+    block = render_schema([_template("A", _prop("x"))], ["Types"])
+    assert "PROPERTY LANGUAGE SCOPE" in block
+    assert "PER-LANGUAGE types" in block
+    assert "LANGUAGE-INDEPENDENT types" in block
+    assert "NEVER ask which language row" in block
 
 
 def test_render_schema_lists_configured_languages() -> None:

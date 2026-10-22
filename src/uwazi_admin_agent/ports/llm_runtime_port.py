@@ -56,6 +56,14 @@ class LlmBatchResult(BaseModel):
 class LlmRuntimePort(ABC):
     """Text-in/text-out LLM access for generated scripts."""
 
+    def cache_identity(self) -> str:
+        """Stable identity of this runtime for LLM cache keys (default: class name).
+
+        Adapters that wrap a concrete model should include the model name so a
+        cache entry produced by one model is never served to another.
+        """
+        return type(self).__name__
+
     @abstractmethod
     async def complete(self, instruction: str, text: str) -> LlmCallResult:
         """Run ``instruction`` over one ``text`` and return the reply + usage."""

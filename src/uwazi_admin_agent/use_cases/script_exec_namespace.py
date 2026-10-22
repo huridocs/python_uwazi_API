@@ -63,6 +63,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort, UrlFetchError
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
@@ -1331,6 +1332,7 @@ def build_real_exec_namespace(
     throttle: ThrottleController | None = None,
     llm_runtime: LlmRuntimePort | None = None,
     llm_ledger: LlmLedger | None = None,
+    llm_cache: TextCachePort | None = None,
     target_shared_id: str | None = None,
 ) -> dict[str, Any]:
     """Construct the real-scoped + backup-intercepted exec namespace (Phase 4).
@@ -1394,7 +1396,7 @@ def build_real_exec_namespace(
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
         ),
-        **build_llm_script_helpers(llm_runtime, llm_ledger, loop),
+        **build_llm_script_helpers(llm_runtime, llm_ledger, loop, text_cache=llm_cache),
         **_STDLIB,
         "__builtins__": SAFE_BUILTINS,
     }
@@ -1520,6 +1522,7 @@ def build_dry_run_namespace(
     llm_runtime: LlmRuntimePort | None = None,
     llm_ledger: LlmLedger | None = None,
     llm_progress: Callable[[int], None] | None = None,
+    llm_cache: TextCachePort | None = None,
     entity_scope: set[str] | None = None,
     target_shared_id: str | None = None,
     apply_mode: bool = False,
@@ -1565,7 +1568,7 @@ def build_dry_run_namespace(
     executor = ParallelExecutor(controller)
     dry_writes = _dry_run_write_helpers(dry_run_records)
     if apply_mode and llm_runtime is not None and llm_ledger is not None:
-        llm_helpers = build_llm_script_helpers(llm_runtime, llm_ledger, loop, progress=llm_progress)
+        llm_helpers = build_llm_script_helpers(llm_runtime, llm_ledger, loop, progress=llm_progress, text_cache=llm_cache)
     else:
         # Selection mode (or an apply run without budget wiring): loud refusals.
         llm_helpers = selection_llm_refusal()

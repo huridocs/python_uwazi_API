@@ -38,7 +38,7 @@ from uwazi_admin_agent.configuration import (
     SUGGESTIONS_DB_PATH,
     TASKS_PATH,
 )
-from uwazi_admin_agent.domain.audit_record import AuditRecord
+from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditRecord, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.drift import (
     MISSING_LABEL,
@@ -57,9 +57,15 @@ from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, R
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
+from uwazi_admin_agent.domain.review_refresh import (
+    PreflightResult,
+    ReconciliationSummary,
+    evaluate_preflight,
+)
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
+    OperationReviewRow,
     PredictionAttempt,
     Suggestion,
     SuggestionFilter,
@@ -75,7 +81,7 @@ from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
     ApplySuggestionsUseCase,
 )
 from uwazi_admin_agent.use_cases.clarify_prompt_use_case import ClarifyPromptUseCase
-from uwazi_admin_agent.use_cases.generate_predictions_use_case import GeneratePredictionsUseCase
+from uwazi_admin_agent.use_cases.generate_predictions_use_case import GeneratePredictionsUseCase, _fetch_raws
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
 from uwazi_api.domain.segmentation import Segmentation
 
@@ -127,6 +133,25 @@ class ExecutionEvent:
     type: str  # "execute" | "revert"
     outcome: str  # "success" | "failure"
     detail: str | None
+
+
+@dataclass(frozen=True)
+class TableUpdateResult:
+    """What one "Update table from Uwazi" pass changed."""
+
+    run_id: str
+    attempt: int
+    changed_in_uwazi: int | None
+    reconciliation: ReconciliationSummary
+
+    def message(self) -> str:
+        if self.changed_in_uwazi is None:
+            changed = "table refreshed (Uwazi change scan unavailable)"
+        elif self.changed_in_uwazi:
+            changed = f"{self.changed_in_uwazi} entity change(s) detected in Uwazi"
+        else:
+            changed = "no Uwazi changes detected"
+        return f"Table updated: {changed}; {self.reconciliation.summary_text()}."
 
 
 @dataclass(frozen=True)
@@ -620,8 +645,198 @@ async def generate_predictions(
         default_language=DUMMY_LANGUAGE,
         template_labels=runtime.template_labels,
         translation_port=runtime.translation_port,
+        # The template property TYPES: the recording path needs them to tell a
+        # per-language change from a shared one (a multiselect change is ONE
+        # row, a translated paragraph is one row per language).
+        property_types=runtime.property_types,
+        llm_cache=runtime.file_cache,
     )
     await use_case.run(script, run_id=run_id, attempt=attempt, budget=budget, entity_scope=shared_ids)
+
+
+async def update_table_from_uwazi(run_id: str, user: str, password: str) -> TableUpdateResult:
+    """Refresh the review table in place against current Uwazi state.
+
+    Full script pass with the persistent caches: LLM/translation answers for
+    unchanged inputs are served from disk, while the entities Uwazi reports as
+    changed, new, or deleted have their cached raws invalidated first so the
+    pass sees live data. The same attempt row and the same suggestion rows are
+    kept; :meth:`GeneratePredictionsUseCase.refresh` merges by identity.
+    """
+    store = build_suggestion_store()
+    assert isinstance(store, SqliteSuggestionStore)
+    attempt_row = current_attempt(run_id)
+    if attempt_row is None:
+        raise GenerateError(f"run {run_id!r} has no prediction attempt to refresh")
+
+    runtime = await asyncio.to_thread(build_runtime, user, password)
+    script = read_run_script(run_id, attempt_row.attempt)
+    now = datetime.now(timezone.utc)
+    report = await asyncio.to_thread(
+        _scan_drift_report,
+        runtime,
+        store,
+        run_id,
+        attempt_row.attempt,
+        now,
+    )
+    if report is not None:
+        changed_ids = {entry.shared_id for entry in report.entries()}
+        changed_in_uwazi: int | None = report.total()
+    else:
+        # Without a scan we cannot name what changed. Invalidate everything the
+        # run already knows about (rows + baseline) so no stale raw can be
+        # mistaken for live state; new entities would not be cached anyway.
+        changed_ids = set(store.shared_ids(run_id, attempt_row.attempt, SuggestionFilter(include_obsolete=True)))
+        changed_ids.update(row.shared_id for row in store.drift_baseline(run_id))
+        changed_in_uwazi = None
+    if runtime.file_cache is not None and changed_ids:
+        # Missing entities too: a cached raw would otherwise make the script
+        # propose writes for an entity that no longer exists.
+        runtime.file_cache.invalidate_entities(sorted(changed_ids))
+
+    use_case = GeneratePredictionsUseCase(
+        entity_api=runtime.entity_api,
+        entity_repository=runtime.entity_repository,
+        file_repository=runtime.file_repository,
+        segmentation_repository=runtime.segmentation_repository,
+        url_fetcher=runtime.url_fetcher,
+        suggestion_store=store,
+        llm_runtime=PydanticAiLlmRuntime(runtime.llm),
+        default_language=DUMMY_LANGUAGE,
+        template_labels=runtime.template_labels,
+        translation_port=runtime.translation_port,
+        property_types=runtime.property_types,
+        llm_cache=runtime.file_cache,
+    )
+    _final, summary = await use_case.refresh(
+        script,
+        run_id=run_id,
+        attempt=attempt_row.attempt,
+        budget=attempt_row.budget or _script_caps_budget(),
+    )
+
+    baseline_rows = await asyncio.to_thread(
+        sync_drift_baseline,
+        run_id,
+        user,
+        password,
+        attempt_row.attempt,
+    )
+    if baseline_rows:
+        synced_state = store.drift_state(run_id)
+        store.set_drift_state(
+            run_id,
+            status=DriftStatus.VALID,
+            checked_at=datetime.now(timezone.utc),
+            checked_by=user,
+            baseline_max_edit_date=_baseline_max(store, run_id),
+            # Keep the count sync_drift_baseline just captured: clearing it
+            # would make the next probe blind to count-only drift.
+            live_count=synced_state.live_count if synced_state is not None else None,
+            detail=None,
+        )
+    try:
+        build_audit_log().append(
+            run_id,
+            make_audit_record(
+                run_id,
+                AuditStep.TABLE_SYNC,
+                "table_sync",
+                [],
+                AuditOutcome.SUCCESS,
+                detail=summary.summary_text(),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — the refresh succeeded; logging is best-effort
+        logger.warning("could not record the table-update timestamp for {}: {}", run_id, exc)
+    return TableUpdateResult(
+        run_id=run_id,
+        attempt=attempt_row.attempt,
+        changed_in_uwazi=changed_in_uwazi,
+        reconciliation=summary,
+    )
+
+
+def get_table_update_time(run_id: str) -> datetime | None:
+    """When the table was last refreshed from Uwazi (None = never)."""
+    records = build_audit_log().load(run_id)
+    timestamps = [record.timestamp for record in records if record.step is AuditStep.TABLE_SYNC]
+    return max(timestamps) if timestamps else None
+
+
+def preflight_selection(
+    run_id: str,
+    suggestion_ids: list[int],
+    user: str,
+    password: str,
+) -> PreflightResult:
+    """Check selected rows against live Uwazi before a Run touches anything.
+
+    Fetches each selected entity-language raw once, then compares the stored
+    ``current_value`` with the live value (or checks existence for whole-entity
+    ops). Creates and non-runnable rows are ignored by the pure evaluator.
+    """
+    if not suggestion_ids:
+        return PreflightResult()
+    store = build_suggestion_store()
+    attempt_row = current_attempt(run_id)
+    if attempt_row is None:
+        return PreflightResult()
+    rows: list[Suggestion] = []
+    chunk_size = 500
+    for start in range(0, len(suggestion_ids), chunk_size):
+        chunk = suggestion_ids[start : start + chunk_size]
+        page, _total = store.query(
+            run_id,
+            attempt_row.attempt,
+            SuggestionFilter(suggestion_ids=chunk, limit=len(chunk)),
+        )
+        rows.extend(page)
+    runtime = build_runtime(user=user, password=password)
+    pairs = {
+        (row.shared_id, row.language or DUMMY_LANGUAGE)
+        for row in rows
+        if row.shared_id and not row.shared_id.startswith("dry-created-")
+    }
+    raws = _fetch_raws(runtime.entity_repository, pairs) if pairs else {}
+    return evaluate_preflight(rows, raws, DUMMY_LANGUAGE)
+
+
+def _scan_drift_report(
+    runtime: Any,
+    store: SqliteSuggestionStore,
+    run_id: str,
+    attempt: int,
+    now: datetime,
+) -> DriftReport | None:
+    """Full paged diff against the baseline (None = no template to scan)."""
+    if runtime.drift_probe is None:
+        return None
+    template_name = _dominant_template_name(store, run_id, attempt)
+    template_id = _check_template_id(runtime, template_name)
+    if template_id is None:
+        return None
+    manifest = runtime.backup_store.load_manifest(run_id)
+    run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
+    languages = _languages_for_run(run_id, store, attempt)
+    live: list[dict[str, Any]] = []
+    scan_failed: list[str] = []
+    for language in languages:
+        try:
+            scanned = runtime.drift_probe.scan_template(template_id, language)
+        except Exception as exc:  # noqa: BLE001 — one language failing keeps the others
+            logger.warning("table refresh drift scan failed {}: {}", language, exc)
+            scan_failed.append(language)
+            continue
+        live.extend({"shared_id": shared_id, "edit_date": edit_date} for shared_id, edit_date in scanned.items())
+    return build_report(
+        live=live,
+        baseline=_baseline_rows_from_store(store, run_id),
+        excluded_ids=run_written,
+        languages_failed=scan_failed,
+        checked_at=now,
+    )
 
 
 def get_suggestions(run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
@@ -723,6 +938,36 @@ def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReview
     return build_suggestion_store().entity_rows(run_id, _current_attempt_number(run_id), f)
 
 
+def get_operation_rows(run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+    """Return a page of OPERATIONS (one row per entity) with their suboperations.
+
+    The review table's read: the filter is a SUBOPERATION filter, so an operation
+    whose every part the filter removed never reaches the page. ``subs`` carries
+    the page's matching suggestion rows.
+    """
+    return build_suggestion_store().operations(run_id, _current_attempt_number(run_id), f)
+
+
+def get_property_scores(run_id: str) -> dict[str, tuple[int, int]]:
+    """``property -> (exact, mismatch)`` over the whole attempt (the Property filter)."""
+    return build_suggestion_store().property_scores(run_id, _current_attempt_number(run_id))
+
+
+def get_templates(run_id: str) -> list[str]:
+    """The distinct template names of the attempt — the property-label lookup."""
+    return build_suggestion_store().templates(run_id, _current_attempt_number(run_id))
+
+
+def get_suggestion_languages(run_id: str) -> list[str]:
+    """The distinct languages the attempt writes — the Language filter's options."""
+    return build_suggestion_store().languages(run_id, _current_attempt_number(run_id))
+
+
+def get_selection_rows(run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+    """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection."""
+    return build_suggestion_store().selection_rows(run_id, _current_attempt_number(run_id), f)
+
+
 def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:
     """Mark the given entity-language groups' rows DISCARDED; return how many moved.
 
@@ -758,6 +1003,38 @@ def restore_rows(run_id: str, pairs: list[tuple[str, str | None]]) -> int:
     )
 
 
+def discard_ids(run_id: str, ids: list[int], reason: str | None = None) -> int:
+    """Mark exactly these SUBOPERATIONS discarded; return how many moved.
+
+    The table's Discard acts on checked suboperation rows, so the selection is a
+    suggestion-id list — narrowing a discard to one property of one
+    entity-language group, which the pair-based :func:`discard_rows` cannot
+    express. APPLIED rows are left alone (as in every discard path: un-writing
+    is the revert's job). An empty list discards nothing.
+    """
+    if not ids:
+        return 0
+    store = build_suggestion_store()
+    return store.discard_by_filter(
+        run_id,
+        _current_attempt_number(run_id),
+        SuggestionFilter(suggestion_ids=ids),
+        reason,
+    )
+
+
+def restore_ids(run_id: str, ids: list[int]) -> int:
+    """Undo the discard of exactly these SUBOPERATIONS; return the count."""
+    if not ids:
+        return 0
+    store = build_suggestion_store()
+    return store.restore_by_filter(
+        run_id,
+        _current_attempt_number(run_id),
+        SuggestionFilter(suggestion_ids=ids),
+    )
+
+
 def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
     """Wire the apply use case over a built runtime (the Run heuristic).
 
@@ -785,6 +1062,7 @@ async def apply_outcomes(
     user: str,
     password: str,
     selection: list[tuple[str, str | None]],
+    row_ids: list[int] | None = None,
 ) -> list[str]:
     """Execute the selected entities' rows into Uwazi (revertable).
 
@@ -802,6 +1080,9 @@ async def apply_outcomes(
     table shows (recorded by the planning pass) are what gets written.
     ``selection`` is the table's checked (sharedId, language) rows, so a
     translation task writes only the languages the operator checked.
+    ``row_ids`` narrows the Run to the checked SUBOPERATIONS (the table's
+    per-property rows): running one property of one entity-language group
+    writes exactly that property and leaves its siblings pending.
 
     Raises :class:`ApplyRefusedError` when there is nothing to run.
     """
@@ -811,7 +1092,7 @@ async def apply_outcomes(
     def _work() -> list[str]:
         runtime = build_runtime(user=user, password=password)
         use_case = _apply_use_case(runtime)
-        use_case.apply(run_id, _current_attempt_number(run_id), selection)
+        use_case.apply(run_id, _current_attempt_number(run_id), selection, row_ids)
         return [run_id]
 
     return await asyncio.to_thread(_work)
@@ -984,6 +1265,27 @@ async def revert_entity_rows(run_id: str, shared_id: str, user: str, password: s
     if snapshot is None:
         raise RevertRefusedError("this row has no backup — the run has not written to this entity")
     return entity_backup_info(run_id, shared_id)
+
+
+async def revert_suboperation(
+    run_id: str,
+    shared_id: str,
+    language: str | None,
+    property_name: str,
+    suggestion_id: int,
+    user: str,
+    password: str,
+) -> str:
+    """Undo ONE property suboperation (one property, one entity-language row).
+
+    The fine-grained undo the suboperation rows offer: only the clicked
+    property is put back to its backup value, so the operator can keep the rest
+    of the entity's writes. Returns the language row written. Raises
+    ``RevertRefusedError`` when the entity has no backup or was created/deleted
+    by the run (those undos stay run-level).
+    """
+    runtime = build_runtime(user=user, password=password)
+    return await runtime.revert_use_case.revert_property(run_id, shared_id, language, property_name, suggestion_id)
 
 
 class BulkRevertOutcome(BaseModel):
@@ -1535,6 +1837,7 @@ __all__ = [
     "get_suggestion_entity_languages",
     "get_suggestion_properties",
     "get_suggestions",
+    "get_templates",
     "list_attempts",
     "list_runs",
     "property_labels_for",

@@ -21,6 +21,13 @@ are valid and asks questions such as "which languages should the translation
 be written into?" while noting that the instance's language set is not
 visible. The languages come from the wired ``settings_api`` port.
 
+Finally, it renders each property's LANGUAGE SCOPE and the rule that decides
+it (:mod:`uwazi_admin_agent.domain.property_language_scope`): only the
+free-text types are stored per language row, every other type is one value
+shared by all of them. Without that, the agent asked "which language row
+should receive that change?" about a multiselect — a question the data model
+answers, so asking it is a gap in the agent's knowledge, not a real ambiguity.
+
 Pure formatting over fetched models; the fetch is best-effort: a failure to
 read the schema must never block the clarification step (the agent falls back
 to asking, behaving exactly as before).
@@ -32,6 +39,7 @@ import asyncio
 
 from loguru import logger
 
+from uwazi_admin_agent.domain.property_language_scope import language_scope_label, language_scope_rule
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.instance_languages import (
     fetch_instance_languages,
@@ -42,7 +50,13 @@ from uwazi_api.domain.language import Language
 
 
 def render_template(template: AgentTemplate) -> str:
-    """Render one template's property list as one line (pure)."""
+    """Render one template's property list as one line (pure).
+
+    Each property carries its LANGUAGE SCOPE ("per-language" / "all languages"),
+    so the agent can tell at a glance which properties need a language
+    decision and which do not — the question it used to ask about a
+    multiselect change (there is no language row choice for a shared value).
+    """
     if not template.properties:
         return f"- {template.name}: (no custom properties)"
     parts: list[str] = []
@@ -52,7 +66,7 @@ def render_template(template: AgentTemplate) -> str:
         descriptor = prop.type.value if hasattr(prop.type, "value") else str(prop.type)
         if prop.thesaurus_name:
             descriptor += f"; thesaurus: {prop.thesaurus_name}"
-        rendered = f"{prop.name} ({descriptor})"
+        rendered = f"{prop.name} ({descriptor}; {language_scope_label(descriptor)})"
         if prop.use_as_filter:
             rendered += " [filterable]"
         parts.append(rendered)
@@ -77,6 +91,8 @@ def render_schema(
         [
             "INSTANCE TEMPLATES (real property names — never ask which property exists; use these):",
             *template_lines,
+            "",
+            language_scope_rule(),
             "",
             "THESAURI NAMES (controlled vocabularies for select/multiselect values):",
             *thesaurus_lines,

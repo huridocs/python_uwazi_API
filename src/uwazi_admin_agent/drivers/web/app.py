@@ -406,7 +406,7 @@ def _build_row_menu() -> None:
         # close callback would do (the raw element isn't a ``ui.menu``).
         menu = ui.element("q-menu").props("touch-position auto-close")
         with menu:
-            ui.menu_item("Review suggestions", lambda: _row_menu_action(_rowmenu_review))
+            ui.menu_item("Review", lambda: _row_menu_action(_rowmenu_review))
             retry_item = ui.menu_item("Retry generation", lambda: _row_menu_action(_rowmenu_retry))
             errors_item = ui.menu_item("Error details", lambda: _row_menu_action(_error_dialog))
             ui.separator()

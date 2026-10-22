@@ -6,12 +6,16 @@ control values, so they are testable directly.
 
 from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, EntityReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
+    SHARED_ID_CSS,
+    SHARED_ID_MAX_CHARS,
     TITLE_CELL_CHARS,
     accuracy_label,
+    cost_card_value,
     entity_language_key,
     entity_open_url,
     entity_row,
     filter_from_controls,
+    format_cost,
     full_value,
     match_label,
     property_caption,
@@ -19,6 +23,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     run_confirmation,
     run_status,
     suggestion_to_row,
+    table_update_label,
     truncate,
 )
 
@@ -149,6 +154,19 @@ def test_accuracy_label_computes_a_percentage() -> None:
 
 def test_accuracy_label_is_na_when_nothing_compares() -> None:
     assert accuracy_label(0, 0) == "n/a"
+
+
+# --- the LLM cost card ---------------------------------------------------------
+
+
+def test_a_cost_reads_as_money_with_two_decimals() -> None:
+    assert format_cost(0.0) == "$0.00"
+    assert format_cost(1.5) == "$1.50"
+    assert format_cost(12.3456) == "$12.35"
+
+
+def test_the_cost_card_reads_the_spend_against_the_budget() -> None:
+    assert cost_card_value(1.25, 10.0) == "$1.25 / $10.00"
 
 
 # --- entity_row ----------------------------------------------------------------
@@ -334,6 +352,29 @@ def test_the_shared_id_is_its_own_field_and_is_not_glued_to_the_title() -> None:
     assert "(" not in row["title"]
 
 
+# --- the shared id cell --------------------------------------------------------
+
+
+def test_the_shared_id_slot_holds_a_fifteen_character_id() -> None:
+    """The id is never cut: its slot is wide enough for a 15-character id."""
+    assert SHARED_ID_MAX_CHARS == 15
+    assert f"min-width: {SHARED_ID_MAX_CHARS}ch" in SHARED_ID_CSS
+
+
+def test_the_shared_id_slot_does_not_shrink_or_clip() -> None:
+    """The id must be shown in FULL: it never shrinks and it never ellipsises."""
+    assert "flex: 0 0 auto" in SHARED_ID_CSS
+    assert "white-space: nowrap" in SHARED_ID_CSS
+    assert "overflow: visible" in SHARED_ID_CSS
+    assert "ellipsis" not in SHARED_ID_CSS
+
+
+def test_a_real_shared_id_fits_the_slot() -> None:
+    """Uwazi's sharedIds are 10-11 characters, so the 15-char slot holds them."""
+    assert len("275ju9aw3gr") <= SHARED_ID_MAX_CHARS
+    assert len("pxtvk1f0fx") <= SHARED_ID_MAX_CHARS
+
+
 def test_entity_row_trims_the_template_list() -> None:
     names = ", ".join(f"TEMPLATE-{index}" for index in range(10))
 
@@ -405,3 +446,20 @@ def test_filter_from_controls_passes_shared_ids_through() -> None:
     f = filter_from_controls(shared_ids=["a", "b"])
     assert f.shared_ids == ["a", "b"]
     assert filter_from_controls().shared_ids is None
+
+
+# --- table refresh label -----------------------------------------------------
+
+
+def test_table_update_label_names_a_never_refreshed_table() -> None:
+    assert table_update_label(None) == "Table never refreshed"
+
+
+def test_table_update_label_shows_date_and_time() -> None:
+    from datetime import datetime
+
+    assert table_update_label(datetime(2026, 10, 22, 14, 5)) == "Table updated 2026-10-22 14:05 UTC"
+
+
+def test_table_update_label_tolerates_an_unexpected_value() -> None:
+    assert table_update_label(object()) == "Table updated"

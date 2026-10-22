@@ -57,13 +57,14 @@ from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    PROPERTY_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
 )
-from uwazi_admin_agent.domain.suggestion_scoring import value_languages
+from uwazi_admin_agent.domain.suggestion_scoring import compare_values, value_languages
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
@@ -158,6 +159,21 @@ def _selected(suggestion: Suggestion, selection: EntitySelection | None) -> bool
     if selection is None:
         return True
     return (suggestion.shared_id, suggestion.language) in selection
+
+
+def _in_rows(suggestion: Suggestion, row_ids: list[int] | None) -> bool:
+    """Whether a row is one of the checked SUBOPERATIONS (pure).
+
+    The review table's checkboxes are per SUBOPERATION (one suggestion row), so
+    a Run of a subset of one entity-language group must narrow below the pair.
+    ``None`` means "no row-level constraint" — the pair selection (or the whole
+    attempt) stands, so every existing caller keeps its behaviour. A row with no
+    id yet (a freshly built, unpersisted suggestion) can never be in an explicit
+    id list.
+    """
+    if row_ids is None:
+        return True
+    return suggestion.id is not None and suggestion.id in row_ids
 
 
 def language_scoped_value(value: Any, language: str | None) -> Any:
@@ -301,7 +317,11 @@ def language_groups(payloads: list[dict], default_language: str) -> list[tuple[s
     return [(language, grouped[language]) for language in order]
 
 
-def pushable_rows(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[Suggestion]:
+def pushable_rows(
+    suggestions: list[Suggestion],
+    selection: EntitySelection | None = None,
+    row_ids: list[int] | None = None,
+) -> list[Suggestion]:
     """The rows a Run would push, in order (pure).
 
     Only ``ACCEPTED``/``EDITED`` rows of executable ops (``update`` rows need a
@@ -309,13 +329,17 @@ def pushable_rows(suggestions: list[Suggestion], selection: EntitySelection | No
     ``set_publish_status``/``create_relationships`` rows are whole-entity; the
     merge ops behave as their target's op, with the source deletes carried in
     ``merge_source_ids``). ``selection`` restricts to the checked (sharedId,
-    language) rows when given; ``None`` means the whole set.
+    language) rows when given; ``None`` means the whole set. ``row_ids`` narrows
+    further to the checked SUBOPERATIONS; ``None`` means the pair selection (or
+    the whole set) stands.
     """
     rows: list[Suggestion] = []
     for s in suggestions:
         if s.status not in _PUSHABLE:
             continue
         if not _selected(s, selection):
+            continue
+        if not _in_rows(s, row_ids):
             continue
         if s.op == "update" and s.property_name is None:
             continue
@@ -324,7 +348,9 @@ def pushable_rows(suggestions: list[Suggestion], selection: EntitySelection | No
 
 
 def partition_for_apply(
-    rows: list[Suggestion], selection: EntitySelection | None = None
+    rows: list[Suggestion],
+    selection: EntitySelection | None = None,
+    row_ids: list[int] | None = None,
 ) -> tuple[list[Suggestion], list[Suggestion]]:
     """(property_rows, whole_entity_rows) among pushable rows for the given subset (pure).
 
@@ -342,6 +368,8 @@ def partition_for_apply(
         if suggestion.status not in _PUSHABLE:
             continue
         if not _selected(suggestion, selection):
+            continue
+        if not _in_rows(suggestion, row_ids):
             continue
         if suggestion.op in _UPDATE_OPS and suggestion.property_name is not None:
             property_rows.append(suggestion)
@@ -403,7 +431,11 @@ def merge_moves(
     return moves
 
 
-def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[dict]:
+def build_apply_updates(
+    suggestions: list[Suggestion],
+    selection: EntitySelection | None = None,
+    row_ids: list[int] | None = None,
+) -> list[dict]:
     """Group pushable property suggestions into per-entity-LANGUAGE update payloads (pure).
 
     Rows group by (sharedId, language) into ONE ``{"shared_id", "language",
@@ -431,7 +463,7 @@ def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelectio
     """
     grouped: dict[tuple[str, str | None], dict] = {}
     order: list[tuple[str, str | None]] = []
-    for suggestion in pushable_rows(suggestions, selection):
+    for suggestion in pushable_rows(suggestions, selection, row_ids):
         if suggestion.op not in _UPDATE_OPS or suggestion.property_name is None:
             continue
         key = (suggestion.shared_id, suggestion.language)
@@ -459,7 +491,11 @@ def build_apply_updates(suggestions: list[Suggestion], selection: EntitySelectio
     return updates
 
 
-def build_apply_creates(suggestions: list[Suggestion], selection: EntitySelection | None = None) -> list[dict]:
+def build_apply_creates(
+    suggestions: list[Suggestion],
+    selection: EntitySelection | None = None,
+    row_ids: list[int] | None = None,
+) -> list[dict]:
     """Group pushable create suggestions into per-entity-LANGUAGE create payloads (pure).
 
     A create's rows carry the same expansion an update does: one suggestion per
@@ -480,7 +516,7 @@ def build_apply_creates(suggestions: list[Suggestion], selection: EntitySelectio
     """
     grouped: dict[tuple[str, str | None], dict] = {}
     order: list[tuple[str, str | None]] = []
-    for suggestion in pushable_rows(suggestions, selection):
+    for suggestion in pushable_rows(suggestions, selection, row_ids):
         if suggestion.op not in _CREATE_OPS:
             continue
         key = (suggestion.shared_id, suggestion.language)
@@ -547,7 +583,13 @@ class ApplySuggestionsUseCase:
         # Set by _build_crud: the event loop the sync CRUD helpers ride.
         self._crud_loop = None
 
-    def apply(self, run_id: str, attempt: int, selection: EntitySelection = None) -> str:
+    def apply(
+        self,
+        run_id: str,
+        attempt: int,
+        selection: EntitySelection = None,
+        row_ids: list[int] | None = None,
+    ) -> str:
         """Write the selected rows (optionally restricted to ``selection``).
 
         A Run accepts first (:meth:`_accept_pending`): the reviewed table
@@ -566,7 +608,10 @@ class ApplySuggestionsUseCase:
 
         ``selection`` is the table's checked (sharedId, language) rows, so a
         translation task writes ONLY the languages the operator checked; None
-        writes the whole attempt.
+        writes the whole attempt. ``row_ids`` narrows further to the checked
+        SUBOPERATIONS (the review table's per-property rows), so running one
+        property of one entity-language group writes exactly that property and
+        leaves its siblings alone; None keeps the pair-level behaviour.
 
         Raises :class:`ApplyRefusedError` when there is nothing to run, and
         :class:`ApplyWriteError` when Uwazi refused a write — in which case
@@ -574,16 +619,18 @@ class ApplySuggestionsUseCase:
         entity keep their ``ACCEPTED`` status so the operator can run them again
         once the cause is fixed.
         """
-        self._accept_pending(run_id, attempt, selection)
+        self._accept_pending(run_id, attempt, selection, row_ids)
         rows = self._all_accepted(run_id, attempt)
-        to_push = pushable_rows(rows, selection)
-        _, whole_entity_rows = partition_for_apply(rows, selection)
+        to_push = pushable_rows(rows, selection, row_ids)
+        _, whole_entity_rows = partition_for_apply(rows, selection, row_ids)
         # Disjoint by construction: the update payloads hold real sharedIds
         # only, the creates the ``dry-created-N`` placeholders. A create
         # reaching ``updates`` would be enriched from a raw that does not
         # exist, so the two payloads are built from their own row sets.
-        updates = self._enrich(build_apply_updates(rows, selection))
-        creates = build_apply_creates(rows, selection) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
+        updates = self._enrich(build_apply_updates(rows, selection, row_ids))
+        creates = (
+            build_apply_creates(rows, selection, row_ids) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
+        )
         # Merge rows write the target above and, in this SAME Run, delete their
         # sources — the part that makes a merge one action instead of a target
         # row plus N delete rows.
@@ -615,6 +662,16 @@ class ApplySuggestionsUseCase:
         refused = {failure["shared_id"] for failure in failures if failure["shared_id"]}
         written = [row for row in to_push if row.shared_id not in refused]
         self._store.set_status([row.id for row in written if row.id is not None], SuggestionStatus.APPLIED)
+        # The write just landed, so the table's "current" column must show the
+        # value Uwazi now holds — otherwise the next preflight reads the stale
+        # pre-run value and blocks a perfectly valid second Run.
+        current_updates: list[tuple[int, object, bool | None]] = []
+        for row in written:
+            if row.id is None or row.property_name is None or row.op not in PROPERTY_OPS:
+                continue
+            value = effective_value(row)
+            current_updates.append((row.id, value, compare_values(row.proposed_value, value)))
+        self._store.set_current_values(current_updates)
         logger.info(
             "run={} pushed {} update payload(s), {} create(s), {} whole-entity row(s), {} merge(s); {} write(s) refused",
             run_id,
@@ -749,7 +806,13 @@ class ApplySuggestionsUseCase:
         finally:
             loop.close()
 
-    def _accept_pending(self, run_id: str, attempt: int, selection: EntitySelection) -> None:
+    def _accept_pending(
+        self,
+        run_id: str,
+        attempt: int,
+        selection: EntitySelection,
+        row_ids: list[int] | None = None,
+    ) -> None:
         """Accept the rows a Run is about to push — a Run IS the acceptance.
 
         The review UI commits through its Run action (the entity selection plus
@@ -767,15 +830,19 @@ class ApplySuggestionsUseCase:
         checked, so running the ``es`` row of a translation task accepts ONLY
         that language's rows — its ``en`` sibling stays pending and is written
         by a second, separate Run. The whole attempt when None, nothing when
-        empty.
+        empty. ``row_ids`` narrows acceptance to the checked SUBOPERATIONS: the
+        unchecked siblings of the same entity-language group stay pending, which
+        is what makes "run this one property" mean exactly that.
         """
         if selection is not None and not selection:
+            return
+        if row_ids is not None and not row_ids:
             return
         for status in (SuggestionStatus.PENDING, SuggestionStatus.REVERTED):
             self._store.set_status_by_filter(
                 run_id,
                 attempt,
-                SuggestionFilter(status=status, entity_languages=selection),
+                SuggestionFilter(status=status, entity_languages=selection, suggestion_ids=row_ids),
                 SuggestionStatus.ACCEPTED,
             )
 

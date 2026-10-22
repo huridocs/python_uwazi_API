@@ -34,6 +34,7 @@ STATUS_COLORS: dict[str, str] = {
     "discarded": "red",
     "applied": "blue",
     "reverted": "indigo",
+    "obsolete": "grey-6",
 }
 
 OP_COLORS: dict[str, str] = {
@@ -60,6 +61,7 @@ RUN_STATUS_COLORS: dict[str, str] = {
     "reverted": "indigo",
     "pending": "grey",
     "discarded": "red",
+    "obsolete": "grey-6",
 }
 
 
@@ -257,11 +259,32 @@ TEMPLATE_COLUMN: str = "width: 170px"
 OPS_COLUMN: str = "width: 190px"
 STATUS_COLUMN: str = "width: 110px"
 # Four flat icon buttons (Discard/Undo, Revert, Run, Edit) at ~32px each.
-ACTIONS_COLUMN: str = "width: 128px"
+ACTIONS_COLUMN: str = "width: 150px"
 # The Entity column takes the remainder: ``max-width: 0`` is what lets the column
 # actually shrink under the browser's default table layout (a bare percentage does
 # not), and the cell's link carries the ellipsis.
 TITLE_COLUMN: str = "max-width: 0; width: 100%"
+
+# The sharedId is an identifier the operator copies out of the table, so it is
+# NEVER cut: the cell gives it a fixed slot wide enough for the longest id,
+# and the TITLE beside it absorbs the shrink instead (the title is the one that
+# may be long — a document title is unbounded).
+SHARED_ID_MAX_CHARS: int = 15
+SHARED_ID_CLASS: str = "review-shared-id"
+
+# The sharedId's own style. The id is set in a monospace
+# face so the reserved slot matches the characters it holds, and the ids line
+# up down the column — which is what makes them comparable at a glance.
+SHARED_ID_CSS: str = (
+    f".{SHARED_ID_CLASS} {{\n"
+    f"    flex: 0 0 auto;\n"
+    f"    min-width: {SHARED_ID_MAX_CHARS}ch;\n"
+    "    white-space: nowrap;\n"
+    "    overflow: visible;\n"
+    "    font-family: monospace;\n"
+    "    font-size: 0.9em;\n"
+    "}\n"
+)
 
 
 def property_heading(property_name: str | None, op: str, labels: dict[str, str]) -> str:
@@ -329,25 +352,14 @@ def suggestion_to_row(suggestion: Suggestion) -> dict[str, Any]:
     }
 
 
-def counterpart_filter(key: str) -> str:
-    """The filter control a pick RESETS, because the two exclude each other (pure).
-
-    The Status dropdown and the Discarded dropdown both speak about the
-    discarded rows: "discarded" plus "not discarded" is an empty table nobody
-    can read, so picking one clears the other. Any other key has no
-    counterpart (""), and its filter stands alone.
-    """
-    return {"status": "discarded", "discarded": "status"}.get(key, "")
-
-
 def filter_from_controls(
     *,
     status: str = "",
-    discarded: str = "",
     op: str = "",
     property_name: str = "",
     match: str = "",
     text: str = "",
+    language: str = "",
     offset: int = 0,
     limit: int = 25,
     accepted_only: bool = False,
@@ -357,18 +369,18 @@ def filter_from_controls(
 
     Empty strings mean "no constraint" — the UI's select controls use "" for
     their "all" option, and translating that here keeps the page's handlers
-    trivial. ``discarded`` is the page's tri-state "Discarded" select: "" (any),
-    "yes" (only the discarded rows) or "no" (only the rows still to execute).
+    trivial. ``language`` narrows the SUBOPERATIONS to one written language (the
+    language-independent rows are their own group and are not matched).
     ``shared_ids`` is the table's checkbox selection passed through verbatim
     (``None`` = no constraint, ``[]`` = match nothing).
     """
     return SuggestionFilter(
         status=SuggestionStatus(status) if status else None,
-        discarded={"yes": True, "no": False}.get(discarded),
         op=op or None,
         property_name=property_name or None,
         match=match or None,  # type: ignore[arg-type] — validated by the pydantic Literal
         text=(text or "").strip() or None,
+        languages=[language] if language else None,
         accepted_only=accepted_only,
         shared_ids=shared_ids,
         limit=limit,
@@ -435,7 +447,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     One row per affected entity IN ONE LANGUAGE (the table is the
     checkbox-selection surface the bulk Run action reads), aggregated from the
     entity's suggestion rows by the store. Columns: Entity (the sharedId and
-    the title, with the open-in-Uwazi icon at its end), Language, Template,
+    the title, with the open-in-Uwazi icon at its end), Template, Language,
     Ops, Status (runned/pending), and the Run/Edit/Revert row actions — no
     separate sharedId column, no change-count columns, and no separate Uwazi
     column.
@@ -502,6 +514,29 @@ def accuracy_label(exact: int, mismatch: int) -> str:
     return f"{100 * exact / denominator:.1f}%" if denominator else "n/a"
 
 
+# The currency the LLM costs are denominated in: the same money the cost
+# dialog's cap field is labelled with ("Max cost ($)").
+CURRENCY_SYMBOL: str = "$"
+
+
+def format_cost(value: float) -> str:
+    """One amount of money, in the operator's currency (pure).
+
+    The figure is money a person reads at a glance: the currency symbol, the
+    whole part and TWO decimals — the per-mtok fractions the domain's own
+    formatter prints with four decimals are noise on a card.
+    """
+    return f"{CURRENCY_SYMBOL}{value:.2f}"
+
+
+def cost_card_value(spent: float, budget: float) -> str:
+    """The LLM budget card's value: the spend against the cap (pure).
+
+    One line, read as "what has been spent of what was allowed".
+    """
+    return f"{format_cost(spent)} / {format_cost(budget)}"
+
+
 # --- drift banner ------------------------------------------------------------
 
 DRIFT_STATUS_COLORS: dict[str, str] = {
@@ -543,15 +578,29 @@ def drift_banner_time(checked_at: Any) -> str:
         return ""
 
 
+def table_update_label(updated_at: Any) -> str:
+    """The last-table-update label shown beside the update button (pure)."""
+    if updated_at is None:
+        return "Table never refreshed"
+    try:
+        return f"Table updated {updated_at:%Y-%m-%d %H:%M} UTC"
+    except (ValueError, TypeError):
+        return "Table updated"
+
+
 __all__ = [
     "DRIFT_STATUS_COLORS",
     "ACTIONS_COLUMN",
+    "CURRENCY_SYMBOL",
     "MATCH_COLORS",
     "OPENABLE_OPS",
     "OP_COLORS",
     "OPS_COLUMN",
     "RUN_OP_PHRASES",
     "RUN_STATUS_COLORS",
+    "SHARED_ID_CLASS",
+    "SHARED_ID_CSS",
+    "SHARED_ID_MAX_CHARS",
     "STATUS_COLUMN",
     "STATUS_COLORS",
     "TEMPLATE_COLUMN",
@@ -559,7 +608,7 @@ __all__ = [
     "TITLE_COLUMN",
     "accuracy_label",
     "bulk_discard_label",
-    "counterpart_filter",
+    "cost_card_value",
     "discard_confirmation",
     "drift_banner_text",
     "drift_banner_time",
@@ -568,6 +617,7 @@ __all__ = [
     "entity_open_url",
     "entity_language_key",
     "filter_from_controls",
+    "format_cost",
     "match_label",
     "property_caption",
     "bulk_revert_label",
@@ -582,5 +632,6 @@ __all__ = [
     "select_all_label",
     "selection_count",
     "suggestion_to_row",
+    "table_update_label",
     "truncate",
 ]

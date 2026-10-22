@@ -25,6 +25,7 @@ class AuditStep(str, Enum):
 
     EXECUTE = "execute"
     REVERT = "revert"
+    TABLE_SYNC = "table_sync"
 
 
 class AuditOutcome(str, Enum):

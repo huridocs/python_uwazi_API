@@ -7,6 +7,7 @@ namespacing is applied by :func:`uwazi_admin_agent.drivers.runtime.build_file_ca
     entities/<safe_cache_name(shared_id)>/<safe_cache_name(language)>.json
                                                                    # CachedRaw JSON
     segmentations/<safe_cache_name(file_id)>.json                  # ready Segmentation JSON
+    text/<sha256-digest>                                           # LLM / translation text
 
 Two freshness regimes (see :mod:`uwazi_admin_agent.domain.file_cache`):
 
@@ -62,6 +63,7 @@ from uwazi_admin_agent.domain.file_cache import (
 )
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.cache_stats_port import CacheStatsPort
+from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_api.domain.segmentation import Segmentation
 
 # Cache key for language=None (the server-default locale row). ISO 639-1
@@ -76,7 +78,7 @@ _EVICT_HEADROOM: float = 0.9
 _DEFAULT_EVICT_SCAN_INTERVAL: int = 256
 
 
-class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
+class FileCacheStore(CacheStatsPort, CacheInvalidationPort, TextCachePort):
     """On-disk bytes+raw cache with TTL, amortized LRU eviction, aggregate stats."""
 
     def __init__(
@@ -91,6 +93,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         self._files_dir: Path = self._root / "files"
         self._entities_dir: Path = self._root / "entities"
         self._segmentations_dir: Path = self._root / "segmentations"
+        self._text_dir: Path = self._root / "text"
         self._max_bytes: int = max_bytes
         self._ttl_seconds: float = ttl_seconds
         self._evict_scan_interval: int = max(1, evict_scan_interval)
@@ -171,6 +174,26 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         self._write_atomic(self._segmentation_path(file_id), seg.model_dump_json(by_alias=True).encode("utf-8"))
         self._maybe_evict()
 
+    # --- LLM / translation text (content-addressed, immutable-forever) ---------
+
+    @override
+    def get_text(self, key: str) -> str | None:
+        """Cached text for a content-addressed ``key``, or None on miss.
+
+        Empty text is a legitimate hit (a model can answer nothing), so the
+        method distinguishes a readable empty file from a missing one.
+        """
+        try:
+            return (self._text_dir / key).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    @override
+    def put_text(self, key: str, value: str) -> None:
+        """Atomically store one text result under its content-addressed key."""
+        self._write_atomic(self._text_dir / key, value.encode("utf-8"))
+        self._maybe_evict()
+
     # --- invalidation (write-path hook) -----------------------------------------
 
     @override
@@ -225,7 +248,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
         the number of entries removed (0 when the cache is empty).
         """
         removed = 0
-        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir):
+        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir, self._text_dir):
             if not sub.is_dir():
                 continue
             for path in sub.rglob("*"):
@@ -360,7 +383,7 @@ class FileCacheStore(CacheStatsPort, CacheInvalidationPort):
     def _scan_all(self) -> list[tuple[Path, int, float]]:
         """Collect (path, size, mtime) for every cached file under the root."""
         entries: list[tuple[Path, int, float]] = []
-        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir):
+        for sub in (self._files_dir, self._entities_dir, self._segmentations_dir, self._text_dir):
             if not sub.is_dir():
                 continue
             for path in sub.rglob("*"):

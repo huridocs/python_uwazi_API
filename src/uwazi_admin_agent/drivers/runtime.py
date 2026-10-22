@@ -56,7 +56,11 @@ from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegm
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
-from uwazi_admin_agent.adapters.translation_repository_adapter import UwaziTranslationRepository
+from uwazi_admin_agent.adapters.template_property_type_adapter import UwaziTemplatePropertyTypes
+from uwazi_admin_agent.adapters.translation_repository_adapter import (
+    CachedTranslationRepository,
+    UwaziTranslationRepository,
+)
 from uwazi_admin_agent.configuration import (
     ENTITY_CACHE_TTL_SECONDS,
     FILE_CACHE_DIR,
@@ -73,6 +77,7 @@ from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.drift_probe_port import DriftProbePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.property_type_port import PropertyTypeLookupPort
 from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
@@ -115,6 +120,7 @@ class Runtime:
         settings_repository: Any = None,
         translation_port: TranslationPort | None = None,
         template_labels: TemplateLabelPort | None = None,
+        property_types: PropertyTypeLookupPort | None = None,
         drift_probe: DriftProbePort | None = None,
         publish_state: PublishStatePort | None = None,
         relationship_hubs: RelationshipHubPort | None = None,
@@ -141,6 +147,9 @@ class Runtime:
         self.translation_port: TranslationPort | None = translation_port
         # Template id -> display label (a raw carries the id; people see the name).
         self.template_labels: TemplateLabelPort | None = template_labels
+        # Template id/name -> its property types. The recording path reads them
+        # to tell a per-language property from a shared one.
+        self.property_types: PropertyTypeLookupPort | None = property_types
         # The instance's settings (``/api/settings``): the configured languages,
         # which the document/segmentation resolvers use as their fallback order
         # when an entity holds its file in a language other than the requested one.
@@ -218,6 +227,10 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     template_labels: TemplateLabelPort = UwaziTemplateLabels(api.client)
+    # The template property TYPES: what tells the recording path whether a
+    # change is per-language (the free-text types) or one shared value. The
+    # same cached /api/templates read the label lookup uses.
+    property_types: PropertyTypeLookupPort = UwaziTemplatePropertyTypes(api.client)
     search_probe = UwaziSearchProbe(api.client)
     base_segmentation_repository = UwaziSegmentationRepository(api.client)
     segmentation_repository: SegmentationRepositoryPort = (
@@ -229,7 +242,10 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     audit_log = build_audit_log()
     llm = OllamaAdapter()
     url_fetcher: UrlFetcherPort = HttpUrlFetcherAdapter()
-    translation_port: TranslationPort | None = UwaziTranslationRepository(api.client)
+    base_translation: TranslationPort = UwaziTranslationRepository(api.client)
+    translation_port: TranslationPort | None = (
+        CachedTranslationRepository(base_translation, file_cache) if file_cache is not None else base_translation
+    )
 
     deps = AdminAgentDeps(
         thesauri_api=api,
@@ -297,6 +313,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         settings_repository=api.client.settings,
         translation_port=translation_port,
         template_labels=template_labels,
+        property_types=property_types,
         drift_probe=UwaziDriftProbe(api.client),
         publish_state=UwaziPublishStateRepository(api.client),
         relationship_hubs=UwaziRelationshipHubs(api.client),

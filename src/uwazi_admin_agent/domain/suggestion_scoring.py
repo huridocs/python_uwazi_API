@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
+from uwazi_admin_agent.domain.property_language_scope import is_per_language_property_type
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
     PROPERTY_OPS,
@@ -166,12 +167,88 @@ def row_language(value_language: str | None, record_language: Any) -> str | None
     return None
 
 
+def _is_per_language_property(
+    property_name: str,
+    value: Any,
+    property_types: dict[str, str] | None,
+) -> bool:
+    """Whether a property's value is stored PER LANGUAGE ROW (pure).
+
+    The instance's template definitions answer it: ``property_types`` maps a
+    property NAME to its Uwazi type, and only the free-text types are stored
+    per language row (see
+    :mod:`uwazi_admin_agent.domain.property_language_scope`).
+
+    Without a declared type the value's own shape is the next best answer: a
+    value carrying ``{"value", "language"}`` entries is a per-language value by
+    construction.
+
+    With NO types at all (the lookup unwired, the instance unreachable) the
+    value's shape is not enough — the contract writes a text value as a bare
+    scalar too, so a bare value is ambiguous — and the row keeps the script's
+    ``language`` argument, which is what the recording path has always done.
+    """
+    declared = (property_types or {}).get(property_name)
+    if declared:
+        return is_per_language_property_type(declared)
+    if property_types:
+        # The instance's types were read and this property is not among them:
+        # a bare value is then a shared one (a select label, a list of labels,
+        # a date), and only a value naming its own languages is per-language.
+        return bool(value_languages(value))
+    # No types at all: keep the existing behaviour — the script's language
+    # argument carries the intent.
+    return True
+
+
+def _record_shared_change(
+    suggestions: list[Suggestion],
+    base: dict[str, Any],
+    *,
+    property_name: str,
+    proposed_value: Any,
+) -> None:
+    """File ONE row for a language-independent change, replacing any earlier one.
+
+    A shared value has no language, so its row's identity is the entity + the
+    property — and a script that wrote the same shared property once per
+    language produces the SAME change several times. Filing each of them would
+    offer the operator two (or more) rows for one change: they would be
+    checked separately, run separately, and the second write would replace the
+    first with the same value. So the LAST write wins — it is the one the
+    script settled on — and it replaces the earlier row in place.
+    """
+    for index, existing in enumerate(suggestions):
+        if (
+            existing.shared_id == base["shared_id"]
+            and existing.op == base["op"]
+            and existing.property_name == property_name
+            and existing.language is None
+        ):
+            suggestions[index] = Suggestion(
+                **base,
+                language=None,
+                property_name=property_name,
+                proposed_value=proposed_value,
+            )
+            return
+    suggestions.append(
+        Suggestion(
+            **base,
+            language=None,
+            property_name=property_name,
+            proposed_value=proposed_value,
+        )
+    )
+
+
 def records_to_suggestions(
     run_id: str,
     attempt: int,
     records: list[dict[str, Any]],
     entity_titles: dict[str, str] | None = None,
     now: datetime | None = None,
+    property_types: dict[str, str] | None = None,
 ) -> list[Suggestion]:
     """Convert dry-run records into suggestion rows (pure).
 
@@ -203,6 +280,18 @@ def records_to_suggestions(
     in, since Uwazi replaces a property's whole value list on write). A
     language-independent value — a select, a multiselect, a link, a date, a
     title — stays ONE row with ``language=None``.
+
+    ``property_types`` maps a property NAME to its Uwazi type ("text",
+    "multiselect", ...), read from the instance's template definitions. It is
+    what makes a language-independent change ONE suboperation even when the
+    script wrote it several times: a multiselect change recorded under
+    ``language="en"`` and again under ``language="es"`` is ONE change to ONE
+    shared value, so it must not become two rows the operator can run
+    separately (the second would overwrite the first with the same value). Only
+    the free-text types are stored per language row, so only those are split
+    (see :mod:`uwazi_admin_agent.domain.property_language_scope`). Without the
+    types the recording falls back to the VALUE's shape: a value carrying
+    ``{"value", "language"}`` entries is split, and a bare value is not.
 
     ``entity_titles`` maps sharedId → title for display (the prediction use case
     resolves it from the entities it already read). Order follows the records so
@@ -260,6 +349,22 @@ def records_to_suggestions(
                 emitted = True
             for key, value in metadata.items():
                 for language, split_value in per_language_split(value):
+                    # A property whose type is LANGUAGE-INDEPENDENT holds ONE
+                    # value shared by every language row, so it is ONE change:
+                    # it is never filed under a language, and it is never
+                    # split. The script may well have written it once per
+                    # language (the helper's ``language`` argument selects the
+                    # ROW, not the value) — that is still one change to one
+                    # shared value, and filing it twice would offer the
+                    # operator two rows that overwrite each other.
+                    if not _is_per_language_property(key, value, property_types):
+                        _record_shared_change(
+                            suggestions,
+                            base,
+                            property_name=str(key),
+                            proposed_value=split_value,
+                        )
+                        continue
                     suggestions.append(
                         Suggestion(
                             **base,
@@ -276,6 +381,27 @@ def records_to_suggestions(
         proposed: Any = None
         if op == "set_publish_status":
             proposed = bool(record.get("published"))
+        if op == "create_relationships":
+            # ONE SUBOPERATION PER LINK. The dry-run recorder writes one record
+            # per relationship (``{"op": "create_relationships", **rel}``), and
+            # the apply path expects that very dict back in ``proposed_value``
+            # (``_write`` builds its ``create_relationships`` payload from it) —
+            # dropping it made every relationship row a no-op write. The link's
+            # target is the row's ``detail_key``: the batch's rows all share the
+            # entity, op, language and (null) property, so without it the store's
+            # identity would collapse N links into one.
+            rel = {key: value for key, value in record.items() if key != "op"}
+            origin = str(rel.get("from_entity_shared_id") or rel.get("shared_id") or shared_id)
+            target = str(rel.get("to_entity_shared_id") or rel.get("to_shared_id") or "")
+            suggestions.append(
+                Suggestion(
+                    **{**base, "shared_id": origin},
+                    property_name=None,
+                    proposed_value=rel,
+                    detail_key=target or None,
+                )
+            )
+            continue
         suggestions.append(Suggestion(**base, property_name=None, proposed_value=proposed))
 
     return suggestions

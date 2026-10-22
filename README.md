@@ -108,7 +108,7 @@ binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
 
-### Reviewing: selection scan → outcomes → accept
+### Reviewing: selection scan → run → revert
 
 Every task has a **review page** (`/review/<run_id>`, reachable from the runs
 table's `fact_check` action or its row menu). The review flow is built on the
@@ -117,8 +117,8 @@ table's `fact_check` action or its row menu). The review flow is built on the
 1. **Selection script** (`script.py`, read-only) — discovers the affected
    entities and declares one intended change per entity. Run it with **"Scan
    entities"**: a dry pass (real reads, zero writes) whose records become the
-   review table's rows, one per affected entity, scored against the values
-   Uwazi currently holds (stored in a local SQLite file,
+   review table's suboperations, grouped one row per affected entity and scored
+   against the values Uwazi currently holds (stored in a local SQLite file,
    `data/suggestions.db`).
 2. **Apply script** (`apply_script.py`) — applies the change to EXACTLY ONE
    entity via the bound `TARGET_SHARED_ID`. It is the only place LLM work
@@ -127,30 +127,36 @@ table's `fact_check` action or its row menu). The review flow is built on the
 
 On the review page:
 
-- the table lists ONE row per affected entity with a **checkbox** per row
-  (Ops / Properties / Changes / Match / Review badges summarize the entity's
-  rows); the entity window (click the title) shows the primary PDF beside the
-  per-property rows;
-- **Generate outcomes (N)** runs the apply script DRY once per checked entity
-  (budget-approved like every LLM pass) and stores each computed value under
-  the row — nothing is written to Uwazi;
-- **Accept selected (N)** writes the checked entities' accepted/edited values
-  to Uwazi through one accumulating, revertable *apply run* (`<run>-apply`).
-  Property rows are pushed as batched partial updates; whole-entity rows
-  (delete/publish/...) and creates are applied by running the apply script for
-  that one entity for real. Accepting again later adds to the same apply run;
-  **Revert task** (or the apply run's own revert) undoes everything in one
-  action;
-- **Reject selected (N)** marks the checked rows discarded (they are never
-  written);
-- **Discard (N)** (and the row's own **Discard** button in the Actions column)
-  marks the checked operations as discarded — "the end user does not want this
-  executed". A discard is a MARK, not a delete: a Run never writes a discarded
-  row, the reason the operator typed is stored with it, and the row's **Undo**
-  button brings the operation back into the review queue. The **Discarded**
-  filter reads both halves of that decision ("discarded" / "not discarded"), so
-  the refused operations can be reviewed on their own while the rest keep being
-  executed;
+- the table lists ONE row per affected **entity** (the operation), with a
+  checkbox; expanding the row (or **Expand all**) lists its **suboperations** —
+  one per property value per language, one per relationship link — each with its
+  own checkbox, status badge and actions. One entity written in two languages is
+  still ONE row, with one part per language;
+- **Run (N)** writes the checked suboperations through one accumulating,
+  revertable *apply run* (`<run>-apply`). Property rows are pushed as batched
+  partial updates; whole-entity rows (delete/publish/...) and creates go through
+  their dedicated helpers. Ticking an operation ticks all its parts, and ticking
+  its last part ticks the operation. An operation's own **Run** button runs its
+  ticked parts (all of them when none is ticked); a suboperation's **Run** writes
+  exactly that property. A locked part (delete/publish/merge) runs with its
+  operation, since it is one action on Uwazi's side;
+- **Revert** on an operation restores that entity to the backup the run made
+  BEFORE any of its writes (all its languages share one backup). A written
+  property suboperation also offers its own **Revert**, which puts back just
+  that property and leaves the run's other writes in place. **Revert task** (or
+  the apply run's own revert) undoes everything in one action;
+- the entity window (click the title, or a suboperation's **Edit** icon) shows
+  the primary PDF beside the entity's property rows; opening it from a
+  suboperation highlights that property;
+- filters (Status, Discarded, Op, Property with its accuracy, Language, Match,
+  Search) are SUBOPERATION filters: an operation whose every part a filter
+  removed is not shown, and a Run under a filter writes only the parts the
+  filter left. **Discard (N)** (and the per-row **Discard**) marks the checked
+  suboperations as discarded — "the end user does not want this executed". A
+  discard is a MARK, not a delete: a Run never writes a discarded row, the
+  reason the operator typed is stored with it, and **Restore** brings the
+  operation back into the review queue. The **Discarded** filter reads both
+  halves of that decision ("discarded" / "not discarded");
 - **Improve the prompt** shows the run's current prompt editable plus this
   round's discard/mismatch evidence; submitting regenerates BOTH scripts
   (selection + apply) with the original discovery context still in view.

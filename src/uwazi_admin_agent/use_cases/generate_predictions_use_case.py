@@ -33,7 +33,8 @@ from typing import Any
 from loguru import logger
 
 from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE
-from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger
+from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmUsage
+from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
     PROPERTY_OPS,
     TITLE_PROPERTY,
@@ -49,9 +50,11 @@ from uwazi_admin_agent.domain.suggestion_scoring import (
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
+from uwazi_admin_agent.ports.property_type_port import PropertyTypeLookupPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
+from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
@@ -217,6 +220,8 @@ class GeneratePredictionsUseCase:
         default_language: str = "en",
         template_labels: TemplateLabelPort | None = None,
         translation_port: TranslationPort | None = None,
+        property_types: PropertyTypeLookupPort | None = None,
+        llm_cache: TextCachePort | None = None,
     ) -> None:
         # The LLM runtime the script's llm_complete/llm_map helpers ride, under
         # the budgeted ledger built per pass below. None → loud refusal stubs.
@@ -231,6 +236,38 @@ class GeneratePredictionsUseCase:
         self._template_labels = template_labels
         # The script helpers' translate_text rides this; None → loud unwired stub.
         self._translation_port = translation_port
+        # The template property TYPES: what tells the recording path whether a
+        # change is per-language (the free-text types) or one shared value.
+        # None → the value's own shape decides, which agrees with the rule for
+        # every type the write contract writes as a bare value.
+        self._property_types = property_types
+        # Content-addressed cache for the script's LLM calls: a refresh reuses
+        # answers for unchanged inputs and pays nothing for the hits.
+        self._llm_cache = llm_cache
+        # Set by a reconcile refresh so the caller can report what changed.
+        self.last_reconciliation: ReconciliationSummary | None = None
+
+    def _property_types_for(self, records: list[dict[str, Any]]) -> dict[str, str]:
+        """``{property_name: property_type}`` for the templates these records touch.
+
+        The recording path needs the types to tell a per-language property from
+        a shared one, and the templates come from the records themselves (the
+        script names the template it writes to). One lookup per template, on
+        the CACHED templates read the label lookup already performs — so this
+        costs no extra request. No lookup wired, or a template that cannot be
+        resolved, contributes nothing: the value's own shape decides then.
+        """
+        if self._property_types is None:
+            return {}
+        templates: list[str] = []
+        for record in records:
+            name = str(record.get("template_name") or "").strip()
+            if name and name not in templates:
+                templates.append(name)
+        types: dict[str, str] = {}
+        for template in templates:
+            types.update(self._property_types.property_types(template))
+        return types
 
     async def run(
         self,
@@ -239,6 +276,8 @@ class GeneratePredictionsUseCase:
         attempt: int,
         budget: LlmBudget,
         entity_scope: list[str] | None = None,
+        *,
+        reconcile: bool = False,
     ) -> PredictionAttempt:
         """Run one prediction pass and persist its suggestions.
 
@@ -246,17 +285,41 @@ class GeneratePredictionsUseCase:
         A budget abort does NOT raise: the aborted attempt row plus the kept
         suggestions ARE the user-facing result. Any other script error is
         recorded as ``FAILED`` and re-raised.
+
+        ``reconcile=True`` is the in-place table refresh: the SAME attempt row is
+        reused and the resulting rows are merged into the existing table by
+        :meth:`SuggestionStorePort.reconcile_suggestions` (the pure rules live
+        in :mod:`uwazi_admin_agent.domain.review_refresh`).
         """
         started = time.monotonic()
         scope = list(entity_scope) if entity_scope is not None else None
-        attempt_row = PredictionAttempt(
-            run_id=run_id,
-            attempt=attempt,
-            status=PredictionAttemptStatus.RUNNING,
-            budget=budget,
-            entities_total=len(scope) if scope is not None else 0,
-            entity_scope=scope,
-            created_at=datetime.now(timezone.utc),
+        now = datetime.now(timezone.utc)
+        existing_attempt = self._store.get_attempt(run_id, attempt) if reconcile else None
+        if reconcile and existing_attempt is None:
+            raise PredictionPassError(f"cannot refresh run {run_id!r}: attempt {attempt} does not exist")
+        attempt_row = (
+            existing_attempt.model_copy(
+                update={
+                    "status": PredictionAttemptStatus.RUNNING,
+                    "budget": budget,
+                    "spent": LlmUsage(),
+                    "entities_total": len(scope) if scope is not None else 0,
+                    "entities_done": 0,
+                    "entity_scope": scope,
+                    "error": None,
+                    "finished_at": None,
+                }
+            )
+            if existing_attempt is not None
+            else PredictionAttempt(
+                run_id=run_id,
+                attempt=attempt,
+                status=PredictionAttemptStatus.RUNNING,
+                budget=budget,
+                entities_total=len(scope) if scope is not None else 0,
+                entity_scope=scope,
+                created_at=now,
+            )
         )
         self._store.create_attempt(attempt_row)
 
@@ -264,7 +327,12 @@ class GeneratePredictionsUseCase:
         records: list[dict[str, Any]] = []
         _result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, attempt, scope)
 
-        suggestions = records_to_suggestions(run_id, attempt, records)
+        suggestions = records_to_suggestions(
+            run_id,
+            attempt,
+            records,
+            property_types=self._property_types_for(records),
+        )
         if suggestions:
             await asyncio.to_thread(
                 hydrate_current_values,
@@ -273,6 +341,14 @@ class GeneratePredictionsUseCase:
                 self._default_language,
                 self._template_labels,
             )
+        if reconcile:
+            self.last_reconciliation = await asyncio.to_thread(
+                self._store.reconcile_suggestions,
+                run_id,
+                attempt,
+                suggestions,
+            )
+        elif suggestions:
             self._store.add_suggestions(suggestions)
 
         spent = ledger.snapshot()
@@ -330,6 +406,18 @@ class GeneratePredictionsUseCase:
 
     # --- internals -----------------------------------------------------------
 
+    async def refresh(
+        self,
+        script: str,
+        run_id: str,
+        attempt: int,
+        budget: LlmBudget,
+    ) -> tuple[PredictionAttempt, ReconciliationSummary]:
+        """Re-run the script against current Uwazi and merge into ``attempt``."""
+        self.last_reconciliation = None
+        final = await self.run(script, run_id=run_id, attempt=attempt, budget=budget, reconcile=True)
+        return final, self.last_reconciliation or ReconciliationSummary()
+
     def _run_script(
         self,
         script: str,
@@ -373,6 +461,7 @@ class GeneratePredictionsUseCase:
                 # this pass's ledger. Without a runtime they are loud refusals.
                 llm_runtime=self._llm_runtime,
                 llm_ledger=ledger,
+                llm_cache=self._llm_cache,
                 apply_mode=self._llm_runtime is not None,
                 entity_scope=set(scope) if scope is not None else None,
             )

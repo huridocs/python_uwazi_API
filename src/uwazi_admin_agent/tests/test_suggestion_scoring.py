@@ -133,6 +133,142 @@ def test_row_language_is_pure() -> None:
     assert row_language(None, 7) is None
 
 
+# --- records_to_suggestions: the property's language scope ---------------------
+
+
+def test_a_multiselect_change_is_one_suboperation_with_no_language() -> None:
+    """A shared value is ONE change: it is not filed under a language.
+
+    A multiselect holds one value shared by every language row of the entity,
+    so the write helper's ``language`` argument says nothing about the value.
+    Filing it under that language would offer the operator a per-language row
+    for a change that has no language.
+    """
+    records = [
+        _rec(
+            op="update",
+            shared_id="lii2m1m62f9",
+            template_name="Case",
+            metadata={"languages": ["English", "Spanish"]},
+            title=None,
+            language="en",
+        )
+    ]
+    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    assert [(r.property_name, r.language) for r in rows] == [("languages", None)]
+
+
+def test_a_multiselect_written_under_two_languages_is_still_one_suboperation() -> None:
+    """The same shared value written once per language is ONE change.
+
+    The script may well write the shared value in several language rows (the
+    helper's ``language`` argument selects the ROW, not the value). That is
+    still one change to one shared value, so it must not become two rows the
+    operator could run separately — the second would overwrite the first with
+    the same value.
+    """
+    records = [
+        _rec(
+            op="update",
+            shared_id="lii2m1m62f9",
+            template_name="Case",
+            metadata={"languages": ["English", "Spanish"]},
+            title=None,
+            language=language,
+        )
+        for language in ("en", "es")
+    ]
+    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    assert [(r.property_name, r.language) for r in rows] == [("languages", None)]
+
+
+def test_a_text_property_still_splits_per_language() -> None:
+    """The free-text types are stored per language row, so they still split."""
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            template_name="Case",
+            metadata={"summary": [{"value": "hello", "language": "en"}, {"value": "hola", "language": "es"}]},
+            title=None,
+            language="en",
+        )
+    ]
+    rows = records_to_suggestions("run1", 1, records, property_types={"summary": "text"})
+    assert [r.language for r in rows] == ["en", "es"]
+
+
+def test_a_text_property_written_as_bare_scalars_still_splits_per_language() -> None:
+    """The contract writes text as a scalar and states the language in the helper."""
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            template_name="Case",
+            metadata={"summary": value},
+            title=None,
+            language=language,
+        )
+        for language, value in (("en", "hello"), ("es", "hola"))
+    ]
+    rows = records_to_suggestions("run1", 1, records, property_types={"summary": "text"})
+    assert [(r.language, r.proposed_value) for r in rows] == [("en", "hello"), ("es", "hola")]
+
+
+def test_without_the_types_the_row_keeps_the_scripts_language() -> None:
+    """With no template definitions at all, the script's language still carries the intent.
+
+    The contract writes a text value as a bare scalar too, so a bare value is
+    ambiguous without the types — and the recording path keeps the behaviour it
+    has always had rather than guessing.
+    """
+    records = [
+        _rec(
+            op="update",
+            shared_id="lii2m1m62f9",
+            template_name="Case",
+            metadata={"languages": ["English", "Spanish"]},
+            title=None,
+            language="en",
+        )
+    ]
+    rows = records_to_suggestions("run1", 1, records)
+    assert [(r.property_name, r.language) for r in rows] == [("languages", "en")]
+
+
+def test_a_value_naming_its_own_languages_is_per_language_without_the_types() -> None:
+    """A value that names its languages is per-language whatever the types say."""
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            template_name="Case",
+            metadata={"summary": [{"value": "hello", "language": "en"}]},
+            title=None,
+            language="en",
+        )
+    ]
+    rows = records_to_suggestions("run1", 1, records)
+    assert [(r.property_name, r.language) for r in rows] == [("summary", "en")]
+
+
+def test_a_shared_value_of_one_entity_does_not_swallow_another_entitys() -> None:
+    """The collapse is per entity: two entities keep their own row."""
+    records = [
+        _rec(
+            op="update",
+            shared_id=shared_id,
+            template_name="Case",
+            metadata={"languages": ["English"]},
+            title=None,
+            language="en",
+        )
+        for shared_id in ("s1", "s2")
+    ]
+    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    assert [(r.shared_id, r.language) for r in rows] == [("s1", None), ("s2", None)]
+
+
 # --- records_to_suggestions: create ------------------------------------------
 
 
@@ -175,12 +311,24 @@ def test_delete_publish_unpublish_produce_one_row_each() -> None:
     assert all(r.match is None for r in rows)
 
 
-def test_create_relationships_produces_one_row() -> None:
-    records = [_rec(op="create_relationships", from_entity_shared_id="a", to_entity_shared_id="b")]
+def test_create_relationships_produces_one_row_per_link() -> None:
+    records = [
+        _rec(op="create_relationships", from_entity_shared_id="a", to_entity_shared_id="b", relationship_type="ref"),
+        _rec(op="create_relationships", from_entity_shared_id="a", to_entity_shared_id="c", relationship_type="ref"),
+    ]
     rows = records_to_suggestions("run1", 1, records)
-    assert len(rows) == 1
-    assert rows[0].op == "create_relationships"
-    assert rows[0].property_name is None
+    assert len(rows) == 2
+    assert all(row.op == "create_relationships" for row in rows)
+    assert all(row.property_name is None for row in rows)
+    # The entity the batch belongs to is the FROM side, and each link's target
+    # rides on detail_key so the rows stay distinct in the store's identity.
+    assert [row.shared_id for row in rows] == ["a", "a"]
+    assert [row.detail_key for row in rows] == ["b", "c"]
+    # The apply path reads the link back from proposed_value, so the record's
+    # payload must survive verbatim.
+    assert rows[0].proposed_value["to_entity_shared_id"] == "b"
+    assert rows[0].proposed_value["relationship_type"] == "ref"
+    assert "op" not in rows[0].proposed_value
 
 
 def test_non_suggestion_ops_are_skipped() -> None:

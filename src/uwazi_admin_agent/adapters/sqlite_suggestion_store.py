@@ -33,8 +33,17 @@ from uwazi_admin_agent.domain.drift import (
     DriftStateRow,
     DriftStatus,
 )
+from uwazi_admin_agent.domain.review_refresh import (
+    ReconciliationSummary,
+    identity_of,
+    missing_status,
+    reconciled_status,
+    same_proposal,
+    suggestion_identity,
+)
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
+    OperationReviewRow,
     PredictionAttempt,
     PredictionAttemptStatus,
     Suggestion,
@@ -70,6 +79,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     op TEXT NOT NULL,
     language TEXT,
     property_name TEXT,
+    detail_key TEXT,
     proposed_value TEXT,
     current_value TEXT,
     match_state INTEGER,
@@ -107,7 +117,10 @@ CREATE TABLE IF NOT EXISTS drift_state (
 # with "no such column: language" on a database created by an older build.
 _INDEXES = """
 CREATE UNIQUE INDEX IF NOT EXISTS suggestion_identity
-    ON suggestion (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''));
+    ON suggestion (
+        run_id, attempt, shared_id, op,
+        ifnull(language, ''), ifnull(property_name, ''), ifnull(detail_key, '')
+    );
 
 CREATE INDEX IF NOT EXISTS suggestion_review
     ON suggestion (run_id, attempt, status, match_state);
@@ -135,6 +148,27 @@ def match_summary_of(verdicts: int, verdict_rows: int, has_mismatch: bool) -> st
     if verdicts == 1:
         return "mismatch" if has_mismatch else "exact"
     return "new" if verdict_rows else "n/a"
+
+
+def _entity_fields(subs: list[Suggestion]) -> dict[str, list[str]]:
+    """One operation's ops / templates / properties, first-appearance order (pure).
+
+    The page-sized suboperation rows ARE the source: no second projection query
+    is needed, and the order mirrors the rows the table shows. ``properties``
+    skips whole-entity rows (a delete writes no property) and keeps ``_title``,
+    which is a real, filterable row.
+    """
+    ops: list[str] = []
+    templates: list[str] = []
+    properties: list[str] = []
+    for sub in subs:
+        if sub.op not in ops:
+            ops.append(sub.op)
+        if sub.template_name and sub.template_name not in templates:
+            templates.append(sub.template_name)
+        if sub.property_name is not None and sub.property_name not in properties:
+            properties.append(sub.property_name)
+    return {"ops": ops, "templates": templates, "properties": properties}
 
 
 def _json_or_none(value: Any) -> str | None:
@@ -183,13 +217,12 @@ def build_where(f: SuggestionFilter, run_id: str, attempt: int) -> tuple[str, li
     if f.status is not None:
         clause.append("status = ?")
         params.append(f.status.value)
-    if f.discarded is not None:
-        # The review table's "Discarded" filter: the operator marks whole
-        # operations as discarded and then works on the rest, so the filter has
-        # to read BOTH halves of that decision (the plain status filter can only
-        # say "discarded", never "not discarded").
-        clause.append("status = ?" if f.discarded else "status != ?")
-        params.append(SuggestionStatus.DISCARDED.value)
+    elif not f.include_obsolete:
+        # A refresh retires rows in bulk; hiding them by default keeps the
+        # table focused on work that can still run. Selecting the OBSOLETE
+        # status explicitly is the way to inspect them.
+        clause.append("status != ?")
+        params.append(SuggestionStatus.OBSOLETE.value)
     if f.accepted_only:
         clause.append(f"status IN ({', '.join('?' for _ in APPLYABLE_STATUSES)})")
         params.extend(APPLYABLE_STATUSES)
@@ -233,6 +266,24 @@ def build_where(f: SuggestionFilter, run_id: str, attempt: int) -> tuple[str, li
                 params.append(shared_id)
                 if language is not None:
                     params.append(language)
+    if f.languages is not None:
+        # The table's Language filter names the languages a SUBOPERATION is
+        # written in; the language-independent rows belong to no language, so
+        # they are not part of this selection.
+        if not f.languages:
+            clause.append("1 = 0")
+        else:
+            clause.append(f"language IN ({', '.join('?' for _ in f.languages)})")
+            params.extend(f.languages)
+    if f.suggestion_ids is not None:
+        # The SUBOPERATION selection: the review table's checked parts are
+        # suggestion row ids, so the bulk Run/Discard/Restore scopes to exactly
+        # those rows (not to their entity-language siblings).
+        if not f.suggestion_ids:
+            clause.append("1 = 0")
+        else:
+            clause.append(f"id IN ({', '.join('?' for _ in f.suggestion_ids)})")
+            params.extend(f.suggestion_ids)
     return " AND ".join(clause), params
 
 
@@ -249,6 +300,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         op=row["op"],
         language=row["language"],
         property_name=row["property_name"],
+        detail_key=row["detail_key"],
         proposed_value=_value_from_json(row["proposed_value"]),
         current_value=_value_from_json(row["current_value"]),
         match=None if match_state is None else bool(match_state),
@@ -296,7 +348,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
     def ensure_schema(self) -> None:
         """Create the tables + indexes when missing (idempotent), and migrate.
 
-        Two additive migrations, both safe on a live DB:
+        Additive migrations, all safe on a live DB:
 
         - ``template_name`` (created before the Template column existed);
         - ``language`` — the language a per-language property's value is written
@@ -306,6 +358,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
           pass re-records it.
         - ``merge_source_ids`` — the source entities a merge row deletes. Legacy
           rows read NULL, which the model turns into an empty list (no merge).
+        - ``detail_key`` — what distinguishes two rows that are otherwise the
+          same change. It is the link target for a ``create_relationships`` row,
+          so a batch of links is one row PER LINK instead of one row carrying
+          the whole batch (and each link can be checked, run and discarded on
+          its own). Legacy rows read NULL, which keys them exactly as before.
 
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
@@ -326,6 +383,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN language TEXT")
             if "merge_source_ids" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_source_ids TEXT")
+            if "detail_key" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN detail_key TEXT")
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
             # one: drop and let _INDEXES recreate it.
@@ -418,6 +477,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 s.op,
                 s.language,
                 s.property_name,
+                s.detail_key,
                 _json_or_none(s.proposed_value),
                 _json_or_none(s.current_value),
                 None if s.match is None else (1 if s.match else 0),
@@ -436,10 +496,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 """
                 INSERT INTO suggestion
                     (run_id, attempt, shared_id, entity_title, template_name, op, language, property_name,
-                     proposed_value, current_value, match_state, merge_source_ids, status, edited_value,
-                     discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''))
+                     detail_key, proposed_value, current_value, match_state, merge_source_ids, status,
+                     edited_value, discard_reason, reviewed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
+                             ifnull(detail_key, ''))
                 DO UPDATE SET
                     entity_title = excluded.entity_title,
                     template_name = excluded.template_name,
@@ -451,6 +512,189 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 rows,
             )
             self._conn.commit()
+
+    def reconcile_suggestions(
+        self,
+        run_id: str,
+        attempt: int,
+        suggestions: list[Suggestion],
+    ) -> ReconciliationSummary:
+        """Merge a refreshed script pass into the SAME attempt, in place.
+
+        Unlike :meth:`add_suggestions` (which preserves every status on an
+        identity match), a refresh also reacts to the proposal CHANGING and to
+        rows the script no longer produces. The pure rules live in
+        :mod:`uwazi_admin_agent.domain.review_refresh`; this method applies
+        them in one transaction:
+
+        - new identity → insert PENDING;
+        - same proposal → keep the operator's status, refresh the proposal
+          columns (including ``current_value``);
+        - changed proposal → PENDING unless the row is EDITED/DISCARDED;
+        - missing → APPLIED stays APPLIED, everything else becomes OBSOLETE;
+        - a returning OBSOLETE row → PENDING.
+        """
+        existing = self._query("SELECT * FROM suggestion WHERE run_id = ? AND attempt = ?", (run_id, attempt))
+        incoming_by_key: dict[tuple[str, str, str, str, str], Suggestion] = {}
+        for suggestion in suggestions:
+            incoming_by_key[identity_of(suggestion)] = suggestion
+        existing_by_key = {
+            suggestion_identity(
+                str(row["shared_id"]),
+                str(row["op"]),
+                row["language"],
+                row["property_name"],
+                row["detail_key"],
+            ): row
+            for row in existing
+        }
+        now_text = _dt_to_text(datetime.now().astimezone())
+        inserts: list[Suggestion] = []
+        updates: list[tuple[Any, ...]] = []
+        refreshed = status_reset = reappeared = 0
+        for key, suggestion in incoming_by_key.items():
+            old = existing_by_key.get(key)
+            if old is None:
+                inserts.append(suggestion)
+                continue
+            old_status = SuggestionStatus(str(old["status"]))
+            same = same_proposal(_value_from_json(old["proposed_value"]), suggestion.proposed_value)
+            status = reconciled_status(
+                old_status,
+                same=same,
+                reappearing=old_status is SuggestionStatus.OBSOLETE,
+            )
+            if old_status is SuggestionStatus.OBSOLETE:
+                reappeared += 1
+            if status is SuggestionStatus.PENDING and status is not old_status:
+                status_reset += 1
+            edited_value = old["edited_value"] if status is SuggestionStatus.EDITED else None
+            discard_reason = old["discard_reason"] if status is SuggestionStatus.DISCARDED else None
+            reviewed_at = old["reviewed_at"] if status is old_status else now_text
+            old_match = old["match_state"]
+            new_match = None if suggestion.match is None else (1 if suggestion.match else 0)
+            if (
+                not same
+                or old["entity_title"] != suggestion.entity_title
+                or old["template_name"] != suggestion.template_name
+                or _value_from_json(old["current_value"]) != suggestion.current_value
+                or old_match != new_match
+            ):
+                refreshed += 1
+            updates.append(
+                (
+                    suggestion.entity_title,
+                    suggestion.template_name,
+                    _json_or_none(suggestion.proposed_value),
+                    _json_or_none(suggestion.current_value),
+                    new_match,
+                    _json_or_none(suggestion.merge_source_ids) if suggestion.merge_source_ids else None,
+                    status.value,
+                    edited_value,
+                    discard_reason,
+                    reviewed_at,
+                    int(old["id"]),
+                )
+            )
+
+        obsolete = kept_applied = 0
+        for key, old in existing_by_key.items():
+            if key in incoming_by_key:
+                continue
+            old_status = SuggestionStatus(str(old["status"]))
+            status = missing_status(old_status)
+            if status is SuggestionStatus.OBSOLETE:
+                obsolete += 1
+            else:
+                kept_applied += 1
+            if status is not old_status or status is SuggestionStatus.OBSOLETE:
+                updates.append(
+                    (
+                        old["entity_title"],
+                        old["template_name"],
+                        old["proposed_value"],
+                        old["current_value"],
+                        old["match_state"],
+                        old["merge_source_ids"],
+                        status.value,
+                        None if status is not SuggestionStatus.EDITED else old["edited_value"],
+                        None if status is not SuggestionStatus.DISCARDED else old["discard_reason"],
+                        now_text,
+                        int(old["id"]),
+                    )
+                )
+
+        if updates:
+            with self._lock:
+                self._conn.executemany(
+                    """
+                    UPDATE suggestion
+                       SET entity_title = ?, template_name = ?, proposed_value = ?,
+                           current_value = ?, match_state = ?, merge_source_ids = ?,
+                           status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?
+                     WHERE id = ?
+                    """,
+                    updates,
+                )
+                self._conn.commit()
+        if inserts:
+            self.add_suggestions(inserts)
+        summary = ReconciliationSummary(
+            inserted=len(inserts),
+            refreshed=refreshed,
+            status_reset=status_reset,
+            reappeared=reappeared,
+            obsolete=obsolete,
+            kept_applied=kept_applied,
+        )
+        logger.info(
+            "table refresh merged run={} attempt={}: {}",
+            run_id,
+            attempt,
+            summary.summary_text(),
+        )
+        return summary
+
+    def set_current_values(self, updates: list[tuple[int, Any, bool | None]]) -> None:
+        """Refresh rows' before-state in place after a write or a revert (bulk).
+
+        ``updates`` carries ``(row id, live value, match)``. ``match=None`` is
+        the "nothing to compare" case (a removed value / a new one), matching
+        the prediction hydration rule.
+        """
+        if not updates:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE suggestion SET current_value = ?, match_state = ? WHERE id = ?",
+                [
+                    (_json_or_none(value), None if match is None else (1 if match else 0), row_id)
+                    for row_id, value, match in updates
+                ],
+            )
+            self._conn.commit()
+
+    def get_suggestion(self, suggestion_id: int) -> Suggestion | None:
+        """One suggestion row by id (the suboperation undo reads it before restoring)."""
+        rows = self._query("SELECT * FROM suggestion WHERE id = ?", (suggestion_id,))
+        return _row_to_suggestion(rows[0]) if rows else None
+
+    def applied_rows_for(self, run_id: str, shared_ids: list[str] | None = None) -> list[Suggestion]:
+        """Every still-APPLIED row of a run (optionally narrowed to sharedIds).
+
+        Used by revert to update ``current_value`` for exactly the rows whose
+        writes are being undone. An empty explicit list returns nothing.
+        """
+        if shared_ids is not None and not shared_ids:
+            return []
+        clause = "run_id = ? AND status = ?"
+        params: list[Any] = [run_id, SuggestionStatus.APPLIED.value]
+        if shared_ids is not None:
+            placeholders = ", ".join("?" for _ in shared_ids)
+            clause += f" AND shared_id IN ({placeholders})"
+            params.extend(shared_ids)
+        rows = self._query(f"SELECT * FROM suggestion WHERE {clause} ORDER BY id", params)
+        return [_row_to_suggestion(row) for row in rows]
 
     def query(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
         where, params = build_where(f, run_id, attempt)
@@ -570,6 +814,182 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 )
             )
         return rows, total
+
+    def operations(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+        """One row per ENTITY (the review table's operation) + its suboperations, SQL-grouped.
+
+        The table's row is the entity — one sharedId, however many languages its
+        suboperations write — so the grouping key is ``shared_id`` alone. One
+        ``GROUP BY shared_id`` statement over the SAME ``build_where`` clause
+        computes the counts and the match verdict under the page's
+        LIMIT/OFFSET; a second statement then loads the page's SUBOPERATION rows
+        (the ``Suggestion`` models themselves) with that same clause. Because
+        the filter is a SUBOPERATION filter, an operation whose every part the
+        filter removed is absent from both queries — the "no suboperations left
+        means no row" rule, enforced in SQL rather than by a Python pass.
+
+        ``total`` is the distinct-sharedId count over the WHOLE filter (paging
+        ignored), so the grid reads "N operations" without loading the set.
+        Bounded work: the detail statement only ever covers the page's entities.
+        """
+        where, params = build_where(f, run_id, attempt)
+        count_rows = self._query(
+            f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE {where} GROUP BY shared_id)",
+            params,
+        )
+        total = int(count_rows[0]["n"]) if count_rows else 0
+        if total == 0:
+            return [], 0
+        group_rows = self._query(
+            f"""
+            SELECT
+                shared_id,
+                MIN(id) AS first_id,
+                MAX(entity_title) AS entity_title,
+                COUNT(*) AS proposal_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS accepted,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS applied,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS reverted,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS discarded,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS edited,
+                COUNT(DISTINCT match_state) AS verdicts,
+                SUM(CASE WHEN match_state IS NULL
+                          AND op IN ('update','create','update_and_delete','create_and_delete')
+                          AND proposed_value IS NOT NULL
+                     THEN 1 ELSE 0 END) AS verdict_rows,
+                MAX(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS has_mismatch,
+                MAX(CASE WHEN op IN ('update','create','update_and_delete','create_and_delete')
+                              AND proposed_value IS NOT NULL THEN 1 ELSE 0 END)
+                    AS has_outcome
+            FROM suggestion
+            WHERE {where}
+            GROUP BY shared_id
+            ORDER BY first_id
+            LIMIT ? OFFSET ?
+            """,
+            [
+                SuggestionStatus.PENDING.value,
+                SuggestionStatus.ACCEPTED.value,
+                SuggestionStatus.APPLIED.value,
+                SuggestionStatus.REVERTED.value,
+                SuggestionStatus.DISCARDED.value,
+                SuggestionStatus.EDITED.value,
+                *params,
+                f.limit,
+                f.offset,
+            ],
+        )
+        if not group_rows:
+            return [], total
+        page_ids = [str(row["shared_id"]) for row in group_rows]
+        id_placeholders = ", ".join("?" for _ in page_ids)
+        detail_rows = self._query(
+            f"""
+            SELECT * FROM suggestion
+            WHERE {where} AND shared_id IN ({id_placeholders})
+            ORDER BY id
+            """,
+            [*params, *page_ids],
+        )
+        subs_by_entity: dict[str, list[Suggestion]] = {}
+        for detail in detail_rows:
+            subs_by_entity.setdefault(str(detail["shared_id"]), []).append(_row_to_suggestion(detail))
+        rows: list[OperationReviewRow] = []
+        for row in group_rows:
+            shared_id = str(row["shared_id"])
+            subs = subs_by_entity.get(shared_id, [])
+            fields = _entity_fields(subs)
+            verdicts = int(row["verdicts"] or 0)
+            verdict_rows = int(row["verdict_rows"] or 0)
+            rows.append(
+                OperationReviewRow(
+                    shared_id=shared_id,
+                    entity_title=str(row["entity_title"] or ""),
+                    template_names=fields["templates"],
+                    ops=fields["ops"],
+                    properties=fields["properties"],
+                    languages=sorted({sub.language for sub in subs if sub.language}),
+                    proposal_count=int(row["proposal_count"]),
+                    pending=int(row["pending"] or 0),
+                    accepted=int(row["accepted"] or 0),
+                    applied=int(row["applied"] or 0),
+                    reverted=int(row["reverted"] or 0),
+                    discarded=int(row["discarded"] or 0),
+                    edited=int(row["edited"] or 0),
+                    match_summary=match_summary_of(verdicts, verdict_rows, bool(row["has_mismatch"])),
+                    has_outcome=bool(row["has_outcome"]),
+                    subs=subs,
+                )
+            )
+        return rows, total
+
+    def languages(self, run_id: str, attempt: int) -> list[str]:
+        """The DISTINCT languages the attempt's rows are written in (SQL).
+
+        The Language filter's options: a language that only exists as a
+        suboperation of some entity still has to be selectable, so this reads
+        the rows, not the operation groups. Language-independent rows carry no
+        language and are not listed — they are their own group, not a language.
+        """
+        rows = self._query(
+            "SELECT DISTINCT language FROM suggestion "
+            "WHERE run_id = ? AND attempt = ? AND language IS NOT NULL ORDER BY language",
+            (run_id, attempt),
+        )
+        return [str(row["language"]) for row in rows]
+
+    def templates(self, run_id: str, attempt: int) -> list[str]:
+        """The DISTINCT template names the attempt's rows belong to (SQL).
+
+        The Property filter and the suboperation headings show a property's
+        human LABEL, which belongs to its template; this list is what the page
+        resolves those labels through. Rows with no template (a language-
+        independent whole-entity op recorded before hydration) are skipped.
+        """
+        rows = self._query(
+            "SELECT DISTINCT template_name FROM suggestion "
+            "WHERE run_id = ? AND attempt = ? AND template_name IS NOT NULL ORDER BY template_name",
+            (run_id, attempt),
+        )
+        return [str(row["template_name"]) for row in rows]
+
+    def property_scores(self, run_id: str, attempt: int) -> dict[str, tuple[int, int]]:
+        """``property -> (exact, mismatch)`` verdict counts for the whole attempt (SQL).
+
+        The Property filter's options carry each property's accuracy (the same
+        figure the entity window shows), and it must span the WHOLE run, not the
+        page: a per-page accuracy would change as the operator pages or filters.
+        A ``new`` value has no current counterpart to be right or wrong about,
+        so it is left out of both counters by construction (NULL match_state).
+        """
+        rows = self._query(
+            """
+            SELECT property_name,
+                   SUM(CASE WHEN match_state = 1 THEN 1 ELSE 0 END) AS exact,
+                   SUM(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS mismatch
+              FROM suggestion
+             WHERE run_id = ? AND attempt = ? AND property_name IS NOT NULL
+             GROUP BY property_name
+            """,
+            (run_id, attempt),
+        )
+        return {str(row["property_name"]): (int(row["exact"] or 0), int(row["mismatch"] or 0)) for row in rows}
+
+    def selection_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+        """Every matching row's ``(id, sharedId, language, op)`` — the selection projection (SQL).
+
+        The table's whole-result selection ("select all results") spans every
+        page, so the Run/Discard/Revert actions cannot read the identity from
+        the page payload. This is a projection, not a page: limit/offset are
+        deliberately ignored, exactly like :meth:`shared_ids`.
+        """
+        where, params = build_where(f, run_id, attempt)
+        rows = self._query(
+            f"SELECT id, shared_id, language, op FROM suggestion WHERE {where} ORDER BY id",
+            params,
+        )
+        return [(int(row["id"]), str(row["shared_id"]), row["language"], str(row["op"])) for row in rows]
 
     def _detail_fields(self, detail_rows: list[sqlite3.Row]) -> dict[str, dict[str, list[str]]]:
         """First-appearance ops, templates, + non-null property names per (id, language) (pure)."""
@@ -861,10 +1281,30 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 counts["match_mismatch"] += int(row["n"])
         total_rows = self._query(
             "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? AND attempt = ? "
-            "GROUP BY shared_id, language)",
-            (run_id, attempt),
+            "AND status != ? GROUP BY shared_id, language)",
+            (run_id, attempt, SuggestionStatus.OBSOLETE.value),
         )
         counts["total"] = int(total_rows[0]["n"]) if total_rows else 0
+        # The header cards count SUBOPERATIONS (the table's real content: one
+        # proposal per property/language/link), so they get their own row-level
+        # counters next to the entity-language group counts above. The operation
+        # count is the distinct sharedId — the table's row total.
+        counts["subs_total"] = 0
+        for status in SuggestionStatus:
+            counts[f"subs_{status.value}"] = 0
+        for row in self._query(
+            "SELECT status, COUNT(*) AS n FROM suggestion WHERE run_id = ? AND attempt = ? GROUP BY status",
+            (run_id, attempt),
+        ):
+            count = int(row["n"])
+            if row["status"] != SuggestionStatus.OBSOLETE.value:
+                counts["subs_total"] += count
+            counts[f"subs_{row['status']}"] = count
+        operation_rows = self._query(
+            "SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion WHERE run_id = ? AND attempt = ? AND status != ?",
+            (run_id, attempt, SuggestionStatus.OBSOLETE.value),
+        )
+        counts["operations_total"] = int(operation_rows[0]["n"]) if operation_rows else 0
         return counts
 
     def delete_run(self, run_id: str) -> None:

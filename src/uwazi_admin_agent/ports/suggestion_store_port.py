@@ -19,9 +19,12 @@ Two record families:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
+from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
+    OperationReviewRow,
     PredictionAttempt,
     Suggestion,
     SuggestionFilter,
@@ -78,6 +81,36 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
+    def reconcile_suggestions(
+        self,
+        run_id: str,
+        attempt: int,
+        suggestions: list[Suggestion],
+    ) -> ReconciliationSummary:
+        """Merge a refreshed pass into the SAME attempt, preserving only safe state.
+
+        New identities insert PENDING; unchanged proposals keep the operator's
+        status; changed proposals reset PENDING except EDITED/DISCARDED; rows
+        the script no longer produces keep APPLIED or become OBSOLETE.
+        """
+        ...
+
+    @abstractmethod
+    def set_current_values(self, updates: list[tuple[int, Any, bool | None]]) -> None:
+        """Refresh rows' live before-state after an apply/revert/table refresh."""
+        ...
+
+    @abstractmethod
+    def get_suggestion(self, suggestion_id: int) -> Suggestion | None:
+        """One row by id, or None."""
+        ...
+
+    @abstractmethod
+    def applied_rows_for(self, run_id: str, shared_ids: list[str] | None = None) -> list[Suggestion]:
+        """APPLIED rows of a run, optionally narrowed to sharedIds."""
+        ...
+
+    @abstractmethod
     def query(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
         """Return ``(page rows, total matching)`` for the filter's window.
 
@@ -92,6 +125,47 @@ class SuggestionStorePort(ABC):
 
         ``total`` is the distinct-shared_id count over the WHOLE filter (limit/offset
         ignored for the count), so the grid shows "N entities". Ordering: MIN(suggestion.id).
+
+        Legacy grouping: one row per (entity, LANGUAGE). The review table now reads
+        :meth:`operations` (one row per entity); this stays for the callers that
+        still speak entity-language rows.
+        """
+        ...
+
+    @abstractmethod
+    def operations(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+        """Return (page of per-ENTITY operation rows, total distinct entities matching f).
+
+        The review table's read: one row per affected entity, whatever languages
+        it writes, with that page's SUBOPERATION rows attached. The filter is a
+        suboperation filter (``property_name``/``match``/``op``/``status``/
+        ``languages`` narrow the parts), so an operation with no matching part is
+        absent from both the page and ``total``. ``total`` ignores limit/offset.
+        """
+        ...
+
+    @abstractmethod
+    def property_scores(self, run_id: str, attempt: int) -> dict[str, tuple[int, int]]:
+        """``property -> (exact, mismatch)`` verdict counts for the whole attempt (the Property filter)."""
+        ...
+
+    @abstractmethod
+    def languages(self, run_id: str, attempt: int) -> list[str]:
+        """The distinct written languages of the attempt — the Language filter's options."""
+        ...
+
+    @abstractmethod
+    def templates(self, run_id: str, attempt: int) -> list[str]:
+        """The distinct template names of the attempt — used to resolve property labels."""
+        ...
+
+    @abstractmethod
+    def selection_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+        """Every matching row's ``(id, sharedId, language, op)`` — the selection projection.
+
+        The whole-result selection ("select all results") spans every page, so the
+        bulk actions resolve their identities from the store through this
+        projection. Limit/offset are ignored on purpose.
         """
         ...
 
@@ -206,6 +280,11 @@ class SuggestionStorePort(ABC):
         ``match_new`` stay row-level: they are per-property comparison verdicts.
 
         Grouped SQL — never a Python pass over 10k rows.
+
+        The ``subs_*`` keys are ROW-level (the table's suboperations — one
+        proposal per property/language/link) and are what the header cards read:
+        ``subs_total`` plus one count per status. ``operations_total`` is the
+        table's own row count (distinct sharedId).
         """
         ...
 

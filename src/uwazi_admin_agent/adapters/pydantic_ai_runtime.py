@@ -19,7 +19,7 @@ Not unit-tested directly (it needs a live model); its pure parsing helper
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, override
 
 from loguru import logger
 from pydantic_ai import Agent, UsageLimits
@@ -90,6 +90,12 @@ class PydanticAiLlmRuntime(LlmRuntimePort):
     def __init__(self, llm_port: LlmPort, max_requests: int = 1) -> None:
         self._llm: LlmPort = llm_port
         self._max_requests = max(1, max_requests)
+
+    @override
+    def cache_identity(self) -> str:
+        """Identify the underlying model, so cache entries never cross models."""
+        model = str(getattr(self._llm, "model_name", "") or type(self._llm).__name__)
+        return f"{type(self).__name__}:{model}"
 
     def _agent(self) -> Agent[None, str]:
         """A minimal tool-free agent: one prompt in, one string out."""

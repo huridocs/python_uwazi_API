@@ -25,13 +25,16 @@ guess): the caps, not the estimate, are what actually bound a pass.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from loguru import logger
 
 from uwazi_admin_agent.configuration import LLM_MAP_BATCH_SIZE
 from uwazi_admin_agent.domain.llm_budget import LlmLedger, LlmUsage, estimate_tokens
+from uwazi_admin_agent.domain.text_cache import llm_complete_cache_key, llm_map_cache_key
 from uwazi_admin_agent.ports.llm_runtime_port import LlmBatchFormatError, LlmRuntimePort
+from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 
 
 def selection_llm_refusal() -> dict[str, Any]:
@@ -59,6 +62,7 @@ def build_llm_script_helpers(
     loop: Any,
     progress: Callable[[int], None] | None = None,
     batch_size: int = LLM_MAP_BATCH_SIZE,
+    text_cache: TextCachePort | None = None,
 ) -> dict[str, Any]:
     """Build the sync ``llm_complete`` / ``llm_map`` helpers for one script pass.
 
@@ -66,6 +70,11 @@ def build_llm_script_helpers(
     helpers drive their async ports with). When either ``runtime`` or ``ledger``
     is None the helpers are loud-failure stubs: an LLM-calling script cannot run
     silently outside the approved-budget path.
+
+    ``text_cache`` (when wired) is checked BEFORE the ledger reserves budget and
+    before any request is issued: a cache hit costs no money and no request. The
+    key includes the runtime's model identity, so a table refresh reuses the
+    previous pass's answers for unchanged inputs but never crosses models.
     """
     if runtime is None or ledger is None:
 
@@ -78,15 +87,25 @@ def build_llm_script_helpers(
         return {"llm_complete": llm_unwired, "llm_map": llm_unwired}
 
     effective_batch = max(1, batch_size)
+    cache_namespace = runtime.cache_identity()
 
     def llm_complete(instruction: str, text: str) -> str:
         """Run ``instruction`` over one ``text``; return the model's reply string."""
+        cache_key = llm_complete_cache_key(namespace=cache_namespace, instruction=instruction, text=text)
+        if text_cache is not None:
+            cached = text_cache.get_text(cache_key)
+            if cached is not None:
+                if progress is not None:
+                    progress(1)
+                return cached
         payload = f"{instruction}\n\n{text}"
         est_in = estimate_tokens(payload)
         est_out = est_in  # a reply of comparable length is the common shape
         ledger.reserve(est_in_tokens=est_in, est_out_tokens=est_out, requests=1)
         result = loop.run_until_complete(runtime.complete(instruction, text))
         ledger.record(result.usage)
+        if text_cache is not None:
+            text_cache.put_text(cache_key, result.output)
         if progress is not None:
             progress(1)
         return result.output
@@ -103,6 +122,25 @@ def build_llm_script_helpers(
         outputs: list[str] = []
         for start in range(0, len(items), effective_batch):
             batch = items[start : start + effective_batch]
+            cache_key = llm_map_cache_key(namespace=cache_namespace, instruction=instruction, items=batch)
+            if text_cache is not None:
+                cached = text_cache.get_text(cache_key)
+                if cached is not None:
+                    # A batch is a JSON array in the cache: keep the exact list
+                    # shape so a hit and a live call are indistinguishable.
+                    try:
+                        parsed = json.loads(cached)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if (
+                        isinstance(parsed, list)
+                        and len(parsed) == len(batch)
+                        and all(isinstance(item, str) for item in parsed)
+                    ):
+                        outputs.extend(parsed)
+                        if progress is not None:
+                            progress(len(batch))
+                        continue
             est_in = estimate_tokens(instruction) + sum(estimate_tokens(item) for item in batch)
             est_out = sum(estimate_tokens(item) for item in batch)
             ledger.reserve(est_in_tokens=est_in, est_out_tokens=est_out, requests=1)
@@ -110,6 +148,8 @@ def build_llm_script_helpers(
                 result = loop.run_until_complete(runtime.map_batch(instruction, batch))
                 outputs.extend(result.outputs)
                 ledger.record(result.usage)
+                if text_cache is not None:
+                    text_cache.put_text(cache_key, json.dumps(result.outputs, ensure_ascii=False))
             except LlmBatchFormatError as exc:
                 logger.warning("llm_map batch {}-{} unparseable after retry: {}", start, start + len(batch), exc)
                 outputs.extend([""] * len(batch))

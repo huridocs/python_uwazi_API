@@ -64,6 +64,7 @@ class SuggestionStatus(str, Enum):
     DISCARDED = "discarded"
     APPLIED = "applied"
     REVERTED = "reverted"
+    OBSOLETE = "obsolete"
 
 
 class PredictionAttemptStatus(str, Enum):
@@ -129,6 +130,17 @@ class Suggestion(BaseModel):
             "For the two merge ops (update_and_delete/create_and_delete): the source "
             "entities the same Run deletes after writing the target. Empty for every "
             "other op. The sources are part of THIS row's action, not separate rows."
+        ),
+    )
+    detail_key: str | None = Field(
+        default=None,
+        description=(
+            "A per-row discriminator INSIDE one (sharedId, op, language, property) identity, "
+            "for ops whose several rows share all of those: a `create_relationships` batch "
+            "records one row per link, and every link of one entity has the same sharedId, "
+            "op, language and (null) property name — so the link's target sharedId rides "
+            "here. None for every other op (and for legacy rows), which keeps their identity "
+            "exactly what it was."
         ),
     )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
@@ -198,6 +210,66 @@ class EntityReviewRow(BaseModel):
     )
 
 
+class OperationReviewRow(BaseModel):
+    """One affected ENTITY — the review table's operation — and its suboperations.
+
+    The table's row is the entity, so its key is the ``shared_id`` alone: a
+    translation task that writes the same entity in ``es`` and ``en`` is ONE
+    operation, and each language's property rows are SUBOPERATIONS of it (see
+    ``Suggestion``). ``subs`` carries those rows, already narrowed by the page's
+    filter — a filter is a SUBOPERATION filter, so an operation whose every part
+    the filter removed never reaches the table in the first place.
+
+    The counters are SQL sums over the SAME filter, and ``languages`` is the
+    distinct language set of the matching rows (the operation has no language of
+    its own; the language is a suboperation attribute).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    shared_id: str = Field(description="The entity's sharedId (a create row keeps its dry-created-N placeholder).")
+    entity_title: str = Field(default="", description="Display title, when any row recorded one.")
+    template_names: list[str] = Field(
+        default_factory=list,
+        description="Distinct template names among the entity's rows, first-appearance order.",
+    )
+    ops: list[str] = Field(description="Distinct ops among the entity's rows, first-appearance order.")
+    properties: list[str] = Field(description="Distinct non-null property names, first-appearance order.")
+    languages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Distinct languages among the matching rows (sorted, language-independent rows excluded — "
+            "they carry no language). Display/navigation only; the table shows language per suboperation."
+        ),
+    )
+    proposal_count: int = Field(ge=0, description="Total matching suggestion rows for the entity.")
+    pending: int = Field(ge=0, description="Rows still in review.")
+    accepted: int = Field(ge=0, description="Rows accepted (not yet applied).")
+    applied: int = Field(ge=0, description="Rows already written to Uwazi.")
+    reverted: int = Field(ge=0, description="Written rows whose writes a revert undid (runnable again).")
+    discarded: int = Field(ge=0, description="Rows rejected/discarded.")
+    edited: int = Field(ge=0, description="Rows carrying an operator edit.")
+    match_summary: str = Field(
+        description=(
+            "One of 'exact' | 'mismatch' | 'new' | 'mixed' | 'n/a': the single match verdict of the "
+            "entity's property rows, 'mixed' when verdicts disagree, 'n/a' when none carries one."
+        ),
+    )
+    has_outcome: bool = Field(
+        description=(
+            "True when at least one update/create row carries a proposed value — i.e. the "
+            "'Generate outcomes' pass has filled the stored value this entity would receive."
+        ),
+    )
+    subs: list[Suggestion] = Field(
+        default_factory=list,
+        description=(
+            "The operation's suboperations — one Suggestion row each, in first-appearance order, "
+            "already narrowed by the page's filter. Loaded per page, never for the whole set."
+        ),
+    )
+
+
 class SuggestionFilter(BaseModel):
     """The selection predicate every review surface produces.
 
@@ -211,14 +283,12 @@ class SuggestionFilter(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: SuggestionStatus | None = Field(default=None, description="Only rows in this status.")
-    discarded: bool | None = Field(
-        default=None,
+    include_obsolete: bool = Field(
+        default=False,
         description=(
-            "Only rows in this discard state: True = only DISCARDED rows, False = only rows "
-            "NOT discarded. None = no constraint. The review table's 'Discarded' filter: the "
-            "operator marks whole operations as discarded ('the end user does not want this "
-            "executed') and then works on the rest — so the filter reads both halves of that "
-            "decision, which the plain status filter cannot express."
+            "Include OBSOLETE rows when no explicit status filter is set. They are hidden "
+            "by default because a refresh can retire many rows at once; picking the "
+            "obsolete status explicitly always shows them."
         ),
     )
     op: str | None = Field(default=None, description="Only rows of this op.")
@@ -254,6 +324,22 @@ class SuggestionFilter(BaseModel):
             "selection, whose rows are per language. A pair with None language "
             "means the language-independent group. An explicit empty list matches "
             "NOTHING, as with shared_ids."
+        ),
+    )
+    languages: list[str] | None = Field(
+        default=None,
+        description=(
+            "Restrict to rows written in these languages (the table's Language filter). "
+            "The language-independent rows (language IS NULL) are never matched by it — "
+            "they are their own group. An explicit empty list matches NOTHING."
+        ),
+    )
+    suggestion_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Restrict to these suggestion row ids — the SUBOPERATION selection, which is "
+            "how the review table's checked parts reach the store. An explicit empty list "
+            "matches NOTHING (nothing checked is distinct from no constraint)."
         ),
     )
     limit: int = Field(default=25, ge=1, description="Page size (ignored by aggregate/projection queries).")
@@ -305,6 +391,7 @@ __all__ = [
     "CREATE_OPS",
     "EntityReviewRow",
     "MERGE_OPS",
+    "OperationReviewRow",
     "PROPERTY_OPS",
     "PredictionAttempt",
     "PredictionAttemptStatus",

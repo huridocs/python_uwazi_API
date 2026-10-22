@@ -41,6 +41,7 @@ from uwazi_admin_agent.domain.connection_hubs import remap_hub_rows, rows_to_del
 from uwazi_admin_agent.domain.create_payload import strip_deleted_entity_refs
 from uwazi_admin_agent.domain.file_restore import build_file_restore_actions
 from uwazi_admin_agent.domain.manifest import RunStatus
+from uwazi_admin_agent.domain.property_restore import property_restore_payload, snapshot_row_raw
 from uwazi_admin_agent.domain.relationship_restore import (
     InboundRef,
     remap_metadata_refs,
@@ -57,7 +58,10 @@ from uwazi_admin_agent.domain.revert import (
     build_revert_actions,
 )
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
+from uwazi_admin_agent.domain.review_refresh import restored_value
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
+from uwazi_admin_agent.domain.suggestion import SuggestionStatus
+from uwazi_admin_agent.domain.suggestion_scoring import compare_values
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
@@ -230,11 +234,85 @@ class RevertRunUseCase:
         logger.info("revert entity: run={} sharedId={} languages={}", run_id, shared_id, [r.language for r in snapshot.rows])
         if self._suggestion_store is not None:
             try:
-                if hasattr(self._suggestion_store, "mark_applied_reverted_for"):
-                    self._suggestion_store.mark_applied_reverted_for(run_id, [shared_id])
+                applied = self._suggestion_store.applied_rows_for(run_id, [shared_id])
+                updates = self._restored_current_updates(applied, run_id)
+                self._suggestion_store.mark_applied_reverted_for(run_id, [shared_id])
+                self._suggestion_store.set_current_values(updates)
             except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
                 logger.warning("could not mark rows reverted for entity {}: {}", shared_id, exc)
         return snapshot
+
+    async def revert_property(
+        self,
+        run_id: str,
+        shared_id: str,
+        language: str | None,
+        property_name: str,
+        suggestion_id: int | None = None,
+    ) -> str:
+        """Undo ONE property write on ONE entity-language row (the suboperation undo).
+
+        The entity-wide :meth:`revert_entity` is the coarse undo; this is the
+        fine one a SUBOPERATION offers. It re-reads the live row, puts back the
+        single key the snapshot captured (``_title`` for the title), and writes
+        the row — leaving every other property (and every other language) the
+        run wrote untouched. That is why it cannot reuse the snapshot restore:
+        re-writing the whole raw would silently undo siblings the operator kept.
+
+        Refused for entities the run created (undo = delete) or deleted (undo =
+        re-create), exactly like the per-entity path. Only property rows are
+        offered by the UI; a whole-entity op has no single key to put back.
+
+        Returns the language row written. When ``suggestion_id`` is given, that
+        one row is flipped to REVERTED (the others keep their status: their
+        writes are still in Uwazi).
+        """
+        manifest = self._backup_store.load_manifest(run_id)
+        if shared_id in {e.shared_id for e in manifest.created}:
+            raise RevertRefusedError(
+                "this suboperation's entity was created by the run — undo the creation from the run-level Revert"
+            )
+        if shared_id in {e.shared_id for e in manifest.deleted}:
+            raise RevertRefusedError(
+                "this suboperation's entity was deleted by the run — use the run-level Revert to re-create it"
+            )
+        try:
+            snapshot = self._backup_store.load_snapshot(run_id, shared_id)
+        except FileNotFoundError as exc:
+            raise RevertRefusedError("this entity has no backup — the run has not written to it") from exc
+        snapshot_raw = snapshot_row_raw(snapshot, language)
+        if snapshot_raw is None:
+            raise RevertRefusedError(
+                f"the backup has no {language or 'language-independent'} row for this entity, "
+                "so there is nothing to restore in this language"
+            )
+        row_language = language or snapshot.language or "en"
+        try:
+            live_raw = await self._entity_repository.get_raw_by_shared_id(shared_id, row_language)
+        except RuntimeError as exc:
+            raise RuntimeError(f"cannot undo {property_name} for {shared_id} ({row_language}): {exc}") from exc
+        payload = property_restore_payload(live_raw, snapshot_raw, property_name)
+        await self._entity_repository.save_raw({**payload, "language": row_language})
+        self._emit(run_id, "restore_property", [shared_id])
+        logger.info(
+            "revert property: run={} sharedId={} language={} property={}",
+            run_id,
+            shared_id,
+            row_language,
+            property_name,
+        )
+        if suggestion_id is not None and self._suggestion_store is not None:
+            try:
+                row = self._suggestion_store.get_suggestion(suggestion_id)
+                restore_language = row.language if row is not None else language
+                current = restored_value(snapshot_raw, property_name, restore_language)
+                self._suggestion_store.set_status([suggestion_id], SuggestionStatus.REVERTED)
+                self._suggestion_store.set_current_values(
+                    [(suggestion_id, current, None if row is None else compare_values(row.proposed_value, current))]
+                )
+            except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
+                logger.warning("could not mark suboperation {} reverted: {}", suggestion_id, exc)
+        return row_language
 
     def _mark_rows_reverted(self, run_id: str) -> int:
         """Move the run's APPLIED review rows to REVERTED (best-effort, never fails a revert).
@@ -246,10 +324,46 @@ class RevertRunUseCase:
         if self._suggestion_store is None:
             return 0
         try:
-            return self._suggestion_store.mark_applied_reverted(run_id)
+            rows = self._suggestion_store.applied_rows_for(run_id)
+            updates = self._restored_current_updates(rows, run_id)
+            count = self._suggestion_store.mark_applied_reverted(run_id)
+            self._suggestion_store.set_current_values(updates)
+            return count
         except Exception as exc:  # noqa: BLE001 — a status refresh must not fail the revert
             logger.warning("could not mark review rows reverted for run={}: {}", run_id, exc)
             return 0
+
+    def _restored_current_updates(
+        self,
+        rows: list[Any],
+        run_id: str,
+    ) -> list[tuple[int, Any, bool | None]]:
+        """``(row id, restored value, match)`` for the applied rows being undone.
+
+        The snapshot's per-language value is the state Uwazi has after a
+        revert, so it replaces the stale prediction-time ``current_value``.
+        Whole-entity rows (no property) and rows without a snapshot are left
+        alone.
+        """
+        snapshots: dict[str, EntitySnapshot | None] = {}
+        updates: list[tuple[int, Any, bool | None]] = []
+        for row in rows:
+            if row.id is None or row.property_name is None:
+                continue
+            if row.shared_id not in snapshots:
+                try:
+                    snapshots[row.shared_id] = self._backup_store.load_snapshot(run_id, row.shared_id)
+                except FileNotFoundError:
+                    snapshots[row.shared_id] = None
+            snapshot = snapshots[row.shared_id]
+            if snapshot is None:
+                continue
+            snapshot_raw = snapshot_row_raw(snapshot, row.language)
+            if snapshot_raw is None:
+                continue
+            current = restored_value(snapshot_raw, row.property_name, row.language)
+            updates.append((row.id, current, compare_values(row.proposed_value, current)))
+        return updates
 
     async def _execute_action(self, action: Any, run_id: str, manifest: Any) -> None:
         """Dispatch one revert action to the entity repository (+ audit + manifest record)."""

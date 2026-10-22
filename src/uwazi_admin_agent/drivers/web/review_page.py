@@ -1,98 +1,93 @@
-"""The review page: the entity table, its filters, and the entity window.
+"""The review page: the operations table, its suboperations, and the entity window.
 
 One page per run (``/review/{run_id}``), separate from the runs table because
-reviewing is a different job from running: the selection scan produced one row
-per AFFECTED ENTITY IN ONE LANGUAGE, the operator checks a subset, and the
-actions act on the checked rows — "Run" executes each checked row's values with
-the deterministic apply heuristic (no LLM at write time), "Revert" undoes them.
+reviewing is a different job from running: the selection scan produced rows for
+the affected entities, the operator checks a subset, and the actions act on the
+checked rows — "Run" executes their values with the deterministic apply
+heuristic (no LLM at write time), "Revert" undoes them.
+
+The table's row is an OPERATION (one entity — every language it writes), and
+expanding it shows the SUBOPERATIONS it is made of: one per property value per
+language, one per link for a relationship batch. That keeps an entity in one
+place on screen and lets the actions narrow below the (entity, language) pair:
+Run/Discard can address a single property, and Revert can put a single property
+back to its backup value.
 
 Scale rules this module obeys:
 
-- the table reads ``get_entity_rows`` (SQL GROUP BY + LIMIT/OFFSET in the store);
-- the header cards come from ``counts`` (SQL ``GROUP BY``), counted over the same
-  entity-language groups, so "Total" always equals the table's own entity total;
-- the property dropdown comes from ``property_names`` (SQL ``DISTINCT``);
-- selection-driven actions resolve to an explicit (sharedId, language) id list
-  read live from the table — never a Python pass over the whole set.
+- the table reads ``get_operation_rows`` (SQL GROUP BY + LIMIT/OFFSET in the
+  store), with the page's ``Suggestion`` rows attached as suboperations;
+- the filter is a SUBOPERATION filter, so an operation whose every part the
+  filter removed never reaches the page;
+- the header cards come from ``counts`` (SQL ``GROUP BY``) and count
+  SUBOPERATIONS — the table's real content — with ONE card for the operations
+  themselves (each one says how many parts it is made of);
+- the Property dropdown comes FIRST (it decides what the table shows) and its
+  options carry each property's accuracy, read from ``property_scores`` (SQL
+  ``GROUP BY``) over the whole attempt; its "any property" option carries the
+  average of the properties that HAVE an accuracy;
+- selection-driven actions resolve to explicit suggestion-id lists, never a
+  Python pass over the whole set.
 
-The table's **Language** column is part of a row's identity: Uwazi keeps one
-entity-language ROW per translation (a text/richtext property holds a single
-value on it) while a select or a date has none, so a translation task records the
-same entity once per language and each of those is its own row, checkbox and Run.
-A change with no language at all (a select, a title, a delete) is its own row
-labelled "—" rather than being repeated into every language. Running the ``es``
-row writes ONLY the Spanish row: the apply path issues one write per language,
-and the ``en`` row is a different entity row this write never touches.
+The **Language** belongs to a SUBOPERATION: Uwazi keeps one entity-language ROW
+per translation (a text/richtext property holds a single value on it) while a
+select or a date has none, so a translation task records the same entity once
+per language and each of those is its own part, checkbox and Run. A change with
+no language at all (a select, a title, a delete) shows "—" rather than being
+repeated into every language. Running the ``es`` part writes ONLY the Spanish
+row: the apply path issues one write per language, narrowed by the selected
+row id.
 
-The table's **Status** column is the Run state, per entity: "runned" once every
-recorded row of that entity is APPLIED, "pending" while any row is left (the
-label and its color come from the same aggregate the row already carries, so
-the column costs no extra query).
+A part is independently checkable only when a Run can execute it alone (a
+property value, a link). A delete/publish/merge part is listed with a lock and
+the reason: its write is the whole operation, so it runs with the operation's
+checkbox.
 
-The **Entity** column carries the open-in-Uwazi link as an icon at the END of
-the (trimmed, ellipsised) title rather than as a column of its own: a plain
-anchor opens the entity's public page on the controlled instance in a NEW tab
-(the row's own language), only for ops whose entity already exists there —
-``update``/``delete`` — and only when ``UWAZI_URL`` is configured; the URL is
-built from the row's sharedId with no extra request. Titles are cut in the row
-payload as well as in the cell, because a document title is unbounded and a cell
-that sizes to its content is what made the table scroll sideways.
+The operation's **Status** is DERIVED from its parts: "runned" once every part
+is written, "discarded" once every part is refused, "pending" while work
+remains. The counter beside it reads checked/checkable parts.
+
+The **Entity** column carries the open-in-Uwazi link as an icon beside the
+(trimmed, ellipsised) title rather than as a column of its own: a plain anchor
+opens the entity's public page on the controlled instance in a NEW tab (the
+operation's first written language), only for ops whose entity already exists
+there — ``update``/``delete`` — and only when ``UWAZI_URL`` is configured; the
+URL is built from the row's sharedId with no extra request. Titles are cut in
+the row payload as well as in the cell, because a document title is unbounded
+and a cell that sizes to its content is what made the table scroll sideways.
 
 The entity window's rows are headed by the property's human LABEL ("Document
 Ref"), resolved once per template from ``/api/templates``, with the raw property
 name beneath it; nothing is resolved when the instance is unreachable, and the
-names are shown exactly as before.
+names are shown exactly as before. Opening the window FROM a suboperation
+highlights that property (and still shows the entity's other rows).
 
 Write timing: the selection scan never mutates Uwazi — it runs AUTOMATICALLY
 right after generation completes (the selection script cannot call the LLM, so
 it needs no approval); only "Accept selected"/Run writes (through the apply
-run); Reject only sets a row status. The selection is re-read from the table on
-EVERY action (``table.selected``) — ``_reload_table`` reassigns ``table.rows``,
+run); Reject only sets a row status. The selection is re-read from the checked
+suboperation ids on EVERY action — ``_reload_table`` reassigns ``table.rows``,
 so a cached selection goes stale.
 
 Discard: the operator can refuse to execute an operation — "the end user does
 not want this" — with the Discard button in the table's Actions cell (and the
-bulk Discard over the checked selection). A discard MARKS the operation's rows
+bulk Discard over the checked selection). A discard MARKS the selected rows
 (DISCARDED, with the reason the operator typed): a Run accepts only PENDING and
-REVERTED rows, so a discarded operation is never written, and the Undo button
-brings it back to the review queue. The rows ALREADY written keep their status
-(a discard says what must not be executed; un-writing is the Revert's job), and
-the "Discarded" filter reads both halves of the decision — "discarded" (the
-refused operations) and "not discarded" (what is left to execute) — which the
-plain Status filter cannot express. The Status and Discarded filters exclude
-each other: "discarded" plus "not discarded" would be an empty table.
+REVERTED rows, so a discarded part is never written, and the Undo button brings
+it back to the review queue. The rows ALREADY written keep their status (a
+discard says what must not be executed; un-writing is the Revert's job). There
+is no separate "Discarded" filter: the Status dropdown already reads
+"discarded" (the refused parts) and "pending" (what is left to execute), and a
+second filter speaking about the same thing would only duplicate it.
 
-Selection count: the action bar's Run button reads ``Run (N)``, updated on the
-table's ``selection`` event (NiceGUI's ``on_select`` — the one event Quasar's
-QTable emits for a checkbox change; ``update:selection`` is not a real event
-and never fires). There are two selection scopes: the header checkbox selects
-the visible PAGE (reloading prunes the selection to those rows), while the
-"Select all N results" button selects every row matching the current filter
-across ALL pages. In whole-result mode ``Run (N)`` counts the filter total minus
-the rows the operator explicitly unchecked (the exclusions are row keys, so a
-translation's two languages stay independent). Run resolves those pairs from the
-store at click time; page flips never truncate the selection.
-
-One window at a time: the entity window is a single dialog that is closed and
-rebuilt on every open, because its content (the PDF) resolves in a background
-task and a second click would otherwise stack dialogs.
-
-Documents: the window resolves the entity's primary document in the ROW's
-language and falls back to the instance's other configured languages (an entity
-usually holds its PDF in the language it was uploaded in, not the one being
-translated). When no language has one, the window shows the document text
-instead of mounting a viewer that would render nothing.
-
-One attempt per run: there is no attempt selector. ``current_attempt`` (the
-run's newest prediction pass) is resolved inside the read functions, so the
-page has no attempt state to carry; the header's Spent/budget card and the
-progress poll read that same attempt, which is why they still describe the
-pass that produced the rows on screen.
-
-The header carries the controlled instance's URL as a link — the same widget the
-runs table shows — because the rows being reviewed are about to be written there,
-and every failure in a background task (generation, apply) is logged server-side
-so ``docker logs`` shows the traceback a toast cannot.
+Selection count: the action bar's Run button reads ``Run (N)``, where N is the
+checked SUBOPERATIONS. Ticking an operation ticks every part of it (locked parts
+included, since its Run covers them); un-ticking any part releases the
+operation, and ticking the last part ticks it. There are two selection scopes:
+the header checkbox selects the visible PAGE (reloading prunes the selection to
+those rows), while the "Select all N results" button selects every suboperation
+matching the current filter across ALL pages (its ids are resolved from the
+store at click time, so page flips never truncate the selection).
 """
 
 from __future__ import annotations
@@ -106,47 +101,53 @@ from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
-from uwazi_admin_agent.domain.llm_budget import format_money
 from uwazi_admin_agent.domain.suggestion import (
     PROPERTY_OPS,
+    OperationReviewRow,
     PredictionAttemptStatus,
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
-    entity_language_key,
+)
+from uwazi_admin_agent.drivers.web.operations_view import (
+    EXPAND_COLUMN,
+    STATUS_WITH_COUNT_COLUMN,
+    any_property_option,
+    entities_of_refs,
+    ids_of_refs,
+    languages_of_refs,
+    operation_row,
+    ops_of_refs,
+    pairs_of_refs,
+    property_options,
+    sub_refs,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
     ACTIONS_COLUMN,
     DRIFT_STATUS_COLORS,
-    LANGUAGE_COLUMN,
     MATCH_COLORS,
     OP_COLORS,
     OPS_COLUMN,
+    SHARED_ID_CSS,
     STATUS_COLORS,
-    STATUS_COLUMN,
     TEMPLATE_COLUMN,
     TITLE_COLUMN,
     bulk_discard_label,
     bulk_revert_label,
-    counterpart_filter,
-    discard_confirmation,
+    cost_card_value,
     drift_banner_text,
     drift_banner_time,
-    entity_row,
     filter_from_controls,
     full_value,
     match_label,
     property_caption,
     property_heading,
-    prune_selection,
     revert_entity_confirmation,
-    rows_excluding_keys,
     run_button_label,
     run_confirmation,
     select_all_label,
-    selection_count,
+    table_update_label,
     truncate,
-    unique_entities,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
     _current_attempt_number,
@@ -155,22 +156,40 @@ from uwazi_admin_agent.drivers.web.run_service import (
     build_suggestion_store,
     check_drift,
     current_attempt,
-    discard_rows,
+    discard_ids,
     get_drift_state,
-    get_entity_rows,
     get_entity_segmentation,
     get_entity_suggestions,
+    get_operation_rows,
+    get_property_scores,
     get_run,
+    get_selection_rows,
     get_suggestion_counts,
-    get_suggestion_entity_languages,
-    get_suggestion_properties,
+    get_suggestion_languages,
+    get_table_update_time,
+    get_templates,
+    preflight_selection,
     property_labels_for,
     refresh_baseline_after_run,
     resolve_entity_document,
-    restore_rows,
+    restore_ids,
     revert_entities_selection,
     revert_entity_rows,
+    revert_suboperation,
+    update_table_from_uwazi,
     uwazi_base_url,
+)
+
+# The suboperation statuses a Run may write. ``applied`` is already in Uwazi,
+# ``discarded`` was refused (Restore is its undo), and ``accepted``/``edited``
+# are waiting for a Run exactly like ``pending``/``reverted``.
+_RUNNABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        SuggestionStatus.PENDING.value,
+        SuggestionStatus.ACCEPTED.value,
+        SuggestionStatus.EDITED.value,
+        SuggestionStatus.REVERTED.value,
+    }
 )
 
 
@@ -205,28 +224,63 @@ def _build_page(run_id: str) -> None:
             ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat")
         return
 
+    # The expansion's styling: Quasar's ``q-table--no-wrap`` turns every
+    # descendant ``td`` into nowrap, so the suboperation cells need the wrap
+    # restored explicitly; and the panel reads as one card with a colored LEFT
+    # border in the operation's color, which is what tells the groups apart once
+    # everything is expanded.
+    ui.add_head_html(
+        f"""
+        <style>
+        .subs-expand {{ white-space: normal; }}
+        .subs-table {{ width: 100%; border-collapse: collapse; table-layout: fixed; white-space: normal; }}
+        .subs-table th {{ border-bottom: 1px solid rgba(0,0,0,0.12); }}
+        .subs-table td {{ border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: top; white-space: normal; }}
+        .subs-table td > div {{ overflow-wrap: anywhere; }}
+        .subs-card {{
+            border: 1px solid rgba(0,0,0,0.12);
+            border-left: 4px solid var(--subs-border-color, #607d8b);
+            border-radius: 4px;
+            background: rgba(0,0,0,0.02);
+            padding: 4px 8px 8px 8px;
+        }}
+        body.body--dark .subs-card {{ background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.15); }}
+        .subs-table td.subs-actions {{ white-space: nowrap; width: 132px; }}
+        .subs-table td.subs-actions .q-btn {{ margin: 0; }}
+        {SHARED_ID_CSS}
+        </style>
+        """
+    )
+
     state: dict[str, Any] = {
         "run_id": run_id,
         "offset": 0,
         "total": 0,
         "status": "",
-        "discarded": "",
         "op": "",
         "property": "",
         "match": "",
+        "language": "",
         "text": "",
         "loading": False,
+        # The SUBOPERATION selection: the suggestion rows the operator ticked,
+        # held as row ids because that is the only identity finer than an
+        # (entity, language) pair — "run this one property of this one
+        # language". The parent operation's tick is DERIVED from its parts, so
+        # the two levels cannot disagree.
+        "_checked": set(),
         # Whole-result selection (the button, not the page header checkbox):
-        # every row matching the current filter, across every page, minus any
-        # row the operator explicitly unchecks afterwards. ``_excluded`` holds
-        # row_key strings (entity+language), so a translation's two rows stay
-        # independent.
+        # every SUBOPERATION matching the current filter, across every page.
+        # The ids are resolved from the store once, and ``_global_refs`` keeps
+        # their identity so Run/Discard/Revert do not need the page payload.
         "_select_all": False,
-        "_excluded": set(),
+        "_global_refs": {},
+        # Which operations are expanded (the table's ``expanded`` prop is the
+        # source of truth, which is what makes "Expand all" possible).
+        "_expanded": set(),
         # Set while a filter control is reset programmatically: assigning a
         # control's value fires its own change handler, and the reset must not
-        # re-enter the filter logic (the State and Discarded filters reset each
-        # other).
+        # re-enter the filter logic.
         "_suppress_filter_events": False,
     }
 
@@ -248,9 +302,12 @@ def _build_page(run_id: str) -> None:
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-7xl"):
             _summary_row(state)
+            # The drift verdict sits BETWEEN the cards and the filters: it is
+            # the state of the data the cards count and the filters narrow, so
+            # it reads as a banner over both, not as one more control.
+            _drift_banner(state)
             _filter_bar(state)
             _action_bar(state)
-            _drift_banner(state)
             _change_table(state)
 
     if current_attempt(run_id) is None:
@@ -279,148 +336,192 @@ def _render_summary(state: dict[str, Any]) -> None:
     attempt = current_attempt(state["run_id"])
     holder.clear()
     with holder:
-        # The status cards count ENTITIES (entity-language groups, the table's own
-        # row identity), not the property rows behind them: "Total" must equal the
-        # "of N entities" the table footer shows, so a single entity carrying 17
-        # property rows reads 1 here and 1 there. Each status card is that filter's
-        # entity count — a group whose rows span statuses counts in each, exactly as
-        # picking that status in the dropdown below would.
-        _card("Total", f"{counts.get('total', 0):,}")
-        _card("Pending", f"{counts.get('pending', 0):,}", "grey")
-        _card("Accepted", f"{counts.get('accepted', 0):,}", "green")
-        _card("Edited", f"{counts.get('edited', 0):,}", "teal")
-        _card("Discarded", f"{counts.get('discarded', 0):,}", "red")
-        _card("Applied", f"{counts.get('applied', 0):,}", "blue")
-        _card("Reverted", f"{counts.get('reverted', 0):,}", "indigo")
+        # ONE card for the operations and their suboperations: the Operations
+        # card counts the PARTS (the table's real content — one proposal per
+        # property/language/link), and the
+        # entities behind them ride underneath, so the operator reads the
+        # table's two levels without a second card.
+        _card(
+            "Operations",
+            f"{counts.get('subs_total', 0):,}",
+            caption=f"{counts.get('operations_total', 0):,} entities",
+        )
+        _card("Pending", f"{counts.get('subs_pending', 0):,}", "grey")
+        _card("Discarded", f"{counts.get('subs_discarded', 0):,}", "red")
+        # Applied reads as a fraction so the operator sees how much of the task
+        # is written without counting rows: applied suboperations / all of them.
+        _card("Applied", f"{counts.get('subs_applied', 0):,} / {counts.get('subs_total', 0):,}", "blue")
+        _card("Reverted", f"{counts.get('subs_reverted', 0):,}", "indigo")
         if attempt is not None:
+            # The LLM cost card: the spend against the cap, as money. It sits
+            # at the FAR RIGHT of the row,
+            # apart from the counters: the cost is not a count of the table's
+            # content, it is the pass's own money, and it gets its own space.
             _card(
-                "Spent / budget",
-                f"{format_money(attempt.budget.call_cost(attempt.spent.input_tokens, attempt.spent.output_tokens))} "
-                f"/ {format_money(attempt.budget.max_cost)}",
+                "LLM cost",
+                cost_card_value(
+                    attempt.budget.call_cost(attempt.spent.input_tokens, attempt.spent.output_tokens),
+                    attempt.budget.max_cost,
+                ),
+                "teal",
+                classes="q-ml-auto",
             )
 
 
-def _card(label: str, value: str, color: str = "primary") -> None:
-    with ui.card().classes("q-pa-sm").style("min-width: 118px"):
+def _card(label: str, value: str, color: str = "primary", caption: str = "", classes: str = "") -> None:
+    """One header card: a label, the figure, and an optional second line.
+
+    The caption carries the SECOND reading of a figure that has two (the
+    Operations card counts the parts, and the entities behind them ride
+    underneath), so the two levels of the table are read from one card.
+
+    ``classes`` positions the card within the row (the LLM cost card pushes
+    itself to the right with ``q-ml-auto``).
+    """
+    with ui.card().classes(f"q-pa-sm {classes}").style("min-width: 118px"):
         ui.label(label).classes("text-caption text-grey-7")
         ui.label(value).classes(f"text-subtitle1 text-bold text-{color}")
+        if caption:
+            ui.label(caption).classes("text-caption text-grey-6")
 
 
 # --- filters -----------------------------------------------------------------
 
 
 def _filter_bar(state: dict[str, Any]) -> None:
-    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
-        state["_status_select"] = (
-            ui.select(
-                {"": "any status", **{s: s for s in STATUS_COLORS}},
-                value=state["status"],
-                label="Status",
-                on_change=lambda e: _set_filter(state, "status", e.value or ""),
+    """The filters, in TWO rows: the search above, the filters below.
+
+    The search gets a row of its own because it is a different kind of
+    control: the dropdowns below pick a value out of a known set, while the
+    search is free text over the whole table. Splitting them keeps the
+    dropdown row from wrapping and gives the search the full width.
+    """
+    with ui.column().classes("w-full q-mb-sm"):
+        # Row 1: the search on its own.
+        with ui.row().classes("w-full items-center gap-2"):
+            state["_text_input"] = (
+                ui.input(
+                    "Search title / sharedId",
+                    value=state["text"],
+                    on_change=lambda e: _set_filter(state, "text", e.value or ""),
+                )
+                .props("dense outlined clearable")
+                .classes("w-full")
             )
-            .props("dense outlined")
-            .classes("min-w-[140px]")
-        )
-        # The Discarded filter: the operator marks whole operations as discarded
-        # ("the end user does not want this executed") and then works on what is
-        # left, so the filter has to read BOTH halves of that decision — the
-        # Status dropdown above can only say "discarded", never "not discarded".
-        state["_discarded_select"] = (
-            ui.select(
-                {"": "any discard state", "no": "not discarded", "yes": "discarded"},
-                value=state["discarded"],
-                label="Discarded",
-                on_change=lambda e: _set_filter(state, "discarded", e.value or ""),
+        # Row 2: the filters, with the clear (Reset) button LAST on the right.
+        with ui.row().classes("w-full items-center gap-2"):
+            # The Property filter comes FIRST: it is the one that decides WHAT
+            # the table shows (every property the task writes is an option, and
+            # picking one narrows the table to the suboperations writing that
+            # property). Each option carries its own accuracy, and "any
+            # property" carries the average of the properties that HAVE one.
+            scores = get_property_scores(state["run_id"])
+            labels_by_template = _template_labels(state["run_id"])
+            state["_template_labels"] = labels_by_template
+            state["_labels"] = _merged_labels(labels_by_template)
+            state["_property_select"] = (
+                ui.select(
+                    {"": any_property_option(scores), **property_options(scores, state["_labels"])},
+                    value=state["property"],
+                    label="Property",
+                    on_change=lambda e: _set_filter(state, "property", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[240px]")
             )
-            .props("dense outlined")
-            .classes("min-w-[160px]")
-        )
-        ui.select(
-            {"": "any op", **{op: op for op in OP_COLORS}},
-            value=state["op"],
-            label="Op",
-            on_change=lambda e: _set_filter(state, "op", e.value or ""),
-        ).props("dense outlined").classes("min-w-[150px]")
-        properties = get_suggestion_properties(state["run_id"])
-        ui.select(
-            {"": "any property", **{p: p for p in properties}},
-            value=state["property"],
-            label="Property",
-            on_change=lambda e: _set_filter(state, "property", e.value or ""),
-        ).props("dense outlined").classes("min-w-[150px]")
-        ui.select(
-            {"": "any match", "exact": "exact", "mismatch": "mismatch", "new": "new"},
-            value=state["match"],
-            label="Match",
-            on_change=lambda e: _set_filter(state, "match", e.value or ""),
-        ).props("dense outlined").classes("min-w-[130px]")
-        ui.input(
-            "Search title / sharedId",
-            value=state["text"],
-            on_change=lambda e: _set_filter(state, "text", e.value or ""),
-        ).props("dense outlined clearable").classes("grow")
-        ui.button("Mismatches only", icon="rule", on_click=lambda: _set_filter(state, "match", "mismatch")).props(
-            "flat dense"
-        )
-        ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense")
+            state["_op_select"] = (
+                ui.select(
+                    {"": "any op", **{op: op for op in OP_COLORS}},
+                    value=state["op"],
+                    label="Op",
+                    on_change=lambda e: _set_filter(state, "op", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[150px]")
+            )
+            state["_status_select"] = (
+                ui.select(
+                    {"": "any status", **{s: s for s in STATUS_COLORS}},
+                    value=state["status"],
+                    label="Status",
+                    on_change=lambda e: _set_filter(state, "status", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[140px]")
+            )
+            # The Language filter names the language a SUBOPERATION is written
+            # in: the operation row is one entity whatever languages it writes,
+            # so the language has to be selectable below the row.
+            state["_language_select"] = (
+                ui.select(
+                    {"": "any language", **{lang: lang for lang in get_suggestion_languages(state["run_id"])}},
+                    value=state["language"],
+                    label="Language",
+                    on_change=lambda e: _set_filter(state, "language", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[150px]")
+            )
+            state["_match_select"] = (
+                ui.select(
+                    {"": "any match", "exact": "exact", "mismatch": "mismatch", "new": "new"},
+                    value=state["match"],
+                    label="Match",
+                    on_change=lambda e: _set_filter(state, "match", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[130px]")
+            )
+            ui.button("Mismatches only", icon="rule", on_click=lambda: _set_filter(state, "match", "mismatch")).props(
+                "flat dense"
+            )
+            # The clear button is the LAST item on the right of the filter row:
+            # it undoes the whole row, so it reads as the row's own exit.
+            ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense").classes(
+                "q-ml-auto"
+            )
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
     if state.get("_suppress_filter_events"):
-        # A programmatic reset of another control (see _reset_filter_widget).
+        # A programmatic reset of a control (see _reset_filters): the handler
+        # must not re-enter the filter logic.
         return
     state[key] = value
-    # The Status and the Discarded filter both speak about the discarded rows,
-    # so they exclude each other: "discarded" + "not discarded" would be an
-    # empty table nobody can read. Picking one resets the other.
-    if value:
-        other = counterpart_filter(key)
-        if other:
-            _reset_filter_widget(state, other)
     state["offset"] = 0
     _reset_global_selection(state)
     _refresh_all(state)
 
 
-def _reset_filter_widget(state: dict[str, Any], key: str) -> None:
-    """Clear one filter and its control (the two discard filters exclude each other).
-
-    Assigning a control's value fires its own change handler, which would
-    re-enter :func:`_set_filter` and refresh the table a second time — so the
-    events are suppressed while the control is reset. The filter's state is set
-    here, because the suppressed handler does not do it.
-    """
-    state[key] = ""
-    widget = state.get(f"_{key}_select")
-    if widget is None or widget.is_deleted:
-        return
-    state["_suppress_filter_events"] = True
-    try:
-        widget.value = ""
-    finally:
-        state["_suppress_filter_events"] = False
-
-
 def _reset_filters(state: dict[str, Any]) -> None:
+    """Clear EVERY filter: the state, and the control that shows it.
+
+    The clear button has to empty the row it sits in, so each control is
+    reset to its own "any" value — the dropdowns to "", the search to "". The
+    change events those assignments fire are suppressed, so the reset does not
+    re-enter the filter logic (and does not refresh the table once per
+    control).
+    """
     state.update(
         {
             "status": "",
-            "discarded": "",
             "op": "",
             "property": "",
             "match": "",
+            "language": "",
             "text": "",
             "offset": 0,
         }
     )
-    for key in ("status", "discarded"):
-        widget = state.get(f"_{key}_select")
-        if widget is not None and not widget.is_deleted:
-            state["_suppress_filter_events"] = True
-            try:
+    widgets = [state.get(f"_{key}_select") for key in ("property", "op", "status", "language", "match")]
+    widgets.append(state.get("_text_input"))
+    state["_suppress_filter_events"] = True
+    try:
+        for widget in widgets:
+            if widget is not None and not widget.is_deleted:
                 widget.value = ""
-            finally:
-                state["_suppress_filter_events"] = False
+    finally:
+        state["_suppress_filter_events"] = False
     _reset_global_selection(state)
     _refresh_all(state)
 
@@ -428,10 +529,10 @@ def _reset_filters(state: dict[str, Any]) -> None:
 def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> SuggestionFilter:
     return filter_from_controls(
         status=state["status"],
-        discarded=state["discarded"],
         op=state["op"],
         property_name=state["property"],
         match=state["match"],
+        language=state["language"],
         text=state["text"],
         offset=state["offset"],
         limit=REVIEW_PAGE_SIZE,
@@ -442,74 +543,55 @@ def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> Su
 # --- actions -----------------------------------------------------------------
 
 
-def _pairs_of_rows(rows: list[Any]) -> list[tuple[str, str | None]]:
-    """The ``(sharedId, language)`` identity of checked table rows (pure).
-
-    A table row is an entity IN ONE LANGUAGE, so a translation task contributes
-    two independent pairs. ``language`` is ``None`` for the language-independent
-    group, which is exactly how the apply path addresses it.
-    """
-    pairs: list[tuple[str, str | None]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        shared_id = row.get("shared_id")
-        if not isinstance(shared_id, str):
-            continue
-        language = row.get("language") or None
-        if (shared_id, language) not in pairs:
-            pairs.append((shared_id, language))
-    return pairs
-
-
-def _all_selected_rows(state: dict[str, Any]) -> list[Any]:
-    """Every entity-language group matching the filter, minus the exclusions.
-
-    The whole-result mode cannot read the ids from the table (it holds only the
-    current page), so Run resolves them from the store through the SAME filter
-    the page used. The aggregate rows are fetched in one page sized to ``total``
-    because Run also needs their ops for the confirmation wording.
-    """
-    total = int(state.get("total") or 0)
-    if total <= 0:
-        return []
-    f = _current_filter(state).model_copy(update={"offset": 0, "limit": total})
-    rows, _ = get_entity_rows(state["run_id"], f)
-    excluded = set(state.get("_excluded") or ())
-    return [row for row in rows if entity_language_key(row.shared_id, row.language) not in excluded]
-
-
-def _ops_of_entities(rows: list[Any]) -> list[str]:
-    """Distinct ops across aggregate entity rows, first-appearance order (pure)."""
-    ops: list[str] = []
-    for row in rows:
-        for op in row.ops:
-            if op not in ops:
-                ops.append(op)
-    return ops
-
-
-def _selection_snapshot(state: dict[str, Any]) -> tuple[list[tuple[str, str | None]], list[str]]:
-    """What Run would act on right now: the selected pairs and their ops.
-
-    Page selection reads the table's own checkboxes; whole-result selection
-    re-reads the matching groups from the store so a page flip or a filter the
-    operator cannot see does not silently truncate the selection.
-    """
-    if state.get("_select_all"):
-        rows = _all_selected_rows(state)
-        return [(row.shared_id, row.language) for row in rows], _ops_of_entities(rows)
+def _row_of_key(state: dict[str, Any], row_key: Any) -> dict[str, Any] | None:
+    """The table payload for one operation key, or None (pure lookup)."""
     table = state.get("_table")
     if table is None or table.is_deleted:
-        return [], []
-    selected = list(getattr(table, "selected", None) or [])
-    return _pairs_of_rows(selected), _ops_of_rows(selected)
+        return None
+    for row in table.rows or []:
+        if isinstance(row, dict) and str(row.get("row_key")) == str(row_key):
+            return row
+    return None
+
+
+def _row_refs(row: dict[str, Any] | None) -> list[tuple[int, str, str | None, str]]:
+    """The suboperation refs of one table row payload (pure)."""
+    return sub_refs((row or {}).get("subs") or [])
+
+
+def _checked_refs(state: dict[str, Any]) -> list[tuple[int, str, str | None, str]]:
+    """The refs of every checked SUBOPERATION, page or whole-result (pure over state).
+
+    The checked set is ids, so the identity is looked up in the page payload and,
+    in whole-result mode, in the projection cached when the mode was entered —
+    which is what lets a Run spanning pages resolve each row's entity, language
+    and op without loading the set again.
+    """
+    ids = state.get("_checked") or set()
+    refs: dict[int, tuple[int, str, str | None, str]] = {}
+    table = state.get("_table")
+    if table is not None and not table.is_deleted:
+        for row in table.rows or []:
+            if not isinstance(row, dict):
+                continue
+            for ref in _row_refs(row):
+                refs[ref[0]] = ref
+    refs.update(state.get("_global_refs") or {})
+    return [refs[sub_id] for sub_id in ids if sub_id in refs]
+
+
+def _selection_snapshot(
+    state: dict[str, Any],
+) -> tuple[list[tuple[int, str, str | None, str]], list[str]]:
+    """What Run would act on right now: the checked suboperations and their ops."""
+    refs = _checked_refs(state)
+    return refs, ops_of_refs(refs)
 
 
 def _run_from_state(state: dict[str, Any]) -> None:
     """Open the Run confirmation for the selection the button's count describes."""
-    selection, ops = _selection_snapshot(state)
-    _run_selected(state, selection, ops)
+    refs, ops = _selection_snapshot(state)
+    _run_refs(state, refs, ops)
 
 
 def _action_bar(state: dict[str, Any]) -> None:
@@ -538,15 +620,23 @@ def _action_bar(state: dict[str, Any]) -> None:
             icon="select_all",
             on_click=lambda: _toggle_select_all(state),
         ).props("dense flat")
+        # The expand toggle changes what the table SHOWS, not what the operator
+        # has selected, so it sits at the far right, away from the actions.
+        state["_expand_button"] = ui.button(
+            "Expand all",
+            icon="unfold_more",
+            on_click=lambda: _toggle_expand_all(state),
+        ).props("dense flat")
+        state["_expand_button"].classes("q-ml-auto")
 
 
 def _revert_from_state(state: dict[str, Any]) -> None:
     """Open the bulk-Revert confirmation for the selection the button's count describes."""
-    selection, _ops = _selection_snapshot(state)
-    if not selection:
+    refs, _ops = _selection_snapshot(state)
+    if not refs:
         ui.notify("Nothing selected", type="warning")
         return
-    entities = unique_entities(selection)
+    entities = entities_of_refs(refs)
 
     def _confirm() -> None:
         # The client is captured HERE, inside the click's slot context (the same
@@ -586,6 +676,7 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
             ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
+            _clear_checked(state)
             _refresh_all(state)
 
 
@@ -593,14 +684,15 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
 
 
 def _discard_from_state(state: dict[str, Any]) -> None:
-    """Open the bulk-Discard dialog for the selection the button's count describes.
+    """Open the bulk-Discard dialog for the checked SUBOPERATIONS.
 
     The dialog asks for the reason too: the operator discards an operation
     because the end user does not want it executed, and WHY is worth keeping
     with the rows (it is stored as the rows' discard reason).
     """
-    selection, _ops = _selection_snapshot(state)
-    if not selection:
+    refs, _ops = _selection_snapshot(state)
+    ids = ids_of_refs(refs)
+    if not ids:
         ui.notify("Nothing selected", type="warning")
         return
 
@@ -610,36 +702,36 @@ def _discard_from_state(state: dict[str, Any]) -> None:
         # stack, so every UI call it makes must re-enter the client explicitly.
         client = context.client
         background_tasks.create(
-            _discard_rows(state, selection, reason, client),
+            _discard_ids(state, ids, reason, client),
             name=f"discard {state['run_id']}",
         )
 
-    title, message = discard_confirmation(len(selection))
+    noun = "suboperation" if len(ids) == 1 else "suboperations"
     _reason_dialog(
-        message,
+        f"Mark {len(ids)} checked {noun} as discarded. They will NOT be executed by a Run, "
+        "and the reason is stored with them.",
         _submit,
-        title=title,
+        title=f"Discard {len(ids)} {noun}",
         confirm_label="Discard",
         reason_label="Reason (optional — why the end user does not want these executed)",
     )
 
 
-def _discard_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
-    """Mark ONE operation as discarded (the row's own Discard button).
+def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
+    """Mark ONE operation as discarded (its visible suboperations).
 
-    The operation is the table's row: an entity in one language. A translation
-    task's two languages are two operations, so discarding the ``es`` row
-    leaves the ``en`` one untouched.
+    The filter is a SUBOPERATION filter, so "the operation" here means the
+    parts the table is showing: discarding an operation under a property filter
+    refuses those property writes, not the ones the filter hid.
     """
-    shared_id, language = _entity_of(row)
-    pairs = [(shared_id, language)]
+    row = _row_of_key(state, row_key)
+    ids = ids_of_refs(_row_refs(row))
+    if not ids:
+        return
 
     def _submit(reason: str | None) -> None:
         client = context.client
-        background_tasks.create(
-            _discard_rows(state, pairs, reason, client),
-            name=f"discard {shared_id}",
-        )
+        background_tasks.create(_discard_ids(state, ids, reason, client), name=f"discard {row_key}")
 
     _reason_dialog(
         "Mark this operation as discarded? It will NOT be executed by a Run. The reason is stored with it.",
@@ -650,18 +742,18 @@ def _discard_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
     )
 
 
-async def _discard_rows(
+async def _discard_ids(
     state: dict[str, Any],
-    pairs: list[tuple[str, str | None]],
+    ids: list[int],
     reason: str | None,
     client: Any,
 ) -> None:
-    """Mark the given operations as discarded, then refresh the page."""
+    """Mark the given SUBOPERATIONS as discarded, then refresh the page."""
     try:
-        count = await asyncio.to_thread(discard_rows, state["run_id"], pairs, reason)
+        count = await asyncio.to_thread(discard_ids, state["run_id"], ids, reason)
         with client:
             ui.notify(
-                f"Discarded {count} row(s) — a Run will not execute them",
+                f"Discarded {count} suboperation(s) — a Run will not execute them",
                 type="positive",
                 multi_line=True,
             )
@@ -671,35 +763,31 @@ async def _discard_rows(
             ui.notify(f"Discard failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
+            _clear_checked(state)
             _refresh_all(state)
 
 
-def _restore_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
-    """Undo the discard of ONE operation (its rows go back to pending).
-
-    No dialog: an undo only ever widens what a Run may execute, so it is the
-    safe direction — the operator can discard it again.
-    """
-    shared_id, language = _entity_of(row)
+def _restore_op_clicked(state: dict[str, Any], row_key: str) -> None:
+    """Undo the discard of ONE operation (its visible rows go back to pending)."""
+    row = _row_of_key(state, row_key)
+    ids = ids_of_refs(_row_refs(row))
     client = context.client
-    background_tasks.create(
-        _restore_rows(state, [(shared_id, language)], client),
-        name=f"restore {shared_id}",
-    )
+    background_tasks.create(_restore_ids(state, ids, client), name=f"restore {row_key}")
 
 
-async def _restore_rows(state: dict[str, Any], pairs: list[tuple[str, str | None]], client: Any) -> None:
-    """Return the given operations' discarded rows to pending, then refresh."""
+async def _restore_ids(state: dict[str, Any], ids: list[int], client: Any) -> None:
+    """Return the given SUBOPERATIONS' discarded rows to pending, then refresh."""
     try:
-        count = await asyncio.to_thread(restore_rows, state["run_id"], pairs)
+        count = await asyncio.to_thread(restore_ids, state["run_id"], ids)
         with client:
-            ui.notify(f"Restored {count} row(s) — they can be run again", type="positive")
+            ui.notify(f"Restored {count} suboperation(s) — they can be run again", type="positive")
     except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
         logger.exception("restore failed")
         with client:
             ui.notify(f"Restore failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
+            _clear_checked(state)
             _refresh_all(state)
 
 
@@ -727,20 +815,90 @@ def _backup_dates_for(rows: list[Any], run_id: str) -> dict[str, Any]:
     return dates
 
 
-async def _revert_entity_clicked(state: dict[str, Any], row: dict[str, Any]) -> None:
+async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
     """Revert one entity (all its languages) to its single backup, then refresh.
 
     Confirm first: the restore overwrites the entity's rows in every language
-    the task touched, not just the clicked row's language.
+    the task touched, not just the clicked suboperation's language.
     """
-    shared_id, _language = _entity_of(row)
+    tooltip = state.get("_backup_dates", {}).get(shared_id)
+    tooltip_text = tooltip.strftime("%Y-%m-%d %H:%M") if tooltip is not None else ""
 
     def _confirm() -> None:
         client = context.client
         background_tasks.create(_revert_entity_rows(state, shared_id, client), name=f"revert {shared_id}")
 
-    title, message = revert_entity_confirmation(shared_id, row.get("revert_tooltip") or "")
+    title, message = revert_entity_confirmation(shared_id, tooltip_text)
     _simple_confirm(title, message, _confirm)
+
+
+def _revert_suboperation_clicked(
+    state: dict[str, Any],
+    shared_id: str,
+    language: str | None,
+    property_name: str,
+    suggestion_id: int,
+    label: str,
+) -> None:
+    """Undo ONE property write (the suboperation's own Revert).
+
+    The entity-wide Revert would throw away every other write to the entity;
+    this one puts a single property back, so the operator can keep the rest.
+    Confirm first — it still writes to Uwazi.
+    """
+
+    def _confirm() -> None:
+        client = context.client
+        background_tasks.create(
+            _revert_suboperation(
+                state,
+                shared_id,
+                language,
+                property_name,
+                suggestion_id,
+                client,
+            ),
+            name=f"revert sub {suggestion_id}",
+        )
+
+    title = f"Revert {label}?"
+    message = (
+        f"Put this one property back to the value the run's backup captured for {shared_id}"
+        + (f" ({language})" if language else "")
+        + ". Every other property, and every other language, keeps the run's write."
+    )
+    _simple_confirm(title, message, _confirm)
+
+
+async def _revert_suboperation(
+    state: dict[str, Any],
+    shared_id: str,
+    language: str | None,
+    property_name: str,
+    suggestion_id: int,
+    client: Any,
+) -> None:
+    """Execute one suboperation revert in a worker thread, then refresh."""
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        with client:
+            ui.notify("Not logged in to Uwazi", type="negative")
+        return
+    try:
+        row_language = await revert_suboperation(
+            state["run_id"], shared_id, language, property_name, suggestion_id, user, password
+        )
+        with client:
+            ui.notify(f"Reverted {property_name} ({row_language}) to its backup value", type="positive")
+    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+        logger.exception("suboperation revert failed")
+        with client:
+            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+    finally:
+        with client:
+            _clear_checked(state)
+            _refresh_all(state)
 
 
 async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any) -> None:
@@ -764,6 +922,7 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
             ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
+            _clear_checked(state)
             _refresh_all(state)
 
 
@@ -771,17 +930,28 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
 
 
 def _drift_banner(state: dict[str, Any]) -> None:
-    """The status line above the table: what the last drift check concluded.
+    """The drift line: what the last drift check concluded.
 
-    Renders the STORED verdict (or "not checked yet"); the open-page auto-check
-    and the manual button update it. One row: an icon + the text + (right) the
-    check-again button.
+    It sits BETWEEN the header cards and the filters — the state of the data
+    both of them work on. Renders the STORED verdict (or "not checked yet");
+    the open-page auto-check and the manual button update it. One row: an icon
+    + the text + (right) the check-again button.
     """
     with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
         state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
         state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
             "text-body2 text-grey-7 grow"
         )
+        state["_table_update_label"] = ui.label(table_update_label(get_table_update_time(state["run_id"]))).classes(
+            "text-caption text-grey-6"
+        )
+        state["_update_table_button"] = ui.button(
+            "Update table from Uwazi",
+            icon="cloud_sync",
+            on_click=lambda: background_tasks.create(
+                _update_table_now(state, client=context.client),
+            ),
+        ).props("dense flat")
         state["_drift_button"] = ui.button(
             "Check drift",
             icon="sync",
@@ -801,6 +971,40 @@ def _drift_banner(state: dict[str, Any]) -> None:
         # A previous page visit already found drift; re-check in the background
         # so the operator sees CURRENT drift rather than yesterday's.
         background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+
+
+async def _update_table_now(state: dict[str, Any], client: Any) -> None:
+    """Refresh the table in place, then repaint the label, drift badge and grid."""
+    user = app.storage.user.get("user")
+    password = app.storage.user.get("password")
+    if not user or not password:
+        with client:
+            ui.notify("Not logged in to Uwazi", type="negative")
+        return
+    button = state.get("_update_table_button")
+    label = state.get("_table_update_label")
+    with client:
+        if button is not None and not button.is_deleted:
+            button.disable()
+        if label is not None and not label.is_deleted:
+            label.text = "Updating table…"
+    try:
+        result = await update_table_from_uwazi(state["run_id"], user, password)
+        updated = get_drift_state(state["run_id"])
+        with client:
+            _apply_drift_state(state, updated)
+            if label is not None and not label.is_deleted:
+                label.text = table_update_label(get_table_update_time(state["run_id"]))
+            ui.notify(result.message(), type="positive", multi_line=True)
+            _refresh_all(state)
+    except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
+        logger.exception("table update failed")
+        with client:
+            ui.notify(f"Table update failed: {exc}", type="negative", multi_line=True)
+    finally:
+        if button is not None and not button.is_deleted:
+            with client:
+                button.enable()
 
 
 def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = False) -> None:
@@ -891,24 +1095,67 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
         logger.debug("could not notify drift verdict (client gone): {}", exc)
 
 
-def _set_table_selection(state: dict[str, Any], rows: list[Any]) -> None:
-    """Replace the table's checkbox selection (server-side, no event round-trip)."""
+def _apply_checked(state: dict[str, Any], ids: list[int], checked: bool) -> None:
+    """Add/remove SUBOPERATION ids from the checked set (in place)."""
+    target: set[int] = state.setdefault("_checked", set())
+    if checked:
+        target.update(ids)
+    else:
+        target.difference_update(ids)
+
+
+def _sync_selection(state: dict[str, Any]) -> None:
+    """Reflect the checked SUBOPERATION ids onto the table's rows and selection.
+
+    The checked set is the source of truth: each part's checkbox reads it, and
+    the parent operation's checkbox is DERIVED from it — an operation is ticked
+    exactly when every one of its parts is: ticking the last part ticks the
+    operation too, and un-ticking any part releases it.
+
+    A LOCKED part has no checkbox but still belongs to the selection its
+    operation's tick created (a delete/publish/merge part runs with the
+    operation), so the parent's derivation counts every part, while the counter
+    beside the status badge counts only the checkable ones.
+    """
     table = state.get("_table")
     if table is None or table.is_deleted:
         return
-    table.selected = list(rows)
-    # Table's ``selected`` setter, unlike most NiceGUI props, does not push the
-    # change by itself; without this the checkboxes would not follow the mode.
+    checked: set[int] = state.get("_checked") or set()
+    selected: list[dict[str, Any]] = []
+    for row in table.rows or []:
+        if not isinstance(row, dict):
+            continue
+        subs = row.get("subs") or []
+        for sub in subs:
+            if isinstance(sub, dict):
+                sub["checked"] = bool(sub.get("selectable")) and sub.get("id") in checked
+        if subs and all(sub.get("id") in checked for sub in subs if isinstance(sub, dict)):
+            selected.append(row)
+    table.selected = selected
     table.update()
+    _refresh_selection_counts(state)
+
+
+def _clear_checked(state: dict[str, Any]) -> None:
+    """Forget the whole selection after an action wrote or moved its rows.
+
+    The rows an action addressed changed status (or left the filter), so keeping
+    them ticked would invite a second Run on work that is already written and
+    leave the count describing stale ids. The next ``_reload_table`` re-derives
+    the table from the store, so clearing here is enough.
+    """
+    state["_checked"] = set()
+    state["_select_all"] = False
+    state["_global_refs"] = {}
 
 
 def _clear_selection(state: dict[str, Any], *, clear_page: bool) -> None:
     """Leave whole-result mode and (optionally) uncheck the visible page."""
     state["_select_all"] = False
-    state["_excluded"] = set()
+    state["_global_refs"] = {}
     if clear_page:
-        _set_table_selection(state, [])
-    _refresh_selection_counts(state)
+        state["_checked"] = set()
+    _sync_selection(state)
 
 
 def _reset_global_selection(state: dict[str, Any]) -> None:
@@ -918,118 +1165,189 @@ def _reset_global_selection(state: dict[str, Any]) -> None:
 
 
 def _toggle_select_all(state: dict[str, Any]) -> None:
-    """Select every row matching the filter across pages, or clear the selection."""
-    table = state.get("_table")
-    if table is None or table.is_deleted:
-        return
+    """Select every SUBOPERATION matching the filter across pages, or clear it."""
     if state.get("_select_all"):
         _clear_selection(state, clear_page=True)
         return
     if int(state.get("total") or 0) <= 0:
         return
+    # The projection is a row-id list, not a page: selection_rows ignores
+    # limit/offset, so this covers every operation the filter matches.
+    refs = get_selection_rows(state["run_id"], _current_filter(state))
+    state["_global_refs"] = {ref[0]: ref for ref in refs}
+    state["_checked"] = {ref[0] for ref in refs}
     state["_select_all"] = True
-    state["_excluded"] = set()
-    # The current page shows the new mode immediately. Other pages pick it up in
-    # _reload_table, which re-applies the same selection after each page load.
-    _set_table_selection(state, list(table.rows))
-    _refresh_selection_counts(state)
+    _sync_selection(state)
+
+
+def _toggle_sub(state: dict[str, Any], args: Any) -> None:
+    """Apply one suboperation's checkbox (row_key, sub id, checked).
+
+    The tick SELECTS a part for the run; it never moves the part between the
+    statuses — only Run and Discard do that.
+    """
+    if not isinstance(args, list) or len(args) != 3:
+        return
+    row_key, sub_id, checked = args
+    row = _row_of_key(state, row_key)
+    if row is None:
+        return
+    sub = next(
+        (one for one in (row.get("subs") or []) if isinstance(one, dict) and one.get("id") == sub_id),
+        None,
+    )
+    if sub is None or not sub.get("selectable"):
+        return
+    _apply_checked(state, [int(sub_id)], bool(checked))
+    _sync_selection(state)
+
+
+def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: bool) -> None:
+    """Tick/untick every part of one operation.
+
+    A tick is a SELECTION, not an acceptance: the parts' statuses are left
+    alone. Locked parts are included because the operation's Run covers them —
+    they simply have no checkbox of their own to show it.
+    """
+    ids = [int(sub["id"]) for sub in (row.get("subs") or []) if isinstance(sub, dict) and isinstance(sub.get("id"), int)]
+    _apply_checked(state, ids, checked)
 
 
 def _on_table_select(state: dict[str, Any], event: Any) -> None:
-    """Keep the page checkboxes and the whole-result mode consistent.
+    """The table's selection callback: only the counters need refreshing.
 
-    In whole-result mode the header checkbox still means "this page": unchecking
-    it excludes that page from the global selection (and re-checking a row puts
-    it back). The count therefore stays total-minus-exclusions rather than
-    collapsing to the visible page size.
+    The cascade to the suboperations lives in :func:`_selection_changed`, which
+    listens to the raw event carrying WHICH rows were added or removed.
     """
-    table = state.get("_table")
-    if table is None or table.is_deleted:
-        return
-    if state.get("_select_all"):
-        selected = getattr(event, "selection", None)
-        if selected is None:
-            selected = getattr(table, "selected", None) or []
-        selected_keys = {str(row.get("row_key")) for row in selected if isinstance(row, dict)}
-        excluded: set[str] = state.setdefault("_excluded", set())
-        for row in table.rows:
-            if not isinstance(row, dict):
-                continue
-            key = str(row.get("row_key"))
-            if key in selected_keys:
-                excluded.discard(key)
-            else:
-                excluded.add(key)
     _refresh_selection_counts(state)
 
 
-def _ops_of_rows(rows: list[Any]) -> list[str]:
-    """Distinct ops across the given table rows, first-appearance order.
-
-    Read LIVE with the selection: the dialog names the change in Uwazi, so it
-    must describe what is checked RIGHT NOW, not what was on the page earlier.
-    """
-    ops: list[str] = []
-    for row in rows:
+def _selection_changed(state: dict[str, Any], event: Any) -> None:
+    """The raw ``selection`` event: propagate an operation's tick to its parts."""
+    args = getattr(event, "args", None)
+    if not isinstance(args, dict):
+        return
+    added = bool(args.get("added"))
+    for row in args.get("rows") or []:
         if not isinstance(row, dict):
             continue
-        for op in str(row.get("ops") or "").split(","):
-            op = op.strip()
-            if op and op not in ops:
-                ops.append(op)
-    return ops
+        payload = _row_of_key(state, row.get("row_key"))
+        if payload is not None:
+            _set_children_checked(state, payload, added)
+    _sync_selection(state)
 
 
-def _run_selected(
+def _run_refs(
     state: dict[str, Any],
-    selection: list[tuple[str, str | None]],
+    refs: list[tuple[int, str, str | None, str]],
     ops: list[str] | None = None,
-    languages: list[str] | None = None,
 ) -> None:
-    """Execute the selected rows with the Run heuristic (revertable).
+    """Execute the given SUBOPERATIONS with the Run heuristic (revertable).
 
     The Run action IS the acceptance: ``ApplySuggestionsUseCase.apply`` accepts
-    the selected rows' PENDING state as it runs them, so the rows the table
-    shows (recorded by the planning pass, never individually reviewed) are what
-    gets written. ``selection`` is the checked (sharedId, language) pairs, so a
-    translation task writes only the languages that were checked. ``ops`` and
-    ``languages`` only shape the confirm dialog's wording.
+    the selected rows' PENDING state as it runs them. The selection carries both
+    the entity-language PAIRS (how the apply path addresses a row) and the
+    suggestion IDS (how it narrows below the pair), so running one property of a
+    translation row writes exactly that property.
     """
-    if not selection:
+    ids = ids_of_refs(refs)
+    if not ids:
         ui.notify("Nothing selected", type="warning")
         return
+    pairs = pairs_of_refs(refs)
+    languages = languages_of_refs(refs)
+    resolved_ops = ops or ops_of_refs(refs)
 
     def _confirm() -> None:
         # The client is captured HERE, inside the click's slot context: the
         # background task starts with an empty slot stack, so every UI call it
         # makes (notify, refresh) must re-enter the client explicitly.
         client = context.client
-        background_tasks.create(_run_rows(state, selection, client), name=f"run {state['run_id']}")
+        background_tasks.create(
+            _run_rows(state, pairs, ids, client),
+            name=f"run {state['run_id']}",
+        )
 
-    title, message = run_confirmation(len(selection), ops, languages or _languages_of(selection))
+    title, message = run_confirmation(len(ids), resolved_ops, languages)
     _simple_confirm(title, message, _confirm)
 
 
-def _languages_of(selection: list[tuple[str, str | None]]) -> list[str]:
-    """The distinct languages of a selection, language-independent last (pure).
+def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
+    """The operation's Run button: run the parts the operation covers.
 
-    The Run dialog names what it is about to write, and for a translation task
-    that is "the es text", not "an entity" — so the languages travel with the
-    count into the confirmation.
+    The parts the operator ticked (plus the locked parts, which run with the
+    operation) are written; when NOTHING checkable is ticked, the button means
+    the whole operation — the only reading that makes a row-level Run useful.
     """
-    languages: list[str] = []
-    saw_agnostic = False
-    for _shared_id, language in selection:
-        if language is None:
-            saw_agnostic = True
-        elif language not in languages:
-            languages.append(language)
-    if saw_agnostic:
-        languages.append("—")
-    return languages
+    row = _row_of_key(state, row_key)
+    if row is None:
+        return
+    subs = [sub for sub in (row.get("subs") or []) if isinstance(sub, dict)]
+    checked = [sub for sub in subs if sub.get("selectable") and sub.get("checked")]
+    if checked:
+        # The ticked parts PLUS the locked ones: a locked part (a merge's source
+        # deletes, a delete's teardown) is part of the operation and has no
+        # checkbox to be ticked on its own.
+        covered = [sub for sub in subs if not sub.get("selectable") or sub.get("checked")]
+    else:
+        # Nothing checkable is ticked: the row-level Run means the whole
+        # operation — the only reading that makes the button useful.
+        covered = subs
+    if not covered:
+        ui.notify("This operation has nothing to run", type="warning")
+        return
+    # A part that was already written (or refused) is not written again by the
+    # operation's Run: "run this operation" means the work that remains, and a
+    # discard says NOT to execute it (Restore is its undo).
+    covered = [sub for sub in covered if _runnable(sub)]
+    if not covered:
+        ui.notify("Nothing left to run in this operation", type="warning")
+        return
+    _set_children_checked(state, row, True)
+    _sync_selection(state)
+    _run_refs(state, sub_refs(covered))
 
 
-async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None]], client: Any) -> None:
+def _runnable(sub: dict[str, Any]) -> bool:
+    """Whether a suboperation payload is still waiting to be written (pure)."""
+    return str(sub.get("status") or "") in _RUNNABLE_STATUSES
+
+
+def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
+    """The suboperation's Run button: write that one part."""
+    if not isinstance(args, list) or len(args) != 2:
+        return
+    row_key, sub_id = args
+    row = _row_of_key(state, row_key)
+    if row is None:
+        return
+    sub = next(
+        (one for one in (row.get("subs") or []) if isinstance(one, dict) and one.get("id") == sub_id),
+        None,
+    )
+    if sub is None:
+        return
+    if not _runnable(sub):
+        ui.notify(
+            f"This suboperation is already {sub.get('status')} — nothing to run"
+            + (" (Restore it first)" if sub.get("status") == "discarded" else ""),
+            type="warning",
+        )
+        return
+    refs = [ref for ref in _row_refs(row) if ref[0] == sub_id]
+    if not refs:
+        return
+    _apply_checked(state, [int(sub_id)], True)
+    _sync_selection(state)
+    _run_refs(state, refs)
+
+
+async def _run_rows(
+    state: dict[str, Any],
+    pairs: list[tuple[str, str | None]],
+    ids: list[int],
+    client: Any,
+) -> None:
     user = app.storage.user.get("user")
     password = app.storage.user.get("password")
     if not user or not password:
@@ -1037,7 +1355,24 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
             ui.notify("Not logged in to Uwazi", type="negative")
         return
     try:
-        await apply_outcomes(state["run_id"], user, password, selection)
+        preflight = await asyncio.to_thread(
+            preflight_selection,
+            state["run_id"],
+            ids,
+            user,
+            password,
+        )
+    except Exception as exc:  # noqa: BLE001 — an unverifiable selection must not run
+        logger.exception("run preflight failed")
+        with client:
+            ui.notify(f"Could not verify the selection against Uwazi: {exc}", type="negative", multi_line=True)
+        return
+    if not preflight.ok:
+        with client:
+            ui.notify(preflight.message(), type="warning", multi_line=True)
+        return
+    try:
+        await apply_outcomes(state["run_id"], user, password, pairs, ids)
         # The writes bumped Uwazi editDates: re-sync the baseline so the run's
         # own writes are the new reference, not drift.
         refresh_baseline_after_run(state["run_id"], user, password, _current_attempt_number(state["run_id"]))
@@ -1053,6 +1388,7 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
             ui.notify(f"Run failed: {exc}", type="negative", multi_line=True)
     finally:
         with client:
+            _clear_checked(state)
             _refresh_all(state)
 
 
@@ -1060,34 +1396,23 @@ async def _run_rows(state: dict[str, Any], selection: list[tuple[str, str | None
 
 
 def _change_table(state: dict[str, Any]) -> None:
-    """The ENTITY table: one row per affected entity, with a checkbox column.
+    """The OPERATIONS table: one row per affected entity, each with suboperations.
 
-    Columns: Entity (the sharedId as plain selectable text, then the title that
-    opens the entity window, with the open-in-Uwazi icon at its end), Language,
-    Template, Ops, Status (runned/pending) and Actions (Run / Edit). No
-    sharedId or change-count columns — the rows are precomputed actions and the
-    Run heuristic executes them.
+    The row is the entity (every language it writes), and expanding it shows the
+    SUBOPERATIONS it is made of: one per property value per language, one per
+    link for a relationship batch. That is what makes a translation task one row
+    with two language parts instead of two peer rows, and what lets Run/Discard/
+    Revert address a single property.
 
-    The widths are explicit (:mod:`review_view`'s column constants) and the
-    Entity column clips with an ellipsis: document titles are arbitrarily long,
-    and a cell that sizes to its content is what pushed the table wider than its
-    card and made every page a horizontal scroll.
-
-    The open-in-Uwazi link is a plain anchor at the END of the title rather than
-    its own column (see :func:`entity_open_url` for when the row carries one):
-    it is a per-row shortcut to the same entity the title already opens, and as a
-    column it cost a full column of width for a 16px icon.
+    The body slot renders both levels so ``props.expand`` (Quasar's expansion,
+    keyed by ``row_key`` so it survives a rows refresh) can show the panel, and
+    ``props.selected`` keeps the header checkbox, the row checkbox and the Run
+    count in step. Colors and labels arrive on the row (computed in Python): a
+    Vue slot cannot reach ``window.*``.
     """
     columns = [
+        {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": EXPAND_COLUMN},
         {"name": "title", "label": "Entity", "field": "title", "align": "left", "sortable": False, "style": TITLE_COLUMN},
-        {
-            "name": "language",
-            "label": "Language",
-            "field": "language",
-            "align": "left",
-            "sortable": False,
-            "style": LANGUAGE_COLUMN,
-        },
         {
             "name": "template",
             "label": "Template",
@@ -1103,7 +1428,7 @@ def _change_table(state: dict[str, Any]) -> None:
             "field": "run_status",
             "align": "left",
             "sortable": False,
-            "style": STATUS_COLUMN,
+            "style": STATUS_WITH_COUNT_COLUMN,
         },
         {
             "name": "actions",
@@ -1117,100 +1442,168 @@ def _change_table(state: dict[str, Any]) -> None:
     table = ui.table(
         rows=[],
         columns=columns,
-        # entity+language, not sharedId: a translation task's two rows are the
-        # SAME entity, and each one has to be its own checkable/selectable row.
+        # The operation's key is the ENTITY: one row however many languages and
+        # properties its suboperations write.
         row_key="row_key",
         selection="multiple",
         pagination={"rowsPerPage": 0},
         on_select=lambda e: _on_table_select(state, e),
     ).classes("w-full")
-    # Colors arrive on the row (computed in Python): a Vue slot cannot reach
-    # ``window.*``, so looking them up in the template renders empty badges.
+    # The table's expansion state lives in the ``expanded`` prop, so the server
+    # owns it: that is what lets the page expand (and collapse) every operation
+    # at once. It starts empty.
+    table.props["expanded"] = []
+
     table.add_slot(
-        "body-cell-ops",
-        '<q-td :props="props"><q-badge v-for="(op, i) in props.row.ops.split(\', \')" :key="op" '
-        ':color="props.row.op_colors[i]" class="q-mr-xs">{{ op }}</q-badge></q-td>',
+        "body",
+        """
+        <q-tr :props="props">
+          <q-td auto-width>
+            <q-checkbox v-model="props.selected" dense />
+          </q-td>
+          <q-td key="expand" :props="props" class="text-center">
+            <q-btn dense flat size="sm" @click.stop="props.expand = !props.expand"
+                   :icon="props.expand ? 'expand_less' : 'chevron_right'"
+                   :title="props.expand ? 'Collapse the suboperations' : 'Show the suboperations'" />
+          </q-td>
+          <q-td key="title" :props="props">
+            <div class="row items-center no-wrap" style="width: 100%;">
+              <span class="text-grey-7 q-mr-xs review-shared-id"
+                    style="user-select: text;">{{ props.row.shared_id }}</span>
+              <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" class="q-mr-xs"
+                 style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">
+                <q-icon name="open_in_new" size="15px" color="primary" /></a>
+              <span class="text-primary" style="flex: 1 1 auto; min-width: 0; overflow: hidden;
+                    text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: text;"
+                    :title="props.row.title_full"
+                    @click="$event => { const sel = $event.target.ownerDocument.getSelection();
+                      if (sel && !sel.isCollapsed && sel.rangeCount &&
+                      ($event.target.contains(sel.getRangeAt(0).startContainer) ||
+                      $event.target.contains(sel.getRangeAt(0).endContainer))) return;
+                      $parent.$emit('open_entity', props.row); }">{{ props.row.title }}</span>
+            </div>
+          </q-td>
+          <q-td key="template" :props="props">{{ props.row.template || '—' }}</q-td>
+          <q-td key="ops" :props="props">
+            <q-badge v-for="(op, i) in props.row.ops.split(', ')" :key="op"
+                     :color="props.row.op_colors[i]" class="q-mr-xs">{{ op }}</q-badge>
+          </q-td>
+          <q-td key="run_status" :props="props" class="text-no-wrap">
+            <q-badge :color="props.row.run_status_color" class="q-mr-xs">{{ props.row.run_status }}</q-badge>
+            <span v-if="props.row.has_validated" :class="'text-' + props.row.validated_color"
+                  class="text-caption text-bold">{{ props.row.validated }}</span>
+          </q-td>
+          <q-td key="actions" :props="props" class="text-no-wrap">
+            <q-btn dense flat icon="play_arrow" color="primary"
+                   title="Run this operation: the ticked suboperations (all of them when none is ticked)"
+                   @click.stop="$parent.$emit('run_op', props.row)" />
+            <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
+                   :title="props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'"
+                   @click.stop="$parent.$emit('revert_op', props.row)" />
+            <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
+                   title="Undo the discard — these suboperations go back to the review queue"
+                   @click.stop="$parent.$emit('restore_op', props.row)" />
+            <q-btn v-else-if="props.row.run_status !== 'runned'" dense flat icon="block" color="negative"
+                   title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
+                   @click.stop="$parent.$emit('discard_op', props.row)" />
+            <q-btn dense flat icon="edit" color="teal"
+                   title="Open the entity window (all its rows, every language)"
+                   @click.stop="$parent.$emit('open_entity', props.row)" />
+          </q-td>
+        </q-tr>
+        <tr v-show="props.expand">
+          <td colspan="100%" class="q-pa-sm subs-expand">
+            <div class="subs-card" :style="{ '--subs-border-color': props.row.border_color }">
+              <div style="width: 0; min-width: 100%; overflow-x: auto;">
+                <table class="subs-table">
+                  <colgroup>
+                    <col style="width: 40px;" />
+                    <col style="width: 22%;" />
+                    <col style="width: 76px;" />
+                    <col style="width: 19%;" />
+                    <col style="width: 22%;" />
+                    <col style="width: 84px;" />
+                    <col style="width: 104px;" />
+                    <col style="width: 132px;" />
+                  </colgroup>
+                  <thead>
+                    <tr class="text-caption text-grey-7">
+                      <th></th>
+                      <th class="text-left q-pa-xs">Change</th>
+                      <th class="text-left q-pa-xs">Language</th>
+                      <th class="text-left q-pa-xs">Current value</th>
+                      <th class="text-left q-pa-xs">Proposed value</th>
+                      <th class="text-left q-pa-xs">Match</th>
+                      <th class="text-left q-pa-xs">Status</th>
+                      <th class="text-left q-pa-xs">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="sub in props.row.subs" :key="sub.id">
+                      <td class="text-center">
+                        <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
+                                    @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, sub.id, v)" />
+                        <q-icon v-else name="lock" size="16px" color="grey-5"
+                                :title="sub.note || 'not independently runnable'" />
+                      </td>
+                      <td class="q-pa-xs">
+                        <div class="text-body2">{{ sub.label }}</div>
+                        <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
+                      </td>
+                      <td class="q-pa-xs">
+                        <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
+                        <span v-else class="text-grey-6">—</span>
+                      </td>
+                      <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
+                      <td class="q-pa-xs"><div class="text-body2">{{ sub.proposed }}</div></td>
+                      <td class="q-pa-xs"><q-badge :color="sub.match_color">{{ sub.match }}</q-badge></td>
+                      <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
+                      <td class="q-pa-xs subs-actions">
+                        <template v-if="sub.selectable">
+                          <q-btn dense flat icon="play_arrow" color="primary"
+                                 title="Run this suboperation (only this property)"
+                                 @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-if="sub.status === 'discarded'" dense flat icon="restore" color="orange"
+                                 title="Undo the discard — this suboperation goes back to the review queue"
+                                 @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-else-if="sub.status !== 'runned'" dense flat icon="block" color="negative"
+                                 title="Discard this suboperation — a Run will not execute it"
+                                 @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
+                                 title="Revert this one property to its backup value"
+                                 @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
+                        </template>
+                        <q-btn dense flat icon="edit" color="teal"
+                               title="Open the entity window at this language"
+                               @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </td>
+        </tr>
+        """,
     )
-    table.add_slot(
-        "body-cell-run_status",
-        '<q-td :props="props"><q-badge :color="props.row.run_status_color" '
-        'class="q-mr-xs">{{ props.row.run_status }}</q-badge></q-td>',
-    )
-    # The Entity cell: the sharedId as PLAIN TEXT, then the open-in-Uwazi icon,
-    # then the entity title as the entity-window link. The icon sits BETWEEN
-    # them (not at the END, not as its own column).
-    #
-    # Plain text, not links: an anchor is draggable, so a drag over it is a LINK
-    # DRAG and never a text selection — that is what made the sharedId so hard
-    # to select with the mouse (and what made the whole cell behave like a
-    # trigger). The title is a span for the same reason and opens the window
-    # through a click handler that steps aside while the operator is selecting
-    # text: a drag ends with a click, and a click that opened the dialog would
-    # throw the selection away.
-    #
-    # Three flex items: id, icon, title. The title takes the remaining width and
-    # the ellipsis (``min-width: 0`` is what lets it shrink); ``title_full`` is
-    # the uncut title for the tooltip, since the cell can only show part of it.
-    table.add_slot(
-        "body-cell-title",
-        '<q-td :props="props">'
-        '<div class="row items-center no-wrap" style="width: 100%;">'
-        '<span class="text-grey-7 q-mr-xs" style="flex: 0 1 auto; min-width: 0; overflow: hidden; '
-        'text-overflow: ellipsis; white-space: nowrap; user-select: text;">{{ props.row.shared_id }}</span>'
-        '<a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" '
-        'class="q-mr-xs" style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">'
-        '<q-icon name="open_in_new" size="15px" color="primary" /></a>'
-        '<span class="text-primary" style="flex: 1 1 auto; min-width: 0; overflow: hidden; '
-        'text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: text;" '
-        ':title="props.row.title_full" '
-        '@click="$event => { const sel = $event.target.ownerDocument.getSelection(); '
-        "if (sel && !sel.isCollapsed && sel.rangeCount && "
-        "($event.target.contains(sel.getRangeAt(0).startContainer) || "
-        "$event.target.contains(sel.getRangeAt(0).endContainer))) return; "
-        "$parent.$emit('open_entity', props.row); }\">{{ props.row.title }}</span>"
-        "</div>"
-        "</q-td>",
-    )
-    table.add_slot(
-        "body-cell-actions",
-        '<q-td :props="props" class="text-no-wrap">'
-        '<q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo" '
-        ":title=\"props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'\" "
-        "@click=\"$parent.$emit('revert_entity', props.row)\" />"
-        '<q-btn dense flat icon="play_arrow" color="primary" title="Run this row (revertable; only its language)" '
-        "@click=\"$parent.$emit('run_entity', props.row)\" />"
-        '<q-btn dense flat icon="edit" color="teal" title="Open the entity window (see/edit its rows)" '
-        "@click=\"$parent.$emit('edit_entity', props.row)\" />"
-        # The discard: the operator refuses to execute this operation ("the end
-        # user does not want this"). A discarded row offers the undo instead —
-        # the same cell, one button, so the action is where the operator
-        # expects it.
-        '<q-btn v-if="props.row.discarded" dense flat icon="restore" color="orange" '
-        'title="Undo the discard — this operation goes back to the review queue" '
-        "@click=\"$parent.$emit('restore_entity', props.row)\" />"
-        '<q-btn v-else dense flat icon="block" color="negative" '
-        'title="Mark this operation as discarded — it will NOT be executed by a Run" '
-        "@click=\"$parent.$emit('discard_entity', props.row)\" />"
-        "</q-td>",
-    )
-    table.add_slot(
-        "body-cell-language",
-        # A DARK badge: Quasar renders badge text white, so a light palette entry
-        # (``teal-1``) put white text on a near-white pill and the language was
-        # invisible. ``teal-9`` keeps the tint and restores the contrast.
-        '<q-td :props="props"><q-badge v-if="props.row.language" color="teal-9" '
-        'class="q-mr-xs">{{ props.row.language }}</q-badge>'
-        '<span v-else class="text-grey-6">—</span></q-td>',
-    )
-    table.on("open_entity", lambda e: _open_entity_window(state, *_entity_of(_row_of(e))))
-    table.on(
-        "run_entity",
-        lambda e: _run_selected(state, [_entity_of(_row_of(e))], _ops_of_rows([_row_of(e)])),
-    )
-    table.on("edit_entity", lambda e: _open_entity_window(state, *_entity_of(_row_of(e))))
-    table.on("revert_entity", lambda e: _revert_entity_clicked(state, _row_of(e)))
-    table.on("discard_entity", lambda e: _discard_entity_clicked(state, _row_of(e)))
-    table.on("restore_entity", lambda e: _restore_entity_clicked(state, _row_of(e)))
+    table.on("run_op", lambda e: _run_op_clicked(state, _row_key_of(getattr(e, "args", None))))
+    table.on("discard_op", lambda e: _discard_op_clicked(state, _row_key_of(getattr(e, "args", None))))
+    table.on("restore_op", lambda e: _restore_op_clicked(state, _row_key_of(getattr(e, "args", None))))
+    table.on("revert_op", lambda e: _revert_entity_clicked(state, _row_key_of(getattr(e, "args", None))))
+    table.on("open_entity", lambda e: _open_entity_row(state, _row_of(e)))
+    table.on("toggle_sub", lambda e: _toggle_sub(state, getattr(e, "args", None)))
+    table.on("run_sub", lambda e: _run_sub_clicked(state, getattr(e, "args", None)))
+    table.on("discard_sub", lambda e: _discard_sub_clicked(state, getattr(e, "args", None)))
+    table.on("restore_sub", lambda e: _restore_sub_clicked(state, getattr(e, "args", None)))
+    table.on("revert_sub", lambda e: _revert_sub_clicked(state, getattr(e, "args", None)))
+    table.on("edit_sub", lambda e: _edit_sub_clicked(state, getattr(e, "args", None)))
+    # The RAW selection event carries WHICH rows were added/removed, which is
+    # what the cascade to the suboperations needs (``on_select`` only carries
+    # the selection itself).
+    table.on("selection", lambda e: _selection_changed(state, e), ["added", "rows", "keys"])
+    # A chevron changed the expansion: mirror it in the prop so "Expand all"
+    # knows what is already open.
+    table.on("update:expanded", lambda e: _expanded_changed(state, e))
     state["_table"] = table
 
     with ui.row().classes("w-full items-center justify-between"):
@@ -1228,14 +1621,133 @@ def _row_of(event: Any) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-def _entity_of(row: dict[str, Any]) -> tuple[str, str | None]:
-    """A table row's ``(sharedId, language)`` identity (pure).
+def _row_key_of(args: Any) -> str:
+    """The row_key out of a table event's args (a dict for row emits, a list for sub emits)."""
+    if isinstance(args, dict):
+        return str(args.get("row_key") or "")
+    if isinstance(args, list) and args:
+        return str(args[0])
+    return ""
 
-    The row's ``language`` is a string (possibly empty) so Quasar can render it;
-    an empty one is the language-independent group, which the apply path
-    addresses as ``None``.
+
+def _sub_of(state: dict[str, Any], args: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The (operation payload, suboperation payload) a suboperation event addresses."""
+    if not isinstance(args, list) or len(args) != 2:
+        return None, None
+    row = _row_of_key(state, args[0])
+    if row is None:
+        return None, None
+    sub = next(
+        (one for one in (row.get("subs") or []) if isinstance(one, dict) and one.get("id") == args[1]),
+        None,
+    )
+    return row, sub
+
+
+def _open_entity_row(state: dict[str, Any], row: dict[str, Any]) -> None:
+    """Open the entity window for one operation row (its first written language)."""
+    shared_id = str(row.get("shared_id") or "")
+    languages = [lang for lang in (row.get("languages") or []) if lang]
+    _open_entity_window(state, shared_id, languages[0] if languages else None)
+
+
+def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
+    """Discard ONE suboperation (its id is the whole selection)."""
+    _row, sub = _sub_of(state, args)
+    if sub is None or not isinstance(sub.get("id"), int):
+        return
+    sub_id = int(sub["id"])
+    client = context.client
+    background_tasks.create(
+        _discard_ids(state, [sub_id], "discarded from the suboperations table", client),
+        name=f"discard sub {sub_id}",
+    )
+
+
+def _restore_sub_clicked(state: dict[str, Any], args: Any) -> None:
+    """Undo ONE suboperation's discard."""
+    _row, sub = _sub_of(state, args)
+    if sub is None or not isinstance(sub.get("id"), int):
+        return
+    client = context.client
+    background_tasks.create(_restore_ids(state, [int(sub["id"])], client), name=f"restore sub {sub['id']}")
+
+
+def _revert_sub_clicked(state: dict[str, Any], args: Any) -> None:
+    """Revert ONE property's write (the suboperation's own undo)."""
+    _row, sub = _sub_of(state, args)
+    if sub is None or not sub.get("revertable") or not isinstance(sub.get("id"), int):
+        return
+    _revert_suboperation_clicked(
+        state,
+        str(sub.get("shared_id") or ""),
+        sub.get("lang"),
+        str(sub.get("property_name") or ""),
+        int(sub["id"]),
+        str(sub.get("label") or "this property"),
+    )
+
+
+def _edit_sub_clicked(state: dict[str, Any], args: Any) -> None:
+    """Open the entity window AT the suboperation's language, focused on its property."""
+    _row, sub = _sub_of(state, args)
+    if sub is None:
+        return
+    _open_entity_window(
+        state,
+        str(sub.get("shared_id") or ""),
+        sub.get("lang"),
+        focus_property=sub.get("property_name"),
+    )
+
+
+def _toggle_expand_all(state: dict[str, Any]) -> None:
+    """Expand every operation — or collapse them all when they all are expanded."""
+    table = state.get("_table")
+    if table is None or table.is_deleted:
+        return
+    rows = table.rows or []
+    keys = [str(row["row_key"]) for row in rows if isinstance(row, dict)]
+    expanded = set(state.get("_expanded") or set())
+    if rows and all(key in expanded for key in keys):
+        expanded = set()
+    else:
+        expanded = set(keys)
+    table.props["expanded"] = list(expanded)
+    state["_expanded"] = expanded
+    table.update()
+    _refresh_expand_button(state)
+
+
+def _expanded_changed(state: dict[str, Any], event: Any) -> None:
+    """A chevron changed the expansion: mirror it back into the table's prop.
+
+    Quasar's QTable is CONTROLLED by ``expanded``: with the prop set, a click
+    only emits ``update:expanded`` and leaves the table's state alone, so the
+    server has to write the new list back — without that the chevron does
+    nothing.
     """
-    return str(row.get("shared_id") or ""), (row.get("language") or None)
+    args = getattr(event, "args", None)
+    keys = args if isinstance(args, list) else []
+    state["_expanded"] = {str(key) for key in keys}
+    table = state.get("_table")
+    if table is not None and not table.is_deleted:
+        table.props["expanded"] = list(state["_expanded"])
+        table.update()
+    _refresh_expand_button(state)
+
+
+def _refresh_expand_button(state: dict[str, Any]) -> None:
+    """The button offers the opposite of the current state: expand or collapse."""
+    button = state.get("_expand_button")
+    if button is None or button.is_deleted:
+        return
+    table = state.get("_table")
+    rows = (table.rows if table is not None and not table.is_deleted else []) or []
+    expanded = state.get("_expanded") or set()
+    all_expanded = bool(rows) and all(isinstance(row, dict) and str(row["row_key"]) in expanded for row in rows)
+    button.text = "Collapse all" if all_expanded else "Expand all"
+    button.set_icon("unfold_less" if all_expanded else "unfold_more")
 
 
 def _page(state: dict[str, Any], direction: int) -> None:
@@ -1247,84 +1759,95 @@ def _page(state: dict[str, Any], direction: int) -> None:
 
 
 def _reload_table(state: dict[str, Any]) -> None:
-    """Load one page of ENTITY rows (SQL GROUP BY + LIMIT/OFFSET) and update counters.
+    """Load one page of OPERATIONS with their suboperations and update the table.
 
-    The rows carry each entity's public Uwazi URL (read once here, so the table
-    costs no extra request for it).
+    The filter is a SUBOPERATION filter, so an operation whose every part the
+    filter removed never reaches the page — "no suboperations left means no
+    row", enforced by the store. The rows carry each entity's public Uwazi URL
+    (read once here, so the table costs no extra request for it).
     """
     if state.get("loading"):
         return
     state["loading"] = True
     try:
-        rows, total = get_entity_rows(state["run_id"], _current_filter(state))
+        rows, total = get_operation_rows(state["run_id"], _current_filter(state))
         state["total"] = total
         base_url = uwazi_base_url()
         # Per-row Revert tooltip: each page reads its entities' backup dates (a
         # local file read per entity — no HTTP). Entities without a backup
-        # (never written) carry None and their Revert icon's tooltip falls back
-        # to the generic text.
+        # (never written) carry None and their Revert tooltip falls back to the
+        # generic text.
         tooltips = _backup_dates_for(rows, state["run_id"])
+        state["_backup_dates"] = tooltips
+        labels_by_template = state.get("_template_labels") or {}
+        payloads = [
+            operation_row(
+                item,
+                checked_ids=state.get("_checked") or (),
+                uwazi_url=base_url,
+                labels=_labels_for_operation(item, labels_by_template, state.get("_labels") or {}),
+            )
+            for item in rows
+        ]
+        # The Revert icon names the backup it would restore, the way the
+        # entity table's did: the date is already read for the confirm dialog.
+        for payload in payloads:
+            captured = tooltips.get(payload["shared_id"])
+            payload["revert_tooltip"] = f"entity backup creation {captured:%Y-%m-%d %H:%M}" if captured is not None else ""
         table = state.get("_table")
         if table is not None and not table.is_deleted:
-            table.rows = [entity_row(item, base_url, backup_created_at=tooltips.get(item.shared_id)) for item in rows]
-            if state.get("_select_all"):
-                # Whole-result mode: every page shows its rows checked except the
-                # ones the operator explicitly excluded. The count is the filter
-                # total minus those exclusions, not the page size.
-                _set_table_selection(state, rows_excluding_keys(table.rows, set(state.get("_excluded") or ())))
-            else:
-                # New rows under the checkboxes: drop the selections that are no
-                # longer visible, so the count (and Run) describe what the operator
-                # can actually see. A poll reloads the same page, so those survive.
-                table.selected = prune_selection(list(getattr(table, "selected", None) or []), table.rows)
-            table.update()
+            table.rows = payloads
+            if not state.get("_select_all"):
+                # Page selection: drop checked ids that are no longer visible,
+                # so the count (and Run) describe what the operator can see.
+                visible = {
+                    int(sub["id"])
+                    for payload in payloads
+                    for sub in payload.get("subs") or []
+                    if isinstance(sub.get("id"), int)
+                }
+                state["_checked"] = {sub_id for sub_id in (state.get("_checked") or ()) if sub_id in visible}
+            _sync_selection(state)
         label = state.get("_page_label")
         if label is not None and not label.is_deleted:
             first = state["offset"] + 1 if total else 0
             last = min(state["offset"] + REVIEW_PAGE_SIZE, total)
-            label.text = f"Showing {first:,}–{last:,} of {total:,} entities"
+            label.text = f"Showing {first:,}–{last:,} of {total:,} operations"
         page_number = state.get("_page_number")
         if page_number is not None and not page_number.is_deleted:
             pages = max((total + REVIEW_PAGE_SIZE - 1) // REVIEW_PAGE_SIZE, 1)
             page_number.text = f"page {state['offset'] // REVIEW_PAGE_SIZE + 1} / {pages}"
-        _refresh_selection_counts(state)
+        _refresh_expand_button(state)
     finally:
         state["loading"] = False
 
 
 def _refresh_selection_counts(state: dict[str, Any]) -> None:
-    """Update the selection-driven buttons' texts from the LIVE selection.
+    """Update the selection-driven buttons' texts from the checked SUBOPERATIONS.
 
-    In whole-result mode the Run count is the filter total minus the rows the
-    operator excluded, so it stays correct across page flips (where the table's
-    own ``selected`` list only ever holds the visible page).
+    The Run/Discard counts are the checked parts (a count of proposals, not of
+    entities); Revert counts the distinct entities those parts belong to,
+    because one entity is restored once however many of its rows are ticked.
     """
-    table = state.get("_table")
-    if table is None or table.is_deleted:
-        return
-    selected = getattr(table, "selected", None) or []
-    all_selected = bool(state.get("_select_all"))
-    total = int(state.get("total") or 0)
-    excluded = len(state.get("_excluded") or ())
-    count = selection_count(
-        all_selected=all_selected,
-        total=total,
-        page_selected=len(selected),
-        excluded=excluded,
-    )
-    button = state.get("_run_button")
-    if button is not None and not button.is_deleted:
-        button.text = run_button_label(count)
+    refs = _checked_refs(state)
+    count = len(refs)
+    entities = len(entities_of_refs(refs))
+    run_button = state.get("_run_button")
+    if run_button is not None and not run_button.is_deleted:
+        run_button.text = run_button_label(count)
+        run_button.set_enabled(count > 0)
     revert_button = state.get("_bulk_revert_button")
     if revert_button is not None and not revert_button.is_deleted:
-        revert_button.text = bulk_revert_label(count)
-        revert_button.set_enabled(count > 0)
+        revert_button.text = bulk_revert_label(entities)
+        revert_button.set_enabled(entities > 0)
     discard_button = state.get("_bulk_discard_button")
     if discard_button is not None and not discard_button.is_deleted:
         discard_button.text = bulk_discard_label(count)
         discard_button.set_enabled(count > 0)
     select_button = state.get("_select_all_button")
     if select_button is not None and not select_button.is_deleted:
+        total = int(state.get("total") or 0)
+        all_selected = bool(state.get("_select_all"))
         select_button.text = select_all_label(total, all_selected)
         select_button.set_enabled(all_selected or total > 0)
 
@@ -1413,7 +1936,12 @@ def _submit_reason(dialog: Any, reason_input: Any, on_submit: Any) -> None:
 # --- entity window -----------------------------------------------------------
 
 
-def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | None = None) -> None:
+def _open_entity_window(
+    state: dict[str, Any],
+    shared_id: str,
+    language: str | None = None,
+    focus_property: str | None = None,
+) -> None:
     """One entity: its primary document beside all its suggestions.
 
     AT MOST ONE window is ever open. The row click that opens it is not
@@ -1422,6 +1950,11 @@ def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | N
     dialogs stacked on top of each other. Any window still open is closed
     before the next one is created, which makes "open one, swap it" the only
     possible outcome no matter how fast the operator clicks.
+
+    ``focus_property`` is set when the window was opened FROM a suboperation:
+    the clicked property's card is highlighted, while every other property of
+    the entity-language group is still shown (the window is the place to see
+    the whole row, not just the filtered part).
     """
     _close_entity_window(state)
     suggestions = get_entity_suggestions(state["run_id"], shared_id, language)
@@ -1438,11 +1971,20 @@ def _open_entity_window(state: dict[str, Any], shared_id: str, language: str | N
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _entity_header(state, dialog, label, shared_id, [s.op for s in suggestions], language, discarded)
+                _entity_header(
+                    state,
+                    dialog,
+                    label,
+                    shared_id,
+                    [s.op for s in suggestions],
+                    language,
+                    discarded,
+                    suggestions,
+                )
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
                     with ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto"):
-                        _entity_suggestions(state, suggestions, labels)
+                        _entity_suggestions(state, suggestions, labels, focus_property=focus_property)
                 with ui.row().classes("w-full justify-between shrink-0"):
                     with ui.row().classes("items-center"):
                         ui.button(
@@ -1557,8 +2099,10 @@ def _entity_header(
     ops: list[str] | None = None,
     language: str | None = None,
     discarded: bool = False,
+    suggestions: list[Suggestion] | None = None,
 ) -> None:
-    """The window's title row: Run this row (its language only), or Close."""
+    """The window's title row: Run this entity-language row, or Close."""
+    refs = [(s.id, s.shared_id, s.language, s.op) for s in (suggestions or []) if s.id is not None]
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         ui.label(label).classes("text-h6")
         with ui.row().classes("items-center no-wrap"):
@@ -1567,9 +2111,51 @@ def _entity_header(
             ui.button(
                 "Run this row",
                 icon="play_arrow",
-                on_click=lambda: _run_selected(state, [(shared_id, language)], ops, [language] if language else None),
+                on_click=lambda: _run_refs(state, refs, ops),
             ).props("flat dense color=primary")
             ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat dense")
+
+
+def _template_labels(run_id: str) -> dict[str, dict[str, str]]:
+    """``{template_name: {property_name: label}}`` for every template the run writes.
+
+    The review table's child rows and the Property filter show a property's
+    human LABEL ("Document Ref"), not the template's raw name
+    (``document_ref``). Labels belong to a template, so they are resolved per
+    template and cached behind :func:`property_labels_for`; an unreachable
+    instance yields ``{}`` and the page falls back to the raw names.
+    """
+    user = app.storage.user.get("user") or ""
+    password = app.storage.user.get("password") or ""
+    return {name: property_labels_for(name, user, password) for name in get_templates(run_id)}
+
+
+def _merged_labels(by_template: dict[str, dict[str, str]]) -> dict[str, str]:
+    """One ``{property_name: label}`` map over every template of a run (pure)."""
+    merged: dict[str, str] = {}
+    for labels in by_template.values():
+        merged.update(labels)
+    return merged
+
+
+def _labels_for_operation(
+    item: OperationReviewRow,
+    by_template: dict[str, dict[str, str]],
+    fallback: dict[str, str],
+) -> dict[str, str]:
+    """The labels of the templates an operation belongs to (pure).
+
+    An operation can span templates (a merge of entities from two of them), so
+    its own template names win over the run-wide fallback: a property name that
+    means different things in two templates must read as the label of the
+    template the row actually writes.
+    """
+    if not item.template_names:
+        return fallback
+    merged: dict[str, str] = {}
+    for name in item.template_names:
+        merged.update(by_template.get(name) or {})
+    return merged or fallback
 
 
 def _property_labels(suggestions: list[Suggestion]) -> dict[str, str]:
@@ -1599,7 +2185,12 @@ def _entity_value_label(text: str, classes: str) -> None:
     ui.label(text).classes(classes).style("white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word")
 
 
-def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], labels: dict[str, str] | None = None) -> None:
+def _entity_suggestions(
+    state: dict[str, Any],
+    suggestions: list[Suggestion],
+    labels: dict[str, str] | None = None,
+    focus_property: str | None = None,
+) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
     Read-only view (see the row's op, property, current and proposed values,
@@ -1611,11 +2202,18 @@ def _entity_suggestions(state: dict[str, Any], suggestions: list[Suggestion], la
     both readable and still matchable against the template or a CSV
     (:func:`property_heading` / :func:`property_caption`). ``labels`` is the
     template's label map; without it the heading falls back to the raw name.
+
+    ``focus_property`` highlights the property the window was opened from (a
+    suboperation's Edit icon) without hiding the entity's other rows: the
+    window is the place to see the whole row.
     """
     resolved = labels or {}
     shown_merge_sources = False
     for suggestion in suggestions:
-        with ui.card().classes("w-full"):
+        classes = "w-full"
+        if focus_property is not None and suggestion.property_name == focus_property:
+            classes = "w-full bg-blue-1"
+        with ui.card().classes(classes):
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 with ui.column().classes("items-start no-wrap").style("min-width: 0"):
                     ui.label(property_heading(suggestion.property_name, suggestion.op, resolved)).classes("text-subtitle2")
@@ -1641,14 +2239,20 @@ def _navigate_entity(state: dict[str, Any], current: str, language: str | None, 
 
     Navigation walks (sharedId, language) pairs, so it lands on the next row of
     the table the operator is looking at — for a translation task that means the
-    sibling language of the same entity, not a different entity.
+    sibling language of the same entity, not a different entity. The pairs come
+    from the store's selection projection (the filter is a suboperation filter,
+    so several parts of one group collapse to one pair).
     """
-    rows = get_suggestion_entity_languages(state["run_id"], _current_filter(state))
-    if not rows:
+    pairs: list[tuple[str, str | None]] = []
+    for _id, shared_id, row_language, _op in get_selection_rows(state["run_id"], _current_filter(state)):
+        pair = (shared_id, row_language)
+        if pair not in pairs:
+            pairs.append(pair)
+    if not pairs:
         return
     current_key = (current, language)
-    index = rows.index(current_key) if current_key in rows else 0
-    target_shared_id, target_language = rows[(index + direction) % len(rows)]
+    index = pairs.index(current_key) if current_key in pairs else 0
+    target_shared_id, target_language = pairs[(index + direction) % len(pairs)]
     _open_entity_window(state, target_shared_id, target_language)
 
 

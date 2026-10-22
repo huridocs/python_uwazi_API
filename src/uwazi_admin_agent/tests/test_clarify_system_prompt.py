@@ -25,3 +25,25 @@ def test_clarify_prompt_keeps_the_generation_contract_embedded() -> None:
     that embed too."""
     assert "ENTITY / LANGUAGE MODEL" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "language-INDEPENDENT" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_forbids_a_language_question_about_a_shared_value() -> None:
+    """The agent used to ask "which language row should receive that change?"
+    about a MULTISELECT — a question the data model already answers."""
+    assert "WHICH PROPERTY TYPES NEED A LANGUAGE" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "LANGUAGE-INDEPENDENT properties" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "which language row should receive that change?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "NEVER ask" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_limits_the_language_question_to_per_language_properties() -> None:
+    """Only the free-text types (and the title) may make the agent ask."""
+    assert "PER-LANGUAGE properties" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "Only per-language properties (and the title) may make you ask a language" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "The entity's TITLE is per-language" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_qualifies_the_instance_languages_question() -> None:
+    """The language question is asked only for a per-language change."""
+    assert "ONLY when the change is actually per-language" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "there is no language to ask about" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
