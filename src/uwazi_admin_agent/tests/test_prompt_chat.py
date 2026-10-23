@@ -15,7 +15,9 @@ from uwazi_admin_agent.domain.prompt_chat import (
     ChatTurn,
     build_chat_history,
     build_final_prompt_from_chat,
+    render_question_answers,
 )
+from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer
 
 ORIGINAL = "Set the document reference on every case file."
 
@@ -157,3 +159,44 @@ def test_a_chat_message_defaults_to_no_questions_and_no_revised_prompt() -> None
     assert message.questions == []
     assert message.revised_prompt is None
     assert message.stamp == ""
+
+
+def test_render_question_answers_lists_every_ticked_option_and_custom_answer() -> None:
+    request = render_question_answers(
+        [
+            QuestionAnswer(
+                question="Which property carries the reference?",
+                selected=["document_ref", "case_ref"],
+            ),
+            QuestionAnswer(question="Should the old value be kept?", custom="No, overwrite it."),
+        ]
+    )
+
+    assert request.startswith("Answers to your clarifying questions:")
+    assert "- Which property carries the reference?" in request
+    assert "  - document_ref" in request
+    assert "  - case_ref" in request
+    assert "- Should the old value be kept?" in request
+    assert "  - No, overwrite it." in request
+
+
+def test_render_question_answers_omits_unanswered_questions() -> None:
+    request = render_question_answers(
+        [
+            QuestionAnswer(
+                question="Which property?",
+                selected=["document_ref"],
+            ),
+            QuestionAnswer(question="Skipped question?", selected=[]),
+            QuestionAnswer(question="Blank custom?", custom="   "),
+        ]
+    )
+
+    assert "Which property?" in request
+    assert "Skipped question?" not in request
+    assert "Blank custom?" not in request
+
+
+def test_render_question_answers_is_empty_when_nothing_was_answered() -> None:
+    assert render_question_answers([QuestionAnswer(question="Unanswered?")]) == ""
+    assert render_question_answers([]) == ""

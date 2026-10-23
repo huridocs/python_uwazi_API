@@ -18,6 +18,16 @@ what the prompt became is the manifest's ``validated_prompt`` (rewritten on
 every Run) plus the generation history file, so the next turn repairs against
 the last one's context.
 
+The improve-prompt flow does NOT open the LLM-spend approval dialog: a turn is
+one tool-free request and the Run is the run's normal planning pass, so both
+run on the configured default caps without asking the operator to review caps
+or estimates.
+
+When a turn carries clarifying questions they open in their own "Review
+questions" modal, with the same checkbox cards as the New task wizard's
+validation step. Sending the answers turns them into the operator's next chat
+request.
+
 The modal chrome (the header with its Close, the pinned footer) is reused from
 :mod:`uwazi_admin_agent.drivers.web.task_dialogs` rather than re-implemented.
 """
@@ -42,8 +52,10 @@ from uwazi_admin_agent.domain.prompt_chat import (
     ChatRole,
     ChatTurn,
     build_chat_history,
+    render_question_answers,
 )
-from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, confirm_llm_spend
+from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer
+from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
 from uwazi_admin_agent.drivers.web.run_service import (
     get_run,
     improve_prompt,
@@ -52,8 +64,9 @@ from uwazi_admin_agent.drivers.web.run_service import (
 )
 from uwazi_admin_agent.drivers.web.task_dialogs import footer_close, modal_header
 
-# The assistant's answer arrives as ONE message; the questions and the revised
-# prompt are rendered under it. The projected output tokens per chat turn.
+# The assistant's answer arrives as ONE message; the clarifying questions open
+# in their own modal, and the revised prompt is rendered under the message. The
+# projected output tokens per chat turn.
 _CHAT_OUT_TOKENS: int = 1024
 
 
@@ -63,10 +76,10 @@ def _stamp() -> str:
 
 
 def _chat_estimate(history: list[ChatMessage], request: str) -> SpendEstimate:
-    """The cost estimate for ONE chat turn (pure; the dialog renders it).
+    """The silent budget source for ONE chat turn (the dialog never shows it).
 
-    A chat turn is a single tool-free LLM request, so the projection is one
-    call whose input is the conversation plus the new request.
+    The improve-prompt flow no longer asks the operator to approve caps or
+    review estimates: the configured defaults are used as the enforced limits.
     """
     history_text = build_chat_history(history)
     return SpendEstimate(
@@ -85,7 +98,7 @@ def _chat_estimate(history: list[ChatMessage], request: str) -> SpendEstimate:
 
 
 def _regeneration_estimate(run_id: str) -> SpendEstimate:
-    """The cost estimate for the Run button's regeneration + planning pass.
+    """The silent budget source for the Run button's regeneration + planning pass.
 
     The projection is the CURRENT script's own LLM call sites (the planning
     pass runs the script once) plus the generation call itself. The entity
@@ -198,54 +211,40 @@ def _add_system_message(state: dict[str, Any], messages: Any, text: str, name: s
 
 def _send(state: dict[str, Any], request_input: Any) -> None:
     """Send the operator's request: append it, then ask the assistant."""
-    if state["busy"] or state.get("awaiting_approval"):
+    if state["busy"]:
         return
     request = (request_input.value or "").strip()
     if not request:
         ui.notify("Type a request first", type="warning")
         return
+    request_input.value = ""
+    _submit_request(state, request)
 
+
+def _submit_request(state: dict[str, Any], request: str) -> None:
+    """Append one operator request and start the assistant's turn.
+
+    The turn runs on the configured default caps: the improve-prompt flow does
+    NOT ask for spend approval (neither the caps nor the estimate are shown).
+    """
+    if state["busy"]:
+        return
     messages = state["_messages"]
+    client = state.get("_client")
     message = ChatMessage(role=ChatRole.OPERATOR, text=request, stamp=_stamp())
     state["history"].append(message)
-    with messages:
-        operator_message = ui.chat_message(text=request, name="You", stamp=message.stamp, sent=True)
-    state["_operator_message"] = operator_message
-    request_input.value = ""
+    with client:
+        with messages:
+            state["_operator_message"] = ui.chat_message(text=request, name="You", stamp=message.stamp, sent=True)
+            # The pending assistant message: its text is replaced by the answer.
+            state["_pending"] = ui.chat_message(text="Thinking…", name="Assistant", stamp=_stamp(), sent=False)
 
-    # The pending assistant message: its text is replaced by the answer.
-    with messages:
-        pending = ui.chat_message(text="Thinking…", name="Assistant", stamp=_stamp(), sent=False)
-    state["_pending"] = pending
-
-    # The turn is not approved yet: the operator may still cancel the spend,
-    # and no second request may be sent until this one is settled.
-    state["awaiting_approval"] = True
-    estimate = _chat_estimate(state["history"][:-1], request)
-    confirm_llm_spend(
-        estimate,
-        lambda budget: _start_turn(state, request, budget),
-        on_cancel=lambda: _cancel_turn(state),
-    )
-
-
-def _cancel_turn(state: dict[str, Any]) -> None:
-    """The operator declined the spend: drop the request and its pending message."""
-    state["awaiting_approval"] = False
-    # The request was the last message; it and its pending reply go away
-    # together, so the chat shows nothing that was never answered.
-    if state["history"] and state["history"][-1].role is ChatRole.OPERATOR:
-        state["history"].pop()
-    for key in ("_operator_message", "_pending"):
-        element = state.get(key)
-        if element is not None and not element.is_deleted:
-            element.delete()
-        state.pop(key, None)
+    budget = build_budget(_chat_estimate(state["history"][:-1], request))
+    _start_turn(state, request, budget)
 
 
 def _start_turn(state: dict[str, Any], request: str, budget: LlmBudget) -> None:
-    """Approved: run the turn in the background."""
-    state["awaiting_approval"] = False
+    """Run the turn in the background."""
     state["busy"] = True
     _set_run_enabled(state, False)
     background_tasks.create(_do_turn(state, request, budget), name=f"chat turn {state['run_id']}")
@@ -271,7 +270,6 @@ async def _do_turn(state: dict[str, Any], request: str, budget: LlmBudget) -> No
 def _render_turn(state: dict[str, Any], turn: ChatTurn) -> None:
     """Replace the pending message with the assistant's answer."""
     state["busy"] = False
-    state["awaiting_approval"] = False
     client = state.get("_client")
     state["last_turn"] = turn
     message = ChatMessage(
@@ -289,22 +287,103 @@ def _render_turn(state: dict[str, Any], turn: ChatTurn) -> None:
         if pending is not None and not pending.is_deleted:
             pending.delete()
         with messages:
-            ui.chat_message(text=turn.summary, name="Assistant", stamp=message.stamp, sent=False)
-            for question in turn.questions:
-                with ui.chat_message(text=question.question, name="Assistant", sent=False):
-                    for option in question.options:
-                        ui.label(f"• {option}").classes("text-body2 text-grey-8")
+            assistant_message = ui.chat_message(text=turn.summary, name="Assistant", stamp=message.stamp, sent=False)
+            if turn.questions:
+                with assistant_message:
+                    ui.button(
+                        f"Answer {len(turn.questions)} question{'' if len(turn.questions) == 1 else 's'}",
+                        icon="help_outline",
+                        on_click=lambda: _open_questions_dialog(state, turn),
+                    ).props("dense flat")
             if turn.revised_prompt:
                 ui.textarea(value=turn.revised_prompt).classes("w-full font-mono").props("readonly outlined autogrow")
     _set_run_enabled(state, True)
     state.pop("_pending", None)
     _scroll_to_bottom(state)
+    if turn.questions:
+        _open_questions_dialog(state, turn)
+
+
+def _open_questions_dialog(state: dict[str, Any], turn: ChatTurn) -> None:
+    """Show the assistant's clarifying questions in their own modal.
+
+    The questions use the same checkbox cards as the New task wizard's
+    validation step: every suggested option is a checkbox, plus a "Custom
+    answer" checkbox and free-text input. Sending the answers turns them into
+    the operator's next chat request.
+    """
+    client = state.get("_client")
+    with client.layout:
+        previous = state.get("_questions_dialog")
+        if previous is not None and not previous.is_deleted:
+            previous.close()
+            previous.delete()
+
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl").props("style=height:85dvh"):
+            dialog.props("persistent")
+            with ui.column().classes("w-full h-full items-stretch no-wrap"):
+                modal_header(dialog, "Review questions")
+                ui.separator().classes("shrink-0")
+                with ui.scroll_area().classes("w-full grow"):
+                    with ui.column().classes("w-full gap-2"):
+                        ui.label("What the LLM understood").classes("text-subtitle1 text-grey-7")
+                        ui.label(turn.summary).classes("text-body1 q-mb-md")
+                        ui.label("Clarifying questions").classes("text-subtitle1 text-grey-7")
+                        answer_widgets: list[dict[str, Any]] = []
+                        for question in turn.questions:
+                            with ui.card().classes("w-full q-mb-sm"):
+                                ui.label(question.question).classes("text-body1 text-weight-medium")
+                                option_checkboxes = [ui.checkbox(option) for option in question.options]
+                                custom_checkbox = ui.checkbox("Custom answer")
+                                custom_input = ui.input("Your answer").classes("w-full")
+                                answer_widgets.append(
+                                    {
+                                        "question": question.question,
+                                        "options": list(zip(question.options, option_checkboxes)),
+                                        "custom_checkbox": custom_checkbox,
+                                        "custom_input": custom_input,
+                                    }
+                                )
+                ui.separator().classes("shrink-0")
+                with ui.row().classes("w-full justify-end no-wrap shrink-0"):
+                    ui.button("Skip", on_click=dialog.close).props("color=grey-7 flat")
+                    ui.button(
+                        "Send answers",
+                        icon="send",
+                        on_click=lambda: _submit_answers(state, dialog, answer_widgets),
+                    ).props("color=primary")
+        state["_questions_dialog"] = dialog
+    dialog.open()
+
+
+def _submit_answers(state: dict[str, Any], dialog: Any, answer_widgets: list[dict[str, Any]]) -> None:
+    """Turn the ticked answers into the operator's next chat request."""
+    answers = [
+        QuestionAnswer(
+            question=widget["question"],
+            selected=[option for option, checkbox in widget["options"] if checkbox.value],
+            custom=(
+                widget["custom_input"].value.strip()
+                if widget["custom_checkbox"].value and (widget["custom_input"].value or "").strip()
+                else None
+            ),
+        )
+        for widget in answer_widgets
+    ]
+    request = render_question_answers(answers)
+    if not request:
+        ui.notify("Tick an option or write an answer first", type="warning")
+        return
+    if state["busy"]:
+        ui.notify("Wait for the current turn to finish", type="warning")
+        return
+    dialog.close()
+    _submit_request(state, request)
 
 
 def _render_turn_error(state: dict[str, Any], exc: Exception) -> None:
     """Show a failed turn in the chat (the modal stays open)."""
     state["busy"] = False
-    state["awaiting_approval"] = False
     client = state.get("_client")
     pending = state.get("_pending")
     with client:
@@ -335,19 +414,14 @@ def _scroll_to_bottom(state: dict[str, Any]) -> None:
 
 def _run_clicked(state: dict[str, Any], dialog: Any, on_table_changed: Callable[[], None] | None) -> None:
     """The Run button: regenerate the script from the whole chat and reconcile."""
-    if state["busy"] or state.get("awaiting_approval"):
+    if state["busy"]:
         return
     turn = state.get("last_turn")
     if turn is None or not turn.revised_prompt:
         ui.notify("Send a request first so the assistant can revise the prompt", type="warning")
         return
-    estimate = _regeneration_estimate(state["run_id"])
-    state["awaiting_approval"] = True
-    confirm_llm_spend(
-        estimate,
-        lambda budget: _start_run(state, dialog, on_table_changed, budget),
-        on_cancel=lambda: state.update({"awaiting_approval": False}),
-    )
+    budget = build_budget(_regeneration_estimate(state["run_id"]))
+    _start_run(state, dialog, on_table_changed, budget)
 
 
 def _start_run(
@@ -356,8 +430,7 @@ def _start_run(
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
 ) -> None:
-    """Approved: regenerate in the background."""
-    state["awaiting_approval"] = False
+    """Regenerate in the background (no spend confirmation)."""
     state["busy"] = True
     _set_run_enabled(state, False)
     background_tasks.create(
@@ -383,7 +456,6 @@ async def _do_run(
         )
     except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
         state["busy"] = False
-        state["awaiting_approval"] = False
         _set_run_enabled(state, state.get("last_turn") is not None)
         ui.notify(f"Regeneration failed: {exc}", type="negative", multi_line=True)
         return

@@ -94,6 +94,27 @@ def build_chat_history(messages: list[ChatMessage]) -> str:
     return "\n\n".join(render_chat_message(message) for message in messages)
 
 
+def render_question_answers(answers: list[QuestionAnswer]) -> str:
+    """Render the operator's ticked answers as the next chat request (pure).
+
+    The text is what the operator "says" after answering a turn's clarifying
+    questions, so it is recorded as an OPERATOR message. Questions with neither
+    a ticked option nor a custom answer are omitted: the operator skipped them,
+    and the assistant can ask again.
+    """
+    lines: list[str] = ["Answers to your clarifying questions:"]
+    for answer in answers:
+        custom = (answer.custom or "").strip()
+        if not answer.selected and not custom:
+            continue
+        lines.append(f"- {answer.question}")
+        for option in answer.selected:
+            lines.append(f"  - {option}")
+        if custom:
+            lines.append(f"  - {custom}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _split_validation(text: str) -> tuple[str, str]:
     """Split a validation message into its clarifications and its conversation.
 
@@ -173,4 +194,5 @@ __all__ = [
     "build_chat_history",
     "build_final_prompt_from_chat",
     "render_chat_message",
+    "render_question_answers",
 ]

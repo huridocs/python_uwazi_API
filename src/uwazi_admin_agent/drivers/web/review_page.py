@@ -788,7 +788,7 @@ def _run_from_state(state: dict[str, Any]) -> None:
 
 def _action_bar(state: dict[str, Any]) -> None:
     """The selection-driven action bar (the checked rows carry the count)."""
-    with ui.row().classes("items-center gap-2"):
+    with ui.row().classes("w-full items-center gap-2"):
         state["_run_button"] = ui.button(
             run_button_label(0),
             icon="play_arrow",
@@ -807,6 +807,9 @@ def _action_bar(state: dict[str, Any]) -> None:
             icon="block",
             on_click=lambda: _discard_from_state(state),
         ).props("dense flat color=negative")
+        # These last two are view controls, not actions on the selection, so a
+        # spacer pushes them to the right edge, away from Run/Revert/Discard.
+        ui.space()
         state["_select_all_button"] = ui.button(
             select_all_label(0, False),
             icon="select_all",
