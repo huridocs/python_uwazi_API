@@ -42,7 +42,6 @@ def _s(
 ) -> Suggestion:
     return Suggestion(
         run_id="run1",
-        attempt=1,
         shared_id=shared_id,
         language=language,
         op=op,  # type: ignore[arg-type]

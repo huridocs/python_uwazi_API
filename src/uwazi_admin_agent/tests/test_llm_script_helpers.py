@@ -326,7 +326,7 @@ for i in range(5):
 """
     _result, error = run_script_sync(script, namespace)
     assert error is not None and "LlmBudgetExceededError" in error
-    suggestions = records_to_suggestions("run1", 1, records)
+    suggestions = records_to_suggestions("run1", records)
     assert [(s.shared_id, s.property_name) for s in suggestions] == [("s0", "v"), ("s1", "v")]
     assert all(s.status == SuggestionStatus.PENDING for s in suggestions)
 

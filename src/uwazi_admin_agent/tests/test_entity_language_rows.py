@@ -36,7 +36,6 @@ def _suggestion(
 ) -> Suggestion:
     return Suggestion(
         run_id="run1",
-        attempt=1,
         shared_id=shared_id,
         entity_title="Title",
         template_name=template,
@@ -65,7 +64,7 @@ def _translation(store: SqliteSuggestionStore, shared_id: str = "s1") -> None:
 def test_a_translation_is_two_rows_of_the_same_entity(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    rows, total = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, total = store.entity_rows("run1", SuggestionFilter())
 
     assert total == 2
     assert [(row.shared_id, row.language) for row in rows] == [("s1", "es"), ("s1", "en")]
@@ -76,7 +75,7 @@ def test_a_language_independent_change_is_its_own_row(store: SqliteSuggestionSto
     _translation(store)
     store.add_suggestions([_suggestion(shared_id="s1", language=None, property_name="case_status", proposed="Closed")])
 
-    rows, _total = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, _total = store.entity_rows("run1", SuggestionFilter())
 
     agnostic = [row for row in rows if row.language is None]
     assert len(agnostic) == 1
@@ -93,7 +92,7 @@ def test_an_entity_without_a_language_is_one_row(store: SqliteSuggestionStore) -
         ]
     )
 
-    rows, total = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, total = store.entity_rows("run1", SuggestionFilter())
 
     assert total == 1
     assert rows[0].language is None
@@ -108,7 +107,7 @@ def test_two_languages_keep_separate_templates(store: SqliteSuggestionStore) -> 
         ]
     )
 
-    rows, _total = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, _total = store.entity_rows("run1", SuggestionFilter())
 
     assert {row.language: row.template_names for row in rows} == {"es": ["Judgment"], "en": ["Report"]}
 
@@ -122,7 +121,7 @@ def test_counters_are_counted_per_language_group(store: SqliteSuggestionStore) -
         ]
     )
 
-    rows, _total = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, _total = store.entity_rows("run1", SuggestionFilter())
     by_language = {row.language: row for row in rows}
 
     assert (by_language["es"].proposal_count, by_language["es"].pending, by_language["es"].applied) == (2, 2, 0)
@@ -133,7 +132,7 @@ def test_paging_counts_language_rows_not_entities(store: SqliteSuggestionStore) 
     _translation(store)
     store.add_suggestions([_suggestion(shared_id="s2", language="es")])
 
-    rows, total = store.entity_rows("run1", 1, SuggestionFilter(limit=2))
+    rows, total = store.entity_rows("run1", SuggestionFilter(limit=2))
 
     assert total == 3  # s1/es, s1/en, s2/es
     assert len(rows) == 2
@@ -145,7 +144,7 @@ def test_paging_counts_language_rows_not_entities(store: SqliteSuggestionStore) 
 def test_get_entity_reads_one_language_group(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    rows = store.get_entity("run1", 1, "s1", "es")
+    rows = store.get_entity("run1", "s1", "es")
 
     assert [row.language for row in rows] == ["es"]
 
@@ -154,7 +153,7 @@ def test_get_entity_reads_the_language_independent_group(store: SqliteSuggestion
     _translation(store)
     store.add_suggestions([_suggestion(shared_id="s1", property_name="case_status")])
 
-    rows = store.get_entity("run1", 1, "s1")
+    rows = store.get_entity("run1", "s1")
 
     assert [row.property_name for row in rows] == ["case_status"]
 
@@ -164,7 +163,7 @@ def test_entity_languages_lists_every_row_of_the_table(store: SqliteSuggestionSt
     _translation(store)
     store.add_suggestions([_suggestion(shared_id="s1", property_name="case_status"), _suggestion(shared_id="s2")])
 
-    assert store.entity_languages("run1", 1, SuggestionFilter()) == [("s1", "es"), ("s1", "en"), ("s1", None), ("s2", None)]
+    assert store.entity_languages("run1", SuggestionFilter()) == [("s1", "es"), ("s1", "en"), ("s1", None), ("s2", None)]
 
 
 # --- selecting one language ---------------------------------------------------
@@ -173,7 +172,7 @@ def test_entity_languages_lists_every_row_of_the_table(store: SqliteSuggestionSt
 def test_a_language_selection_matches_only_that_language(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    rows, _total = store.entity_rows("run1", 1, SuggestionFilter(entity_languages=[("s1", "es")]))
+    rows, _total = store.entity_rows("run1", SuggestionFilter(entity_languages=[("s1", "es")]))
 
     assert [row.language for row in rows] == ["es"]
 
@@ -182,7 +181,7 @@ def test_the_language_independent_group_is_selected_with_a_none_language(store: 
     _translation(store)
     store.add_suggestions([_suggestion(shared_id="s1", property_name="case_status")])
 
-    rows, _total = store.entity_rows("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]))
+    rows, _total = store.entity_rows("run1", SuggestionFilter(entity_languages=[("s1", None)]))
 
     assert [row.properties for row in rows] == [["case_status"]]
 
@@ -190,7 +189,7 @@ def test_the_language_independent_group_is_selected_with_a_none_language(store: 
 def test_an_empty_language_selection_matches_nothing(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    rows, total = store.entity_rows("run1", 1, SuggestionFilter(entity_languages=[]))
+    rows, total = store.entity_rows("run1", SuggestionFilter(entity_languages=[]))
 
     assert rows == []
     assert total == 0
@@ -199,10 +198,8 @@ def test_an_empty_language_selection_matches_nothing(store: SqliteSuggestionStor
 def test_status_can_be_set_for_one_language_group_only(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    count = store.set_status_by_filter(
-        "run1", 1, SuggestionFilter(entity_languages=[("s1", "es")]), SuggestionStatus.ACCEPTED
-    )
+    count = store.set_status_by_filter("run1", SuggestionFilter(entity_languages=[("s1", "es")]), SuggestionStatus.ACCEPTED)
 
     assert count == 1
-    assert [row.language for row in store.get_entity("run1", 1, "s1", "es")] == ["es"]
-    assert [row.status for row in store.get_entity("run1", 1, "s1", "en")] == [SuggestionStatus.PENDING]
+    assert [row.language for row in store.get_entity("run1", "s1", "es")] == ["es"]
+    assert [row.status for row in store.get_entity("run1", "s1", "en")] == [SuggestionStatus.PENDING]

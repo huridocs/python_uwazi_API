@@ -26,7 +26,6 @@ def _sub(
     return Suggestion(
         id=sub_id,
         run_id="run-1",
-        attempt=1,
         shared_id=shared_id,
         op=op,
         property_name=property_name,

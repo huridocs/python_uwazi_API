@@ -33,7 +33,6 @@ def _suggestion(**kwargs: object) -> Suggestion:
     base: dict[str, object] = {
         "id": 7,
         "run_id": "r",
-        "attempt": 1,
         "shared_id": "s1",
         "op": "update",
         "property_name": "excerpt",

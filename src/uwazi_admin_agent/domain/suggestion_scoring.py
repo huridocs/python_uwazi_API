@@ -250,7 +250,6 @@ def _record_shared_change(
 
 def records_to_suggestions(
     run_id: str,
-    attempt: int,
     records: list[dict[str, Any]],
     entity_titles: dict[str, str] | None = None,
     now: datetime | None = None,
@@ -341,7 +340,6 @@ def records_to_suggestions(
         title = titles.get(shared_id, "") or str(record.get("title") or "")
         base: dict[str, Any] = {
             "run_id": run_id,
-            "attempt": attempt,
             "shared_id": shared_id,
             "entity_title": title,
             "template_name": str(record.get("template_name") or "") or None,

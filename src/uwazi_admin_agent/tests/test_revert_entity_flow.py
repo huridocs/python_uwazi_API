@@ -230,8 +230,8 @@ async def test_revert_entity_flips_all_language_rows_of_the_entity(store: Sqlite
     """
     store.add_suggestions(
         [
-            _suggestion("run1", 1, "s1", "es", status="applied"),
-            _suggestion("run1", 1, "s1", "en", status="applied"),
+            _suggestion("run1", "s1", "es", status="applied"),
+            _suggestion("run1", "s1", "en", status="applied"),
         ]
     )
     repo = InMemoryEntityRepository()
@@ -254,7 +254,6 @@ async def test_revert_entity_flips_all_language_rows_of_the_entity(store: Sqlite
 
     rows, _total = store.entity_rows(
         "run1",
-        1,
         __import__("uwazi_admin_agent.domain.suggestion", fromlist=["SuggestionFilter"]).SuggestionFilter(limit=100),
     )
     by_lang = {row.language: row for row in rows}
@@ -263,12 +262,11 @@ async def test_revert_entity_flips_all_language_rows_of_the_entity(store: Sqlite
     assert all(row.applied == 0 for row in rows)
 
 
-def _suggestion(run_id: str, attempt: int, shared_id: str, language: str, status: str) -> Any:
+def _suggestion(run_id: str, shared_id: str, language: str, status: str) -> Any:
     from uwazi_admin_agent.domain.suggestion import Suggestion
 
     return Suggestion(
         run_id=run_id,
-        attempt=attempt,
         shared_id=shared_id,
         op="update",
         language=language,

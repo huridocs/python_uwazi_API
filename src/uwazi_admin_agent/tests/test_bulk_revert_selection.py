@@ -40,7 +40,6 @@ def test_bulk_revert_label_carries_the_count() -> None:
 def _suggestion(run_id: str, shared_id: str, language: str, status: str) -> Suggestion:
     return Suggestion(
         run_id=run_id,
-        attempt=1,
         shared_id=shared_id,
         op="update",
         language=language,
@@ -64,7 +63,7 @@ def test_mark_applied_reverted_for_flips_only_named_entities_all_their_languages
         )
         moved = store.mark_applied_reverted_for("run1", ["s3", "s1"])
         assert moved == 3
-        rows, _total = store.entity_rows("run1", 1, SuggestionFilter(limit=100))
+        rows, _total = store.entity_rows("run1", SuggestionFilter(limit=100))
         states = {(row.shared_id, row.language): (row.reverted, row.applied) for row in rows}
         assert states[("s1", "es")] == (1, 0)
         assert states[("s1", "en")] == (1, 0)
@@ -79,7 +78,7 @@ def test_mark_applied_reverted_for_empty_selection_moves_nothing() -> None:
         store = SqliteSuggestionStore(Path(tmp) / "suggestions.db")
         store.add_suggestions([_suggestion("run1", "s1", "es", "applied")])
         assert store.mark_applied_reverted_for("run1", []) == 0
-        rows, _total = store.entity_rows("run1", 1, SuggestionFilter(limit=100))
+        rows, _total = store.entity_rows("run1", SuggestionFilter(limit=100))
         assert rows[0].applied == 1
         assert rows[0].reverted == 0
         store.close()
@@ -90,7 +89,7 @@ def test_mark_applied_reverted_for_does_not_touch_pending_rows() -> None:
         store = SqliteSuggestionStore(Path(tmp) / "suggestions.db")
         store.add_suggestions([_suggestion("run1", "s1", "es", "pending")])
         assert store.mark_applied_reverted_for("run1", ["s1"]) == 0
-        rows, _total = store.entity_rows("run1", 1, SuggestionFilter(limit=100))
+        rows, _total = store.entity_rows("run1", SuggestionFilter(limit=100))
         assert rows[0].pending == 1
         assert rows[0].reverted == 0
         store.close()

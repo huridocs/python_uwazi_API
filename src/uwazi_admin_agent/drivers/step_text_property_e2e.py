@@ -77,7 +77,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     apply_outcomes,
     build_suggestion_store,
     create_and_generate,
-    current_attempt,
+    current_pass,
     revert_run,
 )
 from uwazi_admin_agent.use_cases.task_use_case import TaskUseCase
@@ -384,16 +384,16 @@ class _Runner:
         await create_and_generate(run_id, prompt, self.user, self.password)
 
     def planned_rows(self, run_id: str) -> list[tuple[str, str | None, str | None]]:
-        """The review table's (sharedId, language, property) rows of the current attempt.
+        """The review table's (sharedId, language, property) rows of the live table.
 
         Read through the SAME store the review page reads, so what the driver
         checks is what the operator saw.
         """
-        attempt = current_attempt(run_id)
-        if attempt is None:
+        pass_row = current_pass(run_id)
+        if pass_row is None:
             return []
         store = build_suggestion_store()
-        rows, _total = store.query(run_id, attempt.attempt, SuggestionFilter(limit=1000))
+        rows, _total = store.query(run_id, SuggestionFilter(limit=1000))
         return [(row.shared_id, row.language, row.property_name) for row in rows]
 
     async def run_rows(self, run_id: str, selection: list[tuple[str, str | None]]) -> None:

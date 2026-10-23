@@ -123,6 +123,11 @@ LLM_MAP_BATCH_SIZE: int = 10
 PREDICTION_DEFAULT_MAX_COST: float = 10.0
 PREDICTION_DEFAULT_MAX_REQUESTS: int = 2000
 
+# Default hard caps for ONE prompt-improvement chat turn (the chat's LLM call).
+# The turn is a single tool-free request; the caps are the enforced backstop.
+IMPROVE_DEFAULT_MAX_COST: float = 0.05
+IMPROVE_DEFAULT_MAX_REQUESTS: int = 1
+
 # Hard caps on the GENERATED SCRIPT's own llm_complete/llm_map calls (the
 # wizard's caps step; enforced by the planning pass's LlmLedger). They apply
 # ONLY to the script's tool calls — never to script generation, which is

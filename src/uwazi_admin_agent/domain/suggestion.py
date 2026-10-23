@@ -89,7 +89,7 @@ class Suggestion(BaseModel):
     """One proposed change to one entity property, as the review UI presents it.
 
     ``shared_id`` / ``op`` / ``property_name`` identify the row (the store's
-    idempotency key adds ``run_id`` + ``attempt``). ``proposed_value`` is what
+    idempotency key adds ``run_id``). ``proposed_value`` is what
     the script would write; ``current_value`` is Uwazi's value at prediction
     time (fetched during persistence, since dry-run records carry no
     before-state); ``match`` says whether the two agree, with ``None`` meaning
@@ -108,7 +108,6 @@ class Suggestion(BaseModel):
         ),
     )
     run_id: str = Field(description="The run this prediction belongs to.")
-    attempt: int = Field(description="The prediction attempt number (1-based, per run).")
     shared_id: str = Field(description="The entity's Uwazi sharedId (placeholder for creates).")
     entity_title: str = Field(default="", description="The entity title for display, when known.")
     template_name: str | None = Field(
@@ -355,8 +354,11 @@ class SuggestionFilter(BaseModel):
     offset: int = Field(default=0, ge=0, description="Page offset (ignored by aggregate/projection queries).")
 
 
-class PredictionAttempt(BaseModel):
-    """One prediction pass: its budget, spend, progress, and outcome.
+class PredictionPass(BaseModel):
+    """One prediction pass over a run's script: its budget, spend, progress, and outcome.
+
+    There is exactly ONE pass row per run — the review table is a single live
+    table, and a re-run overwrites this row instead of adding another.
 
     The UI polls this row while a pass runs (``entities_done`` vs
     ``entities_total``) and reads it afterwards for the spent-vs-budget badge —
@@ -367,7 +369,6 @@ class PredictionAttempt(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     run_id: str = Field(description="The run the pass belongs to.")
-    attempt: int = Field(description="The attempt number (1-based, per run).")
     status: PredictionAttemptStatus = Field(default=PredictionAttemptStatus.RUNNING, description="Pass lifecycle state.")
     budget: LlmBudget = Field(description="The approved ceiling this pass ran under.")
     spent: LlmUsage = Field(default_factory=LlmUsage, description="Real consumption recorded by the ledger.")
@@ -403,8 +404,8 @@ __all__ = [
     "MERGE_OPS",
     "OperationReviewRow",
     "PROPERTY_OPS",
-    "PredictionAttempt",
     "PredictionAttemptStatus",
+    "PredictionPass",
     "Suggestion",
     "SuggestionFilter",
     "SuggestionOp",

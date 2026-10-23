@@ -36,6 +36,7 @@ from loguru import logger
 
 from uwazi_admin_agent.configuration import RUNS_PATH, TASKS_PATH
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
+from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter
 from uwazi_admin_agent.domain.task import TaskDef, TaskView
 from uwazi_admin_agent.drivers.runtime import build_backup_store, build_file_cache
@@ -43,7 +44,6 @@ from uwazi_admin_agent.drivers.web.run_service import (
     apply_outcomes,
     build_suggestion_store,
     build_task_store,
-    current_attempt,
     delete_run,
     get_table_update_time,
     preflight_selection,
@@ -510,7 +510,7 @@ class AdminE2EWorkspace:
         run_id: str,
         script: str,
         prompt: str = "deterministic E2E planning pass",
-    ) -> int:
+    ) -> ReconciliationSummary:
         """Persist the script + manifest and await the real automatic planning scan."""
         self.run_ids.append(run_id)
         run_path = RUNS_PATH / run_id
@@ -528,7 +528,7 @@ class AdminE2EWorkspace:
         build_backup_store().save_manifest(run_id, manifest)
         return await run_auto_scan(run_id, UWAZI_USER, UWAZI_PASSWORD)
 
-    def seed_run(self, run_id: str, script: str, prompt: str = "deterministic E2E planning pass") -> int:
+    def seed_run(self, run_id: str, script: str, prompt: str = "deterministic E2E planning pass") -> ReconciliationSummary:
         """Synchronous wrapper for standalone (non-task) seeded runs."""
         return asyncio.run(self.seed_run_async(run_id, script, prompt))
 
@@ -543,11 +543,6 @@ class AdminE2EWorkspace:
     def status(self, run_id: str) -> RunStatus:
         return self.manifest(run_id).status
 
-    def attempt_number(self, run_id: str) -> int:
-        attempt = current_attempt(run_id)
-        assert attempt is not None, f"run {run_id} has no prediction attempt"
-        return attempt.attempt
-
     def suggestions(
         self,
         run_id: str,
@@ -558,7 +553,6 @@ class AdminE2EWorkspace:
     ) -> list[Suggestion]:
         rows, _total = build_suggestion_store().query(
             run_id,
-            self.attempt_number(run_id),
             SuggestionFilter(limit=1000, include_obsolete=include_obsolete),
         )
         if property_name is not None:
@@ -673,7 +667,7 @@ class AdminE2EWorkspace:
             if (RUNS_PATH / run_id).exists():
                 problems.append(f"run folder still exists: {RUNS_PATH / run_id}")
             with contextlib.suppress(Exception):
-                if build_suggestion_store().list_attempts(run_id):
+                if build_suggestion_store().get_pass(run_id):
                     problems.append(f"suggestion rows still exist for run {run_id}")
 
         if problems:

@@ -51,7 +51,6 @@ def _suggestion(
 ) -> Suggestion:
     return Suggestion(
         run_id="run1",
-        attempt=1,
         shared_id=shared_id,
         language=language,
         op=op,  # type: ignore[arg-type]
@@ -75,7 +74,7 @@ def test_update_merge_collapses_into_one_target_with_its_sources() -> None:
         _record("delete", shared_id="S2"),
     ]
 
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
 
     assert [(r.op, r.shared_id, r.property_name) for r in rows] == [
         ("update_and_delete", "T", TITLE_PROPERTY),
@@ -93,7 +92,7 @@ def test_create_merge_uses_the_create_and_delete_op_and_the_placeholder() -> Non
         _record("delete", shared_id="S1"),
     ]
 
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
 
     assert [(r.op, r.shared_id, r.property_name) for r in rows] == [
         ("create_and_delete", "dry-created-0", TITLE_PROPERTY),
@@ -108,7 +107,7 @@ def test_a_move_without_a_target_write_is_not_a_merge() -> None:
         _record("delete", shared_id="S1"),
     ]
 
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
 
     assert [(r.op, r.shared_id) for r in rows] == [("delete", "S1")]
     assert rows[0].merge_source_ids == []
@@ -120,7 +119,7 @@ def test_an_update_without_a_move_keeps_its_delete_apart() -> None:
         _record("delete", shared_id="S1"),
     ]
 
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
 
     assert [(r.op, r.shared_id) for r in rows] == [("update", "T"), ("delete", "S1")]
 
@@ -263,7 +262,7 @@ def test_store_roundtrips_merge_source_ids(tmp_path) -> None:
     store = SqliteSuggestionStore(tmp_path / "suggestions.db")
     try:
         store.add_suggestions([_suggestion(op="update_and_delete", merge_source_ids=["S1", "S2"])])
-        rows, total = store.query("run1", 1, SuggestionFilter())
+        rows, total = store.query("run1", SuggestionFilter())
     finally:
         store.close()
 
@@ -306,7 +305,7 @@ def test_store_migrates_an_old_database_without_merge_source_ids(tmp_path) -> No
 
     store = SqliteSuggestionStore(db)
     try:
-        rows, total = store.query("run1", 1, SuggestionFilter())
+        rows, total = store.query("run1", SuggestionFilter())
     finally:
         store.close()
 

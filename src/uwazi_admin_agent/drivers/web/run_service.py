@@ -54,6 +54,7 @@ from uwazi_admin_agent.domain.drift import (
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, RewiredRelationship, RunStatus
+from uwazi_admin_agent.domain.prompt_chat import ChatMessage, ChatTurn, build_final_prompt_from_chat
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
@@ -66,7 +67,7 @@ from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
     OperationReviewRow,
-    PredictionAttempt,
+    PredictionPass,
     Suggestion,
     SuggestionFilter,
 )
@@ -83,6 +84,7 @@ from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
 from uwazi_admin_agent.use_cases.clarify_prompt_use_case import ClarifyPromptUseCase
 from uwazi_admin_agent.use_cases.generate_predictions_use_case import GeneratePredictionsUseCase, _fetch_raws
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
+from uwazi_admin_agent.use_cases.improve_prompt_use_case import ImprovePromptUseCase
 from uwazi_api.domain.segmentation import Segmentation
 
 
@@ -140,7 +142,6 @@ class TableUpdateResult:
     """What one "Update table from Uwazi" pass changed."""
 
     run_id: str
-    attempt: int
     changed_in_uwazi: int | None
     reconciliation: ReconciliationSummary
 
@@ -525,30 +526,25 @@ async def create_and_generate(
     await run_auto_scan(name, user, password, budget)
 
 
-async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget | None = None) -> int:
+async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget | None = None) -> ReconciliationSummary:
     """Run the PLANNING pass over ``run_id``'s script and fill the review table.
 
     The ONE generated script runs in the recorded-write namespace with the LLM
     helpers bound under ``budget`` — the caps the operator approved at task
     creation (the wizard's caps step); ``None`` falls back to the configured
     script-caps defaults. A breach aborts the pass cleanly, keeping earlier
-    rows. It lands in the NEXT free attempt slot (a repair that regenerates
-    the script gets a fresh attempt; earlier attempts' rows and review
-    statuses are untouched). Returns the attempt number the pass used. Errors
-    propagate: the same path the wizard shows a toast for.
+    rows. There is ONE live table per run: the pass MERGES its rows into it
+    (rows the script still produces keep their identity and status, changed
+    rows go back to pending, rows it no longer produces become obsolete).
+    Errors propagate: the same path the wizard shows a toast for. Returns the
+    reconciliation summary of the merge into the live table.
     """
-    attempt = _next_suggestion_attempt(run_id)
-    await generate_predictions(run_id, user, password, attempt, budget or _script_caps_budget(), None)
+    summary = await generate_predictions(run_id, user, password, budget or _script_caps_budget(), None)
     # The rows just recorded are Uwazi's CURRENT state: capture their editDates
     # as the drift baseline now, so a later manual edit is detectable. Failure
     # is non-fatal (the table is still built).
-    refresh_baseline_after_run(run_id, user, password, attempt)
-    return attempt
-
-
-def _next_suggestion_attempt(run_id: str) -> int:
-    """One past the highest recorded prediction attempt (1 when none exist)."""
-    return max((a.attempt for a in build_suggestion_store().list_attempts(run_id)), default=0) + 1
+    refresh_baseline_after_run(run_id, user, password)
+    return summary
 
 
 def _script_caps_budget() -> LlmBudget:
@@ -601,29 +597,23 @@ def build_suggestion_store() -> SuggestionStorePort:
     return SqliteSuggestionStore(SUGGESTIONS_DB_PATH)
 
 
-def read_run_script(run_id: str, attempt: int | None = None) -> str:
-    """Read a run's script source (the attempt file when ``attempt`` is given).
+def read_run_script(run_id: str) -> str:
+    """Read a run's script source (the ONE stable path the emitter writes).
 
-    Attempts are immutable history (``script_attempt_<N>.py``); ``script.py``
-    always holds the ORIGINAL generation, so an untouched run has no attempt
-    files at all and every attempt reads ``script.py``.
+    There is one script per run: ``script.py`` is overwritten when a
+    regeneration produces a new one, so the live table always reflects the
+    script that produced it.
     """
-    run_path = RUNS_PATH / run_id
-    if attempt is not None:
-        candidate = run_path / f"script_attempt_{attempt}.py"
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
-    return (run_path / "script.py").read_text(encoding="utf-8")
+    return (RUNS_PATH / run_id / "script.py").read_text(encoding="utf-8")
 
 
 async def generate_predictions(
     run_id: str,
     user: str,
     password: str,
-    attempt: int,
     budget: LlmBudget,
     shared_ids: list[str] | None = None,
-) -> None:
+) -> ReconciliationSummary:
     """Run the planning pass over a run's script and persist its rows.
 
     A subset pass passes ``shared_ids``; None means the script discovers its own
@@ -631,9 +621,11 @@ async def generate_predictions(
     script's OWN llm_complete/llm_map calls ride the LLM runtime under the
     ledger built from ``budget`` — the caps the operator approved at task
     creation; a breach aborts the pass keeping earlier rows.
+
+    Returns the reconciliation summary of the merge into the ONE live table.
     """
     runtime = build_runtime(user=user, password=password)
-    script = read_run_script(run_id, attempt)
+    script = read_run_script(run_id)
     use_case = GeneratePredictionsUseCase(
         entity_api=runtime.entity_api,
         entity_repository=runtime.entity_repository,
@@ -651,7 +643,8 @@ async def generate_predictions(
         property_types=runtime.property_types,
         llm_cache=runtime.file_cache,
     )
-    await use_case.run(script, run_id=run_id, attempt=attempt, budget=budget, entity_scope=shared_ids)
+    await use_case.run(script, run_id=run_id, budget=budget, entity_scope=shared_ids)
+    return use_case.last_reconciliation or ReconciliationSummary()
 
 
 async def update_table_from_uwazi(run_id: str, user: str, password: str) -> TableUpdateResult:
@@ -660,24 +653,23 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
     Full script pass with the persistent caches: LLM/translation answers for
     unchanged inputs are served from disk, while the entities Uwazi reports as
     changed, new, or deleted have their cached raws invalidated first so the
-    pass sees live data. The same attempt row and the same suggestion rows are
+    pass sees live data. The same pass row and the same suggestion rows are
     kept; :meth:`GeneratePredictionsUseCase.refresh` merges by identity.
     """
     store = build_suggestion_store()
     assert isinstance(store, SqliteSuggestionStore)
-    attempt_row = current_attempt(run_id)
-    if attempt_row is None:
-        raise GenerateError(f"run {run_id!r} has no prediction attempt to refresh")
+    pass_row = current_pass(run_id)
+    if pass_row is None:
+        raise GenerateError(f"run {run_id!r} has no prediction pass to refresh")
 
     runtime = await asyncio.to_thread(build_runtime, user, password)
-    script = read_run_script(run_id, attempt_row.attempt)
+    script = read_run_script(run_id)
     now = datetime.now(timezone.utc)
     report = await asyncio.to_thread(
         _scan_drift_report,
         runtime,
         store,
         run_id,
-        attempt_row.attempt,
         now,
     )
     if report is not None:
@@ -687,7 +679,7 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
         # Without a scan we cannot name what changed. Invalidate everything the
         # run already knows about (rows + baseline) so no stale raw can be
         # mistaken for live state; new entities would not be cached anyway.
-        changed_ids = set(store.shared_ids(run_id, attempt_row.attempt, SuggestionFilter(include_obsolete=True)))
+        changed_ids = set(store.shared_ids(run_id, SuggestionFilter(include_obsolete=True)))
         changed_ids.update(row.shared_id for row in store.drift_baseline(run_id))
         changed_in_uwazi = None
     if runtime.file_cache is not None and changed_ids:
@@ -712,8 +704,7 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
     _final, summary = await use_case.refresh(
         script,
         run_id=run_id,
-        attempt=attempt_row.attempt,
-        budget=attempt_row.budget or _script_caps_budget(),
+        budget=pass_row.budget or _script_caps_budget(),
     )
 
     baseline_rows = await asyncio.to_thread(
@@ -721,7 +712,6 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
         run_id,
         user,
         password,
-        attempt_row.attempt,
     )
     if baseline_rows:
         synced_state = store.drift_state(run_id)
@@ -752,7 +742,6 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
         logger.warning("could not record the table-update timestamp for {}: {}", run_id, exc)
     return TableUpdateResult(
         run_id=run_id,
-        attempt=attempt_row.attempt,
         changed_in_uwazi=changed_in_uwazi,
         reconciliation=summary,
     )
@@ -780,8 +769,8 @@ def preflight_selection(
     if not suggestion_ids:
         return PreflightResult()
     store = build_suggestion_store()
-    attempt_row = current_attempt(run_id)
-    if attempt_row is None:
+    pass_row = current_pass(run_id)
+    if pass_row is None:
         return PreflightResult()
     rows: list[Suggestion] = []
     chunk_size = 500
@@ -789,7 +778,6 @@ def preflight_selection(
         chunk = suggestion_ids[start : start + chunk_size]
         page, _total = store.query(
             run_id,
-            attempt_row.attempt,
             SuggestionFilter(suggestion_ids=chunk, limit=len(chunk)),
         )
         rows.extend(page)
@@ -807,19 +795,18 @@ def _scan_drift_report(
     runtime: Any,
     store: SqliteSuggestionStore,
     run_id: str,
-    attempt: int,
     now: datetime,
 ) -> DriftReport | None:
     """Full paged diff against the baseline (None = no template to scan)."""
     if runtime.drift_probe is None:
         return None
-    template_name = _dominant_template_name(store, run_id, attempt)
+    template_name = _dominant_template_name(store, run_id)
     template_id = _check_template_id(runtime, template_name)
     if template_id is None:
         return None
     manifest = runtime.backup_store.load_manifest(run_id)
     run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
-    languages = _languages_for_run(run_id, store, attempt)
+    languages = _languages_for_run(run_id, store)
     live: list[dict[str, Any]] = []
     scan_failed: list[str] = []
     for language in languages:
@@ -839,41 +826,24 @@ def _scan_drift_report(
     )
 
 
-def get_suggestions(run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
+def get_suggestions(run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
     """Return a page of suggestions + the filter's total (the review grid's read)."""
-    return build_suggestion_store().query(run_id, attempt, f)
+    return build_suggestion_store().query(run_id, f)
 
 
-def get_attempt(run_id: str, attempt: int) -> PredictionAttempt | None:
-    """Return one prediction attempt row (the progress/abort badge source)."""
-    return build_suggestion_store().get_attempt(run_id, attempt)
+def current_pass(run_id: str) -> PredictionPass | None:
+    """The run's single prediction pass row, or None when none is recorded.
 
-
-def list_attempts(run_id: str) -> list[PredictionAttempt]:
-    """Return every prediction attempt for a run, newest first."""
-    return build_suggestion_store().list_attempts(run_id)
-
-
-def current_attempt(run_id: str) -> PredictionAttempt | None:
-    """The run's NEWEST prediction attempt row, or None when none is recorded.
-
-    The review page no longer offers an attempt selector, so the review reads
-    below resolve the current attempt HERE — the page never carries an attempt
-    number. A later pass (a repair turn) becomes the current attempt by itself,
-    and that is the one the review surface follows.
+    The review page never carries a pass number — the table is ONE live table
+    per run — so the review reads below resolve the current pass HERE. A later
+    pass overwrites this row, and that is the one the review surface follows.
     """
-    return next(iter(build_suggestion_store().list_attempts(run_id)), None)
-
-
-def _current_attempt_number(run_id: str) -> int:
-    """The attempt number the review reads use (1 before anything is recorded)."""
-    attempt = current_attempt(run_id)
-    return attempt.attempt if attempt is not None else 1
+    return build_suggestion_store().get_pass(run_id)
 
 
 def get_suggestion_entity_languages(run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
     """Return every (sharedId, language) row matching a filter (the window's prev/next)."""
-    return build_suggestion_store().entity_languages(run_id, _current_attempt_number(run_id), f)
+    return build_suggestion_store().entity_languages(run_id, f)
 
 
 def get_suggestion_counts(run_id: str) -> dict[str, int]:
@@ -882,17 +852,17 @@ def get_suggestion_counts(run_id: str) -> dict[str, int]:
     The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table shows
     — so the cards and the table agree; ``match_*`` stay row-level.
     """
-    return build_suggestion_store().counts(run_id, _current_attempt_number(run_id))
+    return build_suggestion_store().counts(run_id)
 
 
 def get_suggestion_properties(run_id: str) -> list[str]:
     """Return the distinct property names in a set (the property dropdown)."""
-    return build_suggestion_store().property_names(run_id, _current_attempt_number(run_id))
+    return build_suggestion_store().property_names(run_id)
 
 
 def get_entity_suggestions(run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
     """Return the suggestions of one entity's language group (the entity window's read)."""
-    return build_suggestion_store().get_entity(run_id, _current_attempt_number(run_id), shared_id, language)
+    return build_suggestion_store().get_entity(run_id, shared_id, language)
 
 
 # Property labels belong to the TEMPLATE, not to a run, so they are resolved once
@@ -935,7 +905,7 @@ def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReview
     The entity table's read: one row per affected entity (checkbox column feeds
     the selection-driven actions), grouped in SQL like every other review read.
     """
-    return build_suggestion_store().entity_rows(run_id, _current_attempt_number(run_id), f)
+    return build_suggestion_store().entity_rows(run_id, f)
 
 
 def get_operation_rows(run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
@@ -945,27 +915,27 @@ def get_operation_rows(run_id: str, f: SuggestionFilter) -> tuple[list[Operation
     whose every part the filter removed never reaches the page. ``subs`` carries
     the page's matching suggestion rows.
     """
-    return build_suggestion_store().operations(run_id, _current_attempt_number(run_id), f)
+    return build_suggestion_store().operations(run_id, f)
 
 
 def get_property_scores(run_id: str) -> dict[str, tuple[int, int]]:
-    """``property -> (exact, mismatch)`` over the whole attempt (the Property filter)."""
-    return build_suggestion_store().property_scores(run_id, _current_attempt_number(run_id))
+    """``property -> (exact, mismatch)`` over the whole run (the Property filter)."""
+    return build_suggestion_store().property_scores(run_id)
 
 
 def get_templates(run_id: str) -> list[str]:
-    """The distinct template names of the attempt — the property-label lookup."""
-    return build_suggestion_store().templates(run_id, _current_attempt_number(run_id))
+    """The distinct template names of the run — the property-label lookup."""
+    return build_suggestion_store().templates(run_id)
 
 
 def get_suggestion_languages(run_id: str) -> list[str]:
-    """The distinct languages the attempt writes — the Language filter's options."""
-    return build_suggestion_store().languages(run_id, _current_attempt_number(run_id))
+    """The distinct languages the run writes — the Language filter's options."""
+    return build_suggestion_store().languages(run_id)
 
 
 def get_selection_rows(run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
     """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection."""
-    return build_suggestion_store().selection_rows(run_id, _current_attempt_number(run_id), f)
+    return build_suggestion_store().selection_rows(run_id, f)
 
 
 def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:
@@ -983,7 +953,6 @@ def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str |
     store = build_suggestion_store()
     return store.discard_by_filter(
         run_id,
-        _current_attempt_number(run_id),
         SuggestionFilter(entity_languages=pairs),
         reason,
     )
@@ -998,7 +967,6 @@ def restore_rows(run_id: str, pairs: list[tuple[str, str | None]]) -> int:
     store = build_suggestion_store()
     return store.restore_by_filter(
         run_id,
-        _current_attempt_number(run_id),
         SuggestionFilter(entity_languages=pairs),
     )
 
@@ -1017,7 +985,6 @@ def discard_ids(run_id: str, ids: list[int], reason: str | None = None) -> int:
     store = build_suggestion_store()
     return store.discard_by_filter(
         run_id,
-        _current_attempt_number(run_id),
         SuggestionFilter(suggestion_ids=ids),
         reason,
     )
@@ -1030,7 +997,6 @@ def restore_ids(run_id: str, ids: list[int]) -> int:
     store = build_suggestion_store()
     return store.restore_by_filter(
         run_id,
-        _current_attempt_number(run_id),
         SuggestionFilter(suggestion_ids=ids),
     )
 
@@ -1095,86 +1061,109 @@ async def apply_outcomes(
     def _work() -> list[str]:
         runtime = build_runtime(user=user, password=password)
         use_case = _apply_use_case(runtime)
-        use_case.apply(run_id, _current_attempt_number(run_id), selection, row_ids, progress=progress)
+        use_case.apply(run_id, selection, row_ids, progress=progress)
         return [run_id]
 
     return await asyncio.to_thread(_work)
 
 
-async def repair_predictions(
+async def improve_prompt(
     run_id: str,
-    feedback: str,
+    history: list[ChatMessage],
+    request: str,
     user: str,
     password: str,
-    budget: LlmBudget,
-) -> str:
-    """Run a repair turn on the run's script and save it as a new attempt.
+    budget: LlmBudget | None = None,
+) -> ChatTurn:
+    """Run one prompt-improvement chat turn over ``history`` + ``request``.
 
-    The review UI's prompt-revisit loop: the discard reasons and mismatch
-    samples become ``feedback``, and the script is regenerated with the ORIGINAL
-    generation context still in view (``repair`` reuses the persisted message
-    history, so discovery is not repeated). The new script is written as
-    ``script_attempt_<N>.py`` — the original ``script.py`` is never overwritten,
-    so attempts stay immutable history. Returns the new script path as a string.
+    The chat's engine: a tool-free LLM call that sees the whole conversation
+    and answers with what it understood, the clarifying questions it still has,
+    and the COMPLETE revised prompt it proposes. Raises on LLM failure; the
+    caller shows the error in the chat.
 
-    When no history was persisted (a run generated before this feature), the
-    turn falls back to a FRESH generation over the original prompt, which the UI
-    reports so the operator knows re-discovery will be paid for.
+    ``budget`` carries the operator's approved caps from the cost dialog: its
+    request backstop is the ENFORCED limit for the turn.
+    """
+    runtime = build_runtime(user=user, password=password)
+    use_case = ImprovePromptUseCase(llm=runtime.llm, deps=runtime.deps)
+    max_requests = budget.max_requests if budget is not None else None
+    return await use_case.execute(history, request, max_requests=max_requests)
+
+
+async def regenerate_from_chat(
+    run_id: str,
+    history: list[ChatMessage],
+    user: str,
+    password: str,
+    budget: LlmBudget | None = None,
+) -> TableUpdateResult:
+    """Regenerate the run's script from the whole chat history and reconcile the table.
+
+    The chat's Run button. The steps, in order:
+
+    1. fold the WHOLE chat into ONE prompt (the original + the resolved
+       clarifications + every turn) — that is what the generation LLM receives;
+    2. regenerate the script, reusing the run's persisted generation history so
+       the ORIGINAL discovery context stays in view (a run generated before the
+       history existed falls back to a fresh generation);
+    3. overwrite the run's ONE script file (``script.py``);
+    4. persist the new generation conversation (so the NEXT turn repairs against
+       this turn's context);
+    5. update the manifest — including ``validated_prompt``, which is what the
+       prompt modal shows as the run's current prompt;
+    6. re-scan: the planning pass runs the NEW script and MERGES its rows into
+       the ONE live table (rows the script still produces keep their identity
+       and status, changed rows go back to pending, rows it no longer produces
+       become obsolete).
+
+    Returns the reconciliation summary. Errors propagate: the caller shows them.
     """
     runtime = build_runtime(user=user, password=password)
     manifest = runtime.backup_store.load_manifest(run_id)
     run_path = RUNS_PATH / run_id
+    final_prompt = build_final_prompt_from_chat(history)
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
-        entity_repository=runtime.entity_repository,
     )
     history_path = run_path / GENERATION_HISTORY_FILENAME
-    repaired_online = False
+    reused_history = False
     if history_path.is_file():
         try:
             use_case.load_history_json(history_path.read_bytes())
-            repaired_online = True
+            reused_history = True
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh generation
             logger.warning("could not restore generation history for {}: {}", run_id, exc)
     try:
-        if repaired_online:
-            script = await use_case.repair(feedback)
+        if reused_history:
+            script = await use_case.repair(final_prompt)
         else:
-            script = await use_case.execute(f"{manifest.validated_prompt or manifest.prompt}\n\n{feedback}")
+            script = await use_case.execute(final_prompt)
     except Exception as exc:  # noqa: BLE001 — surface as a generation error
         raise GenerateError(str(exc)) from exc
 
-    attempt = _next_script_attempt(run_path)
-    (run_path / f"script_attempt_{attempt}.py").write_text(script.python_code, encoding="utf-8")
+    emit_generated_script(script, run_path)
     _persist_generation_history(run_path, use_case)
     manifest.script = script.python_code
     manifest.status = RunStatus.PLANNED
     manifest.error = None
     manifest.error_step = None
+    manifest.validated_prompt = final_prompt
     runtime.backup_store.save_manifest(run_id, manifest)
     logger.info(
-        "repaired predictions run={} attempt={} reused_history={}",
+        "regenerated from chat run={} reused_history={}",
         run_id,
-        attempt,
-        repaired_online,
+        reused_history,
     )
-    # The regenerated script needs a fresh planning scan to build its rows:
-    # it runs unasked into a new attempt slot.
-    await run_auto_scan(run_id, user, password)
-    return str(run_path / f"script_attempt_{attempt}.py")
-
-
-def _next_script_attempt(run_path: Path) -> int:
-    """The next attempt number for a run's script history (1 when none exist)."""
-    existing = [p for p in run_path.glob("script_attempt_*.py")]
-    numbers = []
-    for path in existing:
-        try:
-            numbers.append(int(path.stem.removeprefix("script_attempt_")))
-        except ValueError:
-            continue
-    return max(numbers, default=0) + 1
+    # The regenerated script needs a planning pass: it merges its rows into the
+    # ONE live table.
+    summary = await run_auto_scan(run_id, user, password, budget)
+    return TableUpdateResult(
+        run_id=run_id,
+        changed_in_uwazi=None,
+        reconciliation=summary,
+    )
 
 
 # --- multistep tasks ---------------------------------------------------------
@@ -1489,7 +1478,7 @@ def rename_run(old_id: str, new_id: str) -> None:
             data["active_run"] = new_id
             RUNS_FILE.write_text(yaml.dump(data), encoding="utf-8")
     build_backup_store().rename_run(old_id, new_id)
-    # The review table, prediction attempts and drift rows live in the shared
+    # The review table, the prediction pass and drift rows live in the shared
     # SQLite database keyed by run_id — renaming only the folder left the
     # renamed run's review page empty and the old id's rows orphaned.
     build_suggestion_store().rename_run(old_id, new_id)
@@ -1513,13 +1502,12 @@ def _check_template_id(runtime: Any, template_name: str | None) -> str | None:
     return template.id if template is not None else None
 
 
-def _languages_for_run(run_id: str, store: SuggestionStorePort, attempt: int) -> list[str]:
+def _languages_for_run(run_id: str, store: SuggestionStorePort) -> list[str]:
     """The DISTINCT languages among the run's rows (the languages the probe covers)."""
     languages = [
         lang
         for (_sid, lang) in store.entity_languages(
             run_id,
-            attempt,
             _unfiltered(),
         )
         if lang
@@ -1559,7 +1547,6 @@ def sync_drift_baseline(
     run_id: str,
     user: str,
     password: str,
-    attempt: int,
 ) -> int:
     """Record (sharedId, language) → editDate for the run's template snapshot.
 
@@ -1573,10 +1560,10 @@ def sync_drift_baseline(
     if runtime.drift_probe is None:
         logger.warning("drift probe not wired — baseline not synced for {}", run_id)
         return 0
-    template_name = _dominant_template_name(store, run_id, attempt)
+    template_name = _dominant_template_name(store, run_id)
     template_id = _check_template_id(runtime, template_name)
     now = datetime.now(timezone.utc)
-    languages = _languages_for_run(run_id, store, attempt)
+    languages = _languages_for_run(run_id, store)
     rows: list[DriftBaselineRow] = []
     try:
         if template_id:
@@ -1602,7 +1589,7 @@ def sync_drift_baseline(
             # No template in the rows: capture only the run's own (sharedId,
             # language) rows with no editDate — a probe can then never flag
             # them as drift (their baseline date is unknown, treated valid).
-            for shared_id, lang in store.entity_languages(run_id, attempt, _unfiltered()):
+            for shared_id, lang in store.entity_languages(run_id, _unfiltered()):
                 rows.append(
                     DriftBaselineRow(
                         run_id=run_id,
@@ -1630,9 +1617,9 @@ def sync_drift_baseline(
     return len(rows)
 
 
-def _dominant_template_name(store: SuggestionStorePort, run_id: str, attempt: int) -> str | None:
+def _dominant_template_name(store: SuggestionStorePort, run_id: str) -> str | None:
     """The most frequent template name among the run's rows (None when none)."""
-    rows, _total = store.entity_rows(run_id, attempt, _unfiltered())
+    rows, _total = store.entity_rows(run_id, _unfiltered())
     tally: dict[str, int] = {}
     for row in rows:
         for name in row.template_names:
@@ -1651,7 +1638,6 @@ def check_drift(
     run_id: str,
     user: str,
     password: str,
-    attempt: int,
     by: str = "auto",
 ) -> DriftStateRow:
     """Check whether Uwazi drifted since the baseline; persist + return the verdict.
@@ -1685,7 +1671,7 @@ def check_drift(
     run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
 
     baseline_max = _baseline_max(store, run_id)
-    template_name = _dominant_template_name(store, run_id, attempt)
+    template_name = _dominant_template_name(store, run_id)
     template_id = _check_template_id(runtime, template_name)
     if template_id is None:
         state = DriftStateRow(
@@ -1703,7 +1689,7 @@ def check_drift(
             detail=state.detail,
         )
         return state
-    languages = _languages_for_run(run_id, store, attempt)
+    languages = _languages_for_run(run_id, store)
     try:
         probed: dict[str, int | None] = {}
         languages_failed: list[str] = []
@@ -1813,10 +1799,10 @@ def _drift_detail(report: DriftReport) -> str:
     return ", ".join(parts)
 
 
-def refresh_baseline_after_run(run_id: str, user: str, password: str, attempt: int) -> None:
+def refresh_baseline_after_run(run_id: str, user: str, password: str) -> None:
     """After an apply: re-sync the baseline for the run's template (best effort)."""
     try:
-        sync_drift_baseline(run_id, user, password, attempt)
+        sync_drift_baseline(run_id, user, password)
     except Exception as exc:  # noqa: BLE001 — the apply succeeded; drift bookkeeping must not fail it
         logger.warning("post-run baseline sync failed for {}: {}", run_id, exc)
         build_suggestion_store().drift_mark_stale(run_id)
@@ -1835,11 +1821,10 @@ __all__ = [
     "clarify_prompt",
     "clear_cache",
     "create_and_generate",
-    "current_attempt",
+    "current_pass",
     "delete_run",
     "document_language_candidates",
     "generate_predictions",
-    "get_attempt",
     "get_drift_state",
     "get_entity_rows",
     "get_entity_segmentation",
@@ -1852,7 +1837,6 @@ __all__ = [
     "get_suggestion_properties",
     "get_suggestions",
     "get_templates",
-    "list_attempts",
     "list_runs",
     "property_labels_for",
     "read_run_script",

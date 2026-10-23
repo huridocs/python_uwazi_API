@@ -96,9 +96,7 @@ def test_value_in_language_reads_an_untagged_value_as_the_rows_own() -> None:
 
 
 def test_a_translation_record_becomes_one_row_per_language() -> None:
-    rows = records_to_suggestions(
-        "run1", 1, [{"op": "update", "shared_id": "s1", "metadata": {"excerpt": TRANSLATION_VALUE}}]
-    )
+    rows = records_to_suggestions("run1", [{"op": "update", "shared_id": "s1", "metadata": {"excerpt": TRANSLATION_VALUE}}])
 
     assert [(row.language, row.property_name) for row in rows] == [("es", "excerpt"), ("en", "excerpt")]
     assert [row.proposed_value for row in rows] == [
@@ -108,18 +106,18 @@ def test_a_translation_record_becomes_one_row_per_language() -> None:
 
 
 def test_a_select_update_stays_one_language_independent_row() -> None:
-    rows = records_to_suggestions("run1", 1, [{"op": "update", "shared_id": "s1", "metadata": {"case_status": "Closed"}}])
+    rows = records_to_suggestions("run1", [{"op": "update", "shared_id": "s1", "metadata": {"case_status": "Closed"}}])
 
     assert [(row.language, row.property_name) for row in rows] == [(None, "case_status")]
 
 
 def test_a_title_row_is_language_independent() -> None:
-    rows = records_to_suggestions("run1", 1, [{"op": "update", "shared_id": "s1", "title": "New title"}])
+    rows = records_to_suggestions("run1", [{"op": "update", "shared_id": "s1", "title": "New title"}])
 
     assert [(row.language, row.property_name) for row in rows] == [(None, "_title")]
 
 
 def test_a_delete_record_is_language_independent() -> None:
-    rows = records_to_suggestions("run1", 1, [{"op": "delete", "shared_id": "s1"}])
+    rows = records_to_suggestions("run1", [{"op": "delete", "shared_id": "s1"}])
 
     assert [(row.language, row.property_name) for row in rows] == [(None, None)]

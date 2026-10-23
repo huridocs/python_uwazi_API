@@ -1,4 +1,4 @@
-"""Persistence + query seam for prediction attempts and their suggestions.
+"""Persistence + query seam for a run's prediction pass and its suggestions.
 
 The review UI's 10k-entity scale requirement lives here: every selection surface
 (the grid's checkboxes, the bulk accept/discard buttons, the subset re-predict,
@@ -9,10 +9,10 @@ UI.
 
 Two record families:
 
-- :class:`PredictionAttempt` — one row per pass, polled while it runs (progress)
+- :class:`PredictionPass` — ONE row per run, polled while the pass runs (progress)
   and read afterwards (spent vs budget, abort reason).
 - :class:`Suggestion` — the reviewable rows, upserted idempotently on
-  ``(run_id, attempt, shared_id, op, property_name)`` so re-running a pass over
+  ``(run_id, shared_id, op, property_name)`` so re-running a pass over
   the same scope overwrites those rows instead of duplicating them.
 """
 
@@ -25,7 +25,7 @@ from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
     OperationReviewRow,
-    PredictionAttempt,
+    PredictionPass,
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
@@ -33,45 +33,30 @@ from uwazi_admin_agent.domain.suggestion import (
 
 
 class SuggestionStorePort(ABC):
-    """Storage + query API for prediction attempts and suggestions."""
+    """Storage + query API for a run's prediction pass and its suggestions."""
 
     @abstractmethod
     def ensure_schema(self) -> None:
         """Create the tables/indexes when missing (idempotent; safe on every build)."""
         ...
 
-    # --- attempts ------------------------------------------------------------
+    # --- the run's prediction pass -------------------------------------------
 
     @abstractmethod
-    def create_attempt(self, attempt: PredictionAttempt) -> None:
-        """Insert a pass row (the UI starts polling it for progress)."""
+    def save_pass(self, pass_row: PredictionPass) -> None:
+        """Insert or overwrite the run's single pass row (progress ticks, terminal transitions)."""
         ...
 
     @abstractmethod
-    def update_attempt(self, attempt: PredictionAttempt) -> None:
-        """Overwrite a pass row (progress ticks and terminal transitions)."""
-        ...
-
-    @abstractmethod
-    def get_attempt(self, run_id: str, attempt: int) -> PredictionAttempt | None:
-        """One pass row, or None."""
-        ...
-
-    @abstractmethod
-    def latest_attempt(self, run_id: str) -> PredictionAttempt | None:
-        """The highest-numbered pass row for a run, or None."""
-        ...
-
-    @abstractmethod
-    def list_attempts(self, run_id: str) -> list[PredictionAttempt]:
-        """Every pass row for a run, newest first (the attempt dropdown)."""
+    def get_pass(self, run_id: str) -> PredictionPass | None:
+        """The run's single pass row, or None."""
         ...
 
     # --- suggestions ---------------------------------------------------------
 
     @abstractmethod
     def add_suggestions(self, suggestions: list[Suggestion]) -> None:
-        """Upsert suggestion rows (idempotent on run/attempt/shared_id/op/property).
+        """Upsert suggestion rows (idempotent on run/shared_id/op/property).
 
         An upsert, not an insert: a re-run of the same pass over the same scope
         must overwrite those rows. Operator review state (status/edited value)
@@ -84,14 +69,18 @@ class SuggestionStorePort(ABC):
     def reconcile_suggestions(
         self,
         run_id: str,
-        attempt: int,
         suggestions: list[Suggestion],
+        entity_scope: list[str] | None = None,
     ) -> ReconciliationSummary:
-        """Merge a refreshed pass into the SAME attempt, preserving only safe state.
+        """Merge a refreshed pass into the SAME table, preserving only safe state.
 
         New identities insert PENDING; unchanged proposals keep the operator's
         status; changed proposals reset PENDING except EDITED/DISCARDED; rows
         the script no longer produces keep APPLIED or become OBSOLETE.
+
+        ``entity_scope`` narrows the merge to the entities the pass actually
+        covered (None = the whole run). A scope-limited pass does NOT retire the
+        rows of the entities it never visited — it only says nothing about them.
         """
         ...
 
@@ -111,7 +100,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def query(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
+    def query(self, run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
         """Return ``(page rows, total matching)`` for the filter's window.
 
         ``total`` is the count over the WHOLE filter (ignoring limit/offset), so
@@ -120,7 +109,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def entity_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
+    def entity_rows(self, run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
         """Return (page of per-entity aggregate rows, total distinct entities matching f).
 
         ``total`` is the distinct-shared_id count over the WHOLE filter (limit/offset
@@ -133,7 +122,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def operations(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+    def operations(self, run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
         """Return (page of per-ENTITY operation rows, total distinct entities matching f).
 
         The review table's read: one row per affected entity, whatever languages
@@ -145,22 +134,22 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def property_scores(self, run_id: str, attempt: int) -> dict[str, tuple[int, int]]:
-        """``property -> (exact, mismatch)`` verdict counts for the whole attempt (the Property filter)."""
+    def property_scores(self, run_id: str) -> dict[str, tuple[int, int]]:
+        """``property -> (exact, mismatch)`` verdict counts for the whole run (the Property filter)."""
         ...
 
     @abstractmethod
-    def languages(self, run_id: str, attempt: int) -> list[str]:
-        """The distinct written languages of the attempt — the Language filter's options."""
+    def languages(self, run_id: str) -> list[str]:
+        """The distinct written languages of the run — the Language filter's options."""
         ...
 
     @abstractmethod
-    def templates(self, run_id: str, attempt: int) -> list[str]:
-        """The distinct template names of the attempt — used to resolve property labels."""
+    def templates(self, run_id: str) -> list[str]:
+        """The distinct template names of the run — used to resolve property labels."""
         ...
 
     @abstractmethod
-    def selection_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+    def selection_rows(self, run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection.
 
         The whole-result selection ("select all results") spans every page, so the
@@ -170,7 +159,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def get_entity(self, run_id: str, attempt: int, shared_id: str, language: str | None = None) -> list[Suggestion]:
+    def get_entity(self, run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
         """Every suggestion row for one entity in ONE language group (the entity window).
 
         ``language=None`` is the language-independent group (selects, titles,
@@ -180,7 +169,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def entity_languages(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+    def entity_languages(self, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
         """Every (sharedId, language) pair matching a filter, first-appearance order."""
         ...
 
@@ -199,7 +188,6 @@ class SuggestionStorePort(ABC):
     def set_status_by_filter(
         self,
         run_id: str,
-        attempt: int,
         f: SuggestionFilter,
         status: SuggestionStatus,
         reason: str | None = None,
@@ -213,7 +201,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def reset_statuses(self, run_id: str, attempt: int, ids: list[int]) -> None:
+    def reset_statuses(self, run_id: str, ids: list[int]) -> None:
         """Return DISCARDED rows to PENDING ("Undo discard").
 
         Only the discard state is undoable this way: ACCEPTED/EDITED/APPLIED rows
@@ -226,7 +214,6 @@ class SuggestionStorePort(ABC):
     def discard_by_filter(
         self,
         run_id: str,
-        attempt: int,
         f: SuggestionFilter,
         reason: str | None = None,
     ) -> int:
@@ -244,7 +231,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def restore_by_filter(self, run_id: str, attempt: int, f: SuggestionFilter) -> int:
+    def restore_by_filter(self, run_id: str, f: SuggestionFilter) -> int:
         """Return the filter's DISCARDED rows to PENDING (undo a discard); return the count.
 
         The counterpart of :meth:`discard_by_filter`: an operation the operator
@@ -254,12 +241,12 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def property_names(self, run_id: str, attempt: int) -> list[str]:
+    def property_names(self, run_id: str) -> list[str]:
         """Distinct property names present in the set (the property dropdown)."""
         ...
 
     @abstractmethod
-    def shared_ids(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[str]:
+    def shared_ids(self, run_id: str, f: SuggestionFilter) -> list[str]:
         """The distinct sharedIds matching the filter (subset re-predict/apply).
 
         Ignores limit/offset on purpose: this is a projection of the selection,
@@ -268,7 +255,7 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def counts(self, run_id: str, attempt: int) -> dict[str, int]:
+    def counts(self, run_id: str) -> dict[str, int]:
         """Aggregate counters for the header cards, computed in the store.
 
         The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table
@@ -294,31 +281,31 @@ class SuggestionStorePort(ABC):
 
         Called after a successful run-level revert: those writes no longer
         exist, so the rows must read as reverted (runnable again) rather than
-        applied. Scoped to the run, across all its attempts, since one revert
+        applied. Scoped to the run, since one revert
         undoes the run's whole accumulated manifest.
         """
         ...
 
     @abstractmethod
     def mark_applied_reverted_for(self, run_id: str, shared_ids: list[str]) -> int:
-        """Mark APPLIED rows REVERTED for exactly these sharedIds (any language, any attempt); return the count.
+        """Mark APPLIED rows REVERTED for exactly these sharedIds (any language); return the count.
 
         Called after a per-entity (per-row) revert: one restore rolled the WHOLE
         entity back — every language row's write — so all the entity's APPLIED
-        rows move, across languages and attempts.
+        rows move, across languages.
         """
         ...
 
     @abstractmethod
     def delete_run(self, run_id: str) -> None:
-        """Remove every suggestion + attempt row for a run (run deletion flow)."""
+        """Remove every suggestion + pass row for a run (run deletion flow)."""
         ...
 
     @abstractmethod
     def rename_run(self, old_id: str, new_id: str) -> None:
         """Re-key every row of ``old_id`` to ``new_id`` (the run-rename flow).
 
-        The run's review table, its prediction attempts and its drift rows are
+        The run's review table, its prediction pass and its drift rows are
         all keyed by ``run_id``; the backup store renames the run FOLDER, so
         without this the review page of the renamed run opens empty and the old
         name keeps orphaned rows. Idempotent when no rows exist for ``old_id``.

@@ -118,13 +118,21 @@ def build_budget(
     )
 
 
-def confirm_llm_spend(estimate: SpendEstimate, on_approve: Callable[[LlmBudget], Any]) -> None:
+def confirm_llm_spend(
+    estimate: SpendEstimate,
+    on_approve: Callable[[LlmBudget], Any],
+    on_cancel: Callable[[], Any] | None = None,
+) -> None:
     """Open the approval dialog; call ``on_approve(budget)`` only when approved.
 
     The dollar cap (the enforced limit) and the request backstop are editable
     inputs prefilled from the estimate's defaults, so the operator can lower
     them after seeing the projected call count — and never raise them by
     accident (an empty/invalid input falls back to the default).
+
+    ``on_cancel`` is called when the operator closes the dialog WITHOUT
+    approving — the caller may need to undo what it staged before the dialog
+    opened (e.g. a pending message in a chat).
     """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
@@ -154,12 +162,19 @@ def confirm_llm_spend(estimate: SpendEstimate, on_approve: Callable[[LlmBudget],
                 "cap. Predictions never write to Uwazi, so an aborted pass keeps everything it already recorded."
             ).classes("text-body2 text-grey-7")
             with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
+                ui.button("Cancel", on_click=lambda: _cancel(dialog, on_cancel)).props("color=grey-7 flat")
                 ui.button(
                     "Approve and run",
                     on_click=lambda: _approve(dialog, estimate, on_approve, cost_input, requests_input),
                 )
     dialog.open()
+
+
+def _cancel(dialog: Any, on_cancel: Callable[[], Any] | None) -> None:
+    """Close the dialog and tell the caller the spend was NOT approved."""
+    dialog.close()
+    if on_cancel is not None:
+        on_cancel()
 
 
 def _approve(

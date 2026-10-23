@@ -1,7 +1,7 @@
 """Stdlib-``sqlite3`` implementation of :class:`SuggestionStorePort`.
 
 One database file (``SUGGESTIONS_DB_PATH``) holds every run's prediction
-attempts and suggestions. SQLite is the right tool for the review UI's scale
+passes and suggestions. SQLite is the right tool for the review UI's scale
 requirement: filtering, ordering, pagination, and aggregation all happen in SQL,
 so a 10 000-row set costs a 25-row page read and a couple of ``GROUP BY``
 scans — never a Python loop over the whole set.
@@ -45,8 +45,8 @@ from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     EntityReviewRow,
     OperationReviewRow,
-    PredictionAttempt,
     PredictionAttemptStatus,
+    PredictionPass,
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
@@ -55,9 +55,8 @@ from uwazi_admin_agent.domain.suggestion import (
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
 
 _TABLES = """
-CREATE TABLE IF NOT EXISTS prediction_attempt (
-    run_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS prediction_pass (
+    run_id TEXT NOT NULL PRIMARY KEY,
     status TEXT NOT NULL,
     budget TEXT NOT NULL,
     spent TEXT NOT NULL,
@@ -66,14 +65,12 @@ CREATE TABLE IF NOT EXISTS prediction_attempt (
     entity_scope TEXT,
     error TEXT,
     created_at TEXT,
-    finished_at TEXT,
-    PRIMARY KEY (run_id, attempt)
+    finished_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS suggestion (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
     shared_id TEXT NOT NULL,
     entity_title TEXT NOT NULL DEFAULT '',
     template_name TEXT,
@@ -119,15 +116,15 @@ CREATE TABLE IF NOT EXISTS drift_state (
 _INDEXES = """
 CREATE UNIQUE INDEX IF NOT EXISTS suggestion_identity
     ON suggestion (
-        run_id, attempt, shared_id, op,
+        run_id, shared_id, op,
         ifnull(language, ''), ifnull(property_name, ''), ifnull(detail_key, '')
     );
 
 CREATE INDEX IF NOT EXISTS suggestion_review
-    ON suggestion (run_id, attempt, status, match_state);
+    ON suggestion (run_id, status, match_state);
 
 CREATE INDEX IF NOT EXISTS suggestion_entity_language
-    ON suggestion (run_id, attempt, shared_id, language);
+    ON suggestion (run_id, shared_id, language);
 """
 
 # Statuses the apply path pushes (accepted, or accepted-then-edited).
@@ -204,17 +201,17 @@ def _dt_from_text(text: str | None) -> datetime | None:
         return None
 
 
-def build_where(f: SuggestionFilter, run_id: str, attempt: int) -> tuple[str, list[Any]]:
+def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
     """Compose the parameterized WHERE clause for a filter (pure).
 
-    Returns ``(sql, params)`` where ``sql`` starts with ``run_id = ? AND attempt
-    = ?`` and appends only the predicates the filter actually sets. Every value
-    is a bound parameter, so no filter input is ever interpolated into SQL.
+    Returns ``(sql, params)`` where ``sql`` starts with ``run_id = ?`` and
+    appends only the predicates the filter actually sets. Every value is a bound
+    parameter, so no filter input is ever interpolated into SQL.
     ``limit``/``offset`` are deliberately NOT part of the clause — the caller
     appends them, and the count/projection queries omit them.
     """
-    clause = ["run_id = ?", "attempt = ?"]
-    params: list[Any] = [run_id, attempt]
+    clause = ["run_id = ?"]
+    params: list[Any] = [run_id]
     if f.status is not None:
         clause.append("status = ?")
         params.append(f.status.value)
@@ -294,7 +291,6 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
     return Suggestion(
         id=int(row["id"]),
         run_id=row["run_id"],
-        attempt=row["attempt"],
         shared_id=row["shared_id"],
         entity_title=row["entity_title"],
         template_name=row["template_name"],
@@ -314,11 +310,10 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
     )
 
 
-def _row_to_attempt(row: sqlite3.Row) -> PredictionAttempt:
-    """Convert one ``prediction_attempt`` row into the domain model."""
-    return PredictionAttempt(
+def _row_to_pass(row: sqlite3.Row) -> PredictionPass:
+    """Convert one ``prediction_pass`` row into the domain model."""
+    return PredictionPass(
         run_id=row["run_id"],
-        attempt=row["attempt"],
         status=PredictionAttemptStatus(row["status"]),
         budget=_value_from_json(row["budget"]),
         spent=_value_from_json(row["spent"]),
@@ -332,7 +327,7 @@ def _row_to_attempt(row: sqlite3.Row) -> PredictionAttempt:
 
 
 class SqliteSuggestionStore(SuggestionStorePort):
-    """SQLite-backed suggestion + prediction-attempt store."""
+    """SQLite-backed suggestion + prediction-pass store."""
 
     def __init__(self, path: Path) -> None:
         self._path: Path = Path(path)
@@ -386,12 +381,66 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_source_ids TEXT")
             if "detail_key" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN detail_key TEXT")
+            self._migrate_attempts_to_single_pass()
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
             # one: drop and let _INDEXES recreate it.
             self._conn.execute("DROP INDEX IF EXISTS suggestion_identity")
             self._conn.executescript(_INDEXES)
             self._conn.commit()
+
+    def _migrate_attempts_to_single_pass(self) -> None:
+        """Migrate a pre-attempt-removal database to the one-live-table shape.
+
+        The ORDER is load-bearing:
+
+        1. the old indexes NAME the ``attempt`` column, so they must go before
+           the column does;
+        2. only the NEWEST attempt's rows per run survive — the live table is
+           the newest pass's rows;
+        3. ``ALTER TABLE ... DROP COLUMN attempt`` (the column is in no key);
+        4. ``prediction_attempt`` is REBUILT as ``prediction_pass`` (its
+           primary key contained the attempt number, so the column could not
+           simply be dropped), keeping the newest pass per run.
+
+        Idempotent: a database already in the new shape has neither the column
+        nor the old table, so the whole block is skipped. A fresh database
+        never enters it (the new tables come from ``_TABLES``).
+        """
+        tables = {row["name"] for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(suggestion)")}
+        if "attempt" in columns:
+            self._conn.execute("DROP INDEX IF EXISTS suggestion_identity")
+            self._conn.execute("DROP INDEX IF EXISTS suggestion_review")
+            self._conn.execute("DROP INDEX IF EXISTS suggestion_entity_language")
+            self._conn.execute(
+                "DELETE FROM suggestion WHERE attempt NOT IN (SELECT MAX(attempt) FROM suggestion GROUP BY run_id)"
+            )
+            self._conn.execute("ALTER TABLE suggestion DROP COLUMN attempt")
+        if "prediction_attempt" in tables:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS prediction_pass (
+                    run_id TEXT NOT NULL PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    budget TEXT NOT NULL,
+                    spent TEXT NOT NULL,
+                    entities_total INTEGER NOT NULL DEFAULT 0,
+                    entities_done INTEGER NOT NULL DEFAULT 0,
+                    entity_scope TEXT,
+                    error TEXT,
+                    created_at TEXT,
+                    finished_at TEXT
+                );
+                INSERT OR REPLACE INTO prediction_pass
+                    SELECT run_id, status, budget, spent, entities_total, entities_done,
+                           entity_scope, error, created_at, finished_at
+                      FROM prediction_attempt
+                     WHERE attempt = (SELECT MAX(p2.attempt) FROM prediction_attempt p2
+                                       WHERE p2.run_id = prediction_attempt.run_id);
+                DROP TABLE prediction_attempt;
+                """
+            )
 
     def close(self) -> None:
         """Close the connection (tests; the web app keeps it open for its lifetime)."""
@@ -410,51 +459,39 @@ class SqliteSuggestionStore(SuggestionStorePort):
         with self._lock:
             return list(self._conn.execute(sql, params).fetchall())
 
-    # --- attempts ------------------------------------------------------------
+    # --- the run's prediction pass -------------------------------------------
 
-    def create_attempt(self, attempt: PredictionAttempt) -> None:
+    def save_pass(self, pass_row: PredictionPass) -> None:
+        """Insert or overwrite the run's single pass row (progress ticks, terminal transitions)."""
         logger.info(
-            "prediction attempt start run={} attempt={} scope={}",
-            attempt.run_id,
-            attempt.attempt,
-            "all" if attempt.entity_scope is None else len(attempt.entity_scope),
+            "prediction pass start run={} scope={}",
+            pass_row.run_id,
+            "all" if pass_row.entity_scope is None else len(pass_row.entity_scope),
         )
         self._execute(
             """
-            INSERT OR REPLACE INTO prediction_attempt
-                (run_id, attempt, status, budget, spent, entities_total, entities_done,
+            INSERT OR REPLACE INTO prediction_pass
+                (run_id, status, budget, spent, entities_total, entities_done,
                  entity_scope, error, created_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                attempt.run_id,
-                attempt.attempt,
-                attempt.status.value,
-                _json_or_none(attempt.budget.model_dump(mode="json")),
-                _json_or_none(attempt.spent.model_dump(mode="json")),
-                attempt.entities_total,
-                attempt.entities_done,
-                _json_or_none(attempt.entity_scope),
-                attempt.error,
-                _dt_to_text(attempt.created_at),
-                _dt_to_text(attempt.finished_at),
+                pass_row.run_id,
+                pass_row.status.value,
+                _json_or_none(pass_row.budget.model_dump(mode="json")),
+                _json_or_none(pass_row.spent.model_dump(mode="json")),
+                pass_row.entities_total,
+                pass_row.entities_done,
+                _json_or_none(pass_row.entity_scope),
+                pass_row.error,
+                _dt_to_text(pass_row.created_at),
+                _dt_to_text(pass_row.finished_at),
             ),
         )
 
-    def update_attempt(self, attempt: PredictionAttempt) -> None:
-        self.create_attempt(attempt)  # same row, INSERT OR REPLACE
-
-    def get_attempt(self, run_id: str, attempt: int) -> PredictionAttempt | None:
-        rows = self._query("SELECT * FROM prediction_attempt WHERE run_id = ? AND attempt = ?", (run_id, attempt))
-        return _row_to_attempt(rows[0]) if rows else None
-
-    def latest_attempt(self, run_id: str) -> PredictionAttempt | None:
-        rows = self._query("SELECT * FROM prediction_attempt WHERE run_id = ? ORDER BY attempt DESC LIMIT 1", (run_id,))
-        return _row_to_attempt(rows[0]) if rows else None
-
-    def list_attempts(self, run_id: str) -> list[PredictionAttempt]:
-        rows = self._query("SELECT * FROM prediction_attempt WHERE run_id = ? ORDER BY attempt DESC", (run_id,))
-        return [_row_to_attempt(row) for row in rows]
+    def get_pass(self, run_id: str) -> PredictionPass | None:
+        rows = self._query("SELECT * FROM prediction_pass WHERE run_id = ?", (run_id,))
+        return _row_to_pass(rows[0]) if rows else None
 
     # --- suggestions ---------------------------------------------------------
 
@@ -471,7 +508,6 @@ class SqliteSuggestionStore(SuggestionStorePort):
         rows = [
             (
                 s.run_id,
-                s.attempt,
                 s.shared_id,
                 s.entity_title,
                 s.template_name,
@@ -496,11 +532,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
             self._conn.executemany(
                 """
                 INSERT INTO suggestion
-                    (run_id, attempt, shared_id, entity_title, template_name, op, language, property_name,
+                    (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, match_state, merge_source_ids, status,
                      edited_value, discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_id, attempt, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
                     entity_title = excluded.entity_title,
@@ -517,10 +553,10 @@ class SqliteSuggestionStore(SuggestionStorePort):
     def reconcile_suggestions(
         self,
         run_id: str,
-        attempt: int,
         suggestions: list[Suggestion],
+        entity_scope: list[str] | None = None,
     ) -> ReconciliationSummary:
-        """Merge a refreshed script pass into the SAME attempt, in place.
+        """Merge a refreshed script pass into the SAME table, in place.
 
         Unlike :meth:`add_suggestions` (which preserves every status on an
         identity match), a refresh also reacts to the proposal CHANGING and to
@@ -534,8 +570,16 @@ class SqliteSuggestionStore(SuggestionStorePort):
         - changed proposal → PENDING unless the row is EDITED/DISCARDED;
         - missing → APPLIED stays APPLIED, everything else becomes OBSOLETE;
         - a returning OBSOLETE row → PENDING.
+
+        ``entity_scope`` narrows the merge to the entities the pass covered
+        (None = the whole run). A scope-limited pass says NOTHING about the
+        entities it never visited, so their rows are left exactly as they are —
+        only the rows of the covered entities can be retired.
         """
-        existing = self._query("SELECT * FROM suggestion WHERE run_id = ? AND attempt = ?", (run_id, attempt))
+        scope = set(entity_scope) if entity_scope is not None else None
+        existing = self._query("SELECT * FROM suggestion WHERE run_id = ?", (run_id,))
+        if scope is not None:
+            existing = [row for row in existing if str(row["shared_id"]) in scope]
         incoming_by_key: dict[tuple[str, str, str, str, str], Suggestion] = {}
         for suggestion in suggestions:
             incoming_by_key[identity_of(suggestion)] = suggestion
@@ -649,9 +693,9 @@ class SqliteSuggestionStore(SuggestionStorePort):
             kept_applied=kept_applied,
         )
         logger.info(
-            "table refresh merged run={} attempt={}: {}",
+            "table refresh merged run={} scope={}: {}",
             run_id,
-            attempt,
+            "all" if scope is None else len(scope),
             summary.summary_text(),
         )
         return summary
@@ -697,8 +741,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
         rows = self._query(f"SELECT * FROM suggestion WHERE {clause} ORDER BY id", params)
         return [_row_to_suggestion(row) for row in rows]
 
-    def query(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
-        where, params = build_where(f, run_id, attempt)
+    def query(self, run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
+        where, params = build_where(f, run_id)
         total_rows = self._query(f"SELECT COUNT(*) AS n FROM suggestion WHERE {where}", params)
         total = int(total_rows[0]["n"]) if total_rows else 0
         page_rows = self._query(
@@ -707,7 +751,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         )
         return [_row_to_suggestion(row) for row in page_rows], total
 
-    def entity_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
+    def entity_rows(self, run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
         """One aggregate row per (entity, language), SQL-grouped (the review table's read).
 
         One `GROUP BY shared_id, language` statement over the SAME ``build_where``
@@ -725,7 +769,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         select, a title, a delete) and is deliberately NOT merged into the
         per-language groups: it is its own row, labelled "—".
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         count_rows = self._query(
             f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE {where} GROUP BY shared_id, language)",
             params,
@@ -816,7 +860,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
             )
         return rows, total
 
-    def operations(self, run_id: str, attempt: int, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+    def operations(self, run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
         """One row per ENTITY (the review table's operation) + its suboperations, SQL-grouped.
 
         The table's row is the entity — one sharedId, however many languages its
@@ -833,7 +877,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         ignored), so the grid reads "N operations" without loading the set.
         Bounded work: the detail statement only ever covers the page's entities.
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         count_rows = self._query(
             f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE {where} GROUP BY shared_id)",
             params,
@@ -925,8 +969,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
             )
         return rows, total
 
-    def languages(self, run_id: str, attempt: int) -> list[str]:
-        """The DISTINCT languages the attempt's rows are written in (SQL).
+    def languages(self, run_id: str) -> list[str]:
+        """The DISTINCT languages the run's rows are written in (SQL).
 
         The Language filter's options: a language that only exists as a
         suboperation of some entity still has to be selectable, so this reads
@@ -934,14 +978,13 @@ class SqliteSuggestionStore(SuggestionStorePort):
         language and are not listed — they are their own group, not a language.
         """
         rows = self._query(
-            "SELECT DISTINCT language FROM suggestion "
-            "WHERE run_id = ? AND attempt = ? AND language IS NOT NULL ORDER BY language",
-            (run_id, attempt),
+            "SELECT DISTINCT language FROM suggestion WHERE run_id = ? AND language IS NOT NULL ORDER BY language",
+            (run_id,),
         )
         return [str(row["language"]) for row in rows]
 
-    def templates(self, run_id: str, attempt: int) -> list[str]:
-        """The DISTINCT template names the attempt's rows belong to (SQL).
+    def templates(self, run_id: str) -> list[str]:
+        """The DISTINCT template names the run's rows belong to (SQL).
 
         The Property filter and the suboperation headings show a property's
         human LABEL, which belongs to its template; this list is what the page
@@ -950,13 +993,13 @@ class SqliteSuggestionStore(SuggestionStorePort):
         """
         rows = self._query(
             "SELECT DISTINCT template_name FROM suggestion "
-            "WHERE run_id = ? AND attempt = ? AND template_name IS NOT NULL ORDER BY template_name",
-            (run_id, attempt),
+            "WHERE run_id = ? AND template_name IS NOT NULL ORDER BY template_name",
+            (run_id,),
         )
         return [str(row["template_name"]) for row in rows]
 
-    def property_scores(self, run_id: str, attempt: int) -> dict[str, tuple[int, int]]:
-        """``property -> (exact, mismatch)`` verdict counts for the whole attempt (SQL).
+    def property_scores(self, run_id: str) -> dict[str, tuple[int, int]]:
+        """``property -> (exact, mismatch)`` verdict counts for the whole run (SQL).
 
         The Property filter's options carry each property's accuracy (the same
         figure the entity window shows), and it must span the WHOLE run, not the
@@ -970,14 +1013,14 @@ class SqliteSuggestionStore(SuggestionStorePort):
                    SUM(CASE WHEN match_state = 1 THEN 1 ELSE 0 END) AS exact,
                    SUM(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS mismatch
               FROM suggestion
-             WHERE run_id = ? AND attempt = ? AND property_name IS NOT NULL
+             WHERE run_id = ? AND property_name IS NOT NULL
              GROUP BY property_name
             """,
-            (run_id, attempt),
+            (run_id,),
         )
         return {str(row["property_name"]): (int(row["exact"] or 0), int(row["mismatch"] or 0)) for row in rows}
 
-    def selection_rows(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+    def selection_rows(self, run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection (SQL).
 
         The table's whole-result selection ("select all results") spans every
@@ -986,7 +1029,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         deliberately ignored, exactly like :meth:`shared_ids`. Display-only
         ``info`` rows are excluded: they can never be selected or run.
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         rows = self._query(
             f"SELECT id, shared_id, language, op FROM suggestion WHERE {where} AND op != ? ORDER BY id",
             [*params, INFO_OP],
@@ -1010,7 +1053,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 entry["templates"].append(str(template))
         return fields
 
-    def get_entity(self, run_id: str, attempt: int, shared_id: str, language: str | None = None) -> list[Suggestion]:
+    def get_entity(self, run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
         """Every suggestion for one entity IN ONE LANGUAGE group (the entity window).
 
         The entity window opens a (entity, language) row, so it reads that
@@ -1018,7 +1061,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         the language-independent group (``language=None`` — selects, titles,
         whole-entity ops) is read with ``language IS NULL``.
         """
-        where, params = build_where(SuggestionFilter(), run_id, attempt)
+        where, params = build_where(SuggestionFilter(), run_id)
         params.append(shared_id)
         if language is None:
             clause = f"{where} AND shared_id = ? AND language IS NULL"
@@ -1050,12 +1093,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
     def set_status_by_filter(
         self,
         run_id: str,
-        attempt: int,
         f: SuggestionFilter,
         status: SuggestionStatus,
         reason: str | None = None,
     ) -> int:
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         cursor = self._execute(
             f"""
             UPDATE suggestion
@@ -1067,7 +1109,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         logger.info("bulk status update: {} row(s) -> {}", cursor.rowcount, status.value)
         return int(cursor.rowcount)
 
-    def reset_statuses(self, run_id: str, attempt: int, ids: list[int]) -> None:
+    def reset_statuses(self, run_id: str, ids: list[int]) -> None:
         if not ids:
             return
         placeholders = ", ".join("?" for _ in ids)
@@ -1084,7 +1126,6 @@ class SqliteSuggestionStore(SuggestionStorePort):
     def discard_by_filter(
         self,
         run_id: str,
-        attempt: int,
         f: SuggestionFilter,
         reason: str | None = None,
     ) -> int:
@@ -1097,7 +1138,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         would also hide them from the run's revert, which finds its rows by
         that status.
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         cursor = self._execute(
             f"""
             UPDATE suggestion
@@ -1115,14 +1156,14 @@ class SqliteSuggestionStore(SuggestionStorePort):
         logger.info("discarded {} suggestion row(s) for run={}", cursor.rowcount, run_id)
         return int(cursor.rowcount)
 
-    def restore_by_filter(self, run_id: str, attempt: int, f: SuggestionFilter) -> int:
+    def restore_by_filter(self, run_id: str, f: SuggestionFilter) -> int:
         """Return the filter's DISCARDED rows to PENDING (undo a discard); return the count.
 
         The counterpart of :meth:`discard_by_filter`: an operation the operator
         marked as discarded goes back to the review queue. Rows in any other
         status keep theirs, so an undo never resurrects an applied write.
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         cursor = self._execute(
             f"""
             UPDATE suggestion
@@ -1144,8 +1185,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
 
         A revert undid exactly what those rows wrote, so they are runnable again
         and the review table says so instead of leaving them reading "applied".
-        EVERY attempt of the run is marked, not just the reviewed one: one
-        revert undoes the run's whole accumulated manifest, across passes. Only
+        EVERY row of the run is marked: one revert undoes the run's whole
+        accumulated manifest, across passes. Only
         APPLIED rows move — PENDING/ACCEPTED/DISCARDED rows were never written,
         and already-REVERTED rows stay REVERTED (idempotent across a repeat).
         """
@@ -1169,7 +1210,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         """Mark APPLIED rows REVERTED for exactly these sharedIds; return the count.
 
         One per-entity restore rolled back EVERY language row of the entity, so
-        all its APPLIED rows move — across languages and attempts. No
+        all its APPLIED rows move — across languages. No
         sharedIds (an empty list) moves nothing.
         """
         if not shared_ids:
@@ -1192,26 +1233,26 @@ class SqliteSuggestionStore(SuggestionStorePort):
         logger.info("reverted {} applied row(s) for {} of run={}", cursor.rowcount, shared_ids, run_id)
         return int(cursor.rowcount)
 
-    def property_names(self, run_id: str, attempt: int) -> list[str]:
+    def property_names(self, run_id: str) -> list[str]:
         rows = self._query(
             """
             SELECT DISTINCT property_name FROM suggestion
-             WHERE run_id = ? AND attempt = ? AND property_name IS NOT NULL
+             WHERE run_id = ? AND property_name IS NOT NULL
              ORDER BY property_name
             """,
-            (run_id, attempt),
+            (run_id,),
         )
         return [str(row["property_name"]) for row in rows]
 
-    def shared_ids(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[str]:
-        where, params = build_where(f, run_id, attempt)
+    def shared_ids(self, run_id: str, f: SuggestionFilter) -> list[str]:
+        where, params = build_where(f, run_id)
         rows = self._query(
             f"SELECT DISTINCT shared_id FROM suggestion WHERE {where} AND op != ? ORDER BY shared_id",
             [*params, INFO_OP],
         )
         return [str(row["shared_id"]) for row in rows]
 
-    def entity_languages(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+    def entity_languages(self, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
         """Every (sharedId, language) pair matching a filter, in first-appearance order.
 
         The entity window's Previous/Next walk THIS list, not the distinct
@@ -1220,7 +1261,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         row, not the next entity. ``info`` rows are display-only and name no
         entity, so they are excluded.
         """
-        where, params = build_where(f, run_id, attempt)
+        where, params = build_where(f, run_id)
         rows = self._query(
             f"""
             SELECT shared_id, language, MIN(id) AS first_id
@@ -1233,7 +1274,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         )
         return [(str(row["shared_id"]), row["language"]) for row in rows]
 
-    def counts(self, run_id: str, attempt: int) -> dict[str, int]:
+    def counts(self, run_id: str) -> dict[str, int]:
         """The review header's counters: entities per status (SQL-side group-bys).
 
         The status keys count ENTITY-LANGUAGE GROUPS, exactly the rows the table
@@ -1256,20 +1297,20 @@ class SqliteSuggestionStore(SuggestionStorePort):
             SELECT status, COUNT(*) AS n FROM (
                 SELECT shared_id, language, status
                 FROM suggestion
-                WHERE run_id = ? AND attempt = ?
+                WHERE run_id = ?
                 GROUP BY shared_id, language, status
             )
             GROUP BY status
             """,
-            (run_id, attempt),
+            (run_id,),
         )
         match_rows = self._query(
             """
             SELECT match_state, COUNT(*) AS n FROM suggestion
-             WHERE run_id = ? AND attempt = ?
+             WHERE run_id = ?
              GROUP BY match_state
             """,
-            (run_id, attempt),
+            (run_id,),
         )
         counts: dict[str, int] = {status.value: 0 for status in SuggestionStatus}
         for row in status_rows:
@@ -1286,9 +1327,9 @@ class SqliteSuggestionStore(SuggestionStorePort):
             else:
                 counts["match_mismatch"] += int(row["n"])
         total_rows = self._query(
-            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? AND attempt = ? "
+            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? "
             "AND status != ? GROUP BY shared_id, language)",
-            (run_id, attempt, SuggestionStatus.OBSOLETE.value),
+            (run_id, SuggestionStatus.OBSOLETE.value),
         )
         counts["total"] = int(total_rows[0]["n"]) if total_rows else 0
         # The header cards count SUBOPERATIONS (the table's real content: one
@@ -1299,30 +1340,30 @@ class SqliteSuggestionStore(SuggestionStorePort):
         for status in SuggestionStatus:
             counts[f"subs_{status.value}"] = 0
         for row in self._query(
-            "SELECT status, COUNT(*) AS n FROM suggestion WHERE run_id = ? AND attempt = ? GROUP BY status",
-            (run_id, attempt),
+            "SELECT status, COUNT(*) AS n FROM suggestion WHERE run_id = ? GROUP BY status",
+            (run_id,),
         ):
             count = int(row["n"])
             if row["status"] != SuggestionStatus.OBSOLETE.value:
                 counts["subs_total"] += count
             counts[f"subs_{row['status']}"] = count
         operation_rows = self._query(
-            "SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion WHERE run_id = ? AND attempt = ? AND status != ?",
-            (run_id, attempt, SuggestionStatus.OBSOLETE.value),
+            "SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion WHERE run_id = ? AND status != ?",
+            (run_id, SuggestionStatus.OBSOLETE.value),
         )
         counts["operations_total"] = int(operation_rows[0]["n"]) if operation_rows else 0
         return counts
 
     def delete_run(self, run_id: str) -> None:
         self._execute("DELETE FROM suggestion WHERE run_id = ?", (run_id,))
-        self._execute("DELETE FROM prediction_attempt WHERE run_id = ?", (run_id,))
+        self._execute("DELETE FROM prediction_pass WHERE run_id = ?", (run_id,))
         self._execute("DELETE FROM drift_baseline WHERE run_id = ?", (run_id,))
         self._execute("DELETE FROM drift_state WHERE run_id = ?", (run_id,))
 
     def rename_run(self, old_id: str, new_id: str) -> None:
         """Re-key every row of ``old_id`` to ``new_id`` (see the port's contract).
 
-        The backup store renames the run's folder; the review table, attempts and
+        The backup store renames the run's folder; the review table, the pass and
         drift rows live in this shared database and are keyed by ``run_id``.
         Renaming only the folder left the new run's review page empty and the old
         id's rows orphaned. All four tables move together inside one locked
@@ -1332,7 +1373,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
             return
         with self._lock:
             try:
-                for table in ("suggestion", "prediction_attempt", "drift_baseline", "drift_state"):
+                for table in ("suggestion", "prediction_pass", "drift_baseline", "drift_state"):
                     self._conn.execute(f"UPDATE {table} SET run_id = ? WHERE run_id = ?", (new_id, old_id))
                 self._conn.commit()
             except Exception:
@@ -1447,7 +1488,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
         )
 
     def drift_mark_stale(self, run_id: str) -> None:
-        """Forget the last verdict (a new apply/attempt makes it out of date)."""
+        """Forget the last verdict (a new apply/pass makes it out of date)."""
         self._execute("DELETE FROM drift_state WHERE run_id = ?", (run_id,))
 
 

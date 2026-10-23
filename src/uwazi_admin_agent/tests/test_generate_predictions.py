@@ -207,7 +207,6 @@ def test_hydration_reads_each_rows_current_value_from_its_own_language() -> None
     suggestions = [
         Suggestion(
             run_id="r",
-            attempt=1,
             shared_id="s1",
             op="update",
             property_name="excerpt",
@@ -216,7 +215,6 @@ def test_hydration_reads_each_rows_current_value_from_its_own_language() -> None
         ),
         Suggestion(
             run_id="r",
-            attempt=1,
             shared_id="s1",
             op="update",
             property_name="excerpt",
@@ -225,7 +223,6 @@ def test_hydration_reads_each_rows_current_value_from_its_own_language() -> None
         ),
         Suggestion(
             run_id="r",
-            attempt=1,
             shared_id="s1",
             op="update",
             property_name="case_status",
@@ -249,7 +246,6 @@ def test_hydration_does_not_use_a_fallback_row_of_another_language() -> None:
     suggestions = [
         Suggestion(
             run_id="r",
-            attempt=1,
             shared_id="s1",
             op="update",
             property_name="excerpt",
@@ -279,9 +275,9 @@ for d in entities:
     update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": [{"value": "new"}]}}])
 result = len(entities)
 """
-    attempt = asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    assert attempt.status == PredictionAttemptStatus.COMPLETED
-    rows, total = store.query("run1", 1, SuggestionFilter())
+    pass_row = asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    assert pass_row.status == PredictionAttemptStatus.COMPLETED
+    rows, total = store.query("run1", SuggestionFilter())
     assert total == 3
     by_id = {row.shared_id: row for row in rows}
     # s1 proposed "new" vs current "old" -> mismatch; s2 proposed "new" vs "same" -> mismatch;
@@ -290,7 +286,7 @@ result = len(entities)
     assert by_id["s1"].current_value == [{"value": "old"}]
     assert by_id["s2"].match is False
     assert by_id["s3"].match is None
-    counts = store.counts("run1", 1)
+    counts = store.counts("run1")
     assert counts["match_mismatch"] == 2
     assert counts["match_new"] == 1
 
@@ -301,8 +297,8 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": d["metadata"].get("excerpt")}}])
 result = "ok"
 """
-    asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    rows, _ = store.query("run1", SuggestionFilter())
     verdicts = {row.shared_id: row.match for row in rows}
     assert verdicts == {"s1": True, "s2": True, "s3": None}
 
@@ -313,23 +309,23 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"x": 1}}])
 result = "ok"
 """
-    asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    attempt = store.get_attempt("run1", 1)
-    assert attempt is not None
-    assert attempt.status == PredictionAttemptStatus.COMPLETED
-    assert attempt.entities_total == 3
-    assert attempt.entities_done == 3
-    assert attempt.finished_at is not None
-    assert attempt.entity_scope is None
+    asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    pass_row = store.get_pass("run1")
+    assert pass_row is not None
+    assert pass_row.status == PredictionAttemptStatus.COMPLETED
+    assert pass_row.entities_total == 3
+    assert pass_row.entities_done == 3
+    assert pass_row.finished_at is not None
+    assert pass_row.entity_scope is None
 
 
-def test_attempt_row_exists_while_running(store: SqliteSuggestionStore) -> None:
-    """The pass creates its attempt row up front so the UI can poll it."""
+def test_pass_row_exists_while_running(store: SqliteSuggestionStore) -> None:
+    """The pass creates its pass row up front so the UI can poll it."""
     seen: list[PredictionAttemptStatus] = []
 
     class WatchingRepository(InMemoryEntityRepository):
         async def get_raw_by_shared_id(self, shared_id: str, language: str | None = None) -> dict[str, Any]:
-            row = store.get_attempt("run1", 1)
+            row = store.get_pass("run1")
             if row is not None:
                 seen.append(row.status)
             return await super().get_raw_by_shared_id(shared_id, language)
@@ -339,7 +335,7 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"x": 1}}])
 result = "ok"
 """
-    asyncio.run(_use_case(store, repository=WatchingRepository(_raws())).run(script, "run1", 1, _budget()))
+    asyncio.run(_use_case(store, repository=WatchingRepository(_raws())).run(script, "run1", _budget()))
     assert seen and all(status == PredictionAttemptStatus.RUNNING for status in seen)
 
 
@@ -352,12 +348,12 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": "scoped"}}])
 result = "ok"
 """
-    attempt = asyncio.run(_use_case(store).run(script, "run1", 1, _budget(), entity_scope=["s2"]))
-    rows, total = store.query("run1", 1, SuggestionFilter())
+    pass_row = asyncio.run(_use_case(store).run(script, "run1", _budget(), entity_scope=["s2"]))
+    rows, total = store.query("run1", SuggestionFilter())
     assert total == 1
     assert rows[0].shared_id == "s2"
-    assert attempt.entity_scope == ["s2"]
-    assert attempt.entities_total == 1
+    assert pass_row.entity_scope == ["s2"]
+    assert pass_row.entities_total == 1
 
 
 # --- whole-entity ops --------------------------------------------------------
@@ -370,8 +366,8 @@ publish_entities(["s2"])
 set_publish_status(["s3"], False)
 result = "ok"
 """
-    asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    rows, _ = store.query("run1", SuggestionFilter())
     assert [(r.op, r.property_name, r.match) for r in rows] == [
         ("delete", None, None),
         ("publish", None, None),
@@ -393,10 +389,10 @@ update_entities([{"shared_id": "s1", "metadata": {"v": out}}])
 result = "ok"
 """
     with pytest.raises(PredictionPassError, match="NOT available in a SELECTION script"):
-        asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    attempt = store.get_attempt("run1", 1)
-    assert attempt is not None
-    assert attempt.status == PredictionAttemptStatus.FAILED
+        asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    pass_row = store.get_pass("run1")
+    assert pass_row is not None
+    assert pass_row.status == PredictionAttemptStatus.FAILED
 
 
 def test_a_script_error_is_failed_and_reraised(store: SqliteSuggestionStore) -> None:
@@ -406,11 +402,11 @@ def test_a_script_error_is_failed_and_reraised(store: SqliteSuggestionStore) -> 
 raise ValueError("boom")
 """
     with pytest.raises(PredictionPassError, match="boom"):
-        asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
-    attempt = store.get_attempt("run1", 1)
-    assert attempt is not None
-    assert attempt.status == PredictionAttemptStatus.FAILED
-    assert "boom" in (attempt.error or "")
+        asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    pass_row = store.get_pass("run1")
+    assert pass_row is not None
+    assert pass_row.status == PredictionAttemptStatus.FAILED
+    assert "boom" in (pass_row.error or "")
 
 
 def test_unwired_llm_helpers_fail_the_pass_loudly(store: SqliteSuggestionStore) -> None:
@@ -423,43 +419,43 @@ out = llm_complete("x", "y")
 result = out
 """
     with pytest.raises(PredictionPassError, match="NOT available in a SELECTION script"):
-        asyncio.run(_use_case(store).run(script, "run1", 1, _budget()))
+        asyncio.run(_use_case(store).run(script, "run1", _budget()))
 
 
 # --- re-runs ----------------------------------------------------------------
 
 
-def test_rerunning_the_same_attempt_over_a_subset_overwrites_those_rows(store: SqliteSuggestionStore) -> None:
+def test_rerunning_over_a_subset_overwrites_those_rows(store: SqliteSuggestionStore) -> None:
     script = """
 for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": "v1"}}])
 result = "ok"
 """
     use_case = _use_case(store)
-    asyncio.run(use_case.run(script, "run1", 1, _budget()))
-    assert store.query("run1", 1, SuggestionFilter())[1] == 3
+    asyncio.run(use_case.run(script, "run1", _budget()))
+    assert store.query("run1", SuggestionFilter())[1] == 3
     script2 = script.replace("v1", "v2")
-    asyncio.run(use_case.run(script2, "run1", 1, _budget(), entity_scope=["s1"]))
-    rows, total = store.query("run1", 1, SuggestionFilter())
+    asyncio.run(use_case.run(script2, "run1", _budget(), entity_scope=["s1"]))
+    rows, total = store.query("run1", SuggestionFilter())
     assert total == 3  # no duplicates
-    assert store.query("run1", 1, SuggestionFilter(property_name="excerpt"))[1] == 3
+    assert store.query("run1", SuggestionFilter(property_name="excerpt"))[1] == 3
     s1 = [r for r in rows if r.shared_id == "s1"][0]
     # proposed_value is the script's raw payload shape, preserved verbatim.
     assert s1.proposed_value == "v2"
 
 
-def test_a_new_attempt_is_a_separate_row_set(store: SqliteSuggestionStore) -> None:
+def test_a_second_pass_merges_into_the_same_live_table(store: SqliteSuggestionStore) -> None:
+    """There is ONE table per run: a second pass merges into it, never beside it."""
     script = """
 for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"x": 1}}])
 result = "ok"
 """
     use_case = _use_case(store)
-    asyncio.run(use_case.run(script, "run1", 1, _budget()))
-    asyncio.run(use_case.run(script, "run1", 2, _budget()))
-    assert store.query("run1", 1, SuggestionFilter())[1] == 3
-    assert store.query("run1", 2, SuggestionFilter())[1] == 3
-    assert [a.attempt for a in store.list_attempts("run1")] == [2, 1]
+    asyncio.run(use_case.run(script, "run1", _budget()))
+    asyncio.run(use_case.run(script, "run1", _budget()))
+    assert store.query("run1", SuggestionFilter())[1] == 3
+    assert store.get_pass("run1") is not None
 
 
 # --- statuses survive a re-run ----------------------------------------------
@@ -472,11 +468,11 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
 result = "ok"
 """
     use_case = _use_case(store)
-    asyncio.run(use_case.run(script, "run1", 1, _budget()))
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    asyncio.run(use_case.run(script, "run1", _budget()))
+    rows, _ = store.query("run1", SuggestionFilter())
     store.set_status([rows[0].id or 0], SuggestionStatus.DISCARDED, reason="bad")
-    asyncio.run(use_case.run(script, "run1", 1, _budget()))
-    after = store.query("run1", 1, SuggestionFilter())[0]
+    asyncio.run(use_case.run(script, "run1", _budget()))
+    after = store.query("run1", SuggestionFilter())[0]
     assert after[0].status == SuggestionStatus.DISCARDED
     assert after[0].discard_reason == "bad"
 

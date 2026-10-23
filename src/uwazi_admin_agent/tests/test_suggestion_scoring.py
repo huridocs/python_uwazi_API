@@ -31,20 +31,20 @@ def test_update_record_explodes_per_metadata_key() -> None:
             language="en",
         )
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.op, r.property_name, r.shared_id) for r in rows] == [
         ("update", "excerpt", "s1"),
         ("update", "topic", "s1"),
     ]
     assert rows[0].proposed_value == [{"value": "v1"}]
     assert all(r.status == SuggestionStatus.PENDING for r in rows)
-    assert all(r.run_id == "run1" and r.attempt == 1 for r in rows)
+    assert all(r.run_id == "run1" for r in rows)
     assert all(r.created_at is not None for r in rows)
 
 
 def test_update_record_with_title_emits_title_row_first() -> None:
     records = [_rec(op="update", shared_id="s1", metadata={"a": 1}, title="New Title")]
-    rows = records_to_suggestions("run1", 2, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.property_name, r.proposed_value) for r in rows] == [
         (TITLE_PROPERTY, "New Title"),
         ("a", 1),
@@ -53,14 +53,14 @@ def test_update_record_with_title_emits_title_row_first() -> None:
 
 def test_update_record_with_no_metadata_and_no_title_emits_a_single_placeholder_row() -> None:
     records = [_rec(op="update", shared_id="s1", metadata={}, title=None)]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert len(rows) == 1
     assert rows[0].property_name is None
     assert rows[0].proposed_value is None
 
 
 def test_update_record_with_missing_metadata_key_still_emits_placeholder() -> None:
-    rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1")])
+    rows = records_to_suggestions("run1", [_rec(op="update", shared_id="s1")])
     assert [r.property_name for r in rows] == [None]
 
 
@@ -86,7 +86,7 @@ def test_a_scalar_value_files_under_the_language_the_script_passed() -> None:
             language="es",
         )
     ]
-    rows = records_to_suggestions("update", 1, records)
+    rows = records_to_suggestions("update", records)
     assert [(r.shared_id, r.language, r.proposed_value) for r in rows] == [("elfd96ccepk", "es", "A/HRC/37/NGO/92 ES")]
 
 
@@ -101,7 +101,7 @@ def test_a_value_naming_its_own_languages_still_splits_per_language() -> None:
             metadata={"document_ref": [{"value": "hola", "language": "es"}, {"value": "hello", "language": "en"}]},
         )
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.language, r.proposed_value) for r in rows] == [
         ("es", [{"value": "hola", "language": "es"}]),
         ("en", [{"value": "hello", "language": "en"}]),
@@ -109,19 +109,19 @@ def test_a_value_naming_its_own_languages_still_splits_per_language() -> None:
 
 
 def test_a_record_without_a_language_files_under_none() -> None:
-    rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1", metadata={"document_ref": "x"})])
+    rows = records_to_suggestions("run1", [_rec(op="update", shared_id="s1", metadata={"document_ref": "x"})])
     assert rows[0].language is None
 
 
 def test_a_blank_or_non_string_record_language_files_under_none() -> None:
     for bogus in ("", None, 7, []):
-        rows = records_to_suggestions("run1", 1, [_rec(op="update", shared_id="s1", metadata={"a": 1}, language=bogus)])
+        rows = records_to_suggestions("run1", [_rec(op="update", shared_id="s1", metadata={"a": 1}, language=bogus)])
         assert rows[0].language is None, bogus
 
 
 def test_whole_entity_rows_stay_language_agnostic() -> None:
     """A delete carries no property value, so the write's language says nothing about it."""
-    rows = records_to_suggestions("run1", 1, [_rec(op="delete", shared_id="s1", language="es")])
+    rows = records_to_suggestions("run1", [_rec(op="delete", shared_id="s1", language="es")])
     assert rows[0].language is None
 
 
@@ -154,7 +154,7 @@ def test_a_multiselect_change_is_one_suboperation_with_no_language() -> None:
             language="en",
         )
     ]
-    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    rows = records_to_suggestions("run1", records, property_types={"languages": "multiselect"})
     assert [(r.property_name, r.language) for r in rows] == [("languages", None)]
 
 
@@ -178,7 +178,7 @@ def test_a_multiselect_written_under_two_languages_is_still_one_suboperation() -
         )
         for language in ("en", "es")
     ]
-    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    rows = records_to_suggestions("run1", records, property_types={"languages": "multiselect"})
     assert [(r.property_name, r.language) for r in rows] == [("languages", None)]
 
 
@@ -194,7 +194,7 @@ def test_a_text_property_still_splits_per_language() -> None:
             language="en",
         )
     ]
-    rows = records_to_suggestions("run1", 1, records, property_types={"summary": "text"})
+    rows = records_to_suggestions("run1", records, property_types={"summary": "text"})
     assert [r.language for r in rows] == ["en", "es"]
 
 
@@ -211,7 +211,7 @@ def test_a_text_property_written_as_bare_scalars_still_splits_per_language() -> 
         )
         for language, value in (("en", "hello"), ("es", "hola"))
     ]
-    rows = records_to_suggestions("run1", 1, records, property_types={"summary": "text"})
+    rows = records_to_suggestions("run1", records, property_types={"summary": "text"})
     assert [(r.language, r.proposed_value) for r in rows] == [("en", "hello"), ("es", "hola")]
 
 
@@ -232,7 +232,7 @@ def test_without_the_types_the_row_keeps_the_scripts_language() -> None:
             language="en",
         )
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.property_name, r.language) for r in rows] == [("languages", "en")]
 
 
@@ -248,7 +248,7 @@ def test_a_value_naming_its_own_languages_is_per_language_without_the_types() ->
             language="en",
         )
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.property_name, r.language) for r in rows] == [("summary", "en")]
 
 
@@ -265,7 +265,7 @@ def test_a_shared_value_of_one_entity_does_not_swallow_another_entitys() -> None
         )
         for shared_id in ("s1", "s2")
     ]
-    rows = records_to_suggestions("run1", 1, records, property_types={"languages": "multiselect"})
+    rows = records_to_suggestions("run1", records, property_types={"languages": "multiselect"})
     assert [(r.shared_id, r.language) for r in rows] == [("s1", None), ("s2", None)]
 
 
@@ -277,7 +277,7 @@ def test_create_record_uses_placeholder_id_and_explodes_metadata() -> None:
         _rec(op="create", title="Made Up", template_name="Case", metadata={"a": 1, "b": 2}),
         _rec(op="create", title="Second", template_name="Case", metadata={}),
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.op, r.shared_id, r.property_name) for r in rows] == [
         ("create", "dry-created-0", TITLE_PROPERTY),
         ("create", "dry-created-0", "a"),
@@ -298,7 +298,7 @@ def test_delete_publish_unpublish_produce_one_row_each() -> None:
         _rec(op="unpublish", shared_id="s3"),
         _rec(op="set_publish_status", shared_id="s4", published=False),
     ]
-    rows = records_to_suggestions("run1", 3, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.op, r.shared_id, r.property_name) for r in rows] == [
         ("delete", "s1", None),
         ("publish", "s2", None),
@@ -316,7 +316,7 @@ def test_create_relationships_produces_one_row_per_link() -> None:
         _rec(op="create_relationships", from_entity_shared_id="a", to_entity_shared_id="b", relationship_type="ref"),
         _rec(op="create_relationships", from_entity_shared_id="a", to_entity_shared_id="c", relationship_type="ref"),
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert len(rows) == 2
     assert all(row.op == "create_relationships" for row in rows)
     assert all(row.property_name is None for row in rows)
@@ -337,18 +337,18 @@ def test_non_suggestion_ops_are_skipped() -> None:
         _rec(op="delete_file", shared_id="s1", file_id="f1"),
         _rec(op="delete", shared_id="s2"),
     ]
-    rows = records_to_suggestions("run1", 1, records)
+    rows = records_to_suggestions("run1", records)
     assert [(r.op, r.shared_id) for r in rows] == [("delete", "s2")]
 
 
 def test_entity_titles_map_wins_over_record_title() -> None:
     records = [_rec(op="update", shared_id="s1", metadata={"a": 1}, title=None)]
-    rows = records_to_suggestions("run1", 1, records, entity_titles={"s1": "Resolved Title"})
+    rows = records_to_suggestions("run1", records, entity_titles={"s1": "Resolved Title"})
     assert rows[0].entity_title == "Resolved Title"
 
 
 def test_records_to_suggestions_on_empty_input() -> None:
-    assert records_to_suggestions("run1", 1, []) == []
+    assert records_to_suggestions("run1", []) == []
 
 
 # --- compare_values ----------------------------------------------------------
@@ -371,7 +371,6 @@ def test_compare_values_display_equality() -> None:
 def _suggestion(property_name: str | None, match: bool | None) -> Suggestion:
     return Suggestion(
         run_id="run1",
-        attempt=1,
         shared_id="s1",
         op="update",
         property_name=property_name,

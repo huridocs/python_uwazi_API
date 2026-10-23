@@ -24,7 +24,7 @@ Scale rules this module obeys:
   themselves (each one says how many parts it is made of);
 - the Property dropdown comes FIRST (it decides what the table shows) and its
   options carry each property's accuracy, read from ``property_scores`` (SQL
-  ``GROUP BY``) over the whole attempt; its "any property" option carries the
+  ``GROUP BY``) over the whole run; its "any property" option carries the
   average of the properties that HAVE an accuracy;
 - selection-driven actions resolve to explicit suggestion-id lists, never a
   Python pass over the whole set.
@@ -143,6 +143,7 @@ from uwazi_admin_agent.drivers.web.operations_view import (
     property_options,
     sub_refs,
 )
+from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
     ACTIONS_COLUMN,
     DRIFT_STATUS_COLORS,
@@ -172,12 +173,11 @@ from uwazi_admin_agent.drivers.web.review_view import (
     truncate,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
-    _current_attempt_number,
     apply_outcomes,
     build_backup_store,
     build_suggestion_store,
     check_drift,
-    current_attempt,
+    current_pass,
     discard_ids,
     get_drift_state,
     get_entity_segmentation,
@@ -201,7 +201,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     update_table_from_uwazi,
     uwazi_base_url,
 )
-from uwazi_admin_agent.drivers.web.task_dialogs import prompt_dialog, script_dialog
+from uwazi_admin_agent.drivers.web.task_dialogs import script_dialog
 
 # The suboperation statuses a Run may write. ``applied`` is already in Uwazi,
 # ``discarded`` was refused (Restore is its undo), and ``accepted``/``edited``
@@ -412,7 +412,7 @@ def _build_page(run_id: str) -> None:
             state["_stats_section"].set_visibility(False)
             state["_filters_section"].set_visibility(False)
 
-    if current_attempt(run_id) is None:
+    if current_pass(run_id) is None:
         ui.notify(
             "No scan recorded yet — the automatic scan right after generation may still be running",
             type="info",
@@ -462,7 +462,11 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 "cloud_sync", "Update table", lambda: _update_table_clicked(state)
             )
             ui.separator()
-            _menu_item("description", "Show prompt", lambda: prompt_dialog(run_id))
+            _menu_item(
+                "description",
+                "Show prompt",
+                lambda: prompt_chat_dialog(run_id, on_table_changed=lambda: _refresh_all(state)),
+            )
             if has_script:
                 # The script item exists only for a run that HAS one — the same
                 # rule the tasks table's row menu follows.
@@ -517,7 +521,7 @@ def _render_summary(state: dict[str, Any]) -> None:
     if holder is None or holder.is_deleted:
         return
     counts = get_suggestion_counts(state["run_id"])
-    attempt = current_attempt(state["run_id"])
+    pass_row = current_pass(state["run_id"])
     holder.clear()
     with holder:
         # ONE card for the operations and their suboperations: the Operations
@@ -536,7 +540,7 @@ def _render_summary(state: dict[str, Any]) -> None:
         # is written without counting rows: applied suboperations / all of them.
         _card("Applied", f"{counts.get('subs_applied', 0):,} / {counts.get('subs_total', 0):,}", "blue")
         _card("Reverted", f"{counts.get('subs_reverted', 0):,}", "indigo")
-        if attempt is not None:
+        if pass_row is not None:
             # The LLM cost card: the spend against the cap, as money. It sits
             # at the FAR RIGHT of the row,
             # apart from the counters: the cost is not a count of the table's
@@ -544,8 +548,8 @@ def _render_summary(state: dict[str, Any]) -> None:
             _card(
                 "LLM cost",
                 cost_card_value(
-                    attempt.budget.call_cost(attempt.spent.input_tokens, attempt.spent.output_tokens),
-                    attempt.budget.max_cost,
+                    pass_row.budget.call_cost(pass_row.spent.input_tokens, pass_row.spent.output_tokens),
+                    pass_row.budget.max_cost,
                 ),
                 "teal",
                 classes="q-ml-auto",
@@ -1297,7 +1301,6 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
         return
     _apply_drift_state(state, None, checking=True)
     try:
-        attempt_row = current_attempt(state["run_id"])
         # ``check_drift`` is SYNCHRONOUS (it blocks on Uwazi HTTP calls), so it
         # must run in a worker thread, like every other service call (the
         # apply_outcomes/revert_run pattern) — awaiting it directly raised
@@ -1307,7 +1310,6 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
             state["run_id"],
             user,
             password,
-            attempt_row.attempt if attempt_row is not None else 1,
             "auto" if not notify else "manual",
         )
     except Exception as exc:  # noqa: BLE001 — the banner reports; the page never crashes
@@ -1621,7 +1623,7 @@ async def _run_rows(
             await apply_outcomes(state["run_id"], user, password, pairs, ids, progress=set_progress)
             # The writes bumped Uwazi editDates: re-sync the baseline so the run's
             # own writes are the new reference, not drift.
-            refresh_baseline_after_run(state["run_id"], user, password, _current_attempt_number(state["run_id"]))
+            refresh_baseline_after_run(state["run_id"], user, password)
             with client:
                 ui.notify(
                     f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
@@ -2135,8 +2137,8 @@ def _refresh_all(state: dict[str, Any]) -> None:
 
 def _poll_progress(state: dict[str, Any]) -> None:
     """Refresh the header while a pass is RUNNING (progress + spend)."""
-    attempt = current_attempt(state["run_id"])
-    if attempt is None or attempt.status != PredictionAttemptStatus.RUNNING:
+    pass_row = current_pass(state["run_id"])
+    if pass_row is None or pass_row.status != PredictionAttemptStatus.RUNNING:
         return
     _render_summary(state)
     _reload_table(state)

@@ -39,6 +39,7 @@ from uwazi_admin_agent.drivers.web import operation_gate
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
     GenerateError,
     RevertVerificationError,
@@ -58,7 +59,6 @@ from uwazi_admin_agent.drivers.web.task_dialogs import (
     close_button,
     footer_close,
     modal_header,
-    prompt_dialog,
 )
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 
@@ -521,7 +521,7 @@ def _on_errors(e: Any) -> None:
 
 def _on_info(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    prompt_dialog(run_id)
+    prompt_chat_dialog(run_id)
 
 
 def _refresh_rows_client() -> None:

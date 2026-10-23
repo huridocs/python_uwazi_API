@@ -381,7 +381,6 @@ def test_verification_passes_when_publish_state_matches() -> None:
 def _suggestion(run_id: str, shared_id: str = "s1") -> Suggestion:
     return Suggestion(
         run_id=run_id,
-        attempt=1,
         shared_id=shared_id,
         op="update",
         language="en",
@@ -396,8 +395,8 @@ def test_rename_run_rekeys_suggestion_rows(tmp_path: Path) -> None:
         store.add_suggestions([_suggestion("old")])
         store.rename_run("old", "renamed")
 
-        rows, total = store.entity_rows("renamed", 1, SuggestionFilter(limit=10))
-        old_rows, old_total = store.entity_rows("old", 1, SuggestionFilter(limit=10))
+        rows, total = store.entity_rows("renamed", SuggestionFilter(limit=10))
+        old_rows, old_total = store.entity_rows("old", SuggestionFilter(limit=10))
     finally:
         store.close()
 

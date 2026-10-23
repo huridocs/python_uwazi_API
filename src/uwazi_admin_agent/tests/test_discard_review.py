@@ -39,11 +39,9 @@ def _suggestion(
     property_name: str | None = "excerpt",
     status: SuggestionStatus = SuggestionStatus.PENDING,
     run_id: str = "run1",
-    attempt: int = 1,
 ) -> Suggestion:
     return Suggestion(
         run_id=run_id,
-        attempt=attempt,
         shared_id=shared_id,
         entity_title="Title",
         op=op,  # type: ignore[arg-type]
@@ -134,13 +132,12 @@ def test_discard_by_filter_marks_the_operation_rows_and_keeps_the_reason(store: 
 
     moved = store.discard_by_filter(
         "run1",
-        1,
         SuggestionFilter(entity_languages=[("s1", None)]),
         "the end user does not want this",
     )
 
     assert moved == 2
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    rows, _ = store.query("run1", SuggestionFilter())
     assert [row.status for row in rows] == [SuggestionStatus.DISCARDED, SuggestionStatus.DISCARDED]
     assert rows[0].discard_reason == "the end user does not want this"
 
@@ -154,10 +151,10 @@ def test_discard_by_filter_leaves_the_already_written_rows_alone(store: SqliteSu
         ]
     )
 
-    moved = store.discard_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]), None)
+    moved = store.discard_by_filter("run1", SuggestionFilter(entity_languages=[("s1", None)]), None)
 
     assert moved == 1
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    rows, _ = store.query("run1", SuggestionFilter())
     assert rows[0].status is SuggestionStatus.APPLIED
     assert rows[1].status is SuggestionStatus.DISCARDED
 
@@ -166,21 +163,21 @@ def test_discarding_one_language_leaves_its_sibling_alone(store: SqliteSuggestio
     """A translation task's two languages are two operations."""
     store.add_suggestions([_suggestion(language="es"), _suggestion(language="en")])
 
-    store.discard_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", "es")]), None)
+    store.discard_by_filter("run1", SuggestionFilter(entity_languages=[("s1", "es")]), None)
 
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    rows, _ = store.query("run1", SuggestionFilter())
     by_language = {row.language: row.status for row in rows}
     assert by_language == {"es": SuggestionStatus.DISCARDED, "en": SuggestionStatus.PENDING}
 
 
 def test_restore_by_filter_brings_the_operation_back(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_suggestion(property_name="a")])
-    store.discard_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]), "not now")
+    store.discard_by_filter("run1", SuggestionFilter(entity_languages=[("s1", None)]), "not now")
 
-    restored = store.restore_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]))
+    restored = store.restore_by_filter("run1", SuggestionFilter(entity_languages=[("s1", None)]))
 
     assert restored == 1
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    rows, _ = store.query("run1", SuggestionFilter())
     assert rows[0].status is SuggestionStatus.PENDING
     assert rows[0].discard_reason is None
 
@@ -193,10 +190,10 @@ def test_restore_by_filter_touches_only_the_discarded_rows(store: SqliteSuggesti
         ]
     )
 
-    restored = store.restore_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]))
+    restored = store.restore_by_filter("run1", SuggestionFilter(entity_languages=[("s1", None)]))
 
     assert restored == 1
-    rows, _ = store.query("run1", 1, SuggestionFilter())
+    rows, _ = store.query("run1", SuggestionFilter())
     assert rows[0].status is SuggestionStatus.PENDING
     assert rows[1].status is SuggestionStatus.ACCEPTED
 
@@ -212,7 +209,7 @@ def test_the_status_filter_reads_the_discarded_rows(store: SqliteSuggestionStore
         ]
     )
 
-    rows, total = store.query("run1", 1, SuggestionFilter(status=SuggestionStatus.DISCARDED))
+    rows, total = store.query("run1", SuggestionFilter(status=SuggestionStatus.DISCARDED))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["a"]
@@ -226,7 +223,7 @@ def test_the_status_filter_reads_the_rest_away_from_the_discarded_rows(store: Sq
         ]
     )
 
-    rows, total = store.query("run1", 1, SuggestionFilter(status=SuggestionStatus.PENDING))
+    rows, total = store.query("run1", SuggestionFilter(status=SuggestionStatus.PENDING))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["b"]
@@ -241,8 +238,8 @@ def test_the_entity_table_filters_the_operations_by_their_discard_state(store: S
         ]
     )
 
-    discarded_rows, discarded_total = store.entity_rows("run1", 1, SuggestionFilter(status=SuggestionStatus.DISCARDED))
-    kept_rows, kept_total = store.entity_rows("run1", 1, SuggestionFilter(status=SuggestionStatus.PENDING))
+    discarded_rows, discarded_total = store.entity_rows("run1", SuggestionFilter(status=SuggestionStatus.DISCARDED))
+    kept_rows, kept_total = store.entity_rows("run1", SuggestionFilter(status=SuggestionStatus.PENDING))
 
     assert (discarded_total, [row.shared_id for row in discarded_rows]) == (1, ["a"])
     assert (kept_total, [row.shared_id for row in kept_rows]) == (1, ["b"])
@@ -250,9 +247,9 @@ def test_the_entity_table_filters_the_operations_by_their_discard_state(store: S
 
 def test_a_discarded_operation_reads_as_discarded_in_the_table(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_suggestion(property_name="x")])
-    store.discard_by_filter("run1", 1, SuggestionFilter(entity_languages=[("s1", None)]), None)
+    store.discard_by_filter("run1", SuggestionFilter(entity_languages=[("s1", None)]), None)
 
-    rows, _ = store.entity_rows("run1", 1, SuggestionFilter())
+    rows, _ = store.entity_rows("run1", SuggestionFilter())
 
     assert rows[0].discarded == rows[0].proposal_count
     assert entity_is_discarded(rows[0]) is True

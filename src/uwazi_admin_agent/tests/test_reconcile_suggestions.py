@@ -14,7 +14,6 @@ from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter, Su
 def _suggestion(property_name: str, proposed: str, **kwargs: object) -> Suggestion:
     base: dict[str, object] = {
         "run_id": "r",
-        "attempt": 1,
         "shared_id": "entity-1",
         "op": "update",
         "property_name": property_name,
@@ -28,7 +27,7 @@ def _suggestion(property_name: str, proposed: str, **kwargs: object) -> Suggesti
 
 
 def _statuses(store: SqliteSuggestionStore) -> dict[str, SuggestionStatus]:
-    rows, _total = store.query("r", 1, SuggestionFilter(include_obsolete=True, limit=100))
+    rows, _total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
     return {str(row.property_name): row.status for row in rows}
 
 
@@ -47,7 +46,6 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
         )
         summary = store.reconcile_suggestions(
             "r",
-            1,
             [
                 _suggestion("same", "unchanged"),
                 _suggestion("accepted", "new"),
@@ -81,8 +79,8 @@ def test_obsolete_rows_are_hidden_unless_requested() -> None:
                 _suggestion("retired", "r", status=SuggestionStatus.OBSOLETE),
             ]
         )
-        visible, visible_total = store.query("r", 1, SuggestionFilter(limit=100))
-        all_rows, all_total = store.query("r", 1, SuggestionFilter(include_obsolete=True, limit=100))
+        visible, visible_total = store.query("r", SuggestionFilter(limit=100))
+        all_rows, all_total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
         assert visible_total == 1
         assert [row.property_name for row in visible] == ["visible"]
         assert all_total == 2

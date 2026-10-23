@@ -47,7 +47,6 @@ def test_add_info_accepts_one_child_and_no_children() -> None:
 def test_records_to_suggestions_expands_info_into_two_levels() -> None:
     rows = records_to_suggestions(
         "run1",
-        1,
         [
             {
                 "op": INFO_OP,
@@ -74,7 +73,7 @@ def test_records_to_suggestions_expands_info_into_two_levels() -> None:
 
 
 def test_records_to_suggestions_invents_an_info_id_when_missing() -> None:
-    rows = records_to_suggestions("run1", 1, [{"op": INFO_OP, "title": "Headline"}])
+    rows = records_to_suggestions("run1", [{"op": INFO_OP, "title": "Headline"}])
 
     assert len(rows) == 1
     assert rows[0].shared_id == "info-0"
@@ -85,7 +84,6 @@ def _info_operation() -> OperationReviewRow:
     parent = Suggestion(
         id=1,
         run_id="run1",
-        attempt=1,
         shared_id="info-0",
         entity_title="A result headline",
         op=INFO_OP,
@@ -94,7 +92,6 @@ def _info_operation() -> OperationReviewRow:
     child = Suggestion(
         id=2,
         run_id="run1",
-        attempt=1,
         shared_id="info-0",
         entity_title="A result headline",
         op=INFO_OP,
@@ -155,7 +152,6 @@ def test_pushable_rows_never_applies_info() -> None:
     info = Suggestion(
         id=1,
         run_id="run1",
-        attempt=1,
         shared_id="info-0",
         op=INFO_OP,
         proposed_value="display only",
@@ -164,7 +160,6 @@ def test_pushable_rows_never_applies_info() -> None:
     update = Suggestion(
         id=2,
         run_id="run1",
-        attempt=1,
         shared_id="entity-a",
         op="update",
         property_name="title",

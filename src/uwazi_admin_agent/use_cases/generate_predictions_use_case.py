@@ -10,7 +10,7 @@ deterministically, under the backup intercept:
   creation (the wizard's request cap + dollar cap). The generated script may
   call ``llm_complete``/``llm_map`` to compute values pure Python cannot; a
   breach halts the pass cleanly, keeping every row recorded before the halt
-  (``ABORTED`` attempt status). When no budget is wired the helpers refuse
+  (``ABORTED`` pass status). When no budget is wired the helpers refuse
   loudly instead (scripts that avoid the LLM tool run identically).
 - **Subset scoping.** A chosen ``entity_scope`` post-filters the discovery
   helpers, so the identical script plans over only those entities.
@@ -19,7 +19,7 @@ deterministically, under the backup intercept:
   value against the live one — that comparison IS the accuracy score the
   review UI shows.
 
-Progress is written to the attempt row as the pass runs, so the UI can poll
+Progress is written to the pass row as the pass runs, so the UI can poll
 done/total while a 10 000-entity pass is in flight.
 """
 
@@ -39,8 +39,8 @@ from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
-    PredictionAttempt,
     PredictionAttemptStatus,
+    PredictionPass,
     Suggestion,
 )
 from uwazi_admin_agent.domain.suggestion_scoring import (
@@ -281,32 +281,29 @@ class GeneratePredictionsUseCase:
         self,
         script: str,
         run_id: str,
-        attempt: int,
         budget: LlmBudget,
         entity_scope: list[str] | None = None,
-        *,
-        reconcile: bool = False,
-    ) -> PredictionAttempt:
+    ) -> PredictionPass:
         """Run one prediction pass and persist its suggestions.
 
-        Returns the terminal attempt row (``COMPLETED``/``ABORTED``/``FAILED``).
-        A budget abort does NOT raise: the aborted attempt row plus the kept
+        Returns the terminal pass row (``COMPLETED``/``ABORTED``/``FAILED``).
+        A budget abort does NOT raise: the aborted pass row plus the kept
         suggestions ARE the user-facing result. Any other script error is
         recorded as ``FAILED`` and re-raised.
 
-        ``reconcile=True`` is the in-place table refresh: the SAME attempt row is
-        reused and the resulting rows are merged into the existing table by
+        The result is ALWAYS merged into the run's ONE live table by
         :meth:`SuggestionStorePort.reconcile_suggestions` (the pure rules live
-        in :mod:`uwazi_admin_agent.domain.review_refresh`).
+        in :mod:`uwazi_admin_agent.domain.review_refresh`): a first pass finds
+        an empty table, so every recorded row is a new identity and lands
+        PENDING, and a later pass over the same scope refreshes the rows it
+        still produces and retires the ones it no longer does.
         """
         started = time.monotonic()
         scope = list(entity_scope) if entity_scope is not None else None
         now = datetime.now(timezone.utc)
-        existing_attempt = self._store.get_attempt(run_id, attempt) if reconcile else None
-        if reconcile and existing_attempt is None:
-            raise PredictionPassError(f"cannot refresh run {run_id!r}: attempt {attempt} does not exist")
-        attempt_row = (
-            existing_attempt.model_copy(
+        existing_pass = self._store.get_pass(run_id)
+        pass_row = (
+            existing_pass.model_copy(
                 update={
                     "status": PredictionAttemptStatus.RUNNING,
                     "budget": budget,
@@ -318,10 +315,9 @@ class GeneratePredictionsUseCase:
                     "finished_at": None,
                 }
             )
-            if existing_attempt is not None
-            else PredictionAttempt(
+            if existing_pass is not None
+            else PredictionPass(
                 run_id=run_id,
-                attempt=attempt,
                 status=PredictionAttemptStatus.RUNNING,
                 budget=budget,
                 entities_total=len(scope) if scope is not None else 0,
@@ -329,15 +325,14 @@ class GeneratePredictionsUseCase:
                 created_at=now,
             )
         )
-        self._store.create_attempt(attempt_row)
+        self._store.save_pass(pass_row)
 
         ledger = LlmLedger(budget)
         records: list[dict[str, Any]] = []
-        _result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, attempt, scope)
+        _result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope)
 
         suggestions = records_to_suggestions(
             run_id,
-            attempt,
             records,
             property_types=self._property_types_for(records),
         )
@@ -349,26 +344,22 @@ class GeneratePredictionsUseCase:
                 self._default_language,
                 self._template_labels,
             )
-        if reconcile:
-            self.last_reconciliation = await asyncio.to_thread(
-                self._store.reconcile_suggestions,
-                run_id,
-                attempt,
-                suggestions,
-            )
-        elif suggestions:
-            self._store.add_suggestions(suggestions)
+        self.last_reconciliation = await asyncio.to_thread(
+            self._store.reconcile_suggestions,
+            run_id,
+            suggestions,
+            scope,
+        )
 
         spent = ledger.snapshot()
         if aborted:
             logger.warning(
-                "prediction pass ABORTED run={} attempt={} after {:.1f}s: {}",
+                "prediction pass ABORTED run={} after {:.1f}s: {}",
                 run_id,
-                attempt,
                 time.monotonic() - started,
                 error,
             )
-            final = attempt_row.model_copy(
+            final = pass_row.model_copy(
                 update={
                     "status": PredictionAttemptStatus.ABORTED,
                     "spent": spent,
@@ -377,11 +368,11 @@ class GeneratePredictionsUseCase:
                     "finished_at": datetime.now(timezone.utc),
                 }
             )
-            self._store.update_attempt(final)
+            self._store.save_pass(final)
             return final
 
         if error is not None:
-            final = attempt_row.model_copy(
+            final = pass_row.model_copy(
                 update={
                     "status": PredictionAttemptStatus.FAILED,
                     "spent": spent,
@@ -389,10 +380,10 @@ class GeneratePredictionsUseCase:
                     "finished_at": datetime.now(timezone.utc),
                 }
             )
-            self._store.update_attempt(final)
+            self._store.save_pass(final)
             raise PredictionPassError(error)
 
-        final = attempt_row.model_copy(
+        final = pass_row.model_copy(
             update={
                 "status": PredictionAttemptStatus.COMPLETED,
                 "spent": spent,
@@ -401,11 +392,10 @@ class GeneratePredictionsUseCase:
                 "finished_at": datetime.now(timezone.utc),
             }
         )
-        self._store.update_attempt(final)
+        self._store.save_pass(final)
         logger.info(
-            "prediction pass COMPLETED run={} attempt={} suggestions={} entities={} in {:.1f}s",
+            "prediction pass COMPLETED run={} suggestions={} entities={} in {:.1f}s",
             run_id,
-            attempt,
             len(suggestions),
             final.entities_total,
             time.monotonic() - started,
@@ -418,12 +408,11 @@ class GeneratePredictionsUseCase:
         self,
         script: str,
         run_id: str,
-        attempt: int,
         budget: LlmBudget,
-    ) -> tuple[PredictionAttempt, ReconciliationSummary]:
-        """Re-run the script against current Uwazi and merge into ``attempt``."""
+    ) -> tuple[PredictionPass, ReconciliationSummary]:
+        """Re-run the script against current Uwazi and merge into the live table."""
         self.last_reconciliation = None
-        final = await self.run(script, run_id=run_id, attempt=attempt, budget=budget, reconcile=True)
+        final = await self.run(script, run_id=run_id, budget=budget)
         return final, self.last_reconciliation or ReconciliationSummary()
 
     def _run_script(
@@ -432,7 +421,6 @@ class GeneratePredictionsUseCase:
         records: list[dict[str, Any]],
         ledger: LlmLedger,
         run_id: str,
-        attempt: int,
         scope: list[str] | None,
     ) -> tuple[str | None, str | None, bool]:
         """Execute the script on a worker thread's own loop (the sandbox pattern).
@@ -443,14 +431,12 @@ class GeneratePredictionsUseCase:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         done = 0
-        base_row = self._store.get_attempt(run_id, attempt) or PredictionAttempt(
-            run_id=run_id, attempt=attempt, budget=ledger.budget
-        )
+        base_row = self._store.get_pass(run_id) or PredictionPass(run_id=run_id, budget=ledger.budget)
 
         def progress(count: int) -> None:
             nonlocal done
             done += count
-            self._store.update_attempt(base_row.model_copy(update={"entities_done": done}))
+            self._store.save_pass(base_row.model_copy(update={"entities_done": done}))
 
         try:
             namespace = build_dry_run_namespace(

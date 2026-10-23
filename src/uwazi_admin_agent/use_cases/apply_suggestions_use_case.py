@@ -98,7 +98,7 @@ _UPDATE_OPS: frozenset[str] = UPDATE_OPS
 _CREATE_OPS: frozenset[str] = CREATE_OPS
 
 # What a Run acts on: the checked (sharedId, language) rows of the review
-# table. ``None`` (the CLI path) means the whole attempt.
+# table. ``None`` (the CLI path) means the whole table.
 EntitySelection = list[tuple[str, str | None]] | None
 
 # The Run's live ``(done, total)`` suboperation counter the review UI's toast
@@ -157,7 +157,7 @@ def _selected(suggestion: Suggestion, selection: EntitySelection | None) -> bool
     """Whether a row belongs to the Run's selection (pure).
 
     The selection is the table's checked (sharedId, language) rows. ``None``
-    means "the whole attempt" (a CLI run); a row is in it when its exact
+    means "the whole table" (a CLI run); a row is in it when its exact
     (sharedId, language) pair is listed — which is what lets the operator run
     the ``es`` row of a translation task WITHOUT touching its ``en`` sibling.
     """
@@ -172,7 +172,7 @@ def _in_rows(suggestion: Suggestion, row_ids: list[int] | None) -> bool:
     The review table's checkboxes are per SUBOPERATION (one suggestion row), so
     a Run of a subset of one entity-language group must narrow below the pair.
     ``None`` means "no row-level constraint" — the pair selection (or the whole
-    attempt) stands, so every existing caller keeps its behaviour. A row with no
+    table) stands, so every existing caller keeps its behaviour. A row with no
     id yet (a freshly built, unpersisted suggestion) can never be in an explicit
     id list.
     """
@@ -633,7 +633,6 @@ class ApplySuggestionsUseCase:
     def apply(
         self,
         run_id: str,
-        attempt: int,
         selection: EntitySelection = None,
         row_ids: list[int] | None = None,
         progress: ProgressCallback | None = None,
@@ -656,7 +655,7 @@ class ApplySuggestionsUseCase:
 
         ``selection`` is the table's checked (sharedId, language) rows, so a
         translation task writes ONLY the languages the operator checked; None
-        writes the whole attempt. ``row_ids`` narrows further to the checked
+        writes the whole table. ``row_ids`` narrows further to the checked
         SUBOPERATIONS (the review table's per-property rows), so running one
         property of one entity-language group writes exactly that property and
         leaves its siblings alone; None keeps the pair-level behaviour.
@@ -672,8 +671,8 @@ class ApplySuggestionsUseCase:
         entity keep their ``ACCEPTED`` status so the operator can run them again
         once the cause is fixed.
         """
-        self._accept_pending(run_id, attempt, selection, row_ids)
-        rows = self._all_accepted(run_id, attempt)
+        self._accept_pending(run_id, selection, row_ids)
+        rows = self._all_accepted(run_id)
         to_push = pushable_rows(rows, selection, row_ids)
         _, whole_entity_rows = partition_for_apply(rows, selection, row_ids)
         # Disjoint by construction: the update payloads hold real sharedIds
@@ -701,7 +700,7 @@ class ApplySuggestionsUseCase:
         if not updates and not creates and not whole_entity_rows and not merges:
             raise ApplyRefusedError("nothing to run for the selected rows")
 
-        manifest = self._prepare_apply_manifest(run_id, attempt, len(to_push))
+        manifest = self._prepare_apply_manifest(run_id, len(to_push))
         if selection is not None:
             selection_languages = {lang for _sid, lang in selection if lang}
         else:
@@ -880,7 +879,6 @@ class ApplySuggestionsUseCase:
     def _accept_pending(
         self,
         run_id: str,
-        attempt: int,
         selection: EntitySelection,
         row_ids: list[int] | None = None,
     ) -> None:
@@ -900,7 +898,7 @@ class ApplySuggestionsUseCase:
         Scope follows the selection: the exact (sharedId, language) rows the operator
         checked, so running the ``es`` row of a translation task accepts ONLY
         that language's rows — its ``en`` sibling stays pending and is written
-        by a second, separate Run. The whole attempt when None, nothing when
+        by a second, separate Run. The whole table when None, nothing when
         empty. ``row_ids`` narrows acceptance to the checked SUBOPERATIONS: the
         unchecked siblings of the same entity-language group stay pending, which
         is what makes "run this one property" mean exactly that.
@@ -912,26 +910,23 @@ class ApplySuggestionsUseCase:
         for status in (SuggestionStatus.PENDING, SuggestionStatus.REVERTED):
             self._store.set_status_by_filter(
                 run_id,
-                attempt,
                 SuggestionFilter(status=status, entity_languages=selection, suggestion_ids=row_ids),
                 SuggestionStatus.ACCEPTED,
             )
 
-    def _all_accepted(self, run_id: str, attempt: int) -> list[Suggestion]:
+    def _all_accepted(self, run_id: str) -> list[Suggestion]:
         """Page through EVERY accepted/edited row (a Run covers the whole set)."""
         rows: list[Suggestion] = []
         page_size = 1000
         offset = 0
         while True:
-            page, _total = self._store.query(
-                run_id, attempt, SuggestionFilter(accepted_only=True, limit=page_size, offset=offset)
-            )
+            page, _total = self._store.query(run_id, SuggestionFilter(accepted_only=True, limit=page_size, offset=offset))
             if not page:
                 return rows
             rows.extend(page)
             offset += len(page)
 
-    def _prepare_apply_manifest(self, run_id: str, attempt: int, entity_count: int) -> MigrationManifest:
+    def _prepare_apply_manifest(self, run_id: str, entity_count: int) -> MigrationManifest:
         """Load the RUN'S OWN manifest and reuse it — a Run creates no run.
 
         A reviewed Run writes into the run it belongs to, so the tasks table
@@ -952,7 +947,7 @@ class ApplySuggestionsUseCase:
             manifest = MigrationManifest(
                 run_id=run_id,
                 created_at=datetime.now(timezone.utc),
-                prompt=f"Run reviewed rows of {run_id} (attempt {attempt}): {entity_count} row(s).",
+                prompt=f"Run reviewed rows of {run_id}: {entity_count} row(s).",
                 script="# reviewed-row execution: heuristic execution of the review table rows (no script)",
                 status=RunStatus.PLANNED,
             )

@@ -36,7 +36,6 @@ async def _run_generate_async() -> int:
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
-        entity_repository=runtime.entity_repository,
     )
 
     logger.info("generate: run={} prompt_tokens~{}", config.name, len(config.prompt) // 4)

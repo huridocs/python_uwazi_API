@@ -1,12 +1,15 @@
 """The task dialogs shared by the runs table and the review page.
 
-The prompt modal belongs to both surfaces: the runs table opens it from the
+The SCRIPT modal belongs to both surfaces: the runs table opens it from the
 row's info button, and the review page opens it from its own menu. Living it
-here is what makes the two show the SAME modal — one implementation, one
-copy of the prompt, the validated prompt and the last error.
+here is what makes the two show the SAME modal — one implementation, one copy
+of the script.
 
 The modal chrome (the header with its Close, the pinned footer, the copy
-buttons) lives here too, because the modal is the only thing that uses it.
+buttons) lives here too, because the modals are the only things that use it.
+The PROMPT modal is not here any more: it became the prompt-improvement chat
+(:mod:`uwazi_admin_agent.drivers.web.prompt_chat_dialog`), which reuses this
+module's chrome.
 """
 
 from __future__ import annotations
@@ -82,7 +85,7 @@ def script_dialog(run_id: str) -> None:
     """Modal: the run's generated Python script (only reachable when a script exists).
 
     Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it — same pattern as ``prompt_dialog``. The
+    auto-refresh doesn't destroy it — same pattern as the prompt chat. The
     run's generated script lives at ``<run>/script.py``; a run whose generation
     failed has none, and the caller hides the item in that case.
 
@@ -135,51 +138,5 @@ def script_dialog(run_id: str) -> None:
                         ui.label("Script").classes("text-subtitle1 text-grey-7")
                         copy_to_clipboard(detail.script, "Copy script")
                     ui.code(detail.script, language="python").classes("w-full shrink-0")
-                footer_close(dialog)
-    dialog.open()
-
-
-def prompt_dialog(run_id: str) -> None:
-    """Modal: the run's name and prompt (plus any recorded error hint).
-
-    Created on the page layout (not inside the table) so the row auto-refresh
-    can't destroy it. Read-only; actions live in the row's ``more_vert`` menu.
-
-    The title and the Close footer stay pinned; the middle column scrolls.
-    Its children are all ``shrink-0`` for the same reason as the script
-    dialog: compressible children squeeze the autogrow textareas' boxes while
-    their content keeps its full height, so the prompt text spills out of the
-    textbox and overlaps the widgets below it.
-    """
-    try:
-        detail = get_run(run_id)
-    except Exception as exc:  # noqa: BLE001
-        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
-        return
-
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                modal_header(dialog, f"Task — {run_id}")
-                ui.separator().classes("shrink-0")
-                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    with ui.row().classes("w-full items-center justify-between shrink-0"):
-                        ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-                        copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono shrink-0").props(
-                        "readonly outlined autogrow"
-                    ).style("min-height: 120px")
-                    if detail.validated_prompt:
-                        ui.separator().classes("shrink-0")
-                        with ui.row().classes("w-full items-center justify-between shrink-0"):
-                            ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
-                            copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono shrink-0").props(
-                            "readonly outlined autogrow"
-                        ).style("min-height: 120px")
-                    if detail.error:
-                        ui.separator().classes("shrink-0")
-                        ui.label("Last error").classes("text-subtitle1 text-grey-7 shrink-0")
-                        ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10 shrink-0")
                 footer_close(dialog)
     dialog.open()
