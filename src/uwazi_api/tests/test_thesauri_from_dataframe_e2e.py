@@ -11,12 +11,15 @@ from uwazi_api.domain.exceptions import EntityNotFoundError
 from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.template import Template
+from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+
+pytestmark = pytest.mark.e2e
 
 
 class TestThesauriFromDataframeE2E:
@@ -25,6 +28,7 @@ class TestThesauriFromDataframeE2E:
     @classmethod
     def setup_class(cls):
         """Set up the client and create test template with select properties."""
+        require_local_e2e_target(UWAZI_URL)
         cls.client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
         cls.template_repo = cls.client.templates
         cls.thesauri_repo = cls.client.thesauris

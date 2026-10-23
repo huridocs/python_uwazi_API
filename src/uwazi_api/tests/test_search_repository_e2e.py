@@ -12,12 +12,15 @@ from uwazi_api.domain.property_schema import PropertySchema
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.search_filters import DateRange, SearchFilters, SelectFilter
 from uwazi_api.domain.template import Template
+from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+
+pytestmark = pytest.mark.e2e
 
 
 class TestSearchRepositoryE2E:
@@ -26,6 +29,7 @@ class TestSearchRepositoryE2E:
     @classmethod
     def setup_class(cls):
         """Set up the client and create test entities for all tests."""
+        require_local_e2e_target(UWAZI_URL)
         cls.client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
         cls.search_repo = cls.client.search
         cls.entity_repo = cls.client.entities

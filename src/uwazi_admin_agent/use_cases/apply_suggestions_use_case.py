@@ -57,6 +57,7 @@ from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    INFO_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
@@ -99,6 +100,10 @@ _CREATE_OPS: frozenset[str] = CREATE_OPS
 # What a Run acts on: the checked (sharedId, language) rows of the review
 # table. ``None`` (the CLI path) means the whole attempt.
 EntitySelection = list[tuple[str, str | None]] | None
+
+# The Run's live ``(done, total)`` suboperation counter the review UI's toast
+# polls; called from the worker thread that performs the writes.
+ProgressCallback = Any
 
 
 class ApplyRefusedError(RuntimeError):
@@ -335,6 +340,9 @@ def pushable_rows(
     """
     rows: list[Suggestion] = []
     for s in suggestions:
+        if s.op == INFO_OP:
+            # Display-only rows are never written to Uwazi.
+            continue
         if s.status not in _PUSHABLE:
             continue
         if not _selected(s, selection):
@@ -365,6 +373,9 @@ def partition_for_apply(
     property_rows: list[Suggestion] = []
     whole_entity_rows: list[Suggestion] = []
     for suggestion in rows:
+        if suggestion.op == INFO_OP:
+            # Display-only rows are never written to Uwazi.
+            continue
         if suggestion.status not in _PUSHABLE:
             continue
         if not _selected(suggestion, selection):
@@ -399,6 +410,42 @@ def merge_deletions(rows: list[Suggestion]) -> list[tuple[str, list[str]]]:
             if source and source not in sources_by_target[row.shared_id]:
                 sources_by_target[row.shared_id].append(source)
     return [(target, sources_by_target[target]) for target in order]
+
+
+def payload_units(payload: dict) -> int:
+    """Suboperations one write payload carries (pure).
+
+    An update/create payload groups one property row per metadata entry plus an
+    optional title row — exactly the review table's suboperations. A payload
+    with neither (never seen, but guarded) still counts as ONE write so the
+    progress fraction keeps moving.
+
+    This is the ONLY place the Run's progress numerator and denominator agree:
+    :func:`apply_units_total` sums it for the total and :meth:`_write` sums it
+    per batch, so "done" can never outgrow "total" by construction.
+    """
+    units = len(payload.get("metadata") or {}) + (1 if "title" in payload else 0)
+    return units if units > 0 else 1
+
+
+def apply_units_total(
+    updates: list[dict],
+    creates: list[dict],
+    whole_entity_rows: list[Suggestion],
+    merges: list[tuple[str, list[str]]] | None = None,
+) -> int:
+    """Suboperations a Run will write, counting from its payloads (pure).
+
+    Property rows (grouped into ``updates``/``creates`` payloads), each
+    whole-entity row (delete/publish/unpublish/set_publish_status/relationship
+    — one unit each), and each merge's source deletions (extra writes the rows
+    of the merge itself do not carry). This is the Run progress toast's
+    denominator ("13/1230 suboperations").
+    """
+    total = sum(payload_units(payload) for payload in (*updates, *creates))
+    total += len(whole_entity_rows)
+    total += sum(len(sources) for _target, sources in (merges or []))
+    return total
 
 
 def merge_moves(
@@ -589,6 +636,7 @@ class ApplySuggestionsUseCase:
         attempt: int,
         selection: EntitySelection = None,
         row_ids: list[int] | None = None,
+        progress: ProgressCallback | None = None,
     ) -> str:
         """Write the selected rows (optionally restricted to ``selection``).
 
@@ -612,6 +660,11 @@ class ApplySuggestionsUseCase:
         SUBOPERATIONS (the review table's per-property rows), so running one
         property of one entity-language group writes exactly that property and
         leaves its siblings alone; None keeps the pair-level behaviour.
+
+        ``progress`` is the optional ``(done, total)`` callback the review UI's
+        progress toast reads while the writes go out: its unit is the
+        SUBOPERATION (see :func:`apply_units_total`), reported after each batch
+        lands so the fraction moves visibly, not once at the end.
 
         Raises :class:`ApplyRefusedError` when there is nothing to run, and
         :class:`ApplyWriteError` when Uwazi refused a write — in which case
@@ -653,7 +706,25 @@ class ApplySuggestionsUseCase:
             selection_languages = {lang for _sid, lang in selection if lang}
         else:
             selection_languages = {row.language for row in to_push if row.language}
-        failures = self._write(run_id, manifest, updates, creates, whole_entity_rows, selection_languages, merges)
+        # The progress denominator: SUBOPERATIONS, counted from the payloads
+        # exactly the way _write counts them up as its batches land — so the
+        # toast's fraction can never pass 1.0 by construction.
+        units_total = apply_units_total(updates, creates, whole_entity_rows, merges)
+        self._report_progress(progress, 0, units_total)
+        failures = self._write(
+            run_id,
+            manifest,
+            updates,
+            creates,
+            whole_entity_rows,
+            selection_languages,
+            merges,
+            progress=progress,
+            units_total=units_total,
+        )
+        # The writes are over (landed or refused): fill the fraction so the
+        # toast ends at its total whatever the per-batch accounting left it at.
+        self._report_progress(progress, units_total, units_total)
         # A refused write changed nothing, so its rows must NOT read as applied:
         # they stay ACCEPTED and the operator can run them again. Every refusal
         # carries an identity the rows share (a real sharedId, or a create's
@@ -938,6 +1009,15 @@ class ApplySuggestionsUseCase:
                 "merge file move finished with {} un-moved file(s); their sources are still deleted", totals["failed"]
             )
 
+    def _report_progress(self, progress: ProgressCallback | None, done: int, total: int) -> None:
+        """Emit one progress tick (best-effort: the write never fails over it)."""
+        if progress is None:
+            return
+        try:
+            progress(done, total)
+        except Exception as exc:  # noqa: BLE001 — progress is display state, never an error state
+            logger.warning("could not report apply progress ({} of {}): {}", done, total, exc)
+
     def _write(
         self,
         run_id: str,
@@ -947,6 +1027,8 @@ class ApplySuggestionsUseCase:
         whole_entity_rows: list[Suggestion],
         affected_languages: set[str] | None = None,
         merges: list[tuple[str, list[str]]] | None = None,
+        progress: ProgressCallback | None = None,
+        units_total: int = 0,
     ) -> list[dict[str, str]]:
         """Execute every row kind through ONE intercepted CRUD set, batched.
 
@@ -983,6 +1065,7 @@ class ApplySuggestionsUseCase:
         intercept = self._build_intercept(run_id, manifest, loop, affected_languages)
         failures: list[dict[str, str]] = []
         failed_targets: set[str] = set()
+        done_units = 0
         # placeholder (`dry-created-N`) -> the sharedId Uwazi minted for it, so a
         # create-merge can move files onto the entity that was actually created.
         created_ids: dict[str, str] = {}
@@ -1000,6 +1083,8 @@ class ApplySuggestionsUseCase:
                     batch_failures = write_failures(update_entities(batch, language))
                     failures.extend(batch_failures)
                     failed_targets.update(failure["shared_id"] for failure in batch_failures)
+                    done_units += sum(payload_units(update) for update in batch)
+                    self._report_progress(progress, done_units, units_total)
             for language, group in language_groups(creates, self._default_language):
                 placeholders = [str(payload.get("source_shared_id") or "") for payload in group]
                 for offset in range(0, len(group), EXECUTE_BATCH_SIZE):
@@ -1012,6 +1097,8 @@ class ApplySuggestionsUseCase:
                     for placeholder, result in zip(batch_placeholders, results if isinstance(results, list) else []):
                         if isinstance(result, dict) and result.get("success") and result.get("shared_id"):
                             created_ids[placeholder] = str(result["shared_id"])
+                    done_units += sum(payload_units(create) for create in batch)
+                    self._report_progress(progress, done_units, units_total)
 
             # Move each merge's source files onto its target BEFORE the sources
             # are deleted — the whole point of a merge: the sources' uploaded
@@ -1025,6 +1112,7 @@ class ApplySuggestionsUseCase:
             publish_ids: list[str] = []
             unpublish_ids: list[str] = []
             relationships: list[dict] = []
+            merge_units = 0
             for row in whole_entity_rows:
                 if row.op == "delete":
                     delete_ids.append(row.shared_id)
@@ -1038,21 +1126,36 @@ class ApplySuggestionsUseCase:
                     rel = row.proposed_value if isinstance(row.proposed_value, dict) else None
                     if rel is not None:
                         relationships.append(rel)
+            row_delete_ids = list(delete_ids)
             for target, sources in merges or []:
                 if target in failed_targets:
                     continue
                 delete_ids.extend(sources)
+                merge_units += len(sources)
             delete_ids = list(dict.fromkeys(delete_ids))
             if delete_ids:
                 failures.extend(write_failures(delete_entities(delete_ids)))
+                # The delete unit covers the ROW deletes here (each whole-entity
+                # delete row is one suboperation) and the MERGE sources were
+                # counted when their targets passed the failed-check above —
+                # the same way apply_units_total counted them, so the fraction
+                # can never pass 1.0.
+                done_units += len(row_delete_ids) + merge_units
+                self._report_progress(progress, done_units, units_total)
             if publish_ids:
                 failures.extend(write_failures(set_publish_status(publish_ids, True)))
+                done_units += len(publish_ids)
+                self._report_progress(progress, done_units, units_total)
             if unpublish_ids:
                 failures.extend(write_failures(set_publish_status(unpublish_ids, False)))
+                done_units += len(unpublish_ids)
+                self._report_progress(progress, done_units, units_total)
             for offset in range(0, len(relationships), EXECUTE_BATCH_SIZE):
                 batch = relationships[offset : offset + EXECUTE_BATCH_SIZE]
                 sources = [str(rel.get("from_entity_shared_id") or "") for rel in batch]
                 failures.extend(write_failures(create_relationships(batch), sources))
+                done_units += len(batch)
+                self._report_progress(progress, done_units, units_total)
         except Exception as exc:
             intercept.manifest.status = RunStatus.FAILED
             intercept.manifest.error = f"{type(exc).__name__}: {exc}"
@@ -1078,6 +1181,8 @@ __all__ = [
     "ApplySuggestionsUseCase",
     "ApplyWriteError",
     "EntitySelection",
+    "ProgressCallback",
+    "apply_units_total",
     "build_apply_creates",
     "build_apply_updates",
     "effective_value",
@@ -1087,6 +1192,7 @@ __all__ = [
     "merge_deletions",
     "merge_moves",
     "partition_for_apply",
+    "payload_units",
     "pushable_rows",
     "stamp_language",
     "write_failures",

@@ -8,12 +8,15 @@ from dotenv import load_dotenv
 
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_api.domain.menu_link import MenuLink
+from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+
+pytestmark = pytest.mark.e2e
 
 
 def _run(awaitable: Any) -> Any:
@@ -25,6 +28,7 @@ class TestMenuLinksAdapterE2E:
 
     @classmethod
     def setup_class(cls):
+        require_local_e2e_target(UWAZI_URL)
         cls.adapter = UwaziApiAdapter(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.unique_marker = f"menu_link_adapter_test_{ts}"

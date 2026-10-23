@@ -24,7 +24,10 @@ tag:
 	git push
 
 test:
-    uv run python -m pytest -v --maxfail=1 --disable-warnings
+    uv run python -m pytest -v -m "not e2e" --maxfail=1 --disable-warnings
+
+test_e2e:
+    uv run python -m pytest -v -m e2e --disable-warnings
 
 start:
     docker compose up --build

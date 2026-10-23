@@ -27,6 +27,7 @@ from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.property_language_scope import is_per_language_property_type
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    INFO_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
@@ -65,6 +66,8 @@ def _record_shared_id(record: dict[str, Any], index: int) -> str:
     shared_id = str(record.get("shared_id") or "")
     if not shared_id and record.get("op") == "create":
         return f"dry-created-{index}"
+    if not shared_id and record.get("op") == INFO_OP:
+        return f"info-{index}"
     return shared_id
 
 
@@ -126,7 +129,9 @@ def _as_op(raw: Any) -> SuggestionOp | None:
     ``move_files`` and ``delete_file`` records are deliberately NOT suggestions:
     they are file-collection operations the apply path does not push as entity
     property values (the dry-run report counts them for the step's implication
-    preview instead).
+    preview instead). ``info`` IS accepted: it is recorded as a suggestion so
+    the review table can display it, and ``op == INFO_OP`` is what tells every
+    write path to ignore it.
     """
     value = str(raw or "")
     if value in (
@@ -139,6 +144,7 @@ def _as_op(raw: Any) -> SuggestionOp | None:
         "create_relationships",
         "update_and_delete",
         "create_and_delete",
+        INFO_OP,
     ):
         return value  # type: ignore[return-value] — the literal set above matches SuggestionOp exactly
     return None
@@ -266,6 +272,12 @@ def records_to_suggestions(
       sharedId until applied).
     - ``delete`` / ``publish`` / ``unpublish`` / ``set_publish_status`` /
       ``create_relationships``: one row each, ``property_name=None``.
+    - ``info``: ONE parent row carrying the title, plus one child row per
+      entry in ``children``. They are display-only: the review table shows the
+      title as the operation and the children as its suboperations, with no
+      action buttons. The parent and children share a synthetic ``info-N``
+      sharedId (so they group into one operation) and the children carry an
+      ``info-child-N`` detail key (so the store's row identity stays unique).
 
     A scripted merge (a target update/create plus a file move plus the source
     deletes) is collapsed HERE: the target's rows carry the merge op
@@ -338,6 +350,27 @@ def records_to_suggestions(
             "created_at": created,
             "merge_source_ids": list(merge.source_shared_ids) if merge is not None else [],
         }
+
+        if op == INFO_OP:
+            # DISPLAY-ONLY. ``add_info(title, children)`` records one parent
+            # carrying the headline and one child row per detail line. They
+            # share the synthetic ``shared_id`` so the store groups them into
+            # one operation; the children's ``detail_key`` keeps their DB
+            # identity distinct from the parent (which has None). Neither row
+            # writes anything: the review table renders them without actions.
+            suggestions.append(Suggestion(**base, property_name=None, proposed_value=title))
+            raw_children = record.get("children")
+            children = raw_children if isinstance(raw_children, (list, tuple)) else []
+            for child_index, child in enumerate(children):
+                suggestions.append(
+                    Suggestion(
+                        **base,
+                        property_name=None,
+                        proposed_value="" if child is None else str(child),
+                        detail_key=f"info-child-{child_index}",
+                    )
+                )
+            continue
 
         if op in PROPERTY_OPS:
             record_metadata = record.get("metadata")
@@ -492,7 +525,7 @@ def compare_values(proposed: Any, current: Any) -> bool | None:
     Both sides are rendered through
     :func:`~uwazi_admin_agent.domain.metadata_diff.format_metadata_value` before
     comparison, so a list-vs-joined-text difference is never reported as a
-    change (the same display-equality rule the results window uses). Pure.
+    change (the same display-equality rule the review table's match uses). Pure.
     """
     if current is None:
         return None

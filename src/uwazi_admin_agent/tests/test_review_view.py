@@ -22,6 +22,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     property_heading,
     run_confirmation,
     run_status,
+    section_toggle_label,
     suggestion_to_row,
     table_update_label,
     truncate,
@@ -45,6 +46,13 @@ def _suggestion(**kwargs: object) -> Suggestion:
 
 
 # --- truncate ---------------------------------------------------------------
+
+
+def test_section_toggle_label_states_the_next_action() -> None:
+    assert section_toggle_label("filters", False) == "Show filters"
+    assert section_toggle_label("filters", True) == "Hide filters"
+    assert section_toggle_label("stats", False) == "Show stats"
+    assert section_toggle_label("stats", True) == "Hide stats"
 
 
 def test_truncate_renders_metadata_shapes() -> None:

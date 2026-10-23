@@ -6,12 +6,15 @@ from dotenv import load_dotenv
 
 from uwazi_api.client import UwaziClient
 from uwazi_api.domain.menu_link import MenuLink
+from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+
+pytestmark = pytest.mark.e2e
 
 
 class TestMenuLinksRepositoryE2E:
@@ -24,6 +27,7 @@ class TestMenuLinksRepositoryE2E:
 
     @classmethod
     def setup_class(cls):
+        require_local_e2e_target(UWAZI_URL)
         cls.client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
         cls.repo = cls.client.menu_links
         cls.snapshot: list[MenuLink] = cls.repo.get_all()

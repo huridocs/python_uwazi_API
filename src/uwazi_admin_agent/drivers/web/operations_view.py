@@ -24,6 +24,7 @@ from typing import Any, Iterable
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.suggestion import (
+    INFO_OP,
     TITLE_PROPERTY,
     OperationReviewRow,
     Suggestion,
@@ -63,6 +64,7 @@ OP_BORDER_COLORS: dict[str, str] = {
     "create_relationships": "#8e24aa",
     "update_and_delete": "#5e35b1",
     "create_and_delete": "#3949ab",
+    "info": "#546e7a",
 }
 DEFAULT_BORDER_COLOR: str = "#607d8b"
 
@@ -106,8 +108,11 @@ NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_de
 
 
 def is_selectable(op: str) -> bool:
-    """Whether one suboperation of ``op`` can be run on its own (pure)."""
-    return op not in LOCKED_SUB_OPS
+    """Whether one suboperation of ``op`` can be run on its own (pure).
+
+    ``info`` rows are display-only, so they are never selectable.
+    """
+    return op not in LOCKED_SUB_OPS and op != INFO_OP
 
 
 def lock_note(op: str) -> str:
@@ -132,9 +137,11 @@ def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
     when the template's properties were resolved, falling back to the raw name
     (``document_ref``); a relationship row names the link's TARGET (the thing
     the operator is connecting to); a whole-entity row names its op's phrase.
-    The raw name is kept visible by :func:`sub_caption` so the row stays
-    identifiable.
+    An ``info`` row renders its arbitrary text verbatim. The raw name is kept
+    visible by :func:`sub_caption` so the row stays identifiable.
     """
+    if sub.op == INFO_OP:
+        return "" if sub.proposed_value is None else str(sub.proposed_value)
     if sub.op == "create_relationships":
         rel = sub.proposed_value if isinstance(sub.proposed_value, dict) else {}
         target = sub.detail_key or str(rel.get("to_entity_shared_id") or "")
@@ -146,6 +153,8 @@ def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
 
 def sub_caption(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
     """The raw name shown under a suboperation's heading, or "" (pure)."""
+    if sub.op == INFO_OP:
+        return ""
     if sub.op == "create_relationships":
         rel = sub.proposed_value if isinstance(sub.proposed_value, dict) else {}
         return str(rel.get("relationship_type_name") or "")
@@ -167,6 +176,8 @@ def sub_values(sub: Suggestion) -> tuple[str, str]:
     same rendering the entity window uses. A whole-entity op has no current
     value to show (publishing/deleting is not a property), so it reads "—".
     """
+    if sub.op == INFO_OP:
+        return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
     if sub.op == "create_relationships":
         return "—", _relationship_proposed(sub)
     if sub.op == "set_publish_status":
@@ -240,6 +251,7 @@ def suboperation_row(
         "shared_id": sub.shared_id,
         "op": sub.op,
         "property_name": sub.property_name,
+        "is_info": sub.op == INFO_OP,
     }
 
 
@@ -311,13 +323,53 @@ def operation_row(
     already narrowed ``item.subs``). ``labels`` maps property names to the
     template's human labels, so a child row reads "Document Ref", not the raw
     ``document_ref``.
+
+    An ``info`` operation is display-only: its parent row carries the arbitrary
+    text and only its detail lines become suboperations. The payload is marked
+    ``is_info`` so the page hides every checkbox and action.
     """
     checked = set(checked_ids)
+    is_info = INFO_OP in item.ops
     in_place = not any(op in NON_IN_PLACE_OPS for op in item.ops)
-    subs = [suboperation_row(sub, checked=sub.id in checked, in_place=in_place, labels=labels) for sub in item.subs]
+    if is_info:
+        # The parent row carries the headline; only its detail lines are
+        # rendered as suboperations. The parent itself is not a change, so it
+        # never needs a checkbox, a status badge, or an action.
+        submodels = [sub for sub in item.subs if sub.detail_key is not None]
+    else:
+        submodels = list(item.subs)
+    subs = [suboperation_row(sub, checked=sub.id in checked, in_place=in_place, labels=labels) for sub in submodels]
     text, color = validated_cell(subs)
     status = operation_status(subs)
     title = item.entity_title or item.shared_id
+    if is_info:
+        # Display-only: full text (the Target cell wraps it), no link, no
+        # counters, no Run/Discard/Revert/Edit action, and a dedicated status
+        # word so an info row never reads as pending work.
+        return {
+            "row_key": item.shared_id,
+            "shared_id": item.shared_id,
+            "title": title,
+            "title_full": title,
+            "template": "—",
+            "languages": [],
+            "ops": INFO_OP,
+            "op_colors": [OP_COLORS.get(INFO_OP, "grey")],
+            "url": None,
+            "run_status": "info",
+            "run_status_color": RUN_STATUS_COLORS.get("info", "grey"),
+            "validated": "n/a",
+            "validated_color": "grey-4",
+            "has_validated": False,
+            "has_checkable": False,
+            "border_color": OP_BORDER_COLORS.get(INFO_OP, DEFAULT_BORDER_COLOR),
+            "in_place": False,
+            "revertable": False,
+            "has_applied": False,
+            "subs": subs,
+            "is_info": True,
+            "has_subs": bool(subs),
+        }
     return {
         "row_key": item.shared_id,
         "shared_id": item.shared_id,
@@ -339,6 +391,8 @@ def operation_row(
         "revertable": in_place and item.applied > 0,
         "has_applied": item.applied > 0,
         "subs": subs,
+        "is_info": False,
+        "has_subs": True,
     }
 
 

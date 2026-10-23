@@ -54,6 +54,14 @@ raw-options = { version_scheme = "post-release", local_scheme = "no-local-versio
 [tool.hatch.build.targets.wheel]
 packages = ["src/uwazi_api", "src/uwazi_agent", "src/uwazi_admin_agent", "src/uwazi_property_filler"]
 
+[tool.pytest.ini_options]
+# Live end-to-end tests need a running local Uwazi instance. They are excluded
+# from the default run; use `just test_e2e` (or `pytest -m e2e`) to opt in.
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: requires a running Uwazi instance on localhost; run with `just test_e2e`",
+]
+
 [tool.ruff]
 line-length = 125
 target-version = "py312"

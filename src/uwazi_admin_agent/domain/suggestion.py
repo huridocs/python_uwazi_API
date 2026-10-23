@@ -12,7 +12,9 @@ Op coverage matches the dry-run recorder exactly (``_dry_run_write_helpers``):
 ``update`` / ``create`` records explode into one suggestion per metadata key
 (plus ``_title`` when the record carries a title), while whole-entity ops
 (``delete`` / ``publish`` / ``unpublish`` / ``set_publish_status`` /
-``create_relationships``) produce one row each.
+``create_relationships``) produce one row each. ``info`` is a display-only
+pseud-op: one parent row carrying arbitrary text plus, optionally, one child
+row per detail line.
 """
 
 from __future__ import annotations
@@ -39,7 +41,14 @@ SuggestionOp = Literal[
     "create_relationships",
     "update_and_delete",
     "create_and_delete",
+    "info",
 ]
+
+# The pseud-op the script uses to surface arbitrary text (a query's answer, a
+# result summary) as a two-level row in the review table. It writes NOTHING to
+# Uwazi: its rows are display-only and are never selectable, applied, or
+# reverted.
+INFO_OP: str = "info"
 
 # Ops whose table rows carry a proposed property value (and so get current-value
 # hydration, inline editing, and the update/create apply payloads).
@@ -390,6 +399,7 @@ def entity_language_key(shared_id: str, language: str | None) -> str:
 __all__ = [
     "CREATE_OPS",
     "EntityReviewRow",
+    "INFO_OP",
     "MERGE_OPS",
     "OperationReviewRow",
     "PROPERTY_OPS",

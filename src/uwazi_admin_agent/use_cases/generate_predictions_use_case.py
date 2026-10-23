@@ -36,6 +36,7 @@ from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmUsage
 from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
+    INFO_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     PredictionAttempt,
@@ -152,6 +153,9 @@ def _apply_hydration(
     row is a new translation, so ``current_value`` stays ``None``.
     """
     for index, suggestion in enumerate(suggestions):
+        if suggestion.op == INFO_OP:
+            # Display-only rows name no entity, so there is nothing to hydrate.
+            continue
         if not suggestion.shared_id or suggestion.shared_id.startswith("dry-created-"):
             continue
         raw = raws.get((suggestion.shared_id, _raw_language(suggestion, default_language)))
@@ -197,7 +201,11 @@ def hydrate_current_values(
     """
     if entity_repository is None:
         return
-    indexes = [index for index, s in enumerate(suggestions) if s.shared_id and not s.shared_id.startswith("dry-created-")]
+    indexes = [
+        index
+        for index, s in enumerate(suggestions)
+        if s.op != INFO_OP and s.shared_id and not s.shared_id.startswith("dry-created-")
+    ]
     if not indexes:
         return
     pairs = {(suggestions[index].shared_id, _raw_language(suggestions[index], default_language)) for index in indexes}

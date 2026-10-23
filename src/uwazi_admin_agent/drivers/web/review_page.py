@@ -47,7 +47,7 @@ The operation's **Status** is DERIVED from its parts: "runned" once every part
 is written, "discarded" once every part is refused, "pending" while work
 remains. The counter beside it reads checked/checkable parts.
 
-The **Entity** column carries the open-in-Uwazi link as an icon beside the
+The **Target** column carries the open-in-Uwazi link as an icon beside the
 (trimmed, ellipsised) title rather than as a column of its own: a plain anchor
 opens the entity's public page on the controlled instance in a NEW tab (the
 operation's first written language), only for ops whose entity already exists
@@ -55,6 +55,11 @@ there — ``update``/``delete`` — and only when ``UWAZI_URL`` is configured; t
 URL is built from the row's sharedId with no extra request. Titles are cut in
 the row payload as well as in the cell, because a document title is unbounded
 and a cell that sizes to its content is what made the table scroll sideways.
+
+Display-only **info** rows reuse that same Target column for arbitrary text the
+script surfaced with ``add_info``. They are two-level (the headline plus optional
+detail lines) but carry no checkbox, no link, and no action buttons: nothing
+about them is written, selected, discarded, or reverted.
 
 The entity window's rows are headed by the property's human LABEL ("Document
 Ref"), resolved once per template from ``/api/templates``, with the raw property
@@ -88,11 +93,19 @@ the header checkbox selects the visible PAGE (reloading prunes the selection to
 those rows), while the "Select all N results" button selects every suboperation
 matching the current filter across ALL pages (its ids are resolved from the
 store at click time, so page flips never truncate the selection).
+
+Operation gate: Run, Revert, refresh and the app's generation are serialized by
+:mod:`uwazi_admin_agent.drivers.web.operation_gate` — ONE Uwazi-write pass at a
+time, process-wide. A second attempt is refused with the holder's live count,
+and while the gate is held a fast timer keeps one grouped toast on screen
+naming the holder by its SUBOPERATION fraction ("Running — 13/1230
+suboperations…") until the finishing action replaces it with the outcome.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -108,6 +121,14 @@ from uwazi_admin_agent.domain.suggestion import (
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
+)
+from uwazi_admin_agent.drivers.web.operation_gate import (
+    active_text,
+    busy_text,
+    release,
+    set_progress,
+    snapshot,
+    try_acquire,
 )
 from uwazi_admin_agent.drivers.web.operations_view import (
     EXPAND_COLUMN,
@@ -145,6 +166,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     revert_entity_confirmation,
     run_button_label,
     run_confirmation,
+    section_toggle_label,
     select_all_label,
     table_update_label,
     truncate,
@@ -179,6 +201,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     update_table_from_uwazi,
     uwazi_base_url,
 )
+from uwazi_admin_agent.drivers.web.task_dialogs import prompt_dialog, script_dialog
 
 # The suboperation statuses a Run may write. ``applied`` is already in Uwazi,
 # ``discarded`` was refused (Restore is its undo), and ``accepted``/``edited``
@@ -191,6 +214,60 @@ _RUNNABLE_STATUSES: frozenset[str] = frozenset(
         SuggestionStatus.REVERTED.value,
     }
 )
+
+# Quasar notify's ``group`` key for the operation-progress toast: every
+# emission with this key REPLACES the previous one instead of stacking, which
+# is what makes one toast read "13/1230 … 47/1230" while the operation runs.
+# The completion/failure toasts of the gated actions reuse the key so they
+# replace the last live progress fraction instead of leaving it hanging.
+GATE_TOAST_GROUP: str = "uwazi-operation"
+
+
+def _claim_gate(kind: str, run_id: str, client: Any) -> bool:
+    """Claim the gate's single Uwazi-write slot, or refuse with a busy toast (plain).
+
+    The gate holds ONE mutating Uwazi operation process-wide (Run, Revert,
+    refresh, generation) so no two passes interleave their writes, the store
+    updates, or the entity snapshots. Failure notifies why with the holder
+    counted live — the operator reads the very fraction that is still moving.
+    """
+    if try_acquire(kind, run_id):
+        return True
+    busy = snapshot()
+    with client:
+        ui.notify(busy_text(busy), type="warning", multi_line=True)
+    return False
+
+
+def _poll_gate_toast(state: dict[str, Any]) -> None:
+    """Keep ONE grouped toast alive naming the in-flight Uwazi operation.
+
+    The gate's snapshot is polled at 0.8 s: every change (or every ~2s, to keep
+    the toast alive when progress stalls in a long indeterminate phase) reissues
+    the grouped notification with the fresh fraction and its filling bar
+    (``progress``), so Quasar replaces it in place instead of stacking. A final
+    toast from the finishing action reuses the group and replaces this one with
+    the outcome; when the gate goes idle the last fraction toast simply expires
+    (finite ``timeout``), never lingering on a closed operation.
+    """
+    active = snapshot()
+    if active is None:
+        state["_gate_signature"] = None
+        return  # nothing running; the last grouped toast expires on its own
+    signature = (active.kind, active.run_id, active.done, active.total)
+    now = time.monotonic()
+    if signature == state.get("_gate_signature") and now - float(state.get("_gate_emitted") or 0.0) < 2.0:
+        return
+    state["_gate_signature"] = signature
+    state["_gate_emitted"] = now
+    ui.notify(
+        active_text(active),
+        type="ongoing",
+        group=GATE_TOAST_GROUP,
+        progress=(active.done / active.total) if active.total > 0 else True,
+        timeout=8_000,
+        multi_line=True,
+    )
 
 
 def _modal_header(dialog: Any, title: str) -> None:
@@ -301,14 +378,39 @@ def _build_page(run_id: str) -> None:
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-7xl"):
-            _summary_row(state)
-            # The drift verdict sits BETWEEN the cards and the filters: it is
-            # the state of the data the cards count and the filters narrow, so
-            # it reads as a banner over both, not as one more control.
+            # Row 1: the hamburger ALONE, at the top right. The menu is the
+            # page's own corner control, so it gets a row of its own instead
+            # of sharing a row with the actions.
+            with ui.row().classes("w-full items-center justify-end q-mb-sm"):
+                _header_menu(state, run_id, has_script=bool(detail.script))
+            # The two collapsible sections: the stats (the header cards) and
+            # the filters. Both are hidden by default — the table is the page's
+            # content, and the counters and the narrowing controls are read
+            # when the operator wants them. The menu is the only way in and
+            # out of them. The stats sit ABOVE the filters: the counters
+            # describe the whole, the filters narrow it.
+            with ui.column().classes("w-full") as stats_section:
+                state["_stats_section"] = stats_section
+                _summary_row(state)
+            with ui.column().classes("w-full") as filters_section:
+                state["_filters_section"] = filters_section
+                _filter_bar(state)
+            # Row 2: the actions, aligned LEFT. They act on the rows the
+            # operator ticks, so they sit with the table, on the side the
+            # reading starts from.
+            with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
+                _action_bar(state)
+            # The drift verdict sits BELOW the action bar, just above the
+            # table: it is the state of the data the table shows, so it reads
+            # as a banner over the table, not as one more control above it.
+            # It is NOT hidden: a stale table is a safety warning, not a
+            # statistic.
             _drift_banner(state)
-            _filter_bar(state)
-            _action_bar(state)
             _change_table(state)
+            # Both sections start HIDDEN: the table is the page's content, and
+            # the stats and the filters are read on demand.
+            state["_stats_section"].set_visibility(False)
+            state["_filters_section"].set_visibility(False)
 
     if current_attempt(run_id) is None:
         ui.notify(
@@ -317,6 +419,88 @@ def _build_page(run_id: str) -> None:
         )
 
     ui.timer(3.0, lambda: _poll_progress(state))
+    # The operation gate's fast poller: while a Run/Revert/refresh is held, this
+    # keeps the grouped progress toast alive with the live fraction ("Running —
+    # 13/1230 suboperations…"); idle, it does nothing.
+    ui.timer(0.8, lambda: _poll_gate_toast(state))
+
+
+# --- collapsible sections ----------------------------------------------------
+
+
+def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False) -> None:
+    """The page's hamburger menu: every control that is read on demand.
+
+    One menu in the card's top right holds the controls the operator reaches
+    for occasionally — the two collapsible sections (stats and filters), the
+    drift check, the table refresh, and the run's prompt and script. The page
+    itself is the table; everything else is one click away.
+
+    The section items state what the click WILL do ("Show filters" /
+    "Hide filters"), so the label is the item's own contract.
+    """
+    # The menu is nested INSIDE the button: Quasar anchors a menu to its
+    # parent element, so a sibling menu would hang off the whole toolbar row
+    # instead of the button that opens it.
+    with ui.button(icon="menu", on_click=lambda: menu.open()).props("flat dense color=secondary"):
+        with ui.menu() as menu:
+            state["_filters_item"], state["_filters_label"] = _menu_item(
+                "filter_alt",
+                section_toggle_label("filters", False),
+                lambda: _toggle_section(state, "filters"),
+            )
+            state["_stats_item"], state["_stats_label"] = _menu_item(
+                "insights",
+                section_toggle_label("stats", False),
+                lambda: _toggle_section(state, "stats"),
+            )
+            ui.separator()
+            _menu_item(
+                "sync", "Check drift", lambda: background_tasks.create(_check_drift_now(state, client=context.client))
+            )
+            state["_update_table_item"], state["_update_table_menu_label"] = _menu_item(
+                "cloud_sync", "Update table", lambda: _update_table_clicked(state)
+            )
+            ui.separator()
+            _menu_item("description", "Show prompt", lambda: prompt_dialog(run_id))
+            if has_script:
+                # The script item exists only for a run that HAS one — the same
+                # rule the tasks table's row menu follows.
+                _menu_item("code", "Show script", lambda: script_dialog(run_id))
+
+
+def _menu_item(icon: str, text: str, on_click: Any) -> tuple[Any, Any]:
+    """One menu item: an icon and a label.
+
+    Returns the item and its label: the item can be disabled while its action
+    runs, and the label's text is what the section items rewrite when the
+    section they toggle changes state.
+    """
+    with ui.item(on_click=on_click) as item:
+        ui.icon(icon).classes("q-mr-sm")
+        label = ui.label(text)
+    return item, label
+
+
+def _toggle_section(state: dict[str, Any], section: str) -> None:
+    """Show or hide one collapsible section, and relabel its menu item."""
+    visible = not bool(state.get(f"_{section}_visible"))
+    state[f"_{section}_visible"] = visible
+    container = state.get(f"_{section}_section")
+    if container is not None and not container.is_deleted:
+        container.set_visibility(visible)
+    label = state.get(f"_{section}_label")
+    if label is not None and not label.is_deleted:
+        label.text = section_toggle_label(section, visible)
+        label.update()
+
+
+def _update_table_clicked(state: dict[str, Any]) -> None:
+    """Start the table refresh from the menu, with the menu item disabled while it runs."""
+    item = state.get("_update_table_item")
+    if item is not None and not item.is_deleted:
+        item.disable()
+    background_tasks.create(_update_table_now(state, client=context.client))
 
 
 # --- header ------------------------------------------------------------------
@@ -394,7 +578,11 @@ def _filter_bar(state: dict[str, Any]) -> None:
     The search gets a row of its own because it is a different kind of
     control: the dropdowns below pick a value out of a known set, while the
     search is free text over the whole table. Splitting them keeps the
-    dropdown row from wrapping and gives the search the full width.
+    dropdown row from wrapping.
+
+    The whole bar is aligned LEFT, under the stats: the filters narrow what
+    the table shows, and the operator reads them from the same side as the
+    rows they narrow.
     """
     with ui.column().classes("w-full q-mb-sm"):
         # Row 1: the search on its own.
@@ -596,7 +784,7 @@ def _run_from_state(state: dict[str, Any]) -> None:
 
 def _action_bar(state: dict[str, Any]) -> None:
     """The selection-driven action bar (the checked rows carry the count)."""
-    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
+    with ui.row().classes("items-center gap-2"):
         state["_run_button"] = ui.button(
             run_button_label(0),
             icon="play_arrow",
@@ -627,7 +815,6 @@ def _action_bar(state: dict[str, Any]) -> None:
             icon="unfold_more",
             on_click=lambda: _toggle_expand_all(state),
         ).props("dense flat")
-        state["_expand_button"].classes("q-ml-auto")
 
 
 def _revert_from_state(state: dict[str, Any]) -> None:
@@ -662,19 +849,36 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
         with client:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
+    # One Uwazi-write operation at a time (the gate), as for the Run.
+    if not _claim_gate("revert", state["run_id"], client):
+        return
     try:
-        outcome = await revert_entities_selection(state["run_id"], [(sid, None) for sid in entities], user, password)
-        with client:
-            ui.notify(
-                f"Revert done — {outcome.summary()}",
-                type="positive" if not outcome.failures else "warning",
-                multi_line=True,
+        try:
+            outcome = await revert_entities_selection(
+                state["run_id"],
+                [(sid, None) for sid in entities],
+                user,
+                password,
+                progress=set_progress,
             )
-    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
-        logger.exception("bulk revert failed")
-        with client:
-            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+            with client:
+                ui.notify(
+                    f"Revert done — {outcome.summary()}",
+                    type="positive" if not outcome.failures else "warning",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
+        except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+            logger.exception("bulk revert failed")
+            with client:
+                ui.notify(
+                    f"Revert failed: {exc}",
+                    type="negative",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
     finally:
+        release("revert", state["run_id"])
         with client:
             _clear_checked(state)
             _refresh_all(state)
@@ -725,6 +929,8 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
     refuses those property writes, not the ones the filter hid.
     """
     row = _row_of_key(state, row_key)
+    if row is None or row.get("is_info"):
+        return
     ids = ids_of_refs(_row_refs(row))
     if not ids:
         return
@@ -770,6 +976,8 @@ async def _discard_ids(
 def _restore_op_clicked(state: dict[str, Any], row_key: str) -> None:
     """Undo the discard of ONE operation (its visible rows go back to pending)."""
     row = _row_of_key(state, row_key)
+    if row is None or row.get("is_info"):
+        return
     ids = ids_of_refs(_row_refs(row))
     client = context.client
     background_tasks.create(_restore_ids(state, ids, client), name=f"restore {row_key}")
@@ -885,17 +1093,31 @@ async def _revert_suboperation(
         with client:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
+    # One Uwazi-write operation at a time (the gate), as for the Run.
+    if not _claim_gate("revert", state["run_id"], client):
+        return
     try:
-        row_language = await revert_suboperation(
-            state["run_id"], shared_id, language, property_name, suggestion_id, user, password
-        )
-        with client:
-            ui.notify(f"Reverted {property_name} ({row_language}) to its backup value", type="positive")
-    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
-        logger.exception("suboperation revert failed")
-        with client:
-            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+        try:
+            row_language = await revert_suboperation(
+                state["run_id"], shared_id, language, property_name, suggestion_id, user, password
+            )
+            with client:
+                ui.notify(
+                    f"Reverted {property_name} ({row_language}) to its backup value",
+                    type="positive",
+                    group=GATE_TOAST_GROUP,
+                )
+        except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+            logger.exception("suboperation revert failed")
+            with client:
+                ui.notify(
+                    f"Revert failed: {exc}",
+                    type="negative",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
     finally:
+        release("revert", state["run_id"])
         with client:
             _clear_checked(state)
             _refresh_all(state)
@@ -908,19 +1130,32 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
         with client:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
+    # One Uwazi-write operation at a time (the gate), as for the Run.
+    if not _claim_gate("revert", state["run_id"], client):
+        return
+    set_progress(0, 1)
     try:
-        info = await revert_entity_rows(state["run_id"], shared_id, user, password)
-        with client:
-            ui.notify(
-                f"Reverted {shared_id} to its backup"
-                + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
-                type="positive",
-            )
-    except Exception as exc:  # noqa: BLE001 — the toast reports, the page never crashes
-        logger.exception("per-entity revert failed")
-        with client:
-            ui.notify(f"Revert failed: {exc}", type="negative", multi_line=True)
+        try:
+            info = await revert_entity_rows(state["run_id"], shared_id, user, password)
+            set_progress(1, 1)
+            with client:
+                ui.notify(
+                    f"Reverted {shared_id} to its backup"
+                    + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
+                    type="positive",
+                    group=GATE_TOAST_GROUP,
+                )
+        except Exception as exc:  # noqa: BLE001 — the toast reports, the page never crashes
+            logger.exception("per-entity revert failed")
+            with client:
+                ui.notify(
+                    f"Revert failed: {exc}",
+                    type="negative",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
     finally:
+        release("revert", state["run_id"])
         with client:
             _clear_checked(state)
             _refresh_all(state)
@@ -932,10 +1167,10 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
 def _drift_banner(state: dict[str, Any]) -> None:
     """The drift line: what the last drift check concluded.
 
-    It sits BETWEEN the header cards and the filters — the state of the data
-    both of them work on. Renders the STORED verdict (or "not checked yet");
-    the open-page auto-check and the manual button update it. One row: an icon
-    + the text + (right) the check-again button.
+    It sits BELOW the action bar, just above the table — the state of the data
+    the table shows. Renders the STORED verdict (or "not checked yet"); the
+    open-page auto-check and the manual button update it. One row: an icon +
+    the text + (right) the check-drift and update-table buttons.
     """
     with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
         state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
@@ -945,20 +1180,6 @@ def _drift_banner(state: dict[str, Any]) -> None:
         state["_table_update_label"] = ui.label(table_update_label(get_table_update_time(state["run_id"]))).classes(
             "text-caption text-grey-6"
         )
-        state["_update_table_button"] = ui.button(
-            "Update table from Uwazi",
-            icon="cloud_sync",
-            on_click=lambda: background_tasks.create(
-                _update_table_now(state, client=context.client),
-            ),
-        ).props("dense flat")
-        state["_drift_button"] = ui.button(
-            "Check drift",
-            icon="sync",
-            on_click=lambda: background_tasks.create(
-                _check_drift_now(state, client=context.client),
-            ),
-        ).props("dense flat")
 
     # The verdict's text is stored per run: apply it immediately, then let the
     # open-page auto-check refresh it (a fresh page should not show a stale
@@ -981,11 +1202,16 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
         with client:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
-    button = state.get("_update_table_button")
+    item = state.get("_update_table_item")
     label = state.get("_table_update_label")
+    # The refresh is a heavy Uwazi pass (a full script scan): it goes through
+    # the same gate as a Run, so it can neither overlap one nor be overlapped
+    # by one.
+    if not _claim_gate("refresh", state["run_id"], client):
+        return
     with client:
-        if button is not None and not button.is_deleted:
-            button.disable()
+        if item is not None and not item.is_deleted:
+            item.disable()
         if label is not None and not label.is_deleted:
             label.text = "Updating table…"
     try:
@@ -995,16 +1221,22 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
             _apply_drift_state(state, updated)
             if label is not None and not label.is_deleted:
                 label.text = table_update_label(get_table_update_time(state["run_id"]))
-            ui.notify(result.message(), type="positive", multi_line=True)
+            ui.notify(result.message(), type="positive", multi_line=True, group=GATE_TOAST_GROUP)
             _refresh_all(state)
     except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
         logger.exception("table update failed")
         with client:
-            ui.notify(f"Table update failed: {exc}", type="negative", multi_line=True)
+            ui.notify(
+                f"Table update failed: {exc}",
+                type="negative",
+                multi_line=True,
+                group=GATE_TOAST_GROUP,
+            )
     finally:
-        if button is not None and not button.is_deleted:
+        release("refresh", state["run_id"])
+        if item is not None and not item.is_deleted:
             with client:
-                button.enable()
+                item.enable()
 
 
 def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = False) -> None:
@@ -1125,6 +1357,9 @@ def _sync_selection(state: dict[str, Any]) -> None:
     for row in table.rows or []:
         if not isinstance(row, dict):
             continue
+        if row.get("is_info"):
+            # Display-only rows are never part of a selection.
+            continue
         subs = row.get("subs") or []
         for sub in subs:
             if isinstance(sub, dict):
@@ -1207,8 +1442,11 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
 
     A tick is a SELECTION, not an acceptance: the parts' statuses are left
     alone. Locked parts are included because the operation's Run covers them —
-    they simply have no checkbox of their own to show it.
+    they simply have no checkbox of their own to show it. Info rows are
+    display-only and carry no selection at all.
     """
+    if row.get("is_info"):
+        return
     ids = [int(sub["id"]) for sub in (row.get("subs") or []) if isinstance(sub, dict) and isinstance(sub.get("id"), int)]
     _apply_checked(state, ids, checked)
 
@@ -1282,6 +1520,9 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
     row = _row_of_key(state, row_key)
     if row is None:
         return
+    if row.get("is_info"):
+        ui.notify("Info rows are display-only", type="info")
+        return
     subs = [sub for sub in (row.get("subs") or []) if isinstance(sub, dict)]
     checked = [sub for sub in subs if sub.get("selectable") and sub.get("checked")]
     if checked:
@@ -1325,7 +1566,7 @@ def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
         (one for one in (row.get("subs") or []) if isinstance(one, dict) and one.get("id") == sub_id),
         None,
     )
-    if sub is None:
+    if sub is None or sub.get("is_info"):
         return
     if not _runnable(sub):
         ui.notify(
@@ -1354,39 +1595,51 @@ async def _run_rows(
         with client:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
-    try:
-        preflight = await asyncio.to_thread(
-            preflight_selection,
-            state["run_id"],
-            ids,
-            user,
-            password,
-        )
-    except Exception as exc:  # noqa: BLE001 — an unverifiable selection must not run
-        logger.exception("run preflight failed")
-        with client:
-            ui.notify(f"Could not verify the selection against Uwazi: {exc}", type="negative", multi_line=True)
-        return
-    if not preflight.ok:
-        with client:
-            ui.notify(preflight.message(), type="warning", multi_line=True)
+    # One Uwazi-write operation at a time (the gate): a concurrent Run, Revert
+    # or refresh — this page's or any other's — is refused with its live count.
+    if not _claim_gate("run", state["run_id"], client):
         return
     try:
-        await apply_outcomes(state["run_id"], user, password, pairs, ids)
-        # The writes bumped Uwazi editDates: re-sync the baseline so the run's
-        # own writes are the new reference, not drift.
-        refresh_baseline_after_run(state["run_id"], user, password, _current_attempt_number(state["run_id"]))
-        with client:
-            ui.notify(
-                f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
-                type="positive",
-                multi_line=True,
+        try:
+            preflight = await asyncio.to_thread(
+                preflight_selection,
+                state["run_id"],
+                ids,
+                user,
+                password,
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("run (heuristic apply) failed")
-        with client:
-            ui.notify(f"Run failed: {exc}", type="negative", multi_line=True)
+        except Exception as exc:  # noqa: BLE001 — an unverifiable selection must not run
+            logger.exception("run preflight failed")
+            with client:
+                ui.notify(f"Could not verify the selection against Uwazi: {exc}", type="negative", multi_line=True)
+            return
+        if not preflight.ok:
+            with client:
+                ui.notify(preflight.message(), type="warning", multi_line=True)
+            return
+        try:
+            await apply_outcomes(state["run_id"], user, password, pairs, ids, progress=set_progress)
+            # The writes bumped Uwazi editDates: re-sync the baseline so the run's
+            # own writes are the new reference, not drift.
+            refresh_baseline_after_run(state["run_id"], user, password, _current_attempt_number(state["run_id"]))
+            with client:
+                ui.notify(
+                    f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
+                    type="positive",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("run (heuristic apply) failed")
+            with client:
+                ui.notify(
+                    f"Run failed: {exc}",
+                    type="negative",
+                    multi_line=True,
+                    group=GATE_TOAST_GROUP,
+                )
     finally:
+        release("run", state["run_id"])
         with client:
             _clear_checked(state)
             _refresh_all(state)
@@ -1412,7 +1665,7 @@ def _change_table(state: dict[str, Any]) -> None:
     """
     columns = [
         {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": EXPAND_COLUMN},
-        {"name": "title", "label": "Entity", "field": "title", "align": "left", "sortable": False, "style": TITLE_COLUMN},
+        {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": False, "style": TITLE_COLUMN},
         {
             "name": "template",
             "label": "Template",
@@ -1459,15 +1712,18 @@ def _change_table(state: dict[str, Any]) -> None:
         """
         <q-tr :props="props">
           <q-td auto-width>
-            <q-checkbox v-model="props.selected" dense />
+            <q-checkbox v-if="!props.row.is_info" v-model="props.selected" dense />
           </q-td>
           <q-td key="expand" :props="props" class="text-center">
-            <q-btn dense flat size="sm" @click.stop="props.expand = !props.expand"
+            <q-btn v-if="!props.row.is_info || props.row.has_subs" dense flat size="sm"
+                   @click.stop="props.expand = !props.expand"
                    :icon="props.expand ? 'expand_less' : 'chevron_right'"
                    :title="props.expand ? 'Collapse the suboperations' : 'Show the suboperations'" />
           </q-td>
           <q-td key="title" :props="props">
-            <div class="row items-center no-wrap" style="width: 100%;">
+            <div v-if="props.row.is_info" class="text-body2"
+                 style="white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;">{{ props.row.title_full }}</div>
+            <div v-else class="row items-center no-wrap" style="width: 100%;">
               <span class="text-grey-7 q-mr-xs review-shared-id"
                     style="user-select: text;">{{ props.row.shared_id }}</span>
               <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" class="q-mr-xs"
@@ -1494,21 +1750,23 @@ def _change_table(state: dict[str, Any]) -> None:
                   class="text-caption text-bold">{{ props.row.validated }}</span>
           </q-td>
           <q-td key="actions" :props="props" class="text-no-wrap">
-            <q-btn dense flat icon="play_arrow" color="primary"
-                   title="Run this operation: the ticked suboperations (all of them when none is ticked)"
-                   @click.stop="$parent.$emit('run_op', props.row)" />
-            <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
-                   :title="props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'"
-                   @click.stop="$parent.$emit('revert_op', props.row)" />
-            <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
-                   title="Undo the discard — these suboperations go back to the review queue"
-                   @click.stop="$parent.$emit('restore_op', props.row)" />
-            <q-btn v-else-if="props.row.run_status !== 'runned'" dense flat icon="block" color="negative"
-                   title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
-                   @click.stop="$parent.$emit('discard_op', props.row)" />
-            <q-btn dense flat icon="edit" color="teal"
-                   title="Open the entity window (all its rows, every language)"
-                   @click.stop="$parent.$emit('open_entity', props.row)" />
+            <template v-if="!props.row.is_info">
+              <q-btn dense flat icon="play_arrow" color="primary"
+                     title="Run this operation: the ticked suboperations (all of them when none is ticked)"
+                     @click.stop="$parent.$emit('run_op', props.row)" />
+              <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
+                     :title="props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'"
+                     @click.stop="$parent.$emit('revert_op', props.row)" />
+              <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
+                     title="Undo the discard — these suboperations go back to the review queue"
+                     @click.stop="$parent.$emit('restore_op', props.row)" />
+              <q-btn v-else-if="props.row.run_status !== 'runned'" dense flat icon="block" color="negative"
+                     title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
+                     @click.stop="$parent.$emit('discard_op', props.row)" />
+              <q-btn dense flat icon="edit" color="teal"
+                     title="Open the entity window (all its rows, every language)"
+                     @click.stop="$parent.$emit('open_entity', props.row)" />
+            </template>
           </q-td>
         </q-tr>
         <tr v-show="props.expand">
@@ -1539,45 +1797,55 @@ def _change_table(state: dict[str, Any]) -> None:
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="sub in props.row.subs" :key="sub.id">
-                      <td class="text-center">
-                        <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
-                                    @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, sub.id, v)" />
-                        <q-icon v-else name="lock" size="16px" color="grey-5"
-                                :title="sub.note || 'not independently runnable'" />
-                      </td>
-                      <td class="q-pa-xs">
-                        <div class="text-body2">{{ sub.label }}</div>
-                        <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
-                      </td>
-                      <td class="q-pa-xs">
-                        <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
-                        <span v-else class="text-grey-6">—</span>
-                      </td>
-                      <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
-                      <td class="q-pa-xs"><div class="text-body2">{{ sub.proposed }}</div></td>
-                      <td class="q-pa-xs"><q-badge :color="sub.match_color">{{ sub.match }}</q-badge></td>
-                      <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
-                      <td class="q-pa-xs subs-actions">
-                        <template v-if="sub.selectable">
-                          <q-btn dense flat icon="play_arrow" color="primary"
-                                 title="Run this suboperation (only this property)"
-                                 @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-if="sub.status === 'discarded'" dense flat icon="restore" color="orange"
-                                 title="Undo the discard — this suboperation goes back to the review queue"
-                                 @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-else-if="sub.status !== 'runned'" dense flat icon="block" color="negative"
-                                 title="Discard this suboperation — a Run will not execute it"
-                                 @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
-                                 title="Revert this one property to its backup value"
-                                 @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
-                        </template>
-                        <q-btn dense flat icon="edit" color="teal"
-                               title="Open the entity window at this language"
-                               @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
-                      </td>
-                    </tr>
+                    <template v-for="sub in props.row.subs">
+                      <tr v-if="sub.is_info" :key="'info-' + sub.id">
+                        <td></td>
+                        <td class="q-pa-xs" colspan="7">
+                          <div class="text-body2"
+                               style="white-space: pre-wrap; overflow-wrap: anywhere;
+                                      user-select: text;">{{ sub.label }}</div>
+                        </td>
+                      </tr>
+                      <tr v-else :key="sub.id">
+                        <td class="text-center">
+                          <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
+                                      @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, sub.id, v)" />
+                          <q-icon v-else name="lock" size="16px" color="grey-5"
+                                  :title="sub.note || 'not independently runnable'" />
+                        </td>
+                        <td class="q-pa-xs">
+                          <div class="text-body2">{{ sub.label }}</div>
+                          <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
+                        </td>
+                        <td class="q-pa-xs">
+                          <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
+                          <span v-else class="text-grey-6">—</span>
+                        </td>
+                        <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
+                        <td class="q-pa-xs"><div class="text-body2">{{ sub.proposed }}</div></td>
+                        <td class="q-pa-xs"><q-badge :color="sub.match_color">{{ sub.match }}</q-badge></td>
+                        <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
+                        <td class="q-pa-xs subs-actions">
+                          <template v-if="sub.selectable">
+                            <q-btn dense flat icon="play_arrow" color="primary"
+                                   title="Run this suboperation (only this property)"
+                                   @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-if="sub.status === 'discarded'" dense flat icon="restore" color="orange"
+                                   title="Undo the discard — this suboperation goes back to the review queue"
+                                   @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-else-if="sub.status !== 'runned'" dense flat icon="block" color="negative"
+                                   title="Discard this suboperation — a Run will not execute it"
+                                   @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
+                                   title="Revert this one property to its backup value"
+                                   @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
+                          </template>
+                          <q-btn dense flat icon="edit" color="teal"
+                                 title="Open the entity window at this language"
+                                 @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
+                        </td>
+                      </tr>
+                    </template>
                   </tbody>
                 </table>
               </div>
@@ -1646,6 +1914,8 @@ def _sub_of(state: dict[str, Any], args: Any) -> tuple[dict[str, Any] | None, di
 
 def _open_entity_row(state: dict[str, Any], row: dict[str, Any]) -> None:
     """Open the entity window for one operation row (its first written language)."""
+    if row.get("is_info"):
+        return
     shared_id = str(row.get("shared_id") or "")
     languages = [lang for lang in (row.get("languages") or []) if lang]
     _open_entity_window(state, shared_id, languages[0] if languages else None)
@@ -1654,7 +1924,7 @@ def _open_entity_row(state: dict[str, Any], row: dict[str, Any]) -> None:
 def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Discard ONE suboperation (its id is the whole selection)."""
     _row, sub = _sub_of(state, args)
-    if sub is None or not isinstance(sub.get("id"), int):
+    if sub is None or sub.get("is_info") or not isinstance(sub.get("id"), int):
         return
     sub_id = int(sub["id"])
     client = context.client
@@ -1667,7 +1937,7 @@ def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
 def _restore_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Undo ONE suboperation's discard."""
     _row, sub = _sub_of(state, args)
-    if sub is None or not isinstance(sub.get("id"), int):
+    if sub is None or sub.get("is_info") or not isinstance(sub.get("id"), int):
         return
     client = context.client
     background_tasks.create(_restore_ids(state, [int(sub["id"])], client), name=f"restore sub {sub['id']}")
@@ -1676,7 +1946,7 @@ def _restore_sub_clicked(state: dict[str, Any], args: Any) -> None:
 def _revert_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Revert ONE property's write (the suboperation's own undo)."""
     _row, sub = _sub_of(state, args)
-    if sub is None or not sub.get("revertable") or not isinstance(sub.get("id"), int):
+    if sub is None or sub.get("is_info") or not sub.get("revertable") or not isinstance(sub.get("id"), int):
         return
     _revert_suboperation_clicked(
         state,
@@ -1691,7 +1961,7 @@ def _revert_sub_clicked(state: dict[str, Any], args: Any) -> None:
 def _edit_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Open the entity window AT the suboperation's language, focused on its property."""
     _row, sub = _sub_of(state, args)
-    if sub is None:
+    if sub is None or sub.get("is_info"):
         return
     _open_entity_window(
         state,

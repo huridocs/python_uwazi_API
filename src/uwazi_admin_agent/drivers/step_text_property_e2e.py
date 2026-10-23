@@ -81,6 +81,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     revert_run,
 )
 from uwazi_admin_agent.use_cases.task_use_case import TaskUseCase
+from uwazi_api.testing.e2e_guard import LocalE2ETargetError, require_local_e2e_target
 
 # The languages the use case is about. Uwazi keeps one entity-language ROW per
 # translation, and the write's ``locale`` cookie picks the row.
@@ -889,6 +890,7 @@ async def run_text_property_e2e(
     property, so the driver follows the INSTANCE's schema instead of a
     hard-coded one.
     """
+    require_local_e2e_target()
     client = _client(user, password)
     templates = [t.name for t in client.templates.get()]
     if template_name not in templates:
@@ -1046,16 +1048,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
-    return asyncio.run(
-        run_text_property_e2e(
-            user=args.user,
-            password=args.password,
-            template_name=args.template,
-            property_name=args.property,
-            entities=max(2, args.entities),
-            keep_runs=args.keep_runs,
+    try:
+        return asyncio.run(
+            run_text_property_e2e(
+                user=args.user,
+                password=args.password,
+                template_name=args.template,
+                property_name=args.property,
+                entities=max(2, args.entities),
+                keep_runs=args.keep_runs,
+            )
         )
-    )
+    except LocalE2ETargetError as exc:
+        print(f"error: {exc}", flush=True)
+        return 2
 
 
 __all__ = ["main", "run_text_property_e2e"]

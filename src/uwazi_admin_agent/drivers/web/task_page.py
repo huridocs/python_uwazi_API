@@ -17,6 +17,7 @@ from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.domain.task import StepView, TaskView
+from uwazi_admin_agent.drivers.web.operation_gate import busy_text, release, snapshot, try_acquire
 from uwazi_admin_agent.drivers.web.run_service import (
     revert_run,
     task_view,
@@ -147,6 +148,12 @@ async def _run_revert_task(state: dict[str, Any]) -> None:
     if not user or not password:
         ui.notify("Not logged in to Uwazi", type="negative")
         return
+    # Whole-task reverts write Uwazi too, so they ride the same one-slot gate
+    # the review pages' actions hold: no revert sequence may overlap a Run,
+    # a Revert or a refresh that is still in flight.
+    if not try_acquire("revert", state["task_id"]):
+        ui.notify(busy_text(snapshot()), type="warning", multi_line=True)
+        return
     view: TaskView = state["view"]
     done: list[str] = []
     try:
@@ -162,6 +169,7 @@ async def _run_revert_task(state: dict[str, Any]) -> None:
             multi_line=True,
         )
     finally:
+        release("revert", state["task_id"])
         _reload(state)
 
 

@@ -1,4 +1,4 @@
-"""Pure tests for the applied-write property diff (results window).
+"""Pure tests for the applied-write property diff (result-row diffs).
 
 No I/O, no mocks: :func:`build_property_changes` and
 :func:`format_metadata_value` are deterministic transforms of a literal

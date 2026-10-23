@@ -1,7 +1,7 @@
 """NiceGUI web UI for the admin agent — a driver replacing the CLI for common ops.
 
 Single page: a table of runs with status badges + row actions (execute, revert,
-info, and a per-row "more" menu with rename / history / error details / retry /
+info, and a per-row "more" menu with rename / error details / retry /
 delete), and a "New Task" wizard (stepper) to create + generate a run. Mutating
 operations run as background tasks; the table auto-refreshes every 5s by pushing
 rows in place, so open row menus survive the refresh.
@@ -11,13 +11,12 @@ contains no business logic, matching the ``drivers/`` layer convention.
 """
 
 import asyncio
-import json
 import os
 import sys
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import Response
 from loguru import logger
@@ -34,6 +33,7 @@ from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.metadata_diff import PropertyChange, build_property_changes
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
+from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
 # on import, so the runs table's Review action can navigate to it.
@@ -49,12 +49,16 @@ from uwazi_admin_agent.drivers.web.run_service import (
     delete_run,
     fetch_entity_document_bytes,
     get_entity_segmentation,
-    get_execution_history,
     get_run,
     get_run_audit,
-    get_run_results,
     list_runs,
     rename_run,
+)
+from uwazi_admin_agent.drivers.web.task_dialogs import (
+    close_button,
+    footer_close,
+    modal_header,
+    prompt_dialog,
 )
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 
@@ -104,17 +108,33 @@ _KIND_LABELS = {
     "deleting": "is being deleted",
 }
 
+# This page's claim kinds that ALSO take the review pages' Uwazi-write gate
+# (mapped to the gate's kinds; rename/delete are local-only, no Uwazi pass).
+_GATE_KINDS: dict[str, str] = {
+    "creating": "creating",
+    "running": "run",
+    "reverting": "revert",
+}
+
 
 def _busy_label() -> str:
-    """Human-readable busy banner text naming the active op, or '' when idle."""
+    """Human-readable busy banner text naming the active op, or '' when idle.
+
+    When the runs page's own claim is free but the review pages' Uwazi-write
+    gate is held (a Run/Revert/refresh in flight from /review), the gate's live
+    message is the busy reason — the two serializers share one truth.
+    """
     op = _active_op
-    if op is None:
-        return ""
-    return f"Task {op['run_id']!r} {_KIND_LABELS.get(op['kind'], op['kind'])}"
+    if op is not None:
+        return f"Task {op['run_id']!r} {_KIND_LABELS.get(op['kind'], op['kind'])}"
+    holder = operation_gate.snapshot()
+    if holder is not None:
+        return operation_gate.busy_text(holder)
+    return ""
 
 
 def _is_busy() -> bool:
-    return _active_op is not None
+    return _active_op is not None or operation_gate.snapshot() is not None
 
 
 def _try_claim(run_id: str, kind: str) -> bool:
@@ -123,10 +143,18 @@ def _try_claim(run_id: str, kind: str) -> bool:
     Returns False when another op already holds the claim; on success the
     table overlay is registered and every client is refreshed so their
     controls disable immediately.
+
+    Uwazi-touching kinds (generate/revert — rename/delete are local-only)
+    also take the review pages' write gate, so a generation's planning scan
+    can never overrun a Run/Revert still writing from /review, and those
+    writes block the next generation at the same slot.
     """
     global _active_op
     with _active_op_lock:
         if _active_op is not None:
+            return False
+        gate_kind = _GATE_KINDS.get(kind)
+        if gate_kind is not None and not operation_gate.try_acquire(gate_kind, run_id):
             return False
         _active_op = {"run_id": run_id, "kind": kind}
         # Rename/delete don't change a run's status; only run-level ops get
@@ -141,10 +169,14 @@ def _release_run(run_id: str) -> None:
     """Release the claim when the finishing op owns it; refresh all clients."""
     global _active_op
     with _active_op_lock:
-        if _active_op is None or _active_op["run_id"] != run_id:
+        op = _active_op
+        if op is None or op["run_id"] != run_id:
             return
         _active_op = None
+        gate_kind = _GATE_KINDS.get(op["kind"])
         _running_runs.pop(run_id, None)
+    if gate_kind is not None:
+        operation_gate.release(gate_kind, run_id)
     _broadcast_rows()
 
 
@@ -343,7 +375,15 @@ def _build_runs_table() -> ui.table:
     ``table.rows`` and calling ``update()`` re-renders the cells reactively
     while an open ``q-menu`` (rendered in a portal) survives untouched.
     """
-    table = ui.table(rows=_run_rows(), columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
+    table = (
+        ui.table(rows=_run_rows(), columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
+        .props("selection=multiple")
+        .classes("w-full")
+    )
+    # The checkbox selection: the run ids the toolbar's Delete will remove.
+    # Kept per client and pruned on refresh, so the 5s row push never leaves
+    # stale ids in the selection (the same rule review_page applies).
+    context.client._task_selection = []
 
     table.add_slot(
         "body-cell-status",
@@ -380,10 +420,10 @@ def _build_runs_table() -> ui.table:
     )
     table.add_slot("no-data", '<div class="text-body1 text-grey-7 q-pa-md">No tasks</div>')
 
+    table.on_select(_on_select)
     table.on("review", _on_review)
     table.on("info", _on_info)
     table.on("rowmenu", _on_rowmenu)
-    table.on("history", _on_history)
     table.on("errors", _on_errors)
     table.on("delete", _on_delete)
     return table
@@ -396,8 +436,8 @@ def _build_row_menu() -> None:
     table; the selected run's id travels through ``app.storage.client``. The
     menu is shown by replaying the row click on an off-screen anchor with the
     recorded coordinates, so Quasar positions it at the cursor
-    (``touch-position``). The four conditional items (Show script / Show results /
-    Retry / Error details) are toggled per selection in ``_on_rowmenu``.
+    (``touch-position``). The conditional items (Retry / Error details) are
+    toggled per selection in ``_on_rowmenu``.
     """
     with ui.button(icon="more_vert").props("flat dense").classes("fixed top-[-100px] left-[-100px]") as anchor:
         # Raw ``q-menu`` element: ``ui.menu`` refuses the ``touch-position`` prop,
@@ -412,20 +452,13 @@ def _build_row_menu() -> None:
             ui.separator()
             ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
             ui.menu_item("Duplicate", lambda: _row_menu_action(_rowmenu_duplicate))
-            ui.menu_item("History", lambda: _row_menu_action(_history_dialog))
-            script_item = ui.menu_item("Show script", lambda: _row_menu_action(_script_dialog))
-            results_item = ui.menu_item("Show results", lambda: _row_menu_action(_results_dialog))
             ui.menu_item("Delete", lambda: _row_menu_action(_delete_dialog)).classes("text-negative")
     retry_item.set_visibility(False)
     errors_item.set_visibility(False)
-    script_item.set_visibility(False)
-    results_item.set_visibility(False)
     context.client._row_menu = menu  # noqa: SLF001 — per-client handle
     context.client._row_menu_anchor = anchor  # noqa: SLF001
     context.client._row_menu_retry = retry_item  # noqa: SLF001
     context.client._row_menu_errors = errors_item  # noqa: SLF001
-    context.client._row_menu_script = script_item  # noqa: SLF001
-    context.client._row_menu_results = results_item  # noqa: SLF001
 
 
 def _row_menu_action(action: Any) -> None:
@@ -481,11 +514,6 @@ def _rowmenu_duplicate(run_id: str) -> None:
     _new_task_wizard(prefill_name=f"{run_id} copy", prefill_prompt=detail.prompt)
 
 
-def _on_history(e: Any) -> None:
-    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    _history_dialog(run_id)
-
-
 def _on_errors(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
     _error_dialog(run_id)
@@ -493,7 +521,7 @@ def _on_errors(e: Any) -> None:
 
 def _on_info(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    _info_dialog(run_id)
+    prompt_dialog(run_id)
 
 
 def _refresh_rows_client() -> None:
@@ -515,6 +543,11 @@ def _refresh_rows_client() -> None:
     new_task = getattr(context.client, "_new_task_button", None)
     if new_task is not None and not new_task.is_deleted:
         new_task.set_enabled(not _is_busy())
+    # The bulk Delete button is live only with a selection and an idle bus.
+    delete_btn = getattr(context.client, "_delete_selected_button", None)
+    if delete_btn is not None and not delete_btn.is_deleted:
+        selection = getattr(context.client, "_task_selection", [])
+        delete_btn.set_enabled(bool(selection) and not _is_busy())
 
 
 def _broadcast_rows() -> None:
@@ -522,6 +555,75 @@ def _broadcast_rows() -> None:
     for client in app.clients():
         with client:
             _refresh_rows_client()
+
+
+def _on_select(e: Any) -> None:
+    """Record the checkbox selection, pruned to the rows still visible.
+
+    Reassigning ``table.rows`` on the 5s refresh re-renders the body without
+    clearing the checkbox state, so stale ids must be dropped here (the same
+    pruning rule review_page applies).
+    """
+    # ``on_select`` delivers a ``TableSelectionEventArguments`` (``.selection``);
+    # keep the raw-list branch for direct test drivers.
+    args = getattr(e, "args", None)
+    if isinstance(args, list):
+        selection = args
+    else:
+        selection = getattr(e, "selection", None) or []
+    visible = {row["id"] for row in _run_rows()}
+    context.client._task_selection = [row["id"] for row in selection if isinstance(row, dict) and row.get("id") in visible]
+
+
+def _selection_toolbar() -> None:
+    """The row above the tasks table: New Task (solid primary) + bulk Delete."""
+    with ui.row().classes("w-full items-center q-mb-sm gap-2"):
+        # Solid primary matches the review UI's Run button (`color="primary"`).
+        new_task_button = ui.button("New Task", icon="add", on_click=_new_task_wizard).props(
+            "unelevated color=primary text-color=white"
+        )
+        # The per-client New Task button mirrors the busy state (_refresh_rows_client).
+        context.client._new_task_button = new_task_button  # noqa: SLF001 — per-client busy disable
+        delete_button = ui.button("Delete", icon="delete", on_click=_bulk_delete_selected).props("dense flat color=negative")
+        context.client._delete_selected_button = delete_button  # noqa: SLF001 — per-client enable state
+
+
+def _bulk_delete_selected() -> None:
+    """Open one confirmation for every checked task, then delete them all."""
+    selected: list[str] = list(getattr(context.client, "_task_selection", []))
+    if not selected:
+        ui.notify("Nothing selected", type="warning")
+        return
+    if not all(_try_claim(run_id, "deleting") for run_id in selected):
+        for run_id in selected:
+            _release_run(run_id)
+        ui.notify(_busy_label(), type="warning")
+        return
+
+    names = ", ".join(repr(r) for r in selected)
+    _confirm_dialog(
+        "Delete selected tasks",
+        f"Permanently remove {len(selected)} task(s): {names}? This deletes each run folder. "
+        "If a run is EXECUTED, revert will no longer be possible.",
+        lambda: _delete_selected_and_release(selected),
+        success_msg=f"Deleted {len(selected)} task(s)",
+    )
+
+
+def _delete_selected_and_release(selected: list[str]) -> None:
+    """Delete every claimed run; whatever happens, release every claim."""
+    deleted = 0
+    try:
+        for run_id in selected:
+            delete_run(run_id)
+            deleted += 1
+    finally:
+        for run_id in selected:
+            _release_run(run_id)
+        if deleted:
+            _broadcast_rows()
+            selection = getattr(context.client, "_task_selection", [])
+            context.client._task_selection = [run_id for run_id in selection if run_id not in set(selected)]
 
 
 def _on_review(e: Any) -> None:
@@ -550,20 +652,14 @@ def _on_rowmenu(e: Any) -> None:
     app.storage.client["rowmenu_run"] = run_id
     show_retry = False
     show_errors = False
-    show_script = False
-    show_results = False
     try:
         detail = get_run(run_id)
         show_retry = detail.status.value == "generation_failed"
         show_errors = bool(detail.error)
-        show_script = bool(detail.script)
-        show_results = detail.status.value in ("executed", "verified", "failed", "reverted")
     except Exception:  # noqa: BLE001 — a missing run just hides the conditional items
         pass
     context.client._row_menu_retry.set_visibility(show_retry)  # noqa: SLF001
     context.client._row_menu_errors.set_visibility(show_errors)  # noqa: SLF001
-    context.client._row_menu_script.set_visibility(show_script)  # noqa: SLF001
-    context.client._row_menu_results.set_visibility(show_results)  # noqa: SLF001
 
     anchor = context.client._row_menu_anchor  # noqa: SLF001
     client_x = int(click.get("clientX", 0) or 0)
@@ -605,43 +701,6 @@ async def _run_async(coro: Any, success_msg: str, run_id: str | None = None) -> 
         _broadcast_rows()
 
 
-def _close_button(dialog: Any, dense: bool = False) -> Any:
-    """Standard modal dismiss button (X icon + label), flat."""
-    button = ui.button("Close", icon="close", on_click=dialog.close).props("flat")
-    if dense:
-        button.props("dense")
-    return button
-
-
-def _modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = None) -> None:
-    """Modal title row with a top-right Close button.
-
-    Every modal keeps its Close at the BOTTOM-right too (pinned footers in the
-    maximized dialogs); this is the second, always-reachable escape hatch at the
-    top. ``trailing`` builds extra header widgets (e.g. Refresh / Copy all) that
-    sit between the title and the Close button.
-
-    The row is ``shrink-0``: the maximized cards are fixed-height flex columns
-    whose middle section scrolls, and a compressible header would be squeezed
-    to nothing once the scroll content stops shrinking (``shrink-0`` children).
-    """
-    with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
-        ui.label(title).classes("text-h6")
-        with ui.row().classes("items-center no-wrap"):
-            if trailing is not None:
-                trailing()
-            _close_button(dialog)
-
-
-def _footer_close(dialog: Any) -> None:
-    """The bottom-right Close row that closes a maximized modal.
-
-    ``shrink-0`` keeps it pinned: only the middle scroll column may shrink.
-    """
-    with ui.row().classes("w-full justify-end shrink-0"):
-        ui.button("Close", icon="close", on_click=dialog.close).props("flat")
-
-
 def _confirm_dialog(
     title: str,
     message: str,
@@ -657,7 +716,7 @@ def _confirm_dialog(
     """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card():
-            _modal_header(dialog, title)
+            modal_header(dialog, title)
             ui.label(message).classes("text-body1")
             with ui.row().classes("w-full justify-end"):
                 ui.button("Cancel", on_click=lambda: dialog.close())
@@ -678,7 +737,7 @@ def _rename_dialog(run_id: str) -> None:
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
             dialog.props("persistent")
-            _modal_header(dialog, f"Rename task — {run_id}")
+            modal_header(dialog, f"Rename task — {run_id}")
             name_input = ui.input(
                 "New name",
                 value=run_id,
@@ -691,115 +750,6 @@ def _rename_dialog(run_id: str) -> None:
                     icon="edit",
                     on_click=lambda: _rename_confirm(dialog, run_id, name_input),
                 )
-    dialog.open()
-
-
-def _copy_to_clipboard(text: str, label: str = "Copy") -> None:
-    """Button that copies ``text`` to the clipboard via the browser API.
-
-    Uses ``navigator.clipboard.writeText`` when available (secure contexts);
-    otherwise falls back to a hidden textarea + ``document.execCommand('copy')``.
-    """
-    payload = json.dumps(text)
-    js = (
-        f"navigator.clipboard ? navigator.clipboard.writeText({payload}) : (() => {{ "
-        f"const el = document.createElement('textarea'); el.value = {payload}; "
-        "el.style.position = 'fixed'; el.style.opacity = '0'; "
-        "document.body.appendChild(el); el.select(); "
-        "document.execCommand('copy'); el.remove(); })()"
-    )
-
-    def _do_copy() -> None:
-        ui.run_javascript(js)
-        ui.notify("Copied to clipboard", type="positive", timeout=1.5)
-
-    ui.button(label, icon="content_copy", on_click=_do_copy).props("flat dense color=grey-7")
-
-
-def _info_dialog(run_id: str) -> None:
-    """Modal: the run's name and prompt (plus any recorded error hint).
-
-    Created on the page layout (not inside the table) so the row auto-refresh
-    can't destroy it. Read-only; actions live in the row's ``more_vert`` menu.
-
-    The title and the Close footer stay pinned; the middle column scrolls.
-    Its children are all ``shrink-0`` for the same reason as
-    ``_script_dialog``: compressible children squeeze the autogrow textareas'
-    boxes while their content keeps its full height, so the prompt text spills
-    out of the textbox and overlaps the widgets below it.
-    """
-    try:
-        detail = get_run(run_id)
-    except Exception as exc:  # noqa: BLE001
-        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
-        return
-
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Task — {run_id}")
-                ui.separator().classes("shrink-0")
-                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    with ui.row().classes("w-full items-center justify-between shrink-0"):
-                        ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-                        _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono shrink-0").props(
-                        "readonly outlined autogrow"
-                    ).style("min-height: 120px")
-                    if detail.validated_prompt:
-                        ui.separator().classes("shrink-0")
-                        with ui.row().classes("w-full items-center justify-between shrink-0"):
-                            ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
-                            _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono shrink-0").props(
-                            "readonly outlined autogrow"
-                        ).style("min-height: 120px")
-                    if detail.error:
-                        ui.separator().classes("shrink-0")
-                        ui.label("Last error").classes("text-subtitle1 text-grey-7 shrink-0")
-                        ui.label(detail.error.strip().splitlines()[0]).classes("text-body2 text-red-10 shrink-0")
-                _footer_close(dialog)
-    dialog.open()
-
-
-def _history_dialog(run_id: str) -> None:
-    """Modal: a run's execute/revert history (time, type, outcome).
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it. Reads the run's audit log via
-    ``get_execution_history``; a run with no executions shows an empty state.
-    """
-    events = get_execution_history(run_id)
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl max-h-[85vh]").props("style=height:85dvh"):
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Execution history — {run_id}")
-                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    if not events:
-                        ui.label("No executions recorded yet.").classes("text-grey-7 q-pa-md")
-                    else:
-                        rows = [
-                            {
-                                "time": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                                "type": e.type.capitalize(),
-                                "outcome": e.outcome,
-                                "detail": e.detail or "",
-                            }
-                            for e in events
-                        ]
-                        columns = [
-                            {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
-                            {"name": "type", "label": "Type", "field": "type", "align": "left", "sortable": True},
-                            {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
-                            {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
-                        ]
-                        ui.table(
-                            rows=rows,
-                            columns=columns,
-                            row_key="time",
-                            pagination={"rowsPerPage": 0},
-                        ).classes("w-full")
-                _footer_close(dialog)
     dialog.open()
 
 
@@ -824,7 +774,7 @@ def _error_dialog(run_id: str) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Error details — {run_id}")
+                modal_header(dialog, f"Error details — {run_id}")
                 if detail.error:
                     ui.textarea(value=detail.error).classes("w-full grow font-mono text-caption").props(
                         "readonly outlined"
@@ -859,68 +809,7 @@ def _error_dialog(run_id: str) -> None:
                             row_key="time",
                             pagination={"rowsPerPage": 0},
                         ).classes("w-full")
-                _footer_close(dialog)
-    dialog.open()
-
-
-def _script_dialog(run_id: str) -> None:
-    """Modal: the run's generated Python script (only reachable when a script exists).
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it — same pattern as ``_error_dialog``. The
-    run's generated script lives at ``<run>/script.py``; a run whose generation
-    failed has none, and the menu item is hidden in that case.
-
-    The dialog is maximized: the title row and the Close footer stay pinned
-    while the middle column scrolls. Every child of that scrolling column is
-    ``shrink-0`` — a compressible child lets the autogrow prompt textarea (and
-    the ``ui.code`` block, whose inner markdown is sized ``height: 100%``) keep
-    its full content height while its box is squeezed, so the script text
-    spills out of its box and paints on top of the prompt textbox. With nothing
-    shrinkable the column simply scrolls instead.
-    """
-    try:
-        detail = get_run(run_id)
-    except Exception as exc:  # noqa: BLE001
-        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
-        return
-    if not detail.script:
-        ui.notify("No generated script on this run.", type="warning")
-        return
-
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
-            dialog.props("maximized")
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(
-                    dialog,
-                    f"Generated script — {run_id}",
-                    lambda: _copy_to_clipboard(
-                        f"Prompt:\n{detail.prompt or ''}\n\n"
-                        f"Validated prompt:\n{detail.validated_prompt or ''}\n\n"
-                        f"Script:\n{detail.script}",
-                        "Copy all",
-                    ),
-                )
-                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    with ui.row().classes("w-full items-center justify-between shrink-0"):
-                        ui.label("Prompt").classes("text-subtitle1 text-grey-7")
-                        _copy_to_clipboard(detail.prompt or "", "Copy prompt")
-                    ui.textarea(value=detail.prompt or "").classes("w-full font-mono shrink-0").props(
-                        "readonly outlined autogrow"
-                    ).style("min-height: 80px")
-                    if detail.validated_prompt:
-                        with ui.row().classes("w-full items-center justify-between shrink-0"):
-                            ui.label("Validated prompt").classes("text-subtitle1 text-grey-7")
-                            _copy_to_clipboard(detail.validated_prompt, "Copy validated prompt")
-                        ui.textarea(value=detail.validated_prompt).classes("w-full font-mono shrink-0").props(
-                            "readonly outlined autogrow"
-                        ).style("min-height: 80px")
-                    with ui.row().classes("w-full items-center justify-between shrink-0"):
-                        ui.label("Script").classes("text-subtitle1 text-grey-7")
-                        _copy_to_clipboard(detail.script, "Copy script")
-                    ui.code(detail.script, language="python").classes("w-full shrink-0")
-                _footer_close(dialog)
+                footer_close(dialog)
     dialog.open()
 
 
@@ -1156,7 +1045,7 @@ def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").style("min-width: 600px; height: 85dvh"):
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Changes — {row['title']}")
+                modal_header(dialog, f"Changes — {row['title']}")
                 ui.label(f"sharedId {row['shared_id']}").classes("text-caption text-grey-7")
                 columns = [
                     {"name": "property", "label": "Property", "field": "property", "align": "left", "sortable": True},
@@ -1191,7 +1080,7 @@ def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
                         </q-td>
                         """,
                     )
-                _footer_close(dialog)
+                footer_close(dialog)
     dialog.open()
 
 
@@ -1206,14 +1095,14 @@ def _segmentation_dialog(row: dict[str, Any]) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Document segmentation — {row['title']}")
+                modal_header(dialog, f"Document segmentation — {row['title']}")
                 body = ui.column().classes("w-full grow").style("overflow-y: auto")
                 with body:
                     ui.linear_progress(show_value=False).classes("w-full")
                     ui.label(f"Fetching segmentation for {row['shared_id']} ({row['language_raw']})…").classes(
                         "text-body2 text-grey-7"
                     )
-                _footer_close(dialog)
+                footer_close(dialog)
                 background_tasks.create(_load_segmentation(body, row), name=f"segmentation {row['shared_id']}")
     dialog.open()
 
@@ -1247,101 +1136,6 @@ def _render_segmentation_error(body: Any, exc: Exception) -> None:
     body.clear()
     with body:
         ui.label(f"{type(exc).__name__}: {exc}").classes("text-body2 text-red-10").style("white-space: pre-wrap")
-
-
-def _results_dialog(run_id: str) -> None:
-    """Modal: the run's execution results — its `result` value and touch-set.
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it — same pattern as ``_script_dialog``. Reads
-    the manifest's touch-set via ``get_run_results``; a run with no touch-set
-    (never executed) shows an empty state. The script's `result` value (the
-    answer for a query task, or the summary for a mutation task) is shown first.
-
-    Each entity row shows its title (with an open-in-Uwazi icon), a summary of
-    the properties the run changed (with a button opening the before/after list),
-    the row language, and a button that fetches that entity's document
-    segmentation on demand. Titles and diffs come from run data only; the
-    segmentation is the single live fetch, and only when asked for.
-
-    The dialog is maximized (top to bottom): the result + summary + section
-    tables fill the space between a pinned title and a pinned footer, scrolling
-    internally so the Close button is always visible.
-    """
-    try:
-        results = get_run_results(run_id)
-    except Exception as exc:  # noqa: BLE001
-        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
-        return
-
-    writes_by_sid: dict[str, list[Any]] = {}
-    for write in results.applied_writes:
-        writes_by_sid.setdefault(write.shared_id, []).append(write)
-
-    def _on_changes(e: Any) -> None:
-        row = e.args
-        changes = _merge_changes(writes_by_sid.get(row["shared_id"], []))
-        if not changes:
-            ui.notify("No property changes recorded for this entity.", type="warning")
-            return
-        _changes_dialog(row, changes)
-
-    def _on_segmentation(e: Any) -> None:
-        _segmentation_dialog(e.args)
-
-    def _section(title: str, entities: list[Any], **kwargs: Any) -> None:
-        table = _entity_section(title, entities, writes_by_sid, results.titles, **kwargs)
-        if table is None:
-            return
-        table.on("changes", _on_changes)
-        table.on("segmentation", _on_segmentation)
-
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
-            dialog.props("maximized")
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _modal_header(dialog, f"Run results — {run_id}")
-                with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    if results.result is not None:
-                        ui.label("Result").classes("text-subtitle1 text-grey-7 shrink-0")
-                        ui.label(results.result).classes(
-                            "w-full font-mono text-body2 rounded-borders q-pa-sm shrink-0"
-                        ).style(
-                            "white-space: pre-wrap; word-break: break-word; "
-                            "max-height: 320px; overflow-y: auto; background: rgba(0,0,0,0.03)"
-                        )
-                        ui.separator().classes("shrink-0")
-                    counts = [
-                        ("Modified", len(results.modified)),
-                        ("Created", len(results.created)),
-                        ("Deleted", len(results.deleted)),
-                        ("Rewired", len(results.rewired)),
-                        ("Files deleted", len(results.deleted_files)),
-                    ]
-                    with ui.row().classes("w-full q-mb-md gap-3 no-wrap items-stretch shrink-0"):
-                        for label, count in counts:
-                            with (
-                                ui.column()
-                                .classes("items-center justify-center grow rounded-borders q-pa-sm")
-                                .style("border: 1px solid rgba(0,0,0,0.12); min-width: 0")
-                            ):
-                                ui.label(str(count)).classes("text-h5")
-                                ui.label(label).classes("text-caption text-grey-7 text-center")
-                    if not any(c for _, c in counts) and results.result is None:
-                        ui.label("No results recorded on this run.").classes("text-grey-7 q-pa-md")
-                    _section("Modified entities", results.modified)
-                    _section("Created entities", results.created)
-                    _section(
-                        "Deleted entities",
-                        results.deleted,
-                        include_restored=True,
-                        show_changes=False,
-                        show_segmentation=False,
-                    )
-                    _rewired_section(results.rewired)
-                    _files_section(results.deleted_files)
-                _footer_close(dialog)
-    dialog.open()
 
 
 def _delete_dialog(run_id: str) -> None:
@@ -1396,7 +1190,7 @@ def _logs_dialog() -> None:
                     ui.label("Service Logs").classes("text-h6")
                     with ui.row().classes("items-center no-wrap"):
                         ui.button("Refresh", icon="refresh", on_click=lambda: _refresh_logs(log_area)).props("flat dense")
-                        _close_button(dialog, dense=True)
+                        close_button(dialog, dense=True)
                 log_area = (
                     ui.textarea().classes("w-full grow font-mono text-caption").props("readonly").style("min-height: 0")
                 )
@@ -1406,7 +1200,7 @@ def _logs_dialog() -> None:
 
                 _refresh_logs(log_area)
                 ui.timer(1.0, lambda: _refresh_logs(log_area))
-                _footer_close(dialog)
+                footer_close(dialog)
         dialog.open()
 
 
@@ -1438,13 +1232,13 @@ def _capabilities_dialog() -> None:
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 with ui.row().classes("w-full items-center justify-between q-mb-md"):
                     ui.label("Example Tasks").classes("text-h6")
-                    _close_button(dialog, dense=True)
+                    close_button(dialog, dense=True)
                 with ui.column().classes("w-full grow q-pr-md").style("overflow-y: auto"):
                     for title, prompt in _EXAMPLE_TASKS:
                         with ui.card().classes("w-full"):
                             ui.label(title).classes("text-subtitle1 text-bold")
                             ui.label(prompt).classes("text-body2 text-grey-7")
-                _footer_close(dialog)
+                footer_close(dialog)
         dialog.open()
 
 
@@ -1459,7 +1253,7 @@ def _clear_cache_dialog() -> None:
     """
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-            _modal_header(dialog, "Clear cache")
+            modal_header(dialog, "Clear cache")
             ui.label(
                 "Clear the persistent file/entity cache? The next task will "
                 "re-fetch entity data and file bytes from Uwazi instead of "
@@ -1528,14 +1322,14 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
-        _modal_header(dialog, "New task")
+        modal_header(dialog, "New task")
         with ui.stepper() as stepper:
             state["_dialog"] = dialog
             state["_stepper"] = stepper
             _wizard_step_details(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
-        _footer_close(dialog)
+        footer_close(dialog)
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
@@ -1960,8 +1754,6 @@ def _build_page() -> None:
             ui.icon("link", color="secondary").classes("q-mr-xs")
             ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
             with ui.row().classes("items-center q-ml-md"):
-                new_task_button = ui.button("New Task", icon="add", on_click=_new_task_wizard).props("flat color=secondary")
-                context.client._new_task_button = new_task_button  # noqa: SLF001 — per-client busy disable
                 with ui.button(icon="menu").props("flat round color=secondary"):
                     with ui.menu():
                         ui.menu_item("Logs", _logs_dialog)
@@ -1981,6 +1773,8 @@ def _build_page() -> None:
         )
         context.client._busy_banner = busy_banner  # noqa: SLF001 — per-client busy banner
         with ui.card().classes("w-full max-w-6xl"):
+            # The row above the table: bulk Delete over the checkbox selection + New Task.
+            _selection_toolbar()
             table = _build_runs_table()
             context.client._runs_table = table  # noqa: SLF001 — per-client handle for in-place refresh
     _build_row_menu()

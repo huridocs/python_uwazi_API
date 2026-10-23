@@ -129,7 +129,7 @@ class MigrationManifest(BaseModel):
         default_factory=list,
         description=(
             "Every write the script actually applied, with its before-state — the "
-            "results window's per-entity property diff source. Recorded by BackupIntercept "
+            "per-entity property diff source for the run's backup/audit data. Recorded by BackupIntercept "
             "from the payload the script sent, so the diff needs no HTTP call and no "
             "snapshot parsing. Empty for runs executed before this field existed."
         ),

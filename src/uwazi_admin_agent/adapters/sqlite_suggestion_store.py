@@ -42,6 +42,7 @@ from uwazi_admin_agent.domain.review_refresh import (
     suggestion_identity,
 )
 from uwazi_admin_agent.domain.suggestion import (
+    INFO_OP,
     EntityReviewRow,
     OperationReviewRow,
     PredictionAttempt,
@@ -982,12 +983,13 @@ class SqliteSuggestionStore(SuggestionStorePort):
         The table's whole-result selection ("select all results") spans every
         page, so the Run/Discard/Revert actions cannot read the identity from
         the page payload. This is a projection, not a page: limit/offset are
-        deliberately ignored, exactly like :meth:`shared_ids`.
+        deliberately ignored, exactly like :meth:`shared_ids`. Display-only
+        ``info`` rows are excluded: they can never be selected or run.
         """
         where, params = build_where(f, run_id, attempt)
         rows = self._query(
-            f"SELECT id, shared_id, language, op FROM suggestion WHERE {where} ORDER BY id",
-            params,
+            f"SELECT id, shared_id, language, op FROM suggestion WHERE {where} AND op != ? ORDER BY id",
+            [*params, INFO_OP],
         )
         return [(int(row["id"]), str(row["shared_id"]), row["language"], str(row["op"])) for row in rows]
 
@@ -1203,7 +1205,10 @@ class SqliteSuggestionStore(SuggestionStorePort):
 
     def shared_ids(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[str]:
         where, params = build_where(f, run_id, attempt)
-        rows = self._query(f"SELECT DISTINCT shared_id FROM suggestion WHERE {where} ORDER BY shared_id", params)
+        rows = self._query(
+            f"SELECT DISTINCT shared_id FROM suggestion WHERE {where} AND op != ? ORDER BY shared_id",
+            [*params, INFO_OP],
+        )
         return [str(row["shared_id"]) for row in rows]
 
     def entity_languages(self, run_id: str, attempt: int, f: SuggestionFilter) -> list[tuple[str, str | None]]:
@@ -1212,18 +1217,19 @@ class SqliteSuggestionStore(SuggestionStorePort):
         The entity window's Previous/Next walk THIS list, not the distinct
         sharedIds: the table's rows are per language, so a translation task's
         entity is one stop per language and navigation must land on the next
-        row, not the next entity.
+        row, not the next entity. ``info`` rows are display-only and name no
+        entity, so they are excluded.
         """
         where, params = build_where(f, run_id, attempt)
         rows = self._query(
             f"""
             SELECT shared_id, language, MIN(id) AS first_id
             FROM suggestion
-            WHERE {where}
+            WHERE {where} AND op != ?
             GROUP BY shared_id, language
             ORDER BY first_id
             """,
-            params,
+            [*params, INFO_OP],
         )
         return [(str(row["shared_id"]), row["language"]) for row in rows]
 

@@ -973,9 +973,10 @@ def _build_translate_text_real_helper(translation_port: TranslationPort | None, 
     verbatim, so the applied metadata is already marked.
 
     Raises :class:`~uwazi_api.domain.exceptions.TranslationError` on failure —
-    translation is NOT best-effort: a script asking for a translation of a
-    value must either get the genuine translation or fail the pass (a silent
-    unmarked fallback would write valueless text). Unwired ``translation_port``
+    never substitute unmarked source text for a failed translation. The raise is
+    PER CALL so the generated script can catch it for that one entity, skip the
+    row, record the failure, and keep the rest of the pass (see the system
+    prompt's PER-ENTITY FAILURE ISOLATION rule). Unwired ``translation_port``
     -> a stub that raises a clear ``RuntimeError`` when the script calls it.
     """
     if translation_port is None:
@@ -1050,6 +1051,7 @@ def build_exec_namespace(
         "query_entities_full": _sync_full_entities_factory(dummy_entities, scope),
         **scoped,
         **_dummy_parallel_helpers(scoped, scope),
+        "add_info": _noop_add_info,
         "move_files_to_entity": _move_files_noop_scoped(scope),
         "get_entity_files": _get_entity_files_noop_scoped(scope),
         "get_file_bytes": _get_file_bytes_noop(),
@@ -1317,6 +1319,18 @@ def _real_full_entities_factory(
     return query_entities_full
 
 
+def _noop_add_info(title: str, children: list | tuple | str | None = None) -> dict:
+    """A record-free ``add_info`` for namespaces that build no review table.
+
+    The dummy-validation and real-exec namespaces bind the same helper names as
+    the dry-run planner so a generated script never fails on a missing name.
+    Those paths have no suggestion store to write to, so the text is simply
+    accepted (it has no effect on Uwazi either way).
+    """
+    del title, children
+    return {"success": True}
+
+
 def build_real_exec_namespace(
     entity_api: EntityApiPort,
     relationship_api: RelationshipApiPort | None,
@@ -1384,6 +1398,7 @@ def build_real_exec_namespace(
         "query_entities_full": _real_full_entities_factory(entity_api, loop),
         **intercept.decorate(crud),
         **build_parallel_write_helpers(entity_api, relationship_api, intercept, tool_cache, default_language, executor),
+        "add_info": _noop_add_info,
         "move_files_to_entity": _build_move_files_real_helper(entity_repository, file_repository, loop, default_language),
         **build_parallel_move_files_helper(entity_repository, file_repository, default_language, executor),
         **build_parallel_file_cleanup_helper(entity_repository, file_repository, intercept, default_language, executor),
@@ -1407,12 +1422,17 @@ def build_real_exec_namespace(
 
 
 def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build the 7 write helpers for the dry-run namespace: recorders, no I/O.
+    """Build the write helpers for the dry-run namespace: recorders, no I/O.
 
     Each helper appends one record per operation into the shared ``records``
     list and returns the same success-shaped value the real helpers return, so
     an identical script runs to completion. Nothing is sent to Uwazi: this is
     the dry-run write boundary (real reads, recorded writes).
+
+    ``add_info`` is the display-only exception: it records the text a script
+    wants the operator to READ (a query answer, a result summary) rather than a
+    would-be write. The review table renders it as a two-level info operation
+    with no action buttons.
 
     The returned dict ALSO carries the records list itself under the
     underscore-prefixed key ``_dry_run_records`` (the namespace convention for
@@ -1484,6 +1504,36 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
             records.append({"op": "create_relationships", **r})
         return [{"success": True} for _ in relationships_dicts]
 
+    info_count = 0
+
+    def add_info(title: str, children: list | tuple | str | None = None) -> dict:
+        """Record arbitrary result text for the review table (no Uwazi write).
+
+        ``title`` is the operation row's text; ``children`` (optional) is a
+        list of detail lines rendered as its two-level suboperations. A single
+        string is accepted as one child. Everything is coerced to text because
+        the review table displays it verbatim.
+        """
+        nonlocal info_count
+        if children is None:
+            child_list: list[Any] = []
+        elif isinstance(children, (list, tuple)):
+            child_list = list(children)
+        else:
+            child_list = [children]
+        shared_id = f"info-{info_count}"
+        records.append(
+            {
+                "op": "info",
+                "shared_id": shared_id,
+                "title": "" if title is None else str(title),
+                "children": ["" if child is None else str(child) for child in child_list],
+            }
+        )
+        info_count += 1
+        logger.info("dry-run record: add_info {}", shared_id)
+        return {"success": True, "shared_id": shared_id}
+
     return {
         "create_entities": create_entities,
         "update_entities": update_entities,
@@ -1492,6 +1542,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         "unpublish_entities": unpublish_entities,
         "set_publish_status": set_publish_status,
         "create_relationships": create_relationships,
+        "add_info": add_info,
         "_dry_run_records": records,
     }
 

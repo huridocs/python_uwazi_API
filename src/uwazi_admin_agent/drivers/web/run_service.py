@@ -303,7 +303,7 @@ def _resolve_titles(store: BackupStorePort, run_id: str, manifest: MigrationMani
 
 
 async def get_entity_segmentation(user: str, password: str, shared_id: str, language: str) -> Segmentation:
-    """Fetch one entity's primary-document segmentation (the results window's viewer).
+    """Fetch one entity's primary-document segmentation (the entity window's viewer).
 
     Resolves the entity's document for ``language`` on the controlled instance and
     returns its segmentation. The repository is the runtime's cache-wrapped
@@ -1063,6 +1063,7 @@ async def apply_outcomes(
     password: str,
     selection: list[tuple[str, str | None]],
     row_ids: list[int] | None = None,
+    progress: Any | None = None,
 ) -> list[str]:
     """Execute the selected entities' rows into Uwazi (revertable).
 
@@ -1083,6 +1084,8 @@ async def apply_outcomes(
     ``row_ids`` narrows the Run to the checked SUBOPERATIONS (the table's
     per-property rows): running one property of one entity-language group
     writes exactly that property and leaves its siblings pending.
+    ``progress`` is the optional ``(done, total)`` callback the gate's toast
+    polls — the SUBOPERATION fraction the operator watches while it runs.
 
     Raises :class:`ApplyRefusedError` when there is nothing to run.
     """
@@ -1092,7 +1095,7 @@ async def apply_outcomes(
     def _work() -> list[str]:
         runtime = build_runtime(user=user, password=password)
         use_case = _apply_use_case(runtime)
-        use_case.apply(run_id, _current_attempt_number(run_id), selection, row_ids)
+        use_case.apply(run_id, _current_attempt_number(run_id), selection, row_ids, progress=progress)
         return [run_id]
 
     return await asyncio.to_thread(_work)
@@ -1337,6 +1340,7 @@ async def revert_entities_selection(
     selection: list[tuple[str, str | None]],
     user: str,
     password: str,
+    progress: Any | None = None,
 ) -> BulkRevertOutcome:
     """Revert the CHECKED rows' entities to their single first-touch backup.
 
@@ -1353,6 +1357,9 @@ async def revert_entities_selection(
     are ordered run-level operations that only the run-level Revert performs.
     No-backup entities are skipped too. Per-entity failures are collected: one
     bad restore neither aborts the batch nor hides the restores that landed.
+    ``progress`` is the optional ``(done, total)`` callback the gate's toast
+    polls: one tick per DISTINCT entity attempted, skipped or not, so the
+    fraction always reaches its total.
 
     Raises nothing for empty selection — the caller guards it.
     """
@@ -1366,7 +1373,7 @@ async def revert_entities_selection(
     runtime = build_runtime(user=user, password=password)
     store = build_suggestion_store()
     reverted: list[str] = []
-    for shared_id in seen:
+    for index, shared_id in enumerate(seen):
         try:
             snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
         except RevertRefusedError as exc:
@@ -1376,16 +1383,23 @@ async def revert_entities_selection(
                 outcome.skipped_deleted.append(shared_id)
             else:
                 outcome.skipped_created.append(shared_id)
-            continue
         except Exception as exc:  # noqa: BLE001 — one bad restore must not lose the rest
             logger.warning("bulk revert failed run={} sharedId={}: {}", run_id, shared_id, exc)
             outcome.failures.append(f"{shared_id}: {exc}")
-            continue
-        if snapshot is None:
-            outcome.skipped_no_backup.append(shared_id)
-            continue
-        reverted.append(shared_id)
-        logger.info("bulk revert: restored run={} sharedId={}", run_id, shared_id)
+        else:
+            if snapshot is None:
+                outcome.skipped_no_backup.append(shared_id)
+            else:
+                reverted.append(shared_id)
+                logger.info("bulk revert: restored run={} sharedId={}", run_id, shared_id)
+        # One tick per ATTEMPTED entity — skipped and failed included, so the
+        # fraction always reaches its total. Progress is display state, never
+        # an error state: a broken callback cannot fail a restore.
+        if progress is not None:
+            try:
+                progress(index + 1, len(seen))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not report revert progress: {}", exc)
     outcome.reverted.extend(reverted)
     if reverted and hasattr(store, "mark_applied_reverted_for"):
         # Flip only the RESTORED entities' rows: an unselected sibling entity

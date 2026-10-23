@@ -570,3 +570,16 @@ def test_prompt_explains_subset_scoping_via_discovery() -> None:
     prompt must say so — otherwise a script with hardcoded ids is unknowingly
     unscopable and the operator's cost estimate is wrong."""
     assert "records only that slice's rows" in SYSTEM_PROMPT
+
+
+def test_prompt_isolates_per_entity_failures() -> None:
+    """One entity's failure must not abort the whole pass. The prompt must pin
+    the per-entity try/except pattern, forbid an untranslated fallback, keep the
+    batched write outside the loop, and require the failures be reported."""
+    assert "PER-ENTITY FAILURE ISOLATION" in SYSTEM_PROMPT
+    assert "one bad entity must NOT lose the whole pass" in SYSTEM_PROMPT
+    assert 'failed.append((d["shared_id"], str(exc)))' in SYSTEM_PROMPT
+    assert 'add_info(f"{len(failed)} entities failed"' in SYSTEM_PROMPT
+    assert "NEVER fall back to the" in SYSTEM_PROMPT
+    assert "Do NOT wrap discovery" in SYSTEM_PROMPT
+    assert "must propagate" in SYSTEM_PROMPT  # LLM budget halts are not entity failures

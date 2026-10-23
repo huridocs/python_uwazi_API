@@ -1,6 +1,6 @@
-"""Pure before/after rendering of an :class:`AppliedWrite` (§ results window).
+"""Pure before/after rendering of an :class:`AppliedWrite` (result-row diffs).
 
-The results window shows, per touched entity, which properties a run changed.
+The diff shows, per touched entity, which properties a run changed.
 The raw material is one :class:`~uwazi_admin_agent.domain.manifest.AppliedWrite`
 — recorded by the backup intercept from the exact payload the generated script
 sent, paired with the before-values of only the keys that payload touched. This

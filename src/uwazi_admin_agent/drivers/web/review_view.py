@@ -47,6 +47,7 @@ OP_COLORS: dict[str, str] = {
     "create_relationships": "purple",
     "update_and_delete": "deep-purple",
     "create_and_delete": "indigo",
+    "info": "blue-grey",
 }
 
 MATCH_COLORS: dict[str, str] = {"exact": "green", "mismatch": "red", "new": "grey-6", "mixed": "orange", "n/a": "grey-4"}
@@ -62,6 +63,7 @@ RUN_STATUS_COLORS: dict[str, str] = {
     "pending": "grey",
     "discarded": "red",
     "obsolete": "grey-6",
+    "info": "blue-grey",
 }
 
 
@@ -251,7 +253,7 @@ def full_value(value: Any) -> str:
 # the title itself keeps the whole budget.
 TITLE_CELL_CHARS: int = 97
 
-# Column widths (CSS px) for the review table's fixed columns. The Entity column
+# Column widths (CSS px) for the review table's fixed columns. The Target column
 # takes whatever is left and absorbs the shrink; naming the rest here is what
 # stops a long Template/Status cell from widening the table past its container.
 LANGUAGE_COLUMN: str = "width: 84px"
@@ -260,7 +262,7 @@ OPS_COLUMN: str = "width: 190px"
 STATUS_COLUMN: str = "width: 110px"
 # Four flat icon buttons (Discard/Undo, Revert, Run, Edit) at ~32px each.
 ACTIONS_COLUMN: str = "width: 150px"
-# The Entity column takes the remainder: ``max-width: 0`` is what lets the column
+# The Target column takes the remainder: ``max-width: 0`` is what lets the column
 # actually shrink under the browser's default table layout (a bare percentage does
 # not), and the cell's link carries the ellipsis.
 TITLE_COLUMN: str = "max-width: 0; width: 100%"
@@ -425,8 +427,8 @@ def run_status(item: EntityReviewRow) -> tuple[str, str]:
 def entity_open_url(item: EntityReviewRow, uwazi_url: str | None) -> str | None:
     """The instance's public page for this entity, or None when it has none.
 
-    Uwazi serves an entity at ``/<language>/entity/<sharedId>``, the same URL
-    the results window links from — and the ``<language>`` segment is the ROW's
+    Uwazi serves an entity at ``/<language>/entity/<sharedId>`` — the same URL
+    form the entity window uses — and the ``<language>`` segment is the ROW's
     language, so a translated row opens the entity as that language. A
     language-independent row (``None``) has no locale to ask for, so it opens the
     default one. None — and so no icon — when ``UWAZI_URL`` is not configured, or
@@ -578,6 +580,15 @@ def drift_banner_time(checked_at: Any) -> str:
         return ""
 
 
+def section_toggle_label(section: str, visible: bool) -> str:
+    """The label of a section's show/hide button (pure).
+
+    The button states what the click WILL do: a hidden section's button offers
+    to show it, a visible one's offers to hide it again.
+    """
+    return f"Hide {section}" if visible else f"Show {section}"
+
+
 def table_update_label(updated_at: Any) -> str:
     """The last-table-update label shown beside the update button (pure)."""
     if updated_at is None:
@@ -629,6 +640,7 @@ __all__ = [
     "run_button_label",
     "run_confirmation",
     "run_status",
+    "section_toggle_label",
     "select_all_label",
     "selection_count",
     "suggestion_to_row",
