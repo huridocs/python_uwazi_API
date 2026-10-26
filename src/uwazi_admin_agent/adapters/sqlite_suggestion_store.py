@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     current_value TEXT,
     match_state INTEGER,
     merge_source_ids TEXT,
+    merge_files TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     edited_value TEXT,
     discard_reason TEXT,
@@ -302,6 +303,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         current_value=_value_from_json(row["current_value"]),
         match=None if match_state is None else bool(match_state),
         merge_source_ids=_value_from_json(row["merge_source_ids"]) or [],
+        merge_files=_value_from_json(row["merge_files"]) or [],
         status=SuggestionStatus(row["status"]),
         edited_value=row["edited_value"],
         discard_reason=row["discard_reason"],
@@ -354,6 +356,10 @@ class SqliteSuggestionStore(SuggestionStorePort):
           pass re-records it.
         - ``merge_source_ids`` — the source entities a merge row deletes. Legacy
           rows read NULL, which the model turns into an empty list (no merge).
+        - ``merge_files`` — the source files a merge row would copy onto its
+          target, recorded by the dry run for display. Legacy rows read NULL,
+          which the model turns into an empty list (the review then falls back
+          to a per-source move row).
         - ``detail_key`` — what distinguishes two rows that are otherwise the
           same change. It is the link target for a ``create_relationships`` row,
           so a batch of links is one row PER LINK instead of one row carrying
@@ -379,6 +385,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN language TEXT")
             if "merge_source_ids" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_source_ids TEXT")
+            if "merge_files" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_files TEXT")
             if "detail_key" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN detail_key TEXT")
             self._migrate_attempts_to_single_pass()
@@ -519,6 +527,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 _json_or_none(s.current_value),
                 None if s.match is None else (1 if s.match else 0),
                 _json_or_none(s.merge_source_ids) if s.merge_source_ids else None,
+                _json_or_none(s.merge_files) if s.merge_files else None,
                 s.status.value,
                 s.edited_value,
                 s.discard_reason,
@@ -533,9 +542,9 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 """
                 INSERT INTO suggestion
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
-                     detail_key, proposed_value, current_value, match_state, merge_source_ids, status,
-                     edited_value, discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     detail_key, proposed_value, current_value, match_state, merge_source_ids,
+                     merge_files, status, edited_value, discard_reason, reviewed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
@@ -544,7 +553,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     proposed_value = excluded.proposed_value,
                     current_value = excluded.current_value,
                     match_state = excluded.match_state,
-                    merge_source_ids = excluded.merge_source_ids
+                    merge_source_ids = excluded.merge_source_ids,
+                    merge_files = excluded.merge_files
                 """,
                 rows,
             )
@@ -574,12 +584,15 @@ class SqliteSuggestionStore(SuggestionStorePort):
         ``entity_scope`` narrows the merge to the entities the pass covered
         (None = the whole run). A scope-limited pass says NOTHING about the
         entities it never visited, so their rows are left exactly as they are —
-        only the rows of the covered entities can be retired.
+        only the rows of the covered entities can be retired. INFO rows are the
+        exception: their synthetic ``info-N`` id names no entity, and the pass
+        always re-decides them, so a scoped refresh can retire a stale info row
+        instead of leaving it in the table forever.
         """
         scope = set(entity_scope) if entity_scope is not None else None
         existing = self._query("SELECT * FROM suggestion WHERE run_id = ?", (run_id,))
         if scope is not None:
-            existing = [row for row in existing if str(row["shared_id"]) in scope]
+            existing = [row for row in existing if str(row["op"]) == INFO_OP or str(row["shared_id"]) in scope]
         incoming_by_key: dict[tuple[str, str, str, str, str], Suggestion] = {}
         for suggestion in suggestions:
             incoming_by_key[identity_of(suggestion)] = suggestion
@@ -624,6 +637,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 or old["template_name"] != suggestion.template_name
                 or _value_from_json(old["current_value"]) != suggestion.current_value
                 or old_match != new_match
+                or (_value_from_json(old["merge_files"]) or []) != suggestion.merge_files
             ):
                 refreshed += 1
             updates.append(
@@ -634,6 +648,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     _json_or_none(suggestion.current_value),
                     new_match,
                     _json_or_none(suggestion.merge_source_ids) if suggestion.merge_source_ids else None,
+                    _json_or_none(suggestion.merge_files) if suggestion.merge_files else None,
                     status.value,
                     edited_value,
                     discard_reason,
@@ -661,6 +676,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                         old["current_value"],
                         old["match_state"],
                         old["merge_source_ids"],
+                        old["merge_files"],
                         status.value,
                         None if status is not SuggestionStatus.EDITED else old["edited_value"],
                         None if status is not SuggestionStatus.DISCARDED else old["discard_reason"],
@@ -676,7 +692,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     UPDATE suggestion
                        SET entity_title = ?, template_name = ?, proposed_value = ?,
                            current_value = ?, match_state = ?, merge_source_ids = ?,
-                           status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?
+                           merge_files = ?, status = ?, edited_value = ?, discard_reason = ?,
+                           reviewed_at = ?
                      WHERE id = ?
                     """,
                     updates,
@@ -1053,15 +1070,26 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 entry["templates"].append(str(template))
         return fields
 
-    def get_entity(self, run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
+    def get_entity(
+        self,
+        run_id: str,
+        shared_id: str,
+        language: str | None = None,
+        f: SuggestionFilter | None = None,
+    ) -> list[Suggestion]:
         """Every suggestion for one entity IN ONE LANGUAGE group (the entity window).
 
         The entity window opens a (entity, language) row, so it reads that
         group's rows and no other: a ``es`` row shows the ``es`` values only, and
         the language-independent group (``language=None`` — selects, titles,
         whole-entity ops) is read with ``language IS NULL``.
+
+        ``f`` carries the review table's current filter, so the window lists the
+        same properties the table does. The entity and language predicates are
+        added on top of it; the filter's pagination window is ignored by
+        :func:`build_where`.
         """
-        where, params = build_where(SuggestionFilter(), run_id)
+        where, params = build_where(f or SuggestionFilter(), run_id)
         params.append(shared_id)
         if language is None:
             clause = f"{where} AND shared_id = ? AND language IS NULL"
@@ -1251,6 +1279,24 @@ class SqliteSuggestionStore(SuggestionStorePort):
             [*params, INFO_OP],
         )
         return [str(row["shared_id"]) for row in rows]
+
+    def file_operation_rows(self, run_id: str) -> list[Suggestion]:
+        """Rows carrying merge/move sources + their recorded files (see the port)."""
+        rows = self._query(
+            """
+            SELECT * FROM suggestion
+             WHERE run_id = ?
+               AND (ifnull(merge_source_ids, '') != '' OR ifnull(merge_files, '') != '')
+               AND status NOT IN (?, ?)
+             ORDER BY id
+            """,
+            (
+                run_id,
+                SuggestionStatus.OBSOLETE.value,
+                SuggestionStatus.DISCARDED.value,
+            ),
+        )
+        return [_row_to_suggestion(row) for row in rows]
 
     def entity_languages(self, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
         """Every (sharedId, language) pair matching a filter, in first-appearance order.

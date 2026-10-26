@@ -28,6 +28,8 @@ from uwazi_admin_agent.domain.property_language_scope import is_per_language_pro
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
     INFO_OP,
+    MERGE_OPS,
+    MOVE_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
@@ -44,15 +46,62 @@ _WHOLE_ENTITY_OPS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True)
 class MergeOperation:
-    """One scripted merge: a target write plus the sources deleted by that write.
+    """One scripted merge: a target absorbing the sources deleted by the move.
 
     ``target_op`` is the base record op the target was written with (``update``
-    or ``create``) — it decides which of the two merge ops the review row gets.
+    or ``create``) — it decides which of the two merge ops the review row gets —
+    and is ``None`` when the script wrote no target metadata (a "just append the
+    files and remove the sources" plan). That case is still ONE atomic action:
+    the file copy and the source deletes belong together, so the review row is a
+    propertyless anchor (see :func:`records_to_suggestions`).
+    ``files`` is the dry run's best-effort snapshot of the uploaded files the
+    move would copy (``from_shared_id`` + the file-ref fields); it is display
+    data only, because the apply path re-reads the live files.
     """
 
     target_shared_id: str
-    target_op: str
+    target_op: str | None
     source_shared_ids: tuple[str, ...]
+    files: tuple[dict[str, Any], ...] = ()
+
+
+def _merge_files(record: dict[str, Any], sources: list[str]) -> list[dict[str, Any]]:
+    """The file-ref dicts one ``move_files`` record carries for its sources (pure).
+
+    The dry-run mover records what it READ from each source; older scripts (and
+    a pass with no entity repository) record no ``files`` list, which stays an
+    empty list — the review then falls back to a per-source "uploaded files"
+    row instead of claiming file names it never saw.
+    """
+    raw_files = record.get("files")
+    if not isinstance(raw_files, (list, tuple)):
+        return []
+    known_sources = set(sources)
+    files: list[dict[str, Any]] = []
+    for entry in raw_files:
+        if not isinstance(entry, dict):
+            continue
+        source = str(entry.get("from_shared_id") or "")
+        if source and source not in known_sources:
+            continue
+        normalized = {str(key): value for key, value in entry.items()}
+        if source:
+            normalized["from_shared_id"] = source
+        files.append(normalized)
+    return files
+
+
+def _move_sources(record: dict[str, Any], target: str) -> list[str]:
+    """The distinct, non-target source ids one ``move_files`` record names (pure)."""
+    raw_sources = record.get("from_shared_ids")
+    if not isinstance(raw_sources, (list, tuple)):
+        return []
+    sources: list[str] = []
+    for source in raw_sources:
+        source_id = str(source)
+        if source_id and source_id != target and source_id not in sources:
+            sources.append(source_id)
+    return sources
 
 
 def _record_shared_id(record: dict[str, Any], index: int) -> str:
@@ -66,6 +115,10 @@ def _record_shared_id(record: dict[str, Any], index: int) -> str:
     shared_id = str(record.get("shared_id") or "")
     if not shared_id and record.get("op") == "create":
         return f"dry-created-{index}"
+    if not shared_id and record.get("op") == MOVE_OP:
+        # A move addresses its TARGET (the entity that gains the files). The
+        # sources travel in the row's merge_source_ids.
+        return str(record.get("to_shared_id") or "")
     if not shared_id and record.get("op") == INFO_OP:
         return f"info-{index}"
     return shared_id
@@ -74,12 +127,23 @@ def _record_shared_id(record: dict[str, Any], index: int) -> str:
 def merge_operations(records: list[dict[str, Any]]) -> dict[str, MergeOperation]:
     """The merge actions a script's records describe, keyed by target sharedId (pure).
 
-    A merge script writes the target (``update_entities``/``create_entities``),
-    moves the sources' files to it (``move_files``), then deletes the sources.
-    The file move is the composition's explicit grouping signal: its
+    A merge script writes the target (``update_entities``/``create_entities``)
+    **or not**, moves the sources' files to it (``move_files``), then deletes the
+    sources. The file move is the composition's explicit grouping signal: its
     ``to_shared_id`` names the target and its ``from_shared_ids`` the sources.
-    Only a target that ALSO has an update/create record is a merge — a bare
-    move+delete stays an ordinary delete plan, because no target is written.
+
+    What makes a merge is the file move PLUS a delete for EVERY moved source:
+    the copy and the deletes are one atomic action, and running the deletes
+    without the copy would throw the sources' files away. A target write is
+    optional — "append these files and remove the sources" with no metadata
+    change is still one operation (a propertyless anchor), not a copy row plus
+    separate delete rows the operator could run in the wrong order.
+
+    A move without a source delete is a plain file copy (the operator asked to
+    keep the source) — never a merge. Treating that as a merge would delete a
+    source the script never asked to delete. A move that deletes only SOME
+    sources is also not a merge: the kept sources still need their files copied,
+    so the plan stays an explicit copy row plus the requested delete rows.
 
     Several moves/targets in one script (a multi-group merge) yield one entry
     per target, preserving the script's move order.
@@ -87,10 +151,12 @@ def merge_operations(records: list[dict[str, Any]]) -> dict[str, MergeOperation]
     normalized: list[tuple[dict[str, Any], str]] = [
         (record, _record_shared_id(record, index)) for index, record in enumerate(records)
     ]
+    deleted_ids = {shared_id for record, shared_id in normalized if str(record.get("op") or "") == "delete" and shared_id}
     sources_by_target: dict[str, list[str]] = {}
+    move_records_by_target: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
     for record, _shared_id in normalized:
-        if record.get("op") != "move_files":
+        if record.get("op") != MOVE_OP:
             continue
         target = str(record.get("to_shared_id") or "")
         raw_sources = record.get("from_shared_ids")
@@ -98,7 +164,9 @@ def merge_operations(records: list[dict[str, Any]]) -> dict[str, MergeOperation]
             continue
         if target not in sources_by_target:
             sources_by_target[target] = []
+            move_records_by_target[target] = []
             order.append(target)
+        move_records_by_target[target].append(record)
         for source in raw_sources:
             source_id = str(source)
             if source_id and source_id != target and source_id not in sources_by_target[target]:
@@ -112,26 +180,50 @@ def merge_operations(records: list[dict[str, Any]]) -> dict[str, MergeOperation]
         # First target record wins; a normal merge has exactly one.
         target_ops.setdefault(shared_id, op)
 
-    return {
-        target: MergeOperation(
+    merges: dict[str, MergeOperation] = {}
+    for target in order:
+        sources = sources_by_target[target]
+        if not sources or target in deleted_ids:
+            # Nothing moved, or the "target" is itself being deleted: no merge.
+            continue
+        if any(source not in deleted_ids for source in sources):
+            # The script moved files from a source but did not delete it: the
+            # operator wants the source kept, so this is a file copy, not a
+            # merge. The target update (if any) stays a normal update row and
+            # the move becomes its own row (see records_to_suggestions).
+            continue
+        files: list[dict[str, Any]] = []
+        seen_files: set[tuple[str, str, str]] = set()
+        for record in move_records_by_target[target]:
+            for file in _merge_files(record, sources):
+                identity = (
+                    str(file.get("from_shared_id") or ""),
+                    str(file.get("kind") or ""),
+                    str(file.get("file_id") or file.get("filename") or file.get("originalname") or ""),
+                )
+                if identity in seen_files:
+                    continue
+                seen_files.add(identity)
+                files.append(file)
+        merges[target] = MergeOperation(
             target_shared_id=target,
-            target_op=target_ops[target],
-            source_shared_ids=tuple(sources_by_target[target]),
+            target_op=target_ops.get(target),
+            source_shared_ids=tuple(sources),
+            files=tuple(files),
         )
-        for target in order
-        if target in target_ops and sources_by_target[target]
-    }
+    return merges
 
 
 def _as_op(raw: Any) -> SuggestionOp | None:
     """Coerce a record's ``op`` label into a known :data:`SuggestionOp` (None = unknown).
 
-    ``move_files`` and ``delete_file`` records are deliberately NOT suggestions:
-    they are file-collection operations the apply path does not push as entity
-    property values (the dry-run report counts them for the step's implication
-    preview instead). ``info`` IS accepted: it is recorded as a suggestion so
-    the review table can display it, and ``op == INFO_OP`` is what tells every
-    write path to ignore it.
+    ``move_files`` and ``delete_file`` records: ``move_files`` becomes its OWN
+    suggestion when it is not part of a merge (a file copy the operator asked to
+    keep the source for) — otherwise it is collapsed into the merge row.
+    ``delete_file`` records are not suggestions: they are file-collection
+    operations whose undo is a re-upload, not an un-record. ``info`` IS
+    accepted: it is recorded as a suggestion so the review table can display it,
+    and ``op == INFO_OP`` is what tells every write path to ignore it.
     """
     value = str(raw or "")
     if value in (
@@ -142,6 +234,7 @@ def _as_op(raw: Any) -> SuggestionOp | None:
         "unpublish",
         "set_publish_status",
         "create_relationships",
+        MOVE_OP,
         "update_and_delete",
         "create_and_delete",
         INFO_OP,
@@ -271,19 +364,32 @@ def records_to_suggestions(
       sharedId until applied).
     - ``delete`` / ``publish`` / ``unpublish`` / ``set_publish_status`` /
       ``create_relationships``: one row each, ``property_name=None``.
+    - ``move_files`` that is NOT part of a merge: one row on the TARGET entity,
+      carrying the sources in ``merge_source_ids`` and the files it would copy
+      in ``merge_files``. This is a file copy (the sources keep their files),
+      so it is a first-class runnable operation — a plan whose only work is
+      "append these files to that entity" must not be unreviewable.
     - ``info``: ONE parent row carrying the title, plus one child row per
       entry in ``children``. They are display-only: the review table shows the
       title as the operation and the children as its suboperations, with no
       action buttons. The parent and children share a synthetic ``info-N``
       sharedId (so they group into one operation) and the children carry an
       ``info-child-N`` detail key (so the store's row identity stays unique).
+      When the SAME script records change operations, info rows are DROPPED
+      unless the record is marked ``keep=True``: a change plan must explain
+      itself through its operations, and an info row restating them is noise.
+      ``keep=True`` is reserved for information no change row can show (failed
+      or skipped entities, or an explicitly requested answer).
 
-    A scripted merge (a target update/create plus a file move plus the source
-    deletes) is collapsed HERE: the target's rows carry the merge op
-    (``update_and_delete``/``create_and_delete``) and the moved sources, and the
-    source delete records are dropped. That is what makes a merge ONE table row
-    — one target, however many sources it absorbs — instead of a target row
-    followed by one delete row per source. See :func:`merge_operations`.
+    A scripted merge — a file move plus a delete for EVERY moved source, with or
+    without a target write — is collapsed HERE: the target's rows carry the
+    merge op (``update_and_delete``/``create_and_delete``) and the moved
+    sources, and the source delete records are dropped. When the script wrote no
+    target metadata, one propertyless anchor row is emitted at the move's
+    position so the copy and the deletes still run as one operation. That is
+    what makes a merge ONE table row — one target, however many sources it
+    absorbs — instead of a target row followed by one delete row per source.
+    See :func:`merge_operations`.
 
     The split is what makes a translation task reviewable: the operator sees one
     row per language, checks the one they want written, and Run pushes only that
@@ -323,6 +429,11 @@ def records_to_suggestions(
     suggestions: list[Suggestion] = []
     merges = merge_operations(records)
     merge_sources = {source for merge in merges.values() for source in merge.source_shared_ids}
+    anchored_targets: set[str] = set()
+    # A plan that records ANY change explains itself through its operations.
+    # Info rows in such a plan are dropped unless explicitly marked ``keep``, so
+    # a stray "moved 2 files" summary cannot bury the actual change rows.
+    has_changes = any(_as_op(record.get("op")) not in (None, INFO_OP) for record in records)
 
     for index, record in enumerate(records):
         op = _as_op(record.get("op"))
@@ -330,9 +441,9 @@ def records_to_suggestions(
             continue
         shared_id = _record_shared_id(record, index)
         if op == "delete" and shared_id in merge_sources:
-            # The source is absorbed by its target's merge row: a second delete
-            # row would offer the operator a partial action that cannot run on
-            # its own (the target write is what makes the merge meaningful).
+            # The source is absorbed by its target's merge row: the copy and the
+            # delete are one atomic action, so a separate delete row would offer
+            # a partial action that can run in the wrong order (or alone).
             continue
         merge = merges.get(shared_id)
         if merge is not None and op in UPDATE_OPS | CREATE_OPS:
@@ -347,7 +458,44 @@ def records_to_suggestions(
             "status": SuggestionStatus.PENDING,
             "created_at": created,
             "merge_source_ids": list(merge.source_shared_ids) if merge is not None else [],
+            "merge_files": [dict(file) for file in merge.files] if merge is not None else [],
         }
+
+        if op == MOVE_OP:
+            sources = _move_sources(record, shared_id)
+            if merge is not None:
+                # The move belongs to a merge: its copy is part of the merge row
+                # (the target's property rows when it is written). A merge with
+                # NO target write still needs one propertyless anchor to carry
+                # the copy and the source deletes together — without it the plan
+                # would degrade to a copy row plus independently runnable delete
+                # rows, and running the deletes alone would lose the files.
+                if merge.target_op is None and shared_id not in anchored_targets:
+                    anchored_targets.add(shared_id)
+                    suggestions.append(
+                        Suggestion(
+                            **{**base, "op": "update_and_delete"},
+                            property_name=None,
+                            proposed_value=None,
+                        )
+                    )
+                continue
+            if not sources:
+                # Nothing to copy: no standalone operation to review.
+                continue
+            suggestions.append(
+                Suggestion(
+                    **{
+                        **base,
+                        "merge_source_ids": sources,
+                        "merge_files": _merge_files(record, sources),
+                    },
+                    property_name=None,
+                    proposed_value=None,
+                    detail_key=",".join(sources),
+                )
+            )
+            continue
 
         if op == INFO_OP:
             # DISPLAY-ONLY. ``add_info(title, children)`` records one parent
@@ -356,6 +504,14 @@ def records_to_suggestions(
             # one operation; the children's ``detail_key`` keeps their DB
             # identity distinct from the parent (which has None). Neither row
             # writes anything: the review table renders them without actions.
+            #
+            # In a plan that also records changes, a summary row is noise: the
+            # operations ARE the summary. Only an explicitly kept row (a
+            # failure/skip list or an asked-for answer no change row shows)
+            # survives; this is what stops a script from burying the changes
+            # under an "info" paragraph that the operator must read.
+            if has_changes and not record.get("keep"):
+                continue
             suggestions.append(Suggestion(**base, property_name=None, proposed_value=title))
             raw_children = record.get("children")
             children = raw_children if isinstance(raw_children, (list, tuple)) else []
@@ -436,6 +592,59 @@ def records_to_suggestions(
         suggestions.append(Suggestion(**base, property_name=None, proposed_value=proposed))
 
     return suggestions
+
+
+def drop_unchanged_property_rows(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """Remove property rows whose proposed value EQUALS the current value (pure).
+
+    Hydration fills ``match`` after the records are converted, so this runs on
+    the hydrated rows. A no-op property row is not a change: showing it offers
+    the operator a "value → same value" suboperation that says nothing, and
+    pushing it would send a pointless write. Such rows are dropped here at the
+    source instead of being hidden in one of the two review surfaces.
+
+    A merge whose target writes are ALL no-ops keeps ONE propertyless anchor
+    row. The merge still has two real actions — copying the sources' files and
+    deleting the sources — and :func:`merge_deletions` needs a row to carry
+    ``merge_source_ids``. The anchor renders as the merge operation itself; it
+    writes no property value.
+    """
+    groups_needing_anchor: set[tuple[str, str]] = set()
+    kept_groups: set[tuple[str, str]] = set()
+    for suggestion in suggestions:
+        if suggestion.op not in MERGE_OPS:
+            continue
+        key = (suggestion.shared_id, suggestion.op)
+        unchanged = suggestion.property_name is not None and suggestion.match is True
+        (kept_groups if not unchanged else groups_needing_anchor).add(key)
+    anchors = groups_needing_anchor - kept_groups
+    anchored: set[tuple[str, str]] = set()
+
+    kept: list[Suggestion] = []
+    for suggestion in suggestions:
+        unchanged = suggestion.op in PROPERTY_OPS and suggestion.property_name is not None and suggestion.match is True
+        if not unchanged:
+            kept.append(suggestion)
+            continue
+        if suggestion.op not in MERGE_OPS:
+            continue
+        key = (suggestion.shared_id, suggestion.op)
+        if key not in anchors or key in anchored:
+            continue
+        anchored.add(key)
+        kept.append(
+            suggestion.model_copy(
+                update={
+                    "property_name": None,
+                    "language": None,
+                    "detail_key": None,
+                    "proposed_value": None,
+                    "current_value": None,
+                    "match": None,
+                }
+            )
+        )
+    return kept
 
 
 def value_in_language(value: Any, language: str | None) -> Any:
@@ -595,6 +804,7 @@ __all__ = [
     "MergeOperation",
     "PropertyAccuracy",
     "compare_values",
+    "drop_unchanged_property_rows",
     "merge_operations",
     "per_language_split",
     "records_to_suggestions",

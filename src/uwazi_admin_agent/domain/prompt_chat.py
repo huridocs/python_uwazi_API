@@ -3,9 +3,12 @@
 The chat is the operator-facing way to IMPROVE a run's prompt after the fact.
 It opens with the run's ORIGINAL prompt and the validation step's resolved
 clarifications (both read-only context), then the operator types free-form
-requests. Every turn the assistant answers with a :class:`ChatTurn`: what it
-understood, the clarifying questions it still has, and the COMPLETE revised
-prompt it proposes.
+requests. A request is recorded as one OPERATOR message: its text is the
+prompt, and once the clarification step's answers are resolved they are folded
+into that SAME text in the wizard's ``Clarifications (resolved during
+validation):`` format. The optional assistant-turn model (:class:`ChatTurn`)
+remains available for an assistant that answers with a summary, questions and
+a revised prompt.
 
 The rendering helpers are PURE (no I/O) so the shapes that matter — what the
 assistant sees when the chat is replayed, and what the generation LLM receives

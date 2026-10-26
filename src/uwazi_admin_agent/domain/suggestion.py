@@ -39,6 +39,7 @@ SuggestionOp = Literal[
     "unpublish",
     "set_publish_status",
     "create_relationships",
+    "move_files",
     "update_and_delete",
     "create_and_delete",
     "info",
@@ -58,6 +59,13 @@ PROPERTY_OPS: frozenset[str] = UPDATE_OPS | CREATE_OPS
 # A merge is ONE review row that writes a target (new or existing) and removes
 # every source in the same Run; the sources are never separate table rows.
 MERGE_OPS: frozenset[str] = frozenset({"update_and_delete", "create_and_delete"})
+
+# A standalone file copy: the recorded ``move_files_to_entity`` that is NOT part
+# of a merge (the target is not written and the sources are not deleted). It is
+# its own runnable operation — the only way to review "append this entity's files
+# to that one" — and it copies bytes, so the source keeps its files.
+MOVE_OP: str = "move_files"
+FILE_OPS: frozenset[str] = frozenset({MOVE_OP})
 
 # Synthetic property name used for a whole-entity title change on an
 # update/create record (metadata keys use their own name).
@@ -135,9 +143,20 @@ class Suggestion(BaseModel):
     merge_source_ids: list[str] = Field(
         default_factory=list,
         description=(
-            "For the two merge ops (update_and_delete/create_and_delete): the source "
-            "entities the same Run deletes after writing the target. Empty for every "
+            "For a merge (update_and_delete/create_and_delete): the source entities "
+            "the same Run deletes after writing the target. For a move_files row: the "
+            "source entities whose files it copies onto the target. Empty for every "
             "other op. The sources are part of THIS row's action, not separate rows."
+        ),
+    )
+    merge_files: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "For a merge or a move_files row: the uploaded files the Run copies from "
+            "the sources onto the target. Each entry is a file-ref dict "
+            "(``from_shared_id``, ``kind``, ``originalname``, ...). Empty for every "
+            "other op, and when the dry run could not read the sources' files. "
+            "Display-only: the apply path re-reads the live files."
         ),
     )
     detail_key: str | None = Field(
@@ -400,8 +419,10 @@ def entity_language_key(shared_id: str, language: str | None) -> str:
 __all__ = [
     "CREATE_OPS",
     "EntityReviewRow",
+    "FILE_OPS",
     "INFO_OP",
     "MERGE_OPS",
+    "MOVE_OP",
     "OperationReviewRow",
     "PROPERTY_OPS",
     "PredictionAttemptStatus",

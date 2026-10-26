@@ -331,14 +331,14 @@ def test_create_relationships_produces_one_row_per_link() -> None:
     assert "op" not in rows[0].proposed_value
 
 
-def test_non_suggestion_ops_are_skipped() -> None:
+def test_delete_file_ops_are_skipped_and_a_move_is_its_own_row() -> None:
     records = [
         _rec(op="move_files", from_shared_ids=["a"], to_shared_id="b"),
         _rec(op="delete_file", shared_id="s1", file_id="f1"),
         _rec(op="delete", shared_id="s2"),
     ]
     rows = records_to_suggestions("run1", records)
-    assert [(r.op, r.shared_id) for r in rows] == [("delete", "s2")]
+    assert [(r.op, r.shared_id) for r in rows] == [("move_files", "b"), ("delete", "s2")]
 
 
 def test_entity_titles_map_wins_over_record_title() -> None:

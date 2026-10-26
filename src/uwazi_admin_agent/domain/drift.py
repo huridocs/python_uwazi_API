@@ -17,7 +17,10 @@ Two levels, cheapest first:
   template collecting only ``sharedId``/``editDate`` (~tens of bytes per hit),
   whose diff against the baseline classifies each drift into **modified**
   (editDate advanced), **missing** (deleted in Uwazi) and **new** (created in
-  Uwazi but absent from the baseline).
+  Uwazi but absent from the baseline). A fourth kind, **files**, comes from the
+  separate targeted file-set comparison (:mod:`uwazi_admin_agent.domain.file_drift`):
+  attaching a supporting file does not bump ``editDate``, so editDate alone can
+  never see it.
 
 Baseline bookkeeping: :class:`DriftBaseline` is the per-(sharedId, language)
 ``editDate`` snapshot recorded at discover/sync time, and
@@ -38,16 +41,19 @@ class DriftKind(str, Enum):
     """How one entity's relationship to the run changed since the baseline."""
 
     MODIFIED = "modified"
+    FILES = "files"
     NEW = "new"
     MISSING = "missing"
 
 
 MODIFIED_LABEL: str = "Modified in Uwazi"
+FILES_LABEL: str = "Files changed in Uwazi"
 NEW_LABEL: str = "New in Uwazi"
 MISSING_LABEL: str = "Deleted in Uwazi"
 
 DRIFT_LABEL: dict[DriftKind, str] = {
     DriftKind.MODIFIED: MODIFIED_LABEL,
+    DriftKind.FILES: FILES_LABEL,
     DriftKind.NEW: NEW_LABEL,
     DriftKind.MISSING: MISSING_LABEL,
 }
@@ -158,6 +164,10 @@ class DriftReport(BaseModel):
         default_factory=list,
         description="Entities whose live editDate exceeds their baseline value (run-written ids excluded).",
     )
+    files: list[DriftEntry] = Field(
+        default_factory=list,
+        description="File-operation sources whose live file set differs from the review row's recorded snapshot.",
+    )
     new: list[DriftEntry] = Field(
         default_factory=list,
         description="Live entities the baseline never recorded (created in Uwazi after the snapshot).",
@@ -173,11 +183,11 @@ class DriftReport(BaseModel):
     )
 
     def entries(self) -> list[DriftEntry]:
-        """All drifted entities, modified → new → missing (deterministic display order)."""
-        return [*self.modified, *self.new, *self.missing]
+        """All drifted entities, modified → files → new → missing (stable display order)."""
+        return [*self.modified, *self.files, *self.new, *self.missing]
 
     def total(self) -> int:
-        return len(self.modified) + len(self.new) + len(self.missing)
+        return len(self.modified) + len(self.files) + len(self.new) + len(self.missing)
 
 
 class DriftBaseline(BaseModel):
@@ -248,6 +258,7 @@ def build_report(
     excluded_ids: set[str],
     languages_failed: list[str],
     checked_at: datetime,
+    files: list[DriftEntry] | None = None,
 ) -> DriftReport:
     """The full baseline↔live diff (pure).
 
@@ -259,6 +270,8 @@ def build_report(
     * live id absent from the baseline → **new**
     * baseline id absent from the live scan → **missing**, unless any scan
       language failed (a partial scan must not flag deletions it never saw).
+    * ``files`` are the file-set entries the caller computed separately (see
+      :mod:`uwazi_admin_agent.domain.file_drift`) — editDate cannot see them.
 
     A live hit without a parseable editDate cannot prove modification; it
     still counts for presence (its id is not 'missing').
@@ -283,8 +296,14 @@ def build_report(
         if not languages_failed
         else []
     )
+    # A source can be both file-drifted and modified/new/missing (e.g. someone
+    # saved the entity AND attached a file). Keep the stronger classification
+    # once, never the same entity under two labels.
+    classified = {entry.shared_id for entry in (*modified, *new, *missing)}
+    file_entries = [entry for entry in (files or []) if entry.shared_id not in classified]
     return DriftReport(
         modified=modified,
+        files=file_entries,
         new=new,
         missing=missing,
         languages_failed=list(languages_failed),

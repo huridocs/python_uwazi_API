@@ -1319,7 +1319,7 @@ def _real_full_entities_factory(
     return query_entities_full
 
 
-def _noop_add_info(title: str, children: list | tuple | str | None = None) -> dict:
+def _noop_add_info(title: str, children: list | tuple | str | None = None, keep: bool = False) -> dict:
     """A record-free ``add_info`` for namespaces that build no review table.
 
     The dummy-validation and real-exec namespaces bind the same helper names as
@@ -1327,7 +1327,7 @@ def _noop_add_info(title: str, children: list | tuple | str | None = None) -> di
     Those paths have no suggestion store to write to, so the text is simply
     accepted (it has no effect on Uwazi either way).
     """
-    del title, children
+    del title, children, keep
     return {"success": True}
 
 
@@ -1506,13 +1506,19 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     info_count = 0
 
-    def add_info(title: str, children: list | tuple | str | None = None) -> dict:
+    def add_info(title: str, children: list | tuple | str | None = None, keep: bool = False) -> dict:
         """Record arbitrary result text for the review table (no Uwazi write).
 
         ``title`` is the operation row's text; ``children`` (optional) is a
         list of detail lines rendered as its two-level suboperations. A single
         string is accepted as one child. Everything is coerced to text because
         the review table displays it verbatim.
+
+        ``keep`` marks this row as information the plan's CHANGE rows cannot
+        show (failed/skipped entities, or an explicitly requested answer). The
+        review conversion drops info rows whenever the same script records
+        changes, so a plain summary cannot bury the operations; only a kept row
+        survives beside them.
         """
         nonlocal info_count
         if children is None:
@@ -1522,14 +1528,16 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             child_list = [children]
         shared_id = f"info-{info_count}"
-        records.append(
-            {
-                "op": "info",
-                "shared_id": shared_id,
-                "title": "" if title is None else str(title),
-                "children": ["" if child is None else str(child) for child in child_list],
-            }
-        )
+        record: dict[str, Any] = {
+            "op": "info",
+            "shared_id": shared_id,
+            "title": "" if title is None else str(title),
+            "children": ["" if child is None else str(child) for child in child_list],
+        }
+        if keep:
+            # Omitted when False so a plain info record keeps its old shape.
+            record["keep"] = True
+        records.append(record)
         info_count += 1
         logger.info("dry-run record: add_info {}", shared_id)
         return {"success": True, "shared_id": shared_id}
@@ -1588,8 +1596,11 @@ def build_dry_run_namespace(
       REAL helpers (live reads against the wired ports; the factory's
       unwired stubs raise a clear ``RuntimeError`` when the port is ``None``);
     - all 7 write helpers plus ``move_files_to_entity`` are pure recorders
-      appending into ``dry_run_records`` — no I/O at all, so the dry run can
-      never mutate Uwazi. The ``*_parallel`` write names alias the same
+      appending into ``dry_run_records`` — no write ever reaches Uwazi, so the
+      dry run can never mutate it. The move recorders additionally READ each
+      source's file refs (best-effort) so the review can show which primary
+      documents the merge would copy; a failed read leaves that source's list
+      empty. The ``*_parallel`` write names alias the same
       recorders (same shapes, recorded exactly like the sequential call),
       ``move_files_to_entity_parallel`` records one ``move_files`` op per
       move (and keeps the real helper's duplicated-target guard), while the
@@ -1632,8 +1643,10 @@ def build_dry_run_namespace(
         ),
         **dry_writes,
         **_dry_run_parallel_write_aliases(dry_writes),
-        "move_files_to_entity": _dry_run_move_files_helper(dry_run_records),
-        "move_files_to_entity_parallel": _dry_run_move_files_parallel_helper(dry_run_records),
+        "move_files_to_entity": _dry_run_move_files_helper(dry_run_records, entity_repository, loop, default_language),
+        "move_files_to_entity_parallel": _dry_run_move_files_parallel_helper(
+            dry_run_records, entity_repository, loop, default_language
+        ),
         **build_parallel_file_cleanup_dry_run_helper(
             entity_repository, file_repository, default_language, executor, dry_run_records
         ),
@@ -1675,17 +1688,55 @@ def _dry_run_parallel_write_aliases(dry_writes: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
-    """Dry-run ``move_files_to_entity``: record the request, move nothing."""
+def _dry_run_moved_files(
+    entity_repository: EntityRepositoryPort | None,
+    loop: asyncio.AbstractEventLoop | None,
+    default_language: str,
+    from_shared_ids: list[str],
+    language: str | None,
+) -> list[dict[str, Any]]:
+    """The source file refs a dry-run move WOULD copy, best-effort (real reads).
+
+    The review table has to show what a merge does to the primary documents, not
+    just that a move exists. The move record therefore carries the file refs the
+    mover would read from each source. This is a best-effort READ (the dry run
+    itself moves nothing): an unwired repository or a failed source fetch leaves
+    that source's list empty, and the review falls back to a per-source move row
+    rather than inventing file names.
+    """
+    if entity_repository is None or loop is None:
+        return []
+    lang = language or default_language
+    files: list[dict[str, Any]] = []
+    for shared_id in from_shared_ids:
+        try:
+            raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(shared_id, lang))
+        except Exception as exc:  # noqa: BLE001 — display metadata is best-effort
+            logger.warning("dry-run move: could not read files of {}: {}", shared_id, exc)
+            continue
+        for ref in extract_file_refs(raw):
+            entry = ref.model_dump()
+            entry["from_shared_id"] = shared_id
+            files.append(entry)
+    return files
+
+
+def _dry_run_move_files_helper(
+    records: list[dict[str, Any]],
+    entity_repository: EntityRepositoryPort | None = None,
+    loop: asyncio.AbstractEventLoop | None = None,
+    default_language: str = "en",
+) -> Any:
+    """Dry-run ``move_files_to_entity``: record the request and its file refs, move nothing."""
 
     def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
-        del language
         logger.info("dry-run record: move_files_to_entity x{} -> {}", len(from_shared_ids), to_shared_id)
         records.append(
             {
                 "op": "move_files",
                 "from_shared_ids": list(from_shared_ids),
                 "to_shared_id": to_shared_id,
+                "files": _dry_run_moved_files(entity_repository, loop, default_language, list(from_shared_ids), language),
             }
         )
         return {"moved": len(from_shared_ids), "failed": 0, "skipped": 0}
@@ -1693,7 +1744,12 @@ def _dry_run_move_files_helper(records: list[dict[str, Any]]) -> Any:
     return move_files_to_entity
 
 
-def _dry_run_move_files_parallel_helper(records: list[dict[str, Any]]) -> Any:
+def _dry_run_move_files_parallel_helper(
+    records: list[dict[str, Any]],
+    entity_repository: EntityRepositoryPort | None = None,
+    loop: asyncio.AbstractEventLoop | None = None,
+    default_language: str = "en",
+) -> Any:
     """Dry-run ``move_files_to_entity_parallel``: one record per move, move nothing.
 
     Mirrors ``_dry_run_move_files_helper`` per move so ``_count_ops`` still
@@ -1705,22 +1761,23 @@ def _dry_run_move_files_parallel_helper(records: list[dict[str, Any]]) -> Any:
     """
 
     def move_files_to_entity_parallel(moves: list[dict], language: str | None = None) -> list[dict]:
-        del language
         assert_unique_move_targets(moves)
         logger.info("dry-run record: move_files_to_entity_parallel x{} target(s)", len(moves))
         summaries: list[dict] = []
         for move in moves:
+            from_shared_ids = list(move["from_shared_ids"])
             records.append(
                 {
                     "op": "move_files",
-                    "from_shared_ids": list(move["from_shared_ids"]),
+                    "from_shared_ids": from_shared_ids,
                     "to_shared_id": move["to_shared_id"],
+                    "files": _dry_run_moved_files(entity_repository, loop, default_language, from_shared_ids, language),
                 }
             )
             summaries.append(
                 {
                     "to_shared_id": move["to_shared_id"],
-                    "moved": len(move["from_shared_ids"]),
+                    "moved": len(from_shared_ids),
                     "failed": 0,
                     "skipped": 0,
                 }

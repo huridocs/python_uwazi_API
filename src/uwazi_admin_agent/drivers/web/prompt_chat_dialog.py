@@ -1,14 +1,18 @@
 """The prompt-improvement CHAT: the modal the operator revises a run's prompt in.
 
-The read-only prompt modal is gone; this is what replaced it. The chat opens
-with the run's ORIGINAL prompt and the validation step's resolved
+The chat opens with the run's ORIGINAL prompt and the validation step's resolved
 clarifications (both read-only context), then the operator types free-form
-requests. Every turn the assistant answers with what it understood, the
-clarifying questions it still has, and the COMPLETE revised prompt it
-proposes.
+requests. The chat has ONE input action: **Send**. Sending appends the request
+as a bubble and triggers the LLM CLARIFICATION step; the clarifying questions
+open in their own modal (the same checkbox cards as the New task wizard's
+validation step). The operator's answers are folded into the SAME bubble as the
+request, in the wizard's ``Clarifications (resolved during validation):``
+format, so every bubble has the same shape and the assistant's "thinking" is
+never shown.
 
-The **Run** button is the point of the whole feature: it regenerates the run's
-script from the WHOLE chat history and reconciles the result into the ONE
+After the last bubble a single **Run modifications** button appears, and only
+when the chat has changes. It regenerates the run's script from the WHOLE
+user-and-clarifications conversation and reconciles the result into the ONE
 live review table — the rows the new script still produces keep their identity
 and status, changed rows go back to pending, rows it no longer produces become
 obsolete.
@@ -18,15 +22,10 @@ what the prompt became is the manifest's ``validated_prompt`` (rewritten on
 every Run) plus the generation history file, so the next turn repairs against
 the last one's context.
 
-The improve-prompt flow does NOT open the LLM-spend approval dialog: a turn is
-one tool-free request and the Run is the run's normal planning pass, so both
-run on the configured default caps without asking the operator to review caps
-or estimates.
-
-When a turn carries clarifying questions they open in their own "Review
-questions" modal, with the same checkbox cards as the New task wizard's
-validation step. Sending the answers turns them into the operator's next chat
-request.
+The improvement flow does NOT open the LLM-spend approval dialog: a
+clarification turn is one tool-free request and the Run is the run's normal
+planning pass, so both run on the configured default caps without asking the
+operator to review caps or estimates.
 
 The modal chrome (the header with its Close, the pinned footer) is reused from
 :mod:`uwazi_admin_agent.drivers.web.task_dialogs` rather than re-implemented.
@@ -40,61 +39,34 @@ from typing import Any, Callable
 from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import (
-    IMPROVE_DEFAULT_MAX_COST,
-    IMPROVE_DEFAULT_MAX_REQUESTS,
     PREDICTION_DEFAULT_MAX_COST,
     PREDICTION_DEFAULT_MAX_REQUESTS,
 )
-from uwazi_admin_agent.domain.llm_budget import LlmBudget, estimate_tokens
+from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.llm_script_usage import apply_script_llm_usage
 from uwazi_admin_agent.domain.prompt_chat import (
     ChatMessage,
     ChatRole,
-    ChatTurn,
-    build_chat_history,
-    render_question_answers,
+    build_final_prompt_from_chat,
 )
-from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer
+from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
 from uwazi_admin_agent.drivers.web.run_service import (
+    clarify_prompt,
     get_run,
-    improve_prompt,
     read_run_script,
     regenerate_from_chat,
 )
 from uwazi_admin_agent.drivers.web.task_dialogs import footer_close, modal_header
 
-# The assistant's answer arrives as ONE message; the clarifying questions open
-# in their own modal, and the revised prompt is rendered under the message. The
-# projected output tokens per chat turn.
+# The projected output tokens per regeneration turn (the Run button's planning
+# pass). The clarification turns are cheap and run on the configured defaults.
 _CHAT_OUT_TOKENS: int = 1024
 
 
 def _stamp() -> str:
     """The current time as a short display stamp (for the chat messages)."""
     return datetime.now().astimezone().strftime("%H:%M")
-
-
-def _chat_estimate(history: list[ChatMessage], request: str) -> SpendEstimate:
-    """The silent budget source for ONE chat turn (the dialog never shows it).
-
-    The improve-prompt flow no longer asks the operator to approve caps or
-    review estimates: the configured defaults are used as the enforced limits.
-    """
-    history_text = build_chat_history(history)
-    return SpendEstimate(
-        title="Improve prompt",
-        detail="One assistant turn over this conversation.",
-        n_calls=1,
-        n_entities=0,
-        est_in_tokens_per_call=estimate_tokens(history_text) + estimate_tokens(request),
-        est_out_tokens_per_call=_CHAT_OUT_TOKENS,
-        default_max_cost=IMPROVE_DEFAULT_MAX_COST,
-        default_max_requests=IMPROVE_DEFAULT_MAX_REQUESTS,
-        notes=[
-            "The request cap is the enforced limit for this turn: the turn is a single tool-free LLM call.",
-        ],
-    )
 
 
 def _regeneration_estimate(run_id: str) -> SpendEstimate:
@@ -138,13 +110,15 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
 
-    # The chat's state: the history (what the assistant sees), plus the UI
+    # The chat's state: the history (what the generation LLM sees), plus the UI
     # handles the handlers need to touch.
     state: dict[str, Any] = {
         "run_id": run_id,
         "history": [],
-        "last_turn": None,
         "busy": False,
+        "dirty": False,
+        "_pending_index": None,
+        "_pending_request": None,
     }
 
     client = context.client
@@ -158,6 +132,7 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                 scroll = ui.scroll_area().classes("w-full grow")
                 with scroll:
                     messages = ui.column().classes("w-full gap-2")
+                    run_area = ui.row().classes("w-full q-mt-sm")
                 state["_scroll"] = scroll
                 state["_messages"] = messages
                 ui.separator().classes("shrink-0")
@@ -167,26 +142,20 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                         .classes("w-full font-mono")
                         .props("autogrow input-style='min-height: 60px;'")
                     )
-                    ui.button("Send", icon="send", on_click=lambda: _send(state, request_input))
-                    run_button = ui.button(
-                        "Run",
-                        icon="play_arrow",
-                        on_click=lambda: _run_clicked(state, dialog, on_table_changed),
-                    )
-                    run_button.disable()
-                    state["_run_button"] = run_button
+                    send_button = ui.button("Send", icon="send", on_click=lambda: _send(state, request_input))
+                    state["_send_button"] = send_button
                 footer_close(dialog)
 
-            # The opening context: the original prompt, then the validation
-            # step's clarifications (only when the run WAS validated and the
-            # validated prompt differs from the original). Both are read-only
-            # context, rendered inside the modal's own layout.
-            original = detail.prompt or ""
-            if original:
-                _add_system_message(state, messages, original, "Original prompt")
-            validated = detail.validated_prompt or ""
-            if validated and validated != original:
-                _add_system_message(state, messages, validated, "Validation")
+            with run_area:
+                run_button = ui.button(
+                    "Run modifications",
+                    icon="play_arrow",
+                    on_click=lambda: _run_clicked(state, on_table_changed),
+                ).props("color=primary")
+            run_button.set_visibility(False)
+            state["_run_button"] = run_button
+
+            _load_initial_context(state, detail)
 
     # Enter sends; Shift+Enter inserts a newline. The SAME handler serves the
     # button and the key, so the two paths cannot drift.
@@ -201,16 +170,35 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
     dialog.open()
 
 
-def _add_system_message(state: dict[str, Any], messages: Any, text: str, name: str) -> None:
-    """Render one read-only context message and record it in the history."""
-    message = ChatMessage(role=ChatRole.SYSTEM, text=text, stamp=_stamp())
-    state["history"].append(message)
-    with messages:
-        ui.chat_message(text=text, name=name, stamp=message.stamp, sent=False)
+def _add_prompt_bubble(state: dict[str, Any], text: str, stamp: str) -> Any:
+    """Render one prompt bubble in the ONE style every chat bubble uses."""
+    with state["_client"]:
+        with state["_messages"]:
+            return ui.chat_message(text=text, name="Prompt", stamp=stamp, sent=False)
+
+
+def _load_initial_context(state: dict[str, Any], detail: Any) -> None:
+    """Record the run's prompt + existing clarifications and show them as ONE bubble.
+
+    The history keeps the original prompt and the validation message separate
+    (that is what :func:`build_final_prompt_from_chat` expects), while the chat
+    shows the validation prompt — the original plus its resolved clarifications
+    — so the first bubble has the same shape as every later one.
+    """
+    original = detail.prompt or ""
+    validated = detail.validated_prompt or ""
+    stamp = _stamp()
+    if original:
+        state["history"].append(ChatMessage(role=ChatRole.SYSTEM, text=original, stamp=stamp))
+    if validated and validated != original:
+        state["history"].append(ChatMessage(role=ChatRole.SYSTEM, text=validated, stamp=stamp))
+    context_text = validated if validated and validated != original else original
+    if context_text:
+        _add_prompt_bubble(state, context_text, stamp)
 
 
 def _send(state: dict[str, Any], request_input: Any) -> None:
-    """Send the operator's request: append it, then ask the assistant."""
+    """Send the operator's request: append it, then run the clarification step."""
     if state["busy"]:
         return
     request = (request_input.value or "").strip()
@@ -222,95 +210,51 @@ def _send(state: dict[str, Any], request_input: Any) -> None:
 
 
 def _submit_request(state: dict[str, Any], request: str) -> None:
-    """Append one operator request and start the assistant's turn.
+    """Append one operator request and start the clarification turn.
 
     The turn runs on the configured default caps: the improve-prompt flow does
     NOT ask for spend approval (neither the caps nor the estimate are shown).
+    The clarification sees the WHOLE conversation so far, so it never re-asks
+    what an earlier turn already resolved.
     """
     if state["busy"]:
         return
-    messages = state["_messages"]
-    client = state.get("_client")
-    message = ChatMessage(role=ChatRole.OPERATOR, text=request, stamp=_stamp())
-    state["history"].append(message)
-    with client:
-        with messages:
-            state["_operator_message"] = ui.chat_message(text=request, name="You", stamp=message.stamp, sent=True)
-            # The pending assistant message: its text is replaced by the answer.
-            state["_pending"] = ui.chat_message(text="Thinking…", name="Assistant", stamp=_stamp(), sent=False)
-
-    budget = build_budget(_chat_estimate(state["history"][:-1], request))
-    _start_turn(state, request, budget)
+    stamp = _stamp()
+    state["history"].append(ChatMessage(role=ChatRole.OPERATOR, text=request, stamp=stamp))
+    state["_pending_index"] = len(state["history"]) - 1
+    state["_pending_request"] = request
+    state["_pending_bubble"] = _add_prompt_bubble(state, request, stamp)
+    state["dirty"] = True
+    _set_busy(state, True)
+    prompt = build_final_prompt_from_chat(state["history"])
+    background_tasks.create(_do_clarify(state, prompt), name=f"clarify prompt {state['run_id']}")
+    _scroll_to_bottom(state)
 
 
-def _start_turn(state: dict[str, Any], request: str, budget: LlmBudget) -> None:
-    """Run the turn in the background."""
-    state["busy"] = True
-    _set_run_enabled(state, False)
-    background_tasks.create(_do_turn(state, request, budget), name=f"chat turn {state['run_id']}")
-
-
-async def _do_turn(state: dict[str, Any], request: str, budget: LlmBudget) -> None:
-    """Run one chat turn and render the assistant's answer."""
+async def _do_clarify(state: dict[str, Any], prompt: str) -> None:
+    """Run the clarification step and open its questions modal."""
     try:
-        turn = await improve_prompt(
-            state["run_id"],
-            state["history"][:-1],
-            request,
+        understanding = await clarify_prompt(
+            prompt,
             app.storage.user["user"],
             app.storage.user["password"],
-            budget,
         )
     except Exception as exc:  # noqa: BLE001 — the chat reports; the page never crashes
-        _render_turn_error(state, exc)
+        _set_busy(state, False)
+        ui.notify(f"Clarification failed: {exc}", type="negative", multi_line=True)
         return
-    _render_turn(state, turn)
+    _set_busy(state, False)
+    if understanding.questions:
+        _open_questions_dialog(state, understanding.questions)
 
 
-def _render_turn(state: dict[str, Any], turn: ChatTurn) -> None:
-    """Replace the pending message with the assistant's answer."""
-    state["busy"] = False
-    client = state.get("_client")
-    state["last_turn"] = turn
-    message = ChatMessage(
-        role=ChatRole.ASSISTANT,
-        text=turn.summary,
-        stamp=_stamp(),
-        questions=list(turn.questions),
-        revised_prompt=turn.revised_prompt,
-    )
-    state["history"].append(message)
-
-    pending = state.get("_pending")
-    messages = state["_messages"]
-    with client:
-        if pending is not None and not pending.is_deleted:
-            pending.delete()
-        with messages:
-            assistant_message = ui.chat_message(text=turn.summary, name="Assistant", stamp=message.stamp, sent=False)
-            if turn.questions:
-                with assistant_message:
-                    ui.button(
-                        f"Answer {len(turn.questions)} question{'' if len(turn.questions) == 1 else 's'}",
-                        icon="help_outline",
-                        on_click=lambda: _open_questions_dialog(state, turn),
-                    ).props("dense flat")
-            if turn.revised_prompt:
-                ui.textarea(value=turn.revised_prompt).classes("w-full font-mono").props("readonly outlined autogrow")
-    _set_run_enabled(state, True)
-    state.pop("_pending", None)
-    _scroll_to_bottom(state)
-    if turn.questions:
-        _open_questions_dialog(state, turn)
-
-
-def _open_questions_dialog(state: dict[str, Any], turn: ChatTurn) -> None:
-    """Show the assistant's clarifying questions in their own modal.
+def _open_questions_dialog(state: dict[str, Any], questions: list[Any]) -> None:
+    """Show the clarifications in their own modal.
 
     The questions use the same checkbox cards as the New task wizard's
     validation step: every suggested option is a checkbox, plus a "Custom
-    answer" checkbox and free-text input. Sending the answers turns them into
-    the operator's next chat request.
+    answer" checkbox and free-text input. Sending the answers folds them into
+    the request's existing bubble instead of appending an assistant message.
     """
     client = state.get("_client")
     with client.layout:
@@ -322,15 +266,12 @@ def _open_questions_dialog(state: dict[str, Any], turn: ChatTurn) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl").props("style=height:85dvh"):
             dialog.props("persistent")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                modal_header(dialog, "Review questions")
+                modal_header(dialog, "Clarifying questions")
                 ui.separator().classes("shrink-0")
                 with ui.scroll_area().classes("w-full grow"):
                     with ui.column().classes("w-full gap-2"):
-                        ui.label("What the LLM understood").classes("text-subtitle1 text-grey-7")
-                        ui.label(turn.summary).classes("text-body1 q-mb-md")
-                        ui.label("Clarifying questions").classes("text-subtitle1 text-grey-7")
                         answer_widgets: list[dict[str, Any]] = []
-                        for question in turn.questions:
+                        for question in questions:
                             with ui.card().classes("w-full q-mb-sm"):
                                 ui.label(question.question).classes("text-body1 text-weight-medium")
                                 option_checkboxes = [ui.checkbox(option) for option in question.options]
@@ -346,7 +287,7 @@ def _open_questions_dialog(state: dict[str, Any], turn: ChatTurn) -> None:
                                 )
                 ui.separator().classes("shrink-0")
                 with ui.row().classes("w-full justify-end no-wrap shrink-0"):
-                    ui.button("Skip", on_click=dialog.close).props("color=grey-7 flat")
+                    ui.button("Skip", on_click=lambda: _skip_questions(state, dialog)).props("color=grey-7 flat")
                     ui.button(
                         "Send answers",
                         icon="send",
@@ -356,8 +297,16 @@ def _open_questions_dialog(state: dict[str, Any], turn: ChatTurn) -> None:
     dialog.open()
 
 
+def _skip_questions(state: dict[str, Any], dialog: Any) -> None:
+    """Close the clarifications without folding anything into the request."""
+    dialog.close()
+    state["_pending_index"] = None
+    state["_pending_request"] = None
+    _refresh_run_button(state)
+
+
 def _submit_answers(state: dict[str, Any], dialog: Any, answer_widgets: list[dict[str, Any]]) -> None:
-    """Turn the ticked answers into the operator's next chat request."""
+    """Fold the ticked answers into the request's bubble (no new assistant turn)."""
     answers = [
         QuestionAnswer(
             question=widget["question"],
@@ -370,38 +319,58 @@ def _submit_answers(state: dict[str, Any], dialog: Any, answer_widgets: list[dic
         )
         for widget in answer_widgets
     ]
-    request = render_question_answers(answers)
-    if not request:
+    if not any(answer.selected or (answer.custom or "").strip() for answer in answers):
         ui.notify("Tick an option or write an answer first", type="warning")
         return
-    if state["busy"]:
-        ui.notify("Wait for the current turn to finish", type="warning")
-        return
+    request = state.get("_pending_request") or ""
     dialog.close()
-    _submit_request(state, request)
+    _update_pending_message(state, build_final_prompt(request, answers, ""))
+    state["_pending_index"] = None
+    state["_pending_request"] = None
+    _refresh_run_button(state)
 
 
-def _render_turn_error(state: dict[str, Any], exc: Exception) -> None:
-    """Show a failed turn in the chat (the modal stays open)."""
-    state["busy"] = False
-    client = state.get("_client")
-    pending = state.get("_pending")
-    with client:
-        if pending is not None and not pending.is_deleted:
-            pending.delete()
-        with state["_messages"]:
-            ui.chat_message(text=f"Chat turn failed: {exc}", name="Assistant", sent=False).classes("text-negative")
-    _set_run_enabled(state, state.get("last_turn") is not None)
-    state.pop("_pending", None)
-    ui.notify(f"Chat turn failed: {exc}", type="negative", multi_line=True)
+def _update_pending_message(state: dict[str, Any], text: str) -> None:
+    """Replace the pending request's bubble (and history message) with ``text``."""
+    index = state.get("_pending_index")
+    if index is None:
+        return
+    previous = state["history"][index]
+    state["history"][index] = ChatMessage(role=ChatRole.OPERATOR, text=text, stamp=previous.stamp)
+    bubble = state.get("_pending_bubble")
+    with state["_client"]:
+        if bubble is not None and not bubble.is_deleted:
+            bubble.delete()
+    state["_pending_bubble"] = _add_prompt_bubble(state, text, previous.stamp)
+    _scroll_to_bottom(state)
 
 
-def _set_run_enabled(state: dict[str, Any], enabled: bool) -> None:
-    """Enable the Run button only when a revised prompt is ready."""
-    button = state.get("_run_button")
+def _set_busy(state: dict[str, Any], busy: bool) -> None:
+    """Flip the busy state and refresh the Send / Run affordances."""
+    state["busy"] = busy
+    _set_send_enabled(state, not busy)
+    _refresh_run_button(state)
+
+
+def _set_send_enabled(state: dict[str, Any], enabled: bool) -> None:
+    """Enable or disable the one input action."""
+    button = state.get("_send_button")
     if button is not None and not button.is_deleted:
         with state.get("_client"):
             button.enable() if enabled else button.disable()
+
+
+def _refresh_run_button(state: dict[str, Any]) -> None:
+    """Show the Run button only when the chat has changes and nothing is running."""
+    button = state.get("_run_button")
+    if button is None or button.is_deleted:
+        return
+    with state.get("_client"):
+        button.set_visibility(state["dirty"] and not state["busy"])
+        if state["busy"]:
+            button.disable()
+        else:
+            button.enable()
 
 
 def _scroll_to_bottom(state: dict[str, Any]) -> None:
@@ -412,36 +381,29 @@ def _scroll_to_bottom(state: dict[str, Any]) -> None:
             scroll.scroll_to(percent=100, axis="vertical", duration=0.2)
 
 
-def _run_clicked(state: dict[str, Any], dialog: Any, on_table_changed: Callable[[], None] | None) -> None:
+def _run_clicked(state: dict[str, Any], on_table_changed: Callable[[], None] | None) -> None:
     """The Run button: regenerate the script from the whole chat and reconcile."""
-    if state["busy"]:
-        return
-    turn = state.get("last_turn")
-    if turn is None or not turn.revised_prompt:
-        ui.notify("Send a request first so the assistant can revise the prompt", type="warning")
+    if state["busy"] or not state["dirty"]:
         return
     budget = build_budget(_regeneration_estimate(state["run_id"]))
-    _start_run(state, dialog, on_table_changed, budget)
+    _start_run(state, on_table_changed, budget)
 
 
 def _start_run(
     state: dict[str, Any],
-    dialog: Any,
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
 ) -> None:
     """Regenerate in the background (no spend confirmation)."""
-    state["busy"] = True
-    _set_run_enabled(state, False)
+    _set_busy(state, True)
     background_tasks.create(
-        _do_run(state, dialog, on_table_changed, budget),
+        _do_run(state, on_table_changed, budget),
         name=f"chat regeneration {state['run_id']}",
     )
 
 
 async def _do_run(
     state: dict[str, Any],
-    dialog: Any,
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
 ) -> None:
@@ -455,14 +417,13 @@ async def _do_run(
             budget,
         )
     except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
-        state["busy"] = False
-        _set_run_enabled(state, state.get("last_turn") is not None)
+        _set_busy(state, False)
         ui.notify(f"Regeneration failed: {exc}", type="negative", multi_line=True)
         return
-    state["busy"] = False
+    state["dirty"] = False
+    _set_busy(state, False)
     with state.get("_client"):
         ui.notify(result.message(), type="positive", multi_line=True)
-        dialog.close()
     if on_table_changed is not None:
         on_table_changed()
 

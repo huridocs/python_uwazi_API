@@ -45,6 +45,7 @@ from uwazi_admin_agent.domain.suggestion import (
 )
 from uwazi_admin_agent.domain.suggestion_scoring import (
     compare_values,
+    drop_unchanged_property_rows,
     records_to_suggestions,
     value_in_language,
 )
@@ -344,6 +345,7 @@ class GeneratePredictionsUseCase:
                 self._default_language,
                 self._template_labels,
             )
+            suggestions = drop_unchanged_property_rows(suggestions)
         self.last_reconciliation = await asyncio.to_thread(
             self._store.reconcile_suggestions,
             run_id,

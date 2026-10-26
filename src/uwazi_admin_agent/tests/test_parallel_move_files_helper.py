@@ -265,8 +265,8 @@ def test_dry_run_parallel_move_records_one_op_per_move() -> None:
         {"to_shared_id": "T2", "moved": 1, "failed": 0, "skipped": 0},
     ]
     assert records == [
-        {"op": "move_files", "from_shared_ids": ["S1", "S2"], "to_shared_id": "T1"},
-        {"op": "move_files", "from_shared_ids": ["S3"], "to_shared_id": "T2"},
+        {"op": "move_files", "from_shared_ids": ["S1", "S2"], "to_shared_id": "T1", "files": []},
+        {"op": "move_files", "from_shared_ids": ["S3"], "to_shared_id": "T2", "files": []},
     ]
     # _count_ops feeds would_rewire from move_files records — one per move.
     assert _count_ops(records)["move_files"] == 2

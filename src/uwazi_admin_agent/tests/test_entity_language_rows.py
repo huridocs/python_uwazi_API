@@ -158,6 +158,38 @@ def test_get_entity_reads_the_language_independent_group(store: SqliteSuggestion
     assert [row.property_name for row in rows] == ["case_status"]
 
 
+def test_get_entity_applies_the_review_tables_status_filter(store: SqliteSuggestionStore) -> None:
+    """The detail window shows the same rows the filtered table shows."""
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="s1", language="es", property_name="excerpt"),
+            _suggestion(shared_id="s1", language="es", property_name="summary", status=SuggestionStatus.APPLIED),
+        ]
+    )
+
+    rows = store.get_entity(
+        "run1",
+        "s1",
+        "es",
+        SuggestionFilter(status=SuggestionStatus.APPLIED),
+    )
+
+    assert [row.property_name for row in rows] == ["summary"]
+
+
+def test_get_entity_applies_the_review_tables_property_filter(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="s1", language="es", property_name="excerpt"),
+            _suggestion(shared_id="s1", language="es", property_name="summary"),
+        ]
+    )
+
+    rows = store.get_entity("run1", "s1", "es", SuggestionFilter(property_name="summary"))
+
+    assert [row.property_name for row in rows] == ["summary"]
+
+
 def test_entity_languages_lists_every_row_of_the_table(store: SqliteSuggestionStore) -> None:
     """What the entity window's Previous/Next walks: rows, not entities."""
     _translation(store)

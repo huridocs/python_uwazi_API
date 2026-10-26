@@ -417,6 +417,55 @@ def test_prompt_merge_recipe_moves_files_through_the_parallel_helper() -> None:
     assert "before moving its files (its bytes are torn down on delete)" in SYSTEM_PROMPT
 
 
+def test_prompt_merge_recipe_does_not_duplicate_the_row_with_an_info_summary() -> None:
+    """A successful merge must not add an explanatory info row.
+
+    The merge operation already shows the target's property changes, the moved
+    files and the source deletes, so an ``add_info`` restating them is noise —
+    and the conversion drops it anyway. Info stays only for kept failures/skips.
+    """
+    assert "Do NOT call `add_info` for a successful merge" in SYSTEM_PROMPT
+    assert "a plain info row would be dropped anyway" in SYSTEM_PROMPT
+    assert "`keep=True` info row ONLY for a failure/skip" in SYSTEM_PROMPT
+
+
+def test_prompt_file_only_append_is_a_move_without_a_merge_or_info_row() -> None:
+    """An "add A's files to B" task must be ONE runnable copy row.
+
+    The move is its own review row; calling update_entities (no metadata change),
+    delete_entities (the source must stay) or add_info (restating the copy)
+    would either do unrequested work or hide the only runnable operation.
+    """
+    assert "FILE-ONLY APPEND" in SYSTEM_PROMPT
+    assert "is a file copy, never a merge" in SYSTEM_PROMPT
+    assert "the move itself becomes a runnable review\nrow" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_move_plus_delete_is_one_operation_without_a_target_write() -> None:
+    """A merge may skip the target write when the metadata is already identical.
+
+    The copy and the source deletes are still ONE atomic operation, never two
+    independently runnable rows: running a delete alone would lose the files.
+    """
+    assert "NO-OP TARGET METADATA" in SYSTEM_PROMPT
+    assert "with or without a target write" in SYSTEM_PROMPT
+    assert "running a delete alone would\ndestroy the source's bytes before they are copied" in SYSTEM_PROMPT
+    assert "whether or not the target metadata also changes" in SYSTEM_PROMPT
+
+
+def test_prompt_says_plain_info_rows_are_dropped_beside_changes() -> None:
+    """A change plan must explain itself; info is only for kept exceptions.
+
+    The review conversion drops plain info rows whenever the same script records
+    changes, so the model is told not to add a summary row and to mark the
+    rows that must survive (failures/skips) with ``keep=True``.
+    """
+    assert "add_info(title, children=None, keep=False)" in SYSTEM_PROMPT
+    assert "info rows are DROPPED automatically" in SYSTEM_PROMPT
+    assert "`add_info(..., keep=True)` ONLY for information no change row can show" in SYSTEM_PROMPT
+    assert 'add_info("N entities failed", [f"{sid}: {err}", ...], keep=True)' in SYSTEM_PROMPT
+
+
 def test_prompt_multi_group_merge_batches_the_three_bulk_calls() -> None:
     """MULTI-GROUP MERGE must collect per-group work in the discovery loop and
     then apply the whole merge as ONE update_entities_parallel call, ONE

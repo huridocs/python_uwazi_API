@@ -45,11 +45,18 @@ from uwazi_admin_agent.domain.drift import (
     MODIFIED_LABEL,
     NEW_LABEL,
     DriftBaselineRow,
+    DriftEntry,
+    DriftKind,
     DriftReport,
     DriftStateRow,
     DriftStatus,
     build_probe_result,
     build_report,
+)
+from uwazi_admin_agent.domain.file_drift import (
+    changed_file_entities,
+    recorded_file_languages,
+    recorded_file_signatures,
 )
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
@@ -682,10 +689,15 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
         changed_ids = set(store.shared_ids(run_id, SuggestionFilter(include_obsolete=True)))
         changed_ids.update(row.shared_id for row in store.drift_baseline(run_id))
         changed_in_uwazi = None
-    if runtime.file_cache is not None and changed_ids:
+    # The file operations' sources are ALWAYS re-read: attaching a supporting
+    # file does not bump editDate, so the drift scan can miss it, yet the
+    # script's get_entity_files would keep serving the cached raw without the
+    # attachment. Invalidate them explicitly so the refresh sees the new file.
+    file_sources = set(recorded_file_signatures(store.file_operation_rows(run_id)))
+    if runtime.file_cache is not None and (changed_ids or file_sources):
         # Missing entities too: a cached raw would otherwise make the script
         # propose writes for an entity that no longer exists.
-        runtime.file_cache.invalidate_entities(sorted(changed_ids))
+        runtime.file_cache.invalidate_entities(sorted(changed_ids | file_sources))
 
     use_case = GeneratePredictionsUseCase(
         entity_api=runtime.entity_api,
@@ -791,6 +803,71 @@ def preflight_selection(
     return evaluate_preflight(rows, raws, DUMMY_LANGUAGE)
 
 
+def _file_drift_entries(
+    runtime: Any,
+    store: SqliteSuggestionStore,
+    run_id: str,
+) -> list[DriftEntry]:
+    """The file-set drift of the sources a run's file operations snapshot (I/O).
+
+    ``editDate`` cannot see a newly attached supporting file, so the review
+    row's own ``merge_files`` snapshot is the baseline: every source named by a
+    merge/move row is re-read and its live file identities are compared with
+    what the table recorded.
+
+    Reads are language-aware on purpose: each recorded file carries the entity
+    row language it was read from, and only those rows are re-read (a source
+    with no recorded files is read in the default language — what a
+    language-less read recorded from). Comparing against EVERY run language
+    would make a multi-language source look permanently stale whenever a row
+    the move never reads holds files the table never planned to copy.
+
+    Cost is one raw read per (source, recorded language), bounded by the run's
+    file operations — NOT the template. The entity cache is invalidated first,
+    because a cached raw predates a file-only change exactly like the editDate
+    does. A source whose read fails is skipped (an unread source must never
+    look like "all its files were deleted"). Called from worker threads only
+    (``check_drift`` / ``_scan_drift_report``), so ``asyncio.run`` is safe.
+    """
+    rows = store.file_operation_rows(run_id)
+    recorded = recorded_file_signatures(rows)
+    if not recorded:
+        return []
+    repository = getattr(runtime, "entity_repository", None)
+    if repository is None:
+        logger.warning("file drift: no entity repository — file snapshots not checked")
+        return []
+    languages_by_source = recorded_file_languages(rows)
+    shared_ids = sorted(recorded)
+    cache = getattr(runtime, "file_cache", None)
+    if cache is not None:
+        cache.invalidate_entities(shared_ids)
+
+    async def _read_live() -> tuple[dict[str, list[dict[str, Any]]], set[str]]:
+        live: dict[str, list[dict[str, Any]]] = {}
+        unreadable: set[str] = set()
+        for shared_id in shared_ids:
+            refs: list[dict[str, Any]] = []
+            failed = False
+            for language in sorted(languages_by_source.get(shared_id) or {DUMMY_LANGUAGE}):
+                try:
+                    raw = await repository.get_raw_by_shared_id(shared_id, language)
+                except Exception as exc:  # noqa: BLE001 — an unread source cannot prove drift
+                    logger.warning("file drift: could not read {} ({}): {}", shared_id, language, exc)
+                    failed = True
+                    continue
+                refs.extend(ref.model_dump() for ref in extract_file_refs(raw))
+            if failed:
+                unreadable.add(shared_id)
+            else:
+                live[shared_id] = refs
+        return live, unreadable
+
+    live, unreadable = asyncio.run(_read_live())
+    compared = {source: signature for source, signature in recorded.items() if source not in unreadable}
+    return [DriftEntry(shared_id=source, kind=DriftKind.FILES) for source in changed_file_entities(compared, live)]
+
+
 def _scan_drift_report(
     runtime: Any,
     store: SqliteSuggestionStore,
@@ -817,12 +894,18 @@ def _scan_drift_report(
             scan_failed.append(language)
             continue
         live.extend({"shared_id": shared_id, "edit_date": edit_date} for shared_id, edit_date in scanned.items())
+    try:
+        file_entries = _file_drift_entries(runtime, store, run_id)
+    except Exception as exc:  # noqa: BLE001 — file drift is additive; the editDate diff still stands
+        logger.warning("table refresh file drift failed: {}", exc)
+        file_entries = []
     return build_report(
         live=live,
         baseline=_baseline_rows_from_store(store, run_id),
         excluded_ids=run_written,
         languages_failed=scan_failed,
         checked_at=now,
+        files=file_entries,
     )
 
 
@@ -860,9 +943,19 @@ def get_suggestion_properties(run_id: str) -> list[str]:
     return build_suggestion_store().property_names(run_id)
 
 
-def get_entity_suggestions(run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
-    """Return the suggestions of one entity's language group (the entity window's read)."""
-    return build_suggestion_store().get_entity(run_id, shared_id, language)
+def get_entity_suggestions(
+    run_id: str,
+    shared_id: str,
+    language: str | None = None,
+    f: SuggestionFilter | None = None,
+) -> list[Suggestion]:
+    """Return the suggestions of one entity's language group (the entity window's read).
+
+    ``f`` is the review table's current filter, so the detail window shows the
+    same properties the table does; ``language=None`` reads the
+    language-independent group, exactly as the table's own rows do.
+    """
+    return build_suggestion_store().get_entity(run_id, shared_id, language, f)
 
 
 # Property labels belong to the TEMPLATE, not to a run, so they are resolved once
@@ -1712,7 +1805,12 @@ def check_drift(
         baseline_count = store.drift_state(run_id)
         baseline_count_value = baseline_count.live_count if baseline_count is not None else None
         count_drift = live_count is not None and baseline_count_value is not None and live_count != baseline_count_value
-        if entries or count_drift:
+        try:
+            file_entries = _file_drift_entries(runtime, store, run_id)
+        except Exception as exc:  # noqa: BLE001 — file drift is additive; editDate/count still decide
+            logger.warning("file drift check failed: {}", exc)
+            file_entries = []
+        if entries or count_drift or file_entries:
             # Flagged: pay the full diff for the precise classification + counts.
             try:
                 live: list[dict[str, Any]] = []
@@ -1730,6 +1828,7 @@ def check_drift(
                     excluded_ids=run_written,
                     languages_failed=scan_failed,
                     checked_at=now,
+                    files=file_entries,
                 )
                 detail = _drift_detail(report)
                 status = DriftStatus.DRIFTED
@@ -1792,6 +1891,11 @@ def _drift_detail(report: DriftReport) -> str:
     parts: list[str] = []
     if report.modified:
         parts.append(f"{len(report.modified)} {MODIFIED_LABEL.lower()}")
+    if report.files:
+        # The count is entities whose file set moved, not a file count: "1 file
+        # changed" would be a lie when one source gained three attachments.
+        count = len(report.files)
+        parts.append(f"{count} {'entity' if count == 1 else 'entities'} with changed files in uwazi")
     if report.new:
         parts.append(f"{len(report.new)} {NEW_LABEL.lower()}")
     if report.missing:

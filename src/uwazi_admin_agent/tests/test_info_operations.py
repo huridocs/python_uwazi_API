@@ -44,6 +44,78 @@ def test_add_info_accepts_one_child_and_no_children() -> None:
     assert records[0]["shared_id"] != records[1]["shared_id"]
 
 
+def test_add_info_marks_a_row_to_keep_beside_changes() -> None:
+    records: list[dict] = []
+    add_info = _dry_run_write_helpers(records)["add_info"]
+
+    add_info("2 entities failed", ["S9: timeout"], keep=True)
+
+    assert records == [
+        {
+            "op": INFO_OP,
+            "shared_id": "info-0",
+            "title": "2 entities failed",
+            "children": ["S9: timeout"],
+            "keep": True,
+        }
+    ]
+
+
+def test_info_only_plan_keeps_its_answer() -> None:
+    rows = records_to_suggestions(
+        "run1",
+        [{"op": INFO_OP, "shared_id": "info-0", "title": "The answer", "children": []}],
+    )
+
+    assert [(row.op, row.proposed_value) for row in rows] == [(INFO_OP, "The answer")]
+
+
+def test_plain_info_is_dropped_when_the_same_plan_records_a_change() -> None:
+    """A change plan explains itself: a summary info row is noise.
+
+    This is the regression guard for a "moved N files" info row appearing below
+    the move operation: the operation already shows the files and the target.
+    """
+    rows = records_to_suggestions(
+        "run1",
+        [
+            {
+                "op": "move_files",
+                "shared_id": "T",
+                "to_shared_id": "T",
+                "from_shared_ids": ["S1"],
+            },
+            {
+                "op": INFO_OP,
+                "shared_id": "info-0",
+                "title": "Appended 2 files to T",
+                "children": ["one.pdf", "two.pdf"],
+            },
+        ],
+    )
+
+    assert [(row.op, row.shared_id) for row in rows] == [("move_files", "T")]
+
+
+def test_a_kept_info_row_survives_beside_changes() -> None:
+    rows = records_to_suggestions(
+        "run1",
+        [
+            {"op": "update", "shared_id": "T", "metadata": {"a": "new"}},
+            {
+                "op": INFO_OP,
+                "shared_id": "info-0",
+                "title": "1 entity failed",
+                "children": ["S9: timeout"],
+                "keep": True,
+            },
+        ],
+    )
+
+    assert [row.op for row in rows] == ["update", INFO_OP, INFO_OP]
+    assert [row.proposed_value for row in rows[1:]] == ["1 entity failed", "S9: timeout"]
+
+
 def test_records_to_suggestions_expands_info_into_two_levels() -> None:
     rows = records_to_suggestions(
         "run1",

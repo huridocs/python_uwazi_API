@@ -57,7 +57,10 @@ from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    FILE_OPS,
     INFO_OP,
+    MERGE_OPS,
+    MOVE_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
@@ -369,6 +372,11 @@ def partition_for_apply(
     create_relationships), propertyless update rows, and all
     ``create``/``create_and_delete`` rows (a create's sharedId is the
     ``dry-created-N`` placeholder until Run mints a real one).
+
+    A propertyless MERGE row is the all-no-op anchor: it writes no payload of
+    its own (its sources are handled by :func:`merge_deletions`), so it belongs
+    to neither path and is not counted as a write unit. The same holds for a
+    standalone ``move_files`` row: it adds files, not entity values.
     """
     property_rows: list[Suggestion] = []
     whole_entity_rows: list[Suggestion] = []
@@ -381,6 +389,13 @@ def partition_for_apply(
         if not _selected(suggestion, selection):
             continue
         if not _in_rows(suggestion, row_ids):
+            continue
+        if (suggestion.op in MERGE_OPS or suggestion.op in FILE_OPS) and suggestion.property_name is None:
+            # The merge anchor exists only to carry merge_source_ids; the
+            # target writes are the merge's property rows (if any), the
+            # sources are deleted from `merges`, and a file copy is executed
+            # from `file_moves`. Counting either here would add a write unit
+            # that nothing ever writes.
             continue
         if suggestion.op in _UPDATE_OPS and suggestion.property_name is not None:
             property_rows.append(suggestion)
@@ -412,6 +427,32 @@ def merge_deletions(rows: list[Suggestion]) -> list[tuple[str, list[str]]]:
     return [(target, sources_by_target[target]) for target in order]
 
 
+def file_move_targets(rows: list[Suggestion]) -> list[tuple[str, list[str]]]:
+    """The standalone file copies a Run performs, in first-appearance order (pure).
+
+    A ``move_files`` row is the review form of a scripted
+    ``move_files_to_entity`` that is NOT a merge: the target gains the sources'
+    uploaded files and the sources are left untouched. Each row's
+    ``shared_id`` is the target and its ``merge_source_ids`` the sources; rows
+    for the same target are deduped (their sources merged) so one target is one
+    move.
+    """
+    order: list[str] = []
+    sources_by_target: dict[str, list[str]] = {}
+    for row in rows:
+        if row.op != MOVE_OP or not row.shared_id:
+            continue
+        if not row.merge_source_ids:
+            continue
+        if row.shared_id not in sources_by_target:
+            sources_by_target[row.shared_id] = []
+            order.append(row.shared_id)
+        for source in row.merge_source_ids:
+            if source and source != row.shared_id and source not in sources_by_target[row.shared_id]:
+                sources_by_target[row.shared_id].append(source)
+    return [(target, sources_by_target[target]) for target in order if sources_by_target[target]]
+
+
 def payload_units(payload: dict) -> int:
     """Suboperations one write payload carries (pure).
 
@@ -433,18 +474,20 @@ def apply_units_total(
     creates: list[dict],
     whole_entity_rows: list[Suggestion],
     merges: list[tuple[str, list[str]]] | None = None,
+    file_moves: list[tuple[str, list[str]]] | None = None,
 ) -> int:
     """Suboperations a Run will write, counting from its payloads (pure).
 
     Property rows (grouped into ``updates``/``creates`` payloads), each
     whole-entity row (delete/publish/unpublish/set_publish_status/relationship
-    — one unit each), and each merge's source deletions (extra writes the rows
-    of the merge itself do not carry). This is the Run progress toast's
-    denominator ("13/1230 suboperations").
+    — one unit each), each merge's source deletions, and each standalone file
+    copy (one unit per target). This is the Run progress toast's denominator
+    ("13/1230 suboperations").
     """
     total = sum(payload_units(payload) for payload in (*updates, *creates))
     total += len(whole_entity_rows)
     total += sum(len(sources) for _target, sources in (merges or []))
+    total += len(file_moves or [])
     return total
 
 
@@ -453,10 +496,11 @@ def merge_moves(
     failed_targets: set[str] | None = None,
     created_ids: dict[str, str] | None = None,
 ) -> list[tuple[str, list[str]]]:
-    """The file moves a Run performs for its merges, in order (pure).
+    """The file moves a Run performs for its merges/file copies, in order (pure).
 
-    Each ``(target, sources)`` from :func:`merge_deletions` becomes the
-    ``(real_target, sources)`` the file mover needs:
+    Each ``(target, sources)`` from :func:`merge_deletions` or
+    :func:`file_move_targets` becomes the ``(real_target, sources)`` the file
+    mover needs:
 
     - a merge target written by a CREATE is still keyed by the ``dry-created-N``
       placeholder its rows carry (a create has no real sharedId until Run), so
@@ -687,17 +731,21 @@ class ApplySuggestionsUseCase:
         # sources — the part that makes a merge one action instead of a target
         # row plus N delete rows.
         merges = merge_deletions(to_push)
-        if merges and self._file_repository is None:
+        # A standalone move_files row copies its sources' files onto the target
+        # and leaves the source entities untouched.
+        file_moves = file_move_targets(to_push)
+        if (merges or file_moves) and self._file_repository is None:
             # Refuse BEFORE any write: a merge moves the sources' files onto the
             # target and only THEN deletes the sources, so without a file
             # repository the deletes would destroy files the operator approved
-            # moving. Failing loudly here is the same no-loss bias the script
-            # helper keeps when it is called unwired.
+            # moving. A standalone file copy has the same hard dependency.
+            # Failing loudly here is the same no-loss bias the script helper
+            # keeps when it is called unwired.
             raise ApplyRefusedError(
-                "merge rows need a wired file repository to move the sources' files before deleting them; "
-                "wire FileRepositoryPort into the runtime to run a merge"
+                "merge/file-move rows need a wired file repository to copy the sources' files; "
+                "wire FileRepositoryPort into the runtime to run them"
             )
-        if not updates and not creates and not whole_entity_rows and not merges:
+        if not updates and not creates and not whole_entity_rows and not merges and not file_moves:
             raise ApplyRefusedError("nothing to run for the selected rows")
 
         manifest = self._prepare_apply_manifest(run_id, len(to_push))
@@ -708,7 +756,7 @@ class ApplySuggestionsUseCase:
         # The progress denominator: SUBOPERATIONS, counted from the payloads
         # exactly the way _write counts them up as its batches land — so the
         # toast's fraction can never pass 1.0 by construction.
-        units_total = apply_units_total(updates, creates, whole_entity_rows, merges)
+        units_total = apply_units_total(updates, creates, whole_entity_rows, merges, file_moves)
         self._report_progress(progress, 0, units_total)
         failures = self._write(
             run_id,
@@ -718,6 +766,7 @@ class ApplySuggestionsUseCase:
             whole_entity_rows,
             selection_languages,
             merges,
+            file_moves=file_moves,
             progress=progress,
             units_total=units_total,
         )
@@ -957,24 +1006,26 @@ class ApplySuggestionsUseCase:
         return manifest
 
     def _move_merge_files(self, moves: list[tuple[str, list[str]]]) -> None:
-        """Copy each merge's source files onto its target before the sources are deleted.
+        """Copy source files onto their target — a merge's move or a file copy.
 
         The apply-path twin of the script's ``move_files_to_entity``: it runs the
-        SAME :func:`move_files_for_target` flow, so a UI merge preserves uploaded
-        files exactly like the scripted one (re-upload each source document +
-        uploaded attachment, SKIP byte-identical duplicates so merging duplicate
-        entities never multiplies a shared file). ``moves`` is the pure
-        ``(real_target, sources)`` list from :func:`merge_moves`, already filtered
-        to targets whose own write landed.
+        SAME :func:`move_files_for_target` flow, so a UI merge/file copy
+        preserves uploaded files exactly like the scripted one (re-upload each
+        source document + uploaded attachment, SKIP byte-identical duplicates so
+        merging duplicate entities never multiplies a shared file). ``moves`` is
+        the pure ``(real_target, sources)`` list from :func:`merge_moves`: a
+        merge's sources are deleted afterwards, a standalone copy's are not, but
+        the copy itself is identical. Merge entries are already filtered to
+        targets whose own write landed.
 
         Failure policy mirrors the script mover: a soft per-file failure is
-        counted + logged but does NOT stop the run (the sources are still deleted,
-        the target keeps whatever moved), while a hard port exception propagates
-        to :meth:`_write`'s handler — the run is marked FAILED and the source
-        deletes never run, so a merge whose files could not move keeps its
-        sources. A missing file repository is a no-op here; :meth:`apply` refuses
-        the Run up front instead, so this guard only serves direct ``_write``
-        callers.
+        counted + logged but does NOT stop the run (a merge's sources are still
+        deleted, the target keeps whatever moved), while a hard port exception
+        propagates to :meth:`_write`'s handler — the run is marked FAILED and
+        the source deletes never run, so a merge whose files could not move
+        keeps its sources. A missing file repository is a no-op here;
+        :meth:`apply` refuses the Run up front instead, so this guard only
+        serves direct ``_write`` callers.
         """
         if not moves or self._file_repository is None:
             return
@@ -992,7 +1043,7 @@ class ApplySuggestionsUseCase:
             for key in totals:
                 totals[key] += int(counts.get(key, 0))
             logger.info(
-                "merge file move: target={} sources={} moved={} skipped={} failed={}",
+                "file move: target={} sources={} moved={} skipped={} failed={}",
                 target,
                 len(sources),
                 counts.get("moved"),
@@ -1001,7 +1052,8 @@ class ApplySuggestionsUseCase:
             )
         if totals["failed"]:
             logger.warning(
-                "merge file move finished with {} un-moved file(s); their sources are still deleted", totals["failed"]
+                "file move finished with {} un-copied file(s); for a merge, its sources are still deleted",
+                totals["failed"],
             )
 
     def _report_progress(self, progress: ProgressCallback | None, done: int, total: int) -> None:
@@ -1022,6 +1074,7 @@ class ApplySuggestionsUseCase:
         whole_entity_rows: list[Suggestion],
         affected_languages: set[str] | None = None,
         merges: list[tuple[str, list[str]]] | None = None,
+        file_moves: list[tuple[str, list[str]]] | None = None,
         progress: ProgressCallback | None = None,
         units_total: int = 0,
     ) -> list[dict[str, str]]:
@@ -1042,10 +1095,12 @@ class ApplySuggestionsUseCase:
         ``merges`` is the ``(target, source ids)`` list from
         :func:`merge_deletions`: the target's files are moved onto it first
         (:meth:`_move_merge_files`), then each merge's sources are deleted in the
-        SAME Run (one bulk call with every other delete). A target whose own
-        write was refused does NOT have its sources moved or deleted — the merge
-        never happened, so removing the sources would lose data the operator only
-        approved moving.
+        SAME Run (one bulk call with every other delete). ``file_moves`` is the
+        :func:`file_move_targets` list: the same copy, with no target write and
+        no source delete. A merge target whose own write was refused does NOT
+        have its sources moved or deleted — the merge never happened, so removing
+        the sources would lose data the operator only approved moving. A
+        standalone file copy has no target write to gate it.
 
         Returns the REFUSED writes (see :func:`write_failures`) instead of
         swallowing them. The helpers report a Uwazi rejection as ``success=False``
@@ -1095,13 +1150,25 @@ class ApplySuggestionsUseCase:
                     done_units += sum(payload_units(create) for create in batch)
                     self._report_progress(progress, done_units, units_total)
 
-            # Move each merge's source files onto its target BEFORE the sources
+            # Copy each merge's source files onto its target BEFORE the sources
             # are deleted — the whole point of a merge: the sources' uploaded
-            # files must survive their deletion. Runs after the target writes
-            # (the merge script's order: update -> move -> delete) and before
-            # any delete. A hard port failure raises here (caught below), so the
-            # run is marked FAILED and NO source is deleted, keeping its files.
-            self._move_merge_files(merge_moves(merges or [], failed_targets, created_ids))
+            # files must survive their deletion. A standalone file-copy row runs
+            # through the SAME mover (the sources keep their files). Runs after
+            # the target writes (the merge script's order: update -> move ->
+            # delete) and before any delete. A hard port failure raises here
+            # (caught below), so the run is marked FAILED and NO source is
+            # deleted, keeping its files.
+            merged_moves = merge_moves(merges or [], failed_targets, created_ids)
+            # A standalone file copy has no target write of its own, so a refused
+            # write elsewhere must not suppress it.
+            copied_moves = merge_moves(file_moves or [], None, created_ids)
+            self._move_merge_files([*merged_moves, *copied_moves])
+            if copied_moves and self._file_repository is not None:
+                # A standalone file copy is ONE suboperation per target, exactly
+                # as apply_units_total counted it. (A direct ``_write`` caller
+                # without a file repository performs no copy, so it reports none.)
+                done_units += len(copied_moves)
+                self._report_progress(progress, done_units, units_total)
 
             delete_ids: list[str] = []
             publish_ids: list[str] = []
@@ -1181,6 +1248,7 @@ __all__ = [
     "build_apply_creates",
     "build_apply_updates",
     "effective_value",
+    "file_move_targets",
     "format_write_failures",
     "language_groups",
     "language_scoped_value",

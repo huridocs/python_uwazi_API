@@ -115,6 +115,8 @@ from nicegui import app, background_tasks, context, ui
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
 from uwazi_admin_agent.domain.suggestion import (
+    FILE_OPS,
+    MERGE_OPS,
     PROPERTY_OPS,
     OperationReviewRow,
     PredictionAttemptStatus,
@@ -132,16 +134,27 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
 )
 from uwazi_admin_agent.drivers.web.operations_view import (
     EXPAND_COLUMN,
+    NON_IN_PLACE_OPS,
     STATUS_WITH_COUNT_COLUMN,
     any_property_option,
     entities_of_refs,
+    file_move_detail_rows,
     ids_of_refs,
+    is_file_move_row,
+    is_merge_anchor,
+    is_selectable,
     languages_of_refs,
+    merge_detail_rows,
     operation_row,
+    operation_status,
     ops_of_refs,
     pairs_of_refs,
     property_options,
+    sub_label,
     sub_refs,
+    sub_revertable,
+    sub_status_color,
+    sub_status_label,
 )
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
@@ -150,6 +163,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     MATCH_COLORS,
     OP_COLORS,
     OPS_COLUMN,
+    RUN_STATUS_COLORS,
     SHARED_ID_CSS,
     STATUS_COLORS,
     TEMPLATE_COLUMN,
@@ -170,7 +184,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
     section_toggle_label,
     select_all_label,
     table_update_label,
-    truncate,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
     apply_outcomes,
@@ -889,6 +902,7 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
         with client:
             _clear_checked(state)
             _refresh_all(state)
+            _refresh_entity_window(state)
 
 
 # --- discard ------------------------------------------------------------------
@@ -1128,6 +1142,7 @@ async def _revert_suboperation(
         with client:
             _clear_checked(state)
             _refresh_all(state)
+            _refresh_entity_window(state)
 
 
 async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any) -> None:
@@ -1166,6 +1181,7 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
         with client:
             _clear_checked(state)
             _refresh_all(state)
+            _refresh_entity_window(state)
 
 
 # --- drift banner ------------------------------------------------------------
@@ -1507,7 +1523,7 @@ def _run_refs(
         # makes (notify, refresh) must re-enter the client explicitly.
         client = context.client
         background_tasks.create(
-            _run_rows(state, pairs, ids, client),
+            _run_rows(state, pairs, ids, client, resolved_ops),
             name=f"run {state['run_id']}",
         )
 
@@ -1593,6 +1609,7 @@ async def _run_rows(
     pairs: list[tuple[str, str | None]],
     ids: list[int],
     client: Any,
+    ops: list[str] | None = None,
 ) -> None:
     user = app.storage.user.get("user")
     password = app.storage.user.get("password")
@@ -1628,12 +1645,23 @@ async def _run_rows(
             # own writes are the new reference, not drift.
             refresh_baseline_after_run(state["run_id"], user, password)
             with client:
-                ui.notify(
-                    f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
-                    type="positive",
-                    multi_line=True,
-                    group=GATE_TOAST_GROUP,
-                )
+                if FILE_OPS.intersection(ops or []):
+                    # A file copy appends bytes: no entity snapshot can remove
+                    # them, so do not point the operator at a Revert that
+                    # cannot undo this part.
+                    ui.notify(
+                        "Executed — the files were copied onto the target and stay there",
+                        type="positive",
+                        multi_line=True,
+                        group=GATE_TOAST_GROUP,
+                    )
+                else:
+                    ui.notify(
+                        f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
+                        type="positive",
+                        multi_line=True,
+                        group=GATE_TOAST_GROUP,
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.exception("run (heuristic apply) failed")
             with client:
@@ -1648,6 +1676,7 @@ async def _run_rows(
         with client:
             _clear_checked(state)
             _refresh_all(state)
+            _refresh_entity_window(state)
 
 
 # --- entity table ------------------------------------------------------------
@@ -1794,7 +1823,7 @@ def _change_table(state: dict[str, Any]) -> None:
                       <th></th>
                       <th class="text-left q-pa-xs">Change</th>
                       <th class="text-left q-pa-xs">Language</th>
-                      <th class="text-left q-pa-xs">Current value</th>
+                      <th class="text-left q-pa-xs">Value</th>
                       <th class="text-left q-pa-xs">Proposed value</th>
                       <th class="text-left q-pa-xs">Match</th>
                       <th class="text-left q-pa-xs">Status</th>
@@ -1811,7 +1840,7 @@ def _change_table(state: dict[str, Any]) -> None:
                                       user-select: text;">{{ sub.label }}</div>
                         </td>
                       </tr>
-                      <tr v-else :key="sub.id">
+                      <tr v-else :key="sub.key">
                         <td class="text-center">
                           <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
                                       @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, sub.id, v)" />
@@ -1845,7 +1874,7 @@ def _change_table(state: dict[str, Any]) -> None:
                                    title="Revert this one property to its backup value"
                                    @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
                           </template>
-                          <q-btn dense flat icon="edit" color="teal"
+                          <q-btn v-if="!sub.structural" dense flat icon="edit" color="teal"
                                  title="Open the entity window at this language"
                                  @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
                         </td>
@@ -2226,56 +2255,139 @@ def _open_entity_window(
     before the next one is created, which makes "open one, swap it" the only
     possible outcome no matter how fast the operator clicks.
 
+    The window reads its rows through the review table's CURRENT filter: it is
+    the same properties the table shows for that entity and language, narrowed
+    the same way, so a filtered table and its detail window cannot disagree.
+
     ``focus_property`` is set when the window was opened FROM a suboperation:
-    the clicked property's card is highlighted, while every other property of
-    the entity-language group is still shown (the window is the place to see
-    the whole row, not just the filtered part).
+    the clicked property's card is highlighted.
     """
     _close_entity_window(state)
-    suggestions = get_entity_suggestions(state["run_id"], shared_id, language)
+    suggestions = _entity_rows(state, shared_id, language)
     if not suggestions:
         ui.notify(f"No suggestions for {shared_id}", type="warning")
         return
     title = suggestions[0].entity_title or shared_id
     label = f"{title} — {shared_id}" + (f" · {language}" if language else "")
-    labels = _property_labels(suggestions)
-    # A discarded operation says so in its own window too: the operator who
-    # opened it needs to know a Run will not execute its rows.
-    discarded = all(s.status is SuggestionStatus.DISCARDED for s in suggestions)
+    state["_entity_home"] = {
+        "shared_id": shared_id,
+        "language": language,
+        "focus_property": focus_property,
+        "label": label,
+    }
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                _entity_header(
-                    state,
-                    dialog,
-                    label,
-                    shared_id,
-                    [s.op for s in suggestions],
-                    language,
-                    discarded,
-                    suggestions,
-                )
+                # The header and the properties panel are their own hosts: a
+                # Run/Revert refreshes them in place (the document viewer on the
+                # left keeps its iframe and scroll position).
+                header_host = ui.column().classes("w-full shrink-0")
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
-                    with ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto"):
-                        _entity_suggestions(state, suggestions, labels, focus_property=focus_property)
-                with ui.row().classes("w-full justify-between shrink-0"):
-                    with ui.row().classes("items-center"):
-                        ui.button(
-                            "Previous row",
-                            icon="chevron_left",
-                            on_click=lambda: _navigate_entity(state, shared_id, language, -1),
-                        ).props("flat dense")
-                        ui.button(
-                            "Next row",
-                            icon="chevron_right",
-                            on_click=lambda: _navigate_entity(state, shared_id, language, 1),
-                        ).props("flat dense")
+                    details_host = ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto")
+                with ui.row().classes("w-full justify-center shrink-0"):
+                    ui.button(
+                        "Previous row",
+                        icon="chevron_left",
+                        on_click=lambda: _navigate_entity(state, shared_id, language, -1),
+                    ).props("flat dense")
+                    ui.button(
+                        "Next row",
+                        icon="chevron_right",
+                        on_click=lambda: _navigate_entity(state, shared_id, language, 1),
+                    ).props("flat dense")
                     ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat")
     state["_entity_dialog"] = dialog
+    state["_entity_header_host"] = header_host
+    state["_entity_details_host"] = details_host
+    state["_entity_document_pane"] = document_pane
+    _render_entity_header(state, suggestions, label, shared_id, language)
+    _render_entity_details(state, suggestions, focus_property)
     dialog.open()
     background_tasks.create(_load_document(state, shared_id, language, document_pane), name=f"document {shared_id}")
+
+
+def _entity_rows(state: dict[str, Any], shared_id: str, language: str | None) -> list[Suggestion]:
+    """The entity's rows in one language group, narrowed by the table's filter."""
+    return get_entity_suggestions(state["run_id"], shared_id, language, _current_filter(state))
+
+
+def _render_entity_header(
+    state: dict[str, Any],
+    suggestions: list[Suggestion],
+    label: str,
+    shared_id: str,
+    language: str | None,
+) -> None:
+    """(Re)draw the window's title row into its host."""
+    host = state.get("_entity_header_host")
+    if host is None or host.is_deleted:
+        return
+    host.clear()
+    with host:
+        _entity_header(
+            state,
+            label,
+            shared_id,
+            language,
+            _entity_is_discarded(suggestions),
+            suggestions,
+        )
+
+
+def _render_entity_details(
+    state: dict[str, Any],
+    suggestions: list[Suggestion],
+    focus_property: str | None,
+) -> None:
+    """(Re)draw the properties panel into its host."""
+    host = state.get("_entity_details_host")
+    if host is None or host.is_deleted:
+        return
+    host.clear()
+    with host:
+        if not suggestions:
+            ui.label("No properties of this entity match the current filter.").classes("text-body2 text-grey-7 q-pa-sm")
+            return
+        _entity_suggestions(state, suggestions, _property_labels(suggestions), focus_property=focus_property)
+
+
+def _refresh_entity_window(state: dict[str, Any]) -> None:
+    """Refresh the window's header + properties after a Run/Revert (in place)."""
+    home = state.get("_entity_home")
+    dialog = state.get("_entity_dialog")
+    if not home or dialog is None or dialog.is_deleted:
+        return
+    suggestions = _entity_rows(state, home["shared_id"], home["language"])
+    _render_entity_header(state, suggestions, home["label"], home["shared_id"], home["language"])
+    _render_entity_details(state, suggestions, home["focus_property"])
+
+
+def _entity_is_discarded(suggestions: list[Suggestion]) -> bool:
+    """True when every row of the group was refused (pure)."""
+    return bool(suggestions) and all(s.status is SuggestionStatus.DISCARDED for s in suggestions)
+
+
+def _entity_is_revertable(
+    state: dict[str, Any],
+    shared_id: str,
+    language: str | None,
+    suggestions: list[Suggestion],
+) -> bool:
+    """Whether the entity-level Revert has a write to undo (pure-ish).
+
+    The Revert is entity-wide, not a property action, so it is decided from the
+    UNFILTERED language group: a filter that hides the applied rows must not
+    hide their undo. The same in-place rule as the table applies — created,
+    deleted and merged entities revert at run level, not from this button.
+    """
+    rows = get_entity_suggestions(state["run_id"], shared_id, language) or suggestions
+    in_place = not any(s.op in NON_IN_PLACE_OPS for s in rows)
+    # The table's own rule: an in-place entity with at least one applied row.
+    # That covers a whole-entity op (publish/unpublish) whose undo the snapshot
+    # restore also performs, not just property writes.
+    return in_place and any(s.status is SuggestionStatus.APPLIED for s in rows)
 
 
 def _close_entity_window(state: dict[str, Any]) -> None:
@@ -2284,6 +2396,10 @@ def _close_entity_window(state: dict[str, Any]) -> None:
     if dialog is not None and not dialog.is_deleted:
         dialog.close()
     state["_entity_dialog"] = None
+    state["_entity_home"] = None
+    state["_entity_header_host"] = None
+    state["_entity_details_host"] = None
+    state["_entity_document_pane"] = None
 
 
 async def _load_document(state: dict[str, Any], shared_id: str, language: str | None, pane: Any) -> None:
@@ -2368,26 +2484,41 @@ def _render_pane_message(pane: Any, message: str) -> None:
 
 def _entity_header(
     state: dict[str, Any],
-    dialog: Any,
     label: str,
     shared_id: str,
-    ops: list[str] | None = None,
     language: str | None = None,
     discarded: bool = False,
     suggestions: list[Suggestion] | None = None,
 ) -> None:
-    """The window's title row: Run this entity-language row, or Close."""
-    refs = [(s.id, s.shared_id, s.language, s.op) for s in (suggestions or []) if s.id is not None]
+    """The window's title row: Run this row, Revert this entity, or Close.
+
+    The buttons mirror the review table's operation actions. Run writes the
+    rows that are still waiting (an applied/discarded part is not written
+    again); Revert restores the entity's backup, and is offered only when the
+    entity actually has a completed in-place write to undo.
+    """
+    rows = suggestions or []
+    refs = [(s.id, s.shared_id, s.language, s.op) for s in rows if s.id is not None and _suggestion_is_runnable(s)]
+    revertable = _entity_is_revertable(state, shared_id, language, rows)
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         ui.label(label).classes("text-h6")
         with ui.row().classes("items-center no-wrap"):
             if discarded:
                 ui.badge("discarded").props("color=negative").classes("q-mr-sm")
-            ui.button(
+            run_button = ui.button(
                 "Run this row",
                 icon="play_arrow",
-                on_click=lambda: _run_refs(state, refs, ops),
+                on_click=lambda: _run_refs(state, refs),
             ).props("flat dense color=primary")
+            if not refs:
+                run_button.disable()
+            revert_button = ui.button(
+                "Revert this entity",
+                icon="undo",
+                on_click=lambda: _revert_entity_clicked(state, shared_id),
+            ).props("flat dense color=indigo")
+            if not revertable:
+                revert_button.disable()
             ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat dense")
 
 
@@ -2460,6 +2591,11 @@ def _entity_value_label(text: str, classes: str) -> None:
     ui.label(text).classes(classes).style("white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word")
 
 
+def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
+    """Whether a Run can still write this row (pure)."""
+    return suggestion.id is not None and suggestion.status.value in _RUNNABLE_STATUSES
+
+
 def _entity_suggestions(
     state: dict[str, Any],
     suggestions: list[Suggestion],
@@ -2468,23 +2604,30 @@ def _entity_suggestions(
 ) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
-    Read-only view (see the row's op, property, current and proposed values,
-    and the operator's edit when one was saved via the inline editor); the
-    commit happens through the header's Run button, not per-row buttons.
-
     Each card is headed by the property's LABEL — what Uwazi calls it and what
     the operator knows it by — with the raw property name beneath it, so a row is
     both readable and still matchable against the template or a CSV
     (:func:`property_heading` / :func:`property_caption`). ``labels`` is the
     template's label map; without it the heading falls back to the raw name.
 
+    Each card carries the same per-property actions as the review table's
+    suboperation row: Run (when the part can still be written on its own) and
+    Revert (when that property has a completed in-place write to undo). The
+    header's "Run this row"/"Revert this entity" remain the coarse actions.
+
     ``focus_property`` highlights the property the window was opened from (a
-    suboperation's Edit icon) without hiding the entity's other rows: the
-    window is the place to see the whole row.
+    suboperation's Edit icon) without hiding the entity's other rows.
     """
     resolved = labels or {}
-    shown_merge_sources = False
+    in_place = not any(s.op in NON_IN_PLACE_OPS for s in suggestions)
+    merge_rows = [s for s in suggestions if s.op in MERGE_OPS]
+    move_rows = [s for s in suggestions if is_file_move_row(s)]
     for suggestion in suggestions:
+        if is_merge_anchor(suggestion) or is_file_move_row(suggestion):
+            # The all-no-op merge anchor and a standalone file copy write no
+            # property value of their own: the structural cards below show
+            # their file move (and, for a merge, its source deletes).
+            continue
         classes = "w-full"
         if focus_property is not None and suggestion.property_name == focus_property:
             classes = "w-full bg-blue-1"
@@ -2495,18 +2638,54 @@ def _entity_suggestions(
                     caption = property_caption(suggestion.property_name, resolved)
                     if caption:
                         ui.label(caption).classes("text-caption text-grey-6")
-                ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
+                with ui.row().classes("items-center no-wrap gap-1"):
+                    ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
+                    ui.badge(sub_status_label(suggestion.status)).props(f"color={sub_status_color(suggestion.status)}")
+                    if _suggestion_is_runnable(suggestion) and is_selectable(suggestion.op):
+                        ui.button(
+                            icon="play_arrow",
+                            on_click=lambda s=suggestion: _run_refs(state, [(s.id, s.shared_id, s.language, s.op)], [s.op]),
+                        ).props("flat dense color=primary").tooltip("Run this property")
+                    if sub_revertable(suggestion, in_place=in_place):
+                        ui.button(
+                            icon="undo",
+                            on_click=lambda s=suggestion: _revert_suboperation_clicked(
+                                state,
+                                s.shared_id,
+                                s.language,
+                                s.property_name,
+                                s.id,
+                                sub_label(s, resolved),
+                            ),
+                        ).props("flat dense color=indigo").tooltip("Revert this property to its backup value")
             if suggestion.op in PROPERTY_OPS:
-                _entity_value_label(f"Current: {full_value(suggestion.current_value)}", "text-body2 text-grey-7")
+                _entity_value_label(f"Value: {full_value(suggestion.current_value)}", "text-body2 text-grey-7")
                 _entity_value_label(f"Proposed: {full_value(suggestion.proposed_value)}", "text-body2")
             if suggestion.edited_value is not None:
                 _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
-            if suggestion.merge_source_ids and not shown_merge_sources:
-                shown_merge_sources = True
-                ui.label(
-                    f"Also deletes {len(suggestion.merge_source_ids)} merged source(s): "
-                    f"{truncate(', '.join(suggestion.merge_source_ids), 200)}"
-                ).classes("text-body2 text-negative")
+    if merge_rows:
+        status = operation_status([{"status": sub_status_label(row.status)} for row in merge_rows])
+        status_color = RUN_STATUS_COLORS.get(status, "grey")
+        for detail in merge_detail_rows(merge_rows, status=status, status_color=status_color):
+            _entity_structural_card(detail)
+    if move_rows:
+        for detail in file_move_detail_rows(move_rows):
+            _entity_structural_card(detail)
+
+
+def _entity_structural_card(detail: dict[str, Any]) -> None:
+    """One display-only file/delete card in the entity window (pure payload in)."""
+    with ui.card().classes("w-full"):
+        with ui.row().classes("w-full items-center justify-between no-wrap"):
+            with ui.column().classes("items-start no-wrap").style("min-width: 0"):
+                ui.label(detail["label"]).classes("text-subtitle2")
+                if detail["caption"]:
+                    ui.label(detail["caption"]).classes("text-caption text-grey-6")
+            with ui.row().classes("items-center no-wrap gap-1"):
+                ui.badge(detail["match"]).props(f"color={detail['match_color']}")
+                ui.badge(detail["status"]).props(f"color={detail['status_color']}")
+        _entity_value_label(f"Value: {detail['current']}", "text-body2 text-grey-7")
+        _entity_value_label(f"Proposed: {detail['proposed']}", "text-body2")
 
 
 def _navigate_entity(state: dict[str, Any], current: str, language: str | None, direction: int) -> None:

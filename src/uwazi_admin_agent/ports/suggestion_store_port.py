@@ -159,12 +159,23 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def get_entity(self, run_id: str, shared_id: str, language: str | None = None) -> list[Suggestion]:
+    def get_entity(
+        self,
+        run_id: str,
+        shared_id: str,
+        language: str | None = None,
+        f: SuggestionFilter | None = None,
+    ) -> list[Suggestion]:
         """Every suggestion row for one entity in ONE language group (the entity window).
 
         ``language=None`` is the language-independent group (selects, titles,
         whole-entity ops), not "every language" — the table's rows are per
         language, so the window reads exactly the group it was opened for.
+
+        ``f`` is the review table's current filter: the window shows the same
+        properties the table does (the entity/language constraints are applied
+        on top of it), so a filtered table and its detail window cannot
+        disagree.
         """
         ...
 
@@ -251,6 +262,16 @@ class SuggestionStorePort(ABC):
 
         Ignores limit/offset on purpose: this is a projection of the selection,
         not a page of it.
+        """
+        ...
+
+    @abstractmethod
+    def file_operation_rows(self, run_id: str) -> list[Suggestion]:
+        """Rows that carry a file snapshot (merge/move sources + their files).
+
+        Used by the targeted file-drift check: only these rows name source
+        entities whose live file set the review table displays. Obsolete and
+        discarded rows are excluded — they no longer describe planned work.
         """
         ...
 

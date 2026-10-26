@@ -70,6 +70,38 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
         store.close()
 
 
+def test_a_scoped_refresh_retires_a_stale_info_row() -> None:
+    """Info rows name no entity, so a scoped pass still re-decides them.
+
+    Without this, a "moved N files" summary from an earlier pass stayed visible
+    forever on every scoped refresh (``info-N`` is never in the entity scope).
+    """
+    store = SqliteSuggestionStore(Path(":memory:"))
+    try:
+        store.add_suggestions(
+            [
+                _suggestion("a", "v"),
+                Suggestion(
+                    run_id="r",
+                    shared_id="info-0",
+                    op="info",
+                    property_name=None,
+                    proposed_value="Moved 2 files",
+                    status=SuggestionStatus.PENDING,
+                ),
+            ]
+        )
+
+        summary = store.reconcile_suggestions("r", [_suggestion("a", "v")], entity_scope=["entity-1"])
+
+        rows, _total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        statuses = {(row.op, row.shared_id): row.status for row in rows}
+        assert statuses[("info", "info-0")] is SuggestionStatus.OBSOLETE
+        assert summary.obsolete == 1
+    finally:
+        store.close()
+
+
 def test_obsolete_rows_are_hidden_unless_requested() -> None:
     store = SqliteSuggestionStore(Path(":memory:"))
     try:

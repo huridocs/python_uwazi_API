@@ -96,9 +96,15 @@ _running_runs: dict[str, str] = {}
 # Global claim state: at most ONE mutating op (execute/revert/generate/rename/
 # delete) may be in flight across ALL connected users. ``_active_op`` holds
 # ``{"run_id": ..., "kind": ..., "label": ...}`` or None; the claim is the
-# server-side serializer the JS-only guards cannot provide.
-_active_op: dict[str, str] | None = None
+# server-side serializer the JS-only guards cannot provide. A BULK action
+# (delete selected) carries the whole ``run_ids`` set in ONE claim.
+_active_op: dict[str, Any] | None = None
 _active_op_lock = threading.Lock()
+
+# A confirmed callback returns this when it aborted before doing anything (for
+# example, a busy claim at launch). The confirmation wrapper then suppresses
+# the success toast/broadcast it would otherwise emit.
+_ABORT: object = object()
 
 _KIND_LABELS = {
     "running": "is running",
@@ -126,7 +132,8 @@ def _busy_label() -> str:
     """
     op = _active_op
     if op is not None:
-        return f"Task {op['run_id']!r} {_KIND_LABELS.get(op['kind'], op['kind'])}"
+        label = op.get("label")
+        return label or f"Task {op['run_id']!r} {_KIND_LABELS.get(op['kind'], op['kind'])}"
     holder = operation_gate.snapshot()
     if holder is not None:
         return operation_gate.busy_text(holder)
@@ -177,6 +184,52 @@ def _release_run(run_id: str) -> None:
         _running_runs.pop(run_id, None)
     if gate_kind is not None:
         operation_gate.release(gate_kind, run_id)
+    _broadcast_rows()
+
+
+def _bulk_label(count: int, kind: str) -> str:
+    """The busy banner text for a bulk action over ``count`` tasks (pure)."""
+    action = {"deleting": "being deleted"}.get(kind, kind)
+    verb = "is" if count == 1 else "are"
+    noun = "task" if count == 1 else "tasks"
+    return f"{count} {noun} {verb} {action}"
+
+
+def _try_claim_bulk(run_ids: list[str], kind: str) -> bool:
+    """Claim the one in-flight slot for a BULK action over many runs.
+
+    A bulk delete is ONE operator action. Claiming once per run would always
+    fail from the second run on (the global slot is already held), which is
+    exactly what made multi-select delete impossible. The claim carries the
+    whole id set so its release cannot be confused with a single-run claim.
+    Bulk deletes are local-only, so they take no Uwazi write gate.
+    """
+    global _active_op
+    unique = list(dict.fromkeys(run_ids))
+    if not unique:
+        return False
+    with _active_op_lock:
+        if _active_op is not None:
+            return False
+        _active_op = {
+            "run_id": unique[0],
+            "run_ids": tuple(unique),
+            "kind": kind,
+            "label": _bulk_label(len(unique), kind),
+        }
+    _broadcast_rows()
+    return True
+
+
+def _release_bulk_claim(run_ids: list[str]) -> None:
+    """Release a bulk claim owned by exactly ``run_ids`` (never another op)."""
+    global _active_op
+    unique = tuple(dict.fromkeys(run_ids))
+    with _active_op_lock:
+        op = _active_op
+        if op is None or op.get("run_ids") != unique:
+            return
+        _active_op = None
     _broadcast_rows()
 
 
@@ -410,7 +463,7 @@ def _build_runs_table() -> ui.table:
         <q-td :props="props" class="text-no-wrap">
             <q-btn dense flat icon="fact_check" color="secondary" title="Review &amp; apply"
                    @click="$parent.$emit('review', props.row)" />
-            <q-btn dense flat icon="info" color="grey-8"
+            <q-btn dense flat icon="description" color="grey-8" title="Show prompt"
                    @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="props.row.busy || {_IN_FLIGHT_JS}"
@@ -589,14 +642,17 @@ def _selection_toolbar() -> None:
 
 
 def _bulk_delete_selected() -> None:
-    """Open one confirmation for every checked task, then delete them all."""
+    """Open one confirmation for every checked task, then delete them all.
+
+    The single in-flight claim is taken when the operator CONFIRMS (not here),
+    so closing the dialog leaves nothing held, and it is taken ONCE for the
+    whole set — not once per run.
+    """
     selected: list[str] = list(getattr(context.client, "_task_selection", []))
     if not selected:
         ui.notify("Nothing selected", type="warning")
         return
-    if not all(_try_claim(run_id, "deleting") for run_id in selected):
-        for run_id in selected:
-            _release_run(run_id)
+    if _is_busy():
         ui.notify(_busy_label(), type="warning")
         return
 
@@ -610,20 +666,24 @@ def _bulk_delete_selected() -> None:
     )
 
 
-def _delete_selected_and_release(selected: list[str]) -> None:
-    """Delete every claimed run; whatever happens, release every claim."""
+def _delete_selected_and_release(selected: list[str]) -> Any:
+    """Delete every selected run under ONE bulk claim; always release it."""
+    if not _try_claim_bulk(selected, "deleting"):
+        ui.notify(_busy_label(), type="warning")
+        return _ABORT
     deleted = 0
     try:
         for run_id in selected:
             delete_run(run_id)
             deleted += 1
     finally:
-        for run_id in selected:
-            _release_run(run_id)
         if deleted:
-            _broadcast_rows()
             selection = getattr(context.client, "_task_selection", [])
             context.client._task_selection = [run_id for run_id in selection if run_id not in set(selected)]
+        # Release AFTER pruning: its broadcast refreshes the toolbar from the
+        # pruned selection, so the Delete button disables immediately.
+        _release_bulk_claim(selected)
+    return None
 
 
 def _on_review(e: Any) -> None:
@@ -1302,6 +1362,8 @@ def _start_confirmed_task(on_confirm: Any, success_msg: str, run_id: str | None 
         if run_id is not None:
             _release_run(run_id)
         raise
+    if result is _ABORT:
+        return
     if hasattr(result, "__await__"):
         background_tasks.create(_run_async(result, success_msg, run_id), name=success_msg)
     else:

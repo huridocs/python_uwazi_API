@@ -291,7 +291,14 @@ result = len(entities)
     assert counts["match_new"] == 1
 
 
-def test_prediction_pass_marks_exact_matches(store: SqliteSuggestionStore) -> None:
+def test_prediction_pass_drops_exact_matches(store: SqliteSuggestionStore) -> None:
+    """A row that proposes the value the entity already has is not a change.
+
+    Hydration marks it a match, then the pass drops it: the review must not
+    offer a "value → same value" suboperation, and a Run must not re-send a
+    pointless write. A row with no current value (s3) is a genuine new value
+    and survives.
+    """
     script = """
 for d in query_entities_full(mode="by_template", template_name="Case"):
     update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": d["metadata"].get("excerpt")}}])
@@ -299,8 +306,7 @@ result = "ok"
 """
     asyncio.run(_use_case(store).run(script, "run1", _budget()))
     rows, _ = store.query("run1", SuggestionFilter())
-    verdicts = {row.shared_id: row.match for row in rows}
-    assert verdicts == {"s1": True, "s2": True, "s3": None}
+    assert [(row.shared_id, row.match) for row in rows] == [("s3", None)]
 
 
 def test_prediction_pass_records_progress_and_finish(store: SqliteSuggestionStore) -> None:

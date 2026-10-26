@@ -25,6 +25,8 @@ from typing import Any, Iterable
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
+    MERGE_OPS,
+    MOVE_OP,
     TITLE_PROPERTY,
     OperationReviewRow,
     Suggestion,
@@ -62,6 +64,7 @@ OP_BORDER_COLORS: dict[str, str] = {
     "unpublish": "#fb8c00",
     "set_publish_status": "#f9a825",
     "create_relationships": "#8e24aa",
+    MOVE_OP: "#00897b",
     "update_and_delete": "#5e35b1",
     "create_and_delete": "#3949ab",
     "info": "#546e7a",
@@ -77,6 +80,7 @@ LOCKED_SUB_OPS: dict[str, str] = {
     "publish": "publishing is one action for the whole entity — select the operation",
     "unpublish": "unpublishing is one action for the whole entity — select the operation",
     "set_publish_status": "the publish state is one action for the whole entity — select the operation",
+    MOVE_OP: "adding files is one action — select the operation",
     "update_and_delete": "a merge writes the target and deletes its sources in one Run — select the operation",
     "create_and_delete": "a merge creates the target and deletes its sources in one Run — select the operation",
 }
@@ -104,7 +108,7 @@ SUB_STATUS_COLORS: dict[str, str] = {
 # a deletion, a delete's is a re-create, and a merge's touches several entities
 # (the target AND its deleted sources), so none of them can be restored row by
 # row — the same rule the entity table already applied.
-NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_delete", "update_and_delete"})
+NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_delete", "update_and_delete", MOVE_OP})
 
 
 def is_selectable(op: str) -> bool:
@@ -188,7 +192,21 @@ def sub_values(sub: Suggestion) -> tuple[str, str]:
         return "—", "—"
     if sub.op in ("publish", "unpublish"):
         return "—", RUN_OP_PHRASES.get(sub.op, sub.op)
+    if sub.op == MOVE_OP:
+        return "—", _move_files_summary(sub)
     return truncate(sub.current_value, 120), truncate(sub.proposed_value, 120)
+
+
+def _move_files_summary(sub: Suggestion) -> str:
+    """What a standalone file copy adds to its target (pure)."""
+    names = [
+        str(file.get("originalname") or file.get("filename") or "") for file in sub.merge_files if isinstance(file, dict)
+    ]
+    names = [name for name in names if name]
+    if names:
+        return truncate(", ".join(names), 120)
+    sources = [source for source in sub.merge_source_ids if source]
+    return truncate("Files from " + ", ".join(sources), 120) if sources else "Files"
 
 
 def sub_match(sub: Suggestion) -> str:
@@ -233,6 +251,7 @@ def suboperation_row(
     selectable = is_selectable(sub.op)
     return {
         "id": sub.id,
+        "key": f"sub-{sub.id}",
         "label": sub_label(sub, labels),
         "caption": sub_caption(sub, labels),
         "name": sub.property_name or "",
@@ -252,7 +271,243 @@ def suboperation_row(
         "op": sub.op,
         "property_name": sub.property_name,
         "is_info": sub.op == INFO_OP,
+        "structural": False,
     }
+
+
+# One row per recorded FILE carries the singular: each file is its own
+# suboperation, so a newly attached file is a new row (never a name appended to
+# a shared line that the operator can miss or that a 120-char cell truncates).
+MERGE_FILE_ROW_LABELS: dict[str, str] = {
+    "document": "Primary document",
+    "attachment": "Supporting file",
+}
+
+
+def _structural_row(
+    *,
+    row_id: int | None,
+    key: str,
+    label: str,
+    caption: str,
+    current: str,
+    proposed: str,
+    status: str,
+    status_color: str,
+    op: str,
+    shared_id: str,
+) -> dict[str, Any]:
+    """One display-only structural suboperation (a file copy or a source delete) (pure).
+
+    These parts are NOT checkbox rows: the operation's own row is what Run
+    executes (the file copy and, for a merge, its source deletes are one
+    action). They carry the underlying suggestion's ``id`` so the operation's
+    Run/Discard/Restore still reach it, but they are never selectable
+    individually, and the table hides their Edit action.
+    """
+    return {
+        "id": row_id,
+        "key": key,
+        "label": label,
+        "caption": caption,
+        "name": "",
+        "language": "",
+        "lang": None,
+        "current": current,
+        "proposed": proposed,
+        "match": "n/a",
+        "match_color": MATCH_COLORS.get("n/a", "grey-4"),
+        "status": status,
+        "status_color": status_color,
+        "selectable": False,
+        "checked": False,
+        "note": lock_note(op) or "part of the operation — select the operation",
+        "revertable": False,
+        "shared_id": shared_id,
+        "op": op,
+        "property_name": None,
+        "is_info": False,
+        "structural": True,
+    }
+
+
+def is_merge_anchor(sub: Suggestion) -> bool:
+    """Whether a row is the propertyless anchor of an all-no-op merge (pure).
+
+    When every target property a merge would write already holds the proposed
+    value, the pass keeps ONE such anchor per target so the source deletes and
+    the file move still have a row to hang from. It writes nothing, so no review
+    surface should render it as a property change.
+    """
+    return sub.op in MERGE_OPS and sub.property_name is None and sub.proposed_value is None
+
+
+def is_file_move_row(sub: Suggestion) -> bool:
+    """Whether a row is a standalone file copy (``move_files``) (pure).
+
+    Its file list is shown as structural rows, so rendering the row itself
+    would only repeat the same files.
+    """
+    return sub.op == MOVE_OP
+
+
+def _sources_of(primary: Suggestion) -> list[str]:
+    """The distinct, non-empty sources a merge/move row carries (pure)."""
+    sources: list[str] = []
+    for source in primary.merge_source_ids:
+        if source and source not in sources:
+            sources.append(source)
+    return sources
+
+
+def _file_structural_rows(
+    primary: Suggestion,
+    *,
+    status: str,
+    status_color: str,
+    key_prefix: str = "",
+) -> list[dict[str, Any]]:
+    """The file-copy parts of one merge/move row, ONE ROW PER FILE (pure).
+
+    The plan's own ``merge_files`` is what the Run copies, so the table shows it
+    file by file: attaching a new supporting file to a source makes a new
+    suboperation appear after the next table refresh, and a file cannot hide
+    behind another one's name (the cell holds one file, never a joined list that
+    a long first name would truncate).
+
+    A source whose recorded file list is empty (legacy rows, or a dry run
+    without a repository) still gets one fallback "Uploaded files" row, so the
+    operation never claims fewer copies than it will make.
+    """
+    sources = _sources_of(primary)
+    if not sources:
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    sources_with_files: set[str] = set()
+    for index, file in enumerate(primary.merge_files):
+        source = str(file.get("from_shared_id") or "")
+        if source not in sources:
+            continue
+        kind = str(file.get("kind") or "file")
+        name = str(file.get("originalname") or file.get("filename") or "")
+        # The file id is what Uwazi mints per upload; a replaced file gets a new
+        # one, so its row is new (truthful) rather than silently retitled. A
+        # legacy snapshot without ids falls back to the name and the position,
+        # so two same-named files still get a row each.
+        file_id = str(file.get("file_id") or "")
+        identity = (source, kind, file_id or f"#{index}")
+        if not (file_id or name) or identity in seen:
+            continue
+        seen.add(identity)
+        sources_with_files.add(source)
+        rows.append(
+            _structural_row(
+                row_id=primary.id,
+                key=f"{key_prefix}file-{primary.op}-{source}-{kind}-{file_id or index}",
+                label=MERGE_FILE_ROW_LABELS.get(kind, "File"),
+                caption=source,
+                current="—",
+                proposed=name or "Copied onto the target",
+                status=status,
+                status_color=status_color,
+                op=primary.op,
+                shared_id=primary.shared_id,
+            )
+        )
+
+    for source in sources:
+        if source in sources_with_files:
+            continue
+        rows.append(
+            _structural_row(
+                row_id=primary.id,
+                key=f"{key_prefix}files-{primary.op}-{source}",
+                label="Uploaded files",
+                caption=source,
+                current="—",
+                proposed="Copied onto the target",
+                status=status,
+                status_color=status_color,
+                op=primary.op,
+                shared_id=primary.shared_id,
+            )
+        )
+    return rows
+
+
+def merge_detail_rows(
+    subs: Iterable[Suggestion],
+    *,
+    status: str,
+    status_color: str,
+) -> list[dict[str, Any]]:
+    """The merge's file-copy and source-delete suboperations (pure).
+
+    A merge row would otherwise read only as its target's property updates: the
+    ``update_and_delete`` op promises a delete and a file copy, but neither had
+    a part of its own. This derives both from the merge row's recorded
+    ``merge_source_ids`` / ``merge_files``:
+
+    - the file-copy parts (see :func:`_file_structural_rows`);
+    - one "Delete source entity" row per source.
+
+    The rows are display-only: the Run executes the whole merge (its target
+    write when there is one, the file move, the source deletes) from the merge
+    row itself.
+    """
+    merge_rows = [sub for sub in subs if sub.op in MERGE_OPS]
+    primary = next((row for row in merge_rows if row.merge_source_ids), None)
+    if primary is None:
+        return []
+    sources = _sources_of(primary)
+    if not sources:
+        return []
+    rows = _file_structural_rows(primary, status=status, status_color=status_color)
+    for source in sources:
+        rows.append(
+            _structural_row(
+                row_id=primary.id,
+                key=f"merge-delete-{source}",
+                label="Delete source entity",
+                caption=source,
+                current="—",
+                proposed="Delete",
+                status=status,
+                status_color=status_color,
+                op=primary.op,
+                shared_id=primary.shared_id,
+            )
+        )
+    return rows
+
+
+def file_move_detail_rows(subs: Iterable[Suggestion]) -> list[dict[str, Any]]:
+    """The file-copy suboperations of standalone ``move_files`` rows (pure).
+
+    A file copy adds the sources' uploaded files to the target and keeps the
+    sources untouched, so it has file parts but NO delete part. The sources are
+    named exactly like a merge's, from each row's ``merge_source_ids``.
+
+    One row is rendered per recorded move (and carries THAT row's ``id``):
+    moving two source sets to the same target is two fine-grained moves, and
+    giving both structural rows the same id would let a row-level Run reach only
+    one of them.
+    """
+    rows: list[dict[str, Any]] = []
+    for primary in subs:
+        if primary.op != MOVE_OP or not primary.merge_source_ids:
+            continue
+        status = sub_status_label(primary.status)
+        rows.extend(
+            _file_structural_rows(
+                primary,
+                status=status,
+                status_color=RUN_STATUS_COLORS.get(status, "grey"),
+                key_prefix=f"move-{primary.id or primary.shared_id}-",
+            )
+        )
+    return rows
 
 
 def operation_status(subs: Iterable[dict[str, Any]]) -> str:
@@ -329,7 +584,7 @@ def operation_row(
     ``is_info`` so the page hides every checkbox and action.
     """
     checked = set(checked_ids)
-    is_info = INFO_OP in item.ops
+    is_info = bool(item.ops) and all(op == INFO_OP for op in item.ops)
     in_place = not any(op in NON_IN_PLACE_OPS for op in item.ops)
     if is_info:
         # The parent row carries the headline; only its detail lines are
@@ -338,9 +593,19 @@ def operation_row(
         submodels = [sub for sub in item.subs if sub.detail_key is not None]
     else:
         submodels = list(item.subs)
-    subs = [suboperation_row(sub, checked=sub.id in checked, in_place=in_place, labels=labels) for sub in submodels]
+    rendered = [
+        (sub, suboperation_row(sub, checked=sub.id in checked, in_place=in_place, labels=labels)) for sub in submodels
+    ]
+    # The all-no-op merge anchor and a standalone file-copy row write no
+    # property value of their own: their structural file/delete parts carry the
+    # meaning. Their status still counts toward the operation's own state, then
+    # they are dropped from the display.
+    status = operation_status([payload for _sub, payload in rendered])
+    subs = [payload for sub, payload in rendered if not is_merge_anchor(sub) and not is_file_move_row(sub)]
     text, color = validated_cell(subs)
-    status = operation_status(subs)
+    if not is_info:
+        subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey")))
+        subs.extend(file_move_detail_rows(item.subs))
     title = item.entity_title or item.shared_id
     if is_info:
         # Display-only: full text (the Target cell wraps it), no link, no
@@ -556,10 +821,14 @@ __all__ = [
     "any_property_option",
     "average_accuracy",
     "entities_of_refs",
+    "file_move_detail_rows",
     "ids_of_refs",
+    "is_file_move_row",
+    "is_merge_anchor",
     "is_selectable",
     "languages_of_refs",
     "lock_note",
+    "merge_detail_rows",
     "operation_open_url",
     "operation_row",
     "operation_status",

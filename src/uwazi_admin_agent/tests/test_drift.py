@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 
 from uwazi_admin_agent.domain.drift import (
+    DRIFT_LABEL,
+    DriftEntry,
     DriftKind,
     DriftStatus,
     build_probe_result,
@@ -10,6 +12,7 @@ from uwazi_admin_agent.domain.drift import (
     max_live_edit_date,
 )
 from uwazi_admin_agent.drivers.web.review_view import DRIFT_STATUS_COLORS, drift_banner_text, drift_banner_time
+from uwazi_admin_agent.drivers.web.run_service import _drift_detail
 
 
 def _now() -> datetime:
@@ -65,6 +68,77 @@ def test_report_run_written_id_not_modified() -> None:
     baseline = {"ours": 10}
     report = build_report(live, baseline, excluded_ids={"ours"}, languages_failed=[], checked_at=_now())
     assert report.modified == []
+
+
+def test_report_includes_file_drift_entries() -> None:
+    """A file-only change cannot move editDate, so it arrives as its own kind."""
+    file_entry = DriftEntry(shared_id="source", kind=DriftKind.FILES)
+
+    report = build_report(
+        live=[
+            {"shared_id": "kept", "edit_date": 10},
+            {"shared_id": "source", "edit_date": 10},
+        ],
+        baseline={"kept": 10, "source": 10},
+        excluded_ids=set(),
+        languages_failed=[],
+        checked_at=_now(),
+        files=[file_entry],
+    )
+
+    assert report.modified == []
+    assert [entry.shared_id for entry in report.files] == ["source"]
+    assert [entry.shared_id for entry in report.entries()] == ["source"]
+    assert report.total() == 1
+    assert DRIFT_LABEL[DriftKind.FILES] == "Files changed in Uwazi"
+
+
+def test_a_source_modified_and_file_drifted_is_listed_once() -> None:
+    report = build_report(
+        live=[{"shared_id": "source", "edit_date": 99}],
+        baseline={"source": 10},
+        excluded_ids=set(),
+        languages_failed=[],
+        checked_at=_now(),
+        files=[DriftEntry(shared_id="source", kind=DriftKind.FILES)],
+    )
+
+    assert [entry.shared_id for entry in report.modified] == ["source"]
+    assert report.files == []
+    assert report.total() == 1
+
+
+def test_drift_detail_names_file_drift_as_entities_not_files() -> None:
+    report = build_report(
+        live=[
+            {"shared_id": "a", "edit_date": 99},
+            {"shared_id": "files-1", "edit_date": 10},
+            {"shared_id": "files-2", "edit_date": 10},
+        ],
+        baseline={"a": 10, "files-1": 10, "files-2": 10},
+        excluded_ids=set(),
+        languages_failed=[],
+        checked_at=_now(),
+        files=[
+            DriftEntry(shared_id="files-1", kind=DriftKind.FILES),
+            DriftEntry(shared_id="files-2", kind=DriftKind.FILES),
+        ],
+    )
+
+    assert _drift_detail(report) == "1 modified in uwazi, 2 entities with changed files in uwazi"
+
+
+def test_drift_detail_uses_the_singular_for_one_file_drifted_entity() -> None:
+    report = build_report(
+        live=[{"shared_id": "files-1", "edit_date": 10}],
+        baseline={"files-1": 10},
+        excluded_ids=set(),
+        languages_failed=[],
+        checked_at=_now(),
+        files=[DriftEntry(shared_id="files-1", kind=DriftKind.FILES)],
+    )
+
+    assert _drift_detail(report) == "1 entity with changed files in uwazi"
 
 
 def test_max_live_edit_date_picks_largest() -> None:

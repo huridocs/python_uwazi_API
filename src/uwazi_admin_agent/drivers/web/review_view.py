@@ -17,6 +17,7 @@ from typing import Any
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value, render_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
+    FILE_OPS,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     EntityReviewRow,
@@ -45,6 +46,7 @@ OP_COLORS: dict[str, str] = {
     "unpublish": "orange",
     "set_publish_status": "orange",
     "create_relationships": "purple",
+    "move_files": "teal",
     "update_and_delete": "deep-purple",
     "create_and_delete": "indigo",
     "info": "blue-grey",
@@ -70,7 +72,7 @@ RUN_STATUS_COLORS: dict[str, str] = {
 # Ops whose entity ALREADY EXISTS in Uwazi, so the review row can link to its
 # public page. A create row still holds its dry-created placeholder, so
 # opening it would land on nothing.
-OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete"})
+OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files"})
 
 # ``_title`` is the review table's synthetic name for a title change — no
 # template property carries it, so it gets the same human word Uwazi uses.
@@ -85,6 +87,7 @@ RUN_OP_PHRASES: dict[str, str] = {
     "unpublish": "Unpublish",
     "set_publish_status": "Change publishing",
     "create_relationships": "Relink",
+    "move_files": "Add files",
     "update_and_delete": "Merge (update + delete)",
     "create_and_delete": "Merge (create + delete)",
 }
@@ -106,6 +109,11 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
         title = f"{title} ({', '.join(languages)})"
     phrases = [RUN_OP_PHRASES[op] for op in ops or [] if op in RUN_OP_PHRASES]
     action = " + ".join(dict.fromkeys(phrases)) or "Write"
+    # A file copy adds bytes to the target; Revert restores entity snapshots and
+    # has no way to remove an uploaded file the source still owns. Saying
+    # "Revertable" for it would promise an undo the Run cannot keep.
+    if FILE_OPS.intersection(ops or []):
+        return title, f"{action} {count} {entities} in Uwazi now. The copied files stay on the target."
     return title, f"{action} {count} {entities} in Uwazi now. Revertable from the task page."
 
 
@@ -481,9 +489,11 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     # a re-create (a fresh sharedId, files and connection rows) and a `create`
     # row's undo is a deletion — both are ordered run-level operations. A merge
     # row's undo is likewise ordered: the target was modified/created AND its
-    # sources deleted, so restoring the target alone would not restore them.
+    # sources deleted, so restoring the target alone would not restore them. A
+    # file copy appends bytes an entity snapshot cannot remove, so it is not
+    # in-place revertable either.
     in_place_revertable = status_label in ("runned", "reverted") and not any(
-        op in ("delete", "create", "update_and_delete", "create_and_delete") for op in item.ops
+        op in ("delete", "create", "update_and_delete", "create_and_delete") or op in FILE_OPS for op in item.ops
     )
     title = item.entity_title or item.shared_id
     try:

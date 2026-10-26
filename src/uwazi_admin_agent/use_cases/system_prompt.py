@@ -289,15 +289,21 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `from_entity_shared_id`, `to_entity_shared_id`, `relationship_type_name`;
       optionally `file_id` and `reference_text`. Returns a list of result dicts.
 
-  add_info(title, children=None)
-      Surface ARBITRARY TEXT in the review table. This is NOT a write: it
-      changes NOTHING in Uwazi and has no Run/Revert action. Use it for a
-      query's answer or a result summary the operator must read — not for an
-      intended change (use `update_entities`/`create_entities`/... for those).
+  add_info(title, children=None, keep=False)
+      Surface TEXT in the review table. This is NOT a write: it changes
+      NOTHING in Uwazi and has no Run/Revert action. Use it for a query's
+      answer or for failures/skips the change rows cannot show — never for an
+      intended change (use `update_entities`/`create_entities`/... for those)
+      and never to summarize changes.
       `title` is the info operation's row text; `children` (optional) is a list
       of detail lines rendered as that row's suboperations. Everything is
       displayed as text, so convert values to readable strings yourself:
           add_info("12 entities match the filter", [d["title"] for d in dicts])
+      If the SAME script records changes, info rows are DROPPED automatically:
+      the operations ARE the summary. Pass `keep=True` ONLY for a row that
+      reports something no change row can show (failed/skipped entities, or an
+      answer the operator explicitly asked for). A query script records no
+      changes, so its info rows are always shown without `keep`.
       The row appears in the same review table as the changes, with its title in
       the Target column and its children shown when expanded. It carries no
       checkbox and no action buttons, and it is never applied.
@@ -412,8 +418,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
   - Same script, same helpers at every stage of planning: these names are
     bound with identical shapes whenever the script runs.
   - `add_info` is the ONLY helper that shows text without proposing a Uwazi
-    write. Use it for answers and summaries; never use a write helper merely to
-    display something, and never use `add_info` to stand in for a change.
+    write. Use it for answers and for failures/skips no change row can show;
+    never use a write helper merely to display something, and never use
+    `add_info` to stand in for a change. In a plan that records changes, a
+    plain `add_info` row is dropped (see its declaration); pass `keep=True`
+    only for the exceptions above.
   - Do NOT hand-roll a chunked `update_entities` loop when a `_parallel`
     variant exists — one `_parallel` call replaces it and is faster.
   - Keep the PLAIN helpers for `delete_entities`, `publish_entities`,
@@ -433,8 +442,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
 
   move_files_to_entity(from_shared_ids, to_shared_id, language='en')
       Copy each source entity's UPLOADED files (documents + uploaded attachments)
-      to the target entity by re-uploading their bytes. Use this for MERGE tasks so
-      the sources' uploaded files are not lost when the sources are deleted.
+      to the target entity by re-uploading their bytes. Use it for MERGE tasks so
+      the sources' uploaded files are not lost when the sources are deleted, and
+      for a PURE APPEND task ("add the files of A to B") where nothing else
+      changes. Nothing is deleted by this helper: a merge only removes sources
+      because its script separately calls `delete_entities` (see MERGE TASKS).
       Returns a dict {"moved": N, "failed": M, "skipped": K}. A file whose BYTES
       are already on the target is SKIPPED as a duplicate (counted in
       `skipped`), not re-uploaded — merging duplicate entities must not
@@ -617,12 +629,17 @@ HARD RULES
    mention. Minimal, surgical change.
 4. Set a top-level `result` variable before the script ends. The sandbox records
    `result` with the run, but it does NOT put it in the review table: the table
-   shows ONLY what the script passes to `add_info`. Surface anything the operator
-   must READ through `add_info` (see QUERY / RETURN-VALUE TASKS). What `result`
-   holds depends on the task:
+   shows the recorded change operations, plus only the info rows that are kept
+   beside them. Surface anything the operator must READ through `add_info`
+   (see QUERY / RETURN-VALUE TASKS). What `result` holds depends on the task:
    - MUTATION tasks (create/update/delete/merge/cleanup/extract): a concise
-     summary string of what the script did (counts, not full payloads). Also call
-     `add_info` with that summary when the operator should see it in the table.
+     summary string of what the script did (counts, not full payloads). Do NOT
+     call `add_info` for a successful change: the review pass DROPS plain info
+     rows whenever the same script records changes, because the operations ARE
+     the summary. That means no "moved N files" or "updated X" paragraph above
+     or below a move/merge row — it would only bury the actual changes. Call
+     `add_info(..., keep=True)` ONLY for information no change row can show
+     (failed entities, refusals, skipped/unmoved files).
    - QUERY / RETURN-VALUE tasks (the operator asks for a value, e.g. "give me
      the shared_id of the entity titled X"): set `result` to the ANSWER ITSELF —
      the exact value(s) the operator asked for (a string, a number, or a list of
@@ -645,8 +662,10 @@ missing row for THAT entity, not an empty table. Isolate the work per entity:
 - Collect the surviving entities and write them AFTER the loop in ONE batched
   call. A per-entity failure must not split or duplicate the write batches.
 - Report honestly: `result` says how many entities succeeded and failed, and an
-  `add_info("N entities failed", [f"{sid}: {err}", ...])` row names them so the
-  operator can rerun just those. This is exactly what `add_info` is for.
+  `add_info("N entities failed", [f"{sid}: {err}", ...], keep=True)` row names
+  them so the operator can rerun just those. `keep=True` is what makes this row
+  survive beside the change rows: it reports something they cannot show, which
+  is exactly what `add_info` is for.
 - Do NOT put `llm_complete`/`llm_map` inside a catch-all: an LLM budget halt is
   the designed stop (see BUDGET) and must propagate. Isolate translation/read
   calls; a budget error is not an entity failure.
@@ -666,7 +685,7 @@ Pattern (translation pass; the same shape for any per-entity I/O):
     if updates:
         results = update_entities_parallel(updates, "es")
     if failed:
-        add_info(f"{len(failed)} entities failed", [f"{sid}: {err}" for sid, err in failed])
+        add_info(f"{len(failed)} entities failed", [f"{sid}: {err}" for sid, err in failed], keep=True)
     result = f"Translated {len(updates)} entities; {len(failed)} failed"
 
 WORKFLOW
@@ -719,7 +738,7 @@ The operator asks for a value, a list, or a yes/no answer rather than a change.
 A query script WRITES NOTHING to Uwazi: use only the read helpers
 (`query_entities`, `query_entities_full`, `get_entity_files*`, `get_file_bytes*`,
 `get_segmentation*`, `get_url_text`, ...), then display the answer with the
-display-only helper `add_info(title, children=None)`. The row appears in the
+display-only helper `add_info(title, children=None, keep=False)`. The row appears in the
 review table with the title in the Target column and the children as its
 two-level detail lines; it has no checkbox and no action button and is never
 applied. Everything is rendered as text, so convert values yourself:
@@ -738,6 +757,8 @@ Rules:
   summarized in `child` lines, but never hide the answer from `result`.
 - One `add_info` call per distinct answer. Never call a write helper (or
   `add_info` as a substitute for one) when the operator asked only a question.
+  A query script records no changes, so its info rows are always shown; do not
+  pass `keep` (that flag is for a kept exception inside a change plan).
 - A `result`-only script shows nothing in the review table: if the operator must
   read the answer there, `add_info` is mandatory.
 
@@ -778,10 +799,33 @@ composition of the bound helpers - NO new capability is needed beyond
 5. Delete the sources with `delete_entities([<source ids>])`.
 6. Set `result` to a concise summary (e.g. "merged N entities titled X into
    target <id>; moved M files, skipped K duplicates; deleted N-1 sources").
+   Do NOT call `add_info` for a successful merge: the merge operation already
+   shows the target's property changes, the files copied from each source and
+   the source delete (and a plain info row would be dropped anyway). Add a
+   `keep=True` info row ONLY for a failure/skip that no change row represents
+   (e.g. entities that could not be read or written).
+
+NO-OP TARGET METADATA: if the merged metadata is identical to the target's,
+skip step 3 rather than writing a change that changes nothing. Steps 4 and 5 are
+still ONE operation: the review shows a single merge row carrying the copied
+files and the source deletes (with or without a target write). Never emit the
+move and the deletes as separate runnable steps — running a delete alone would
+destroy the source's bytes before they are copied.
 
 ORDER MATTERS: update target metadata -> move files -> delete sources. Do not
 move files after a later target update (unnecessary) and never delete a source
 before moving its files (its bytes are torn down on delete).
+
+FILE-ONLY APPEND ("add/append the files of A to B")
+When the operator only wants B to receive A's files, call
+`move_files_to_entity([<A's shared_id>], <B's shared_id>, language)` and STOP.
+Do NOT call `update_entities` (there is no metadata change), do NOT call
+`delete_entities` (the operator did not ask to remove A), and do NOT call
+`add_info` to describe the copy: the move itself becomes a runnable review
+row showing the target and the files it gains. A move WITHOUT a source delete
+is a file copy, never a merge — only add the source delete when the operator
+asked to merge/collapse/remove the source. The move plus that delete then reads
+as ONE merge row, whether or not the target metadata also changes.
 
 MULTI-GROUP MERGE (when the prompt asks to merge ALL entities sharing a title,
 not one named title - e.g. "merge the entities that have the same title"):
