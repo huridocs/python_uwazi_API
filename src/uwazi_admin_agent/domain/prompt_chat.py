@@ -24,6 +24,7 @@ validation step uses — so both prompts are formatted identically.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +41,18 @@ class ChatRole(str, Enum):
     SYSTEM = "system"  # the original prompt + the validation clarifications
 
 
+class ChatPromptStatus(str, Enum):
+    """Whether an operator prompt has been folded into a Run.
+
+    The chat shows one bubble per prompt, so the operator can see WHICH request
+    is still waiting to be regenerated. Only operator messages carry a
+    meaningful status; a SYSTEM/ASSISTANT message's status is ignored.
+    """
+
+    PENDING = "pending"  # written by the operator, not run yet
+    APPLIED = "applied"  # part of a completed Run's prompt
+
+
 class ChatMessage(BaseModel):
     """One message in the prompt-improvement chat."""
 
@@ -48,6 +61,7 @@ class ChatMessage(BaseModel):
     role: ChatRole
     text: str
     stamp: str = ""  # ISO timestamp, for display
+    status: ChatPromptStatus = ChatPromptStatus.PENDING
     questions: list[ClarifyingQuestion] = Field(default_factory=list)
     revised_prompt: str | None = None
 
@@ -71,6 +85,12 @@ _HEADINGS: dict[ChatRole, str] = {
 # The heading the conversation is rendered under (in the final prompt AND in a
 # re-opened chat's validation message, which carries the chat-derived prompt).
 _CONVERSATION_HEADING: str = "Conversation:"
+
+# A message heading inside the conversation block, as ``build_chat_history``
+# writes it. Parsing it back is what lets a re-opened chat show ONE BUBBLE PER
+# PROMPT instead of one bubble holding the whole conversation.
+_MESSAGE_HEADING_RE: re.Pattern[str] = re.compile(r"^## (Operator|Assistant)\s*$")
+_REVISED_PROMPT_HEADING: str = "### Revised prompt"
 
 
 def render_chat_message(message: ChatMessage) -> str:
@@ -134,6 +154,113 @@ def _split_validation(text: str) -> tuple[str, str]:
     return text.strip(), ""
 
 
+def _split_revised_prompt(body: str) -> tuple[str, str | None]:
+    """Split an assistant block into its prose/questions and its revised prompt (pure)."""
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == _REVISED_PROMPT_HEADING:
+            head = "\n".join(lines[:index]).strip()
+            revised = "\n".join(lines[index + 1 :]).strip()
+            return head, revised or None
+    return body.strip(), None
+
+
+def parse_conversation(conversation: str) -> list[ChatMessage]:
+    """Parse a rendered ``Conversation:`` block back into its messages (pure).
+
+    ``build_final_prompt_from_chat`` writes the conversation with
+    :func:`render_chat_message`; this is the inverse for the parts a re-opened
+    chat needs. Every parsed message is marked
+    :attr:`ChatPromptStatus.APPLIED`: the conversation is part of the prompt
+    that produced the run's CURRENT script, so those requests were run.
+    """
+    messages: list[ChatMessage] = []
+    role: ChatRole | None = None
+    body: list[str] = []
+
+    def _flush() -> None:
+        if role is None:
+            return
+        text = "\n".join(body).strip()
+        if not text:
+            return
+        if role is ChatRole.OPERATOR:
+            messages.append(ChatMessage(role=ChatRole.OPERATOR, text=text, status=ChatPromptStatus.APPLIED))
+            return
+        summary, revised = _split_revised_prompt(text)
+        messages.append(
+            ChatMessage(
+                role=ChatRole.ASSISTANT,
+                text=summary,
+                status=ChatPromptStatus.APPLIED,
+                revised_prompt=revised,
+            )
+        )
+
+    for line in conversation.splitlines():
+        match = _MESSAGE_HEADING_RE.match(line)
+        if match is not None:
+            _flush()
+            role = ChatRole(match.group(1).lower())
+            body = []
+            continue
+        if role is not None:
+            body.append(line)
+    _flush()
+    return messages
+
+
+def reconstruct_chat(original: str, validated: str) -> tuple[str, list[ChatMessage]]:
+    """Rebuild a RE-OPENED chat from the run's persisted prompt fields (pure).
+
+    Returns ``(baseline, messages)``:
+
+    - ``baseline`` is the one bubble that describes the run itself: the
+      original prompt plus the validation step's clarifications, WITHOUT any
+      conversation (which gets a bubble per prompt instead);
+    - ``messages`` is the history the generation LLM is replayed, and it mirrors
+      :func:`build_final_prompt_from_chat`'s two inputs: the original prompt as
+      the first ``SYSTEM`` message, the clarifications as a second one when
+      there are any, then one ``OPERATOR`` message per prior request.
+
+    A request found in the persisted conversation was part of the Run that
+    produced the current script, so it is marked ``APPLIED``. Requests written
+    in THIS dialog session stay ``PENDING`` until the Run button succeeds.
+    """
+    original = (original or "").strip()
+    validated = (validated or "").strip()
+    baseline, conversation = _split_validation(validated) if validated else ("", "")
+    prior = parse_conversation(conversation)
+
+    messages: list[ChatMessage] = []
+    if original:
+        messages.append(ChatMessage(role=ChatRole.SYSTEM, text=original))
+    if baseline and baseline != original:
+        clarifications = baseline
+        if original and clarifications.startswith(original):
+            clarifications = clarifications[len(original) :].strip()
+        if clarifications:
+            messages.append(ChatMessage(role=ChatRole.SYSTEM, text=clarifications))
+    messages.extend(prior)
+    return (baseline or original), messages
+
+
+def mark_prompts_applied(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Return ``messages`` with every operator prompt marked applied (pure).
+
+    Called after a successful Run: the requests the operator just wrote are now
+    part of the script's prompt, so their bubbles must stop saying "not run
+    yet". Idempotent: already-applied prompts and non-operator messages are
+    returned unchanged.
+    """
+    return [
+        message.model_copy(update={"status": ChatPromptStatus.APPLIED})
+        if message.role is ChatRole.OPERATOR and message.status is not ChatPromptStatus.APPLIED
+        else message
+        for message in messages
+    ]
+
+
 def build_final_prompt_from_chat(messages: list[ChatMessage]) -> str:
     """The prompt the generation LLM receives: the original + the whole chat.
 
@@ -192,10 +319,14 @@ def build_final_prompt_from_chat(messages: list[ChatMessage]) -> str:
 
 __all__ = [
     "ChatMessage",
+    "ChatPromptStatus",
     "ChatRole",
     "ChatTurn",
     "build_chat_history",
     "build_final_prompt_from_chat",
+    "mark_prompts_applied",
+    "parse_conversation",
+    "reconstruct_chat",
     "render_chat_message",
     "render_question_answers",
 ]

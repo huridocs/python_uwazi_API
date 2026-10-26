@@ -3,19 +3,29 @@
 The chat opens with the run's ORIGINAL prompt and the validation step's resolved
 clarifications (both read-only context), then the operator types free-form
 requests. The chat has ONE input action: **Send**. Sending appends the request
-as a bubble and triggers the LLM CLARIFICATION step; the clarifying questions
-open in their own modal (the same checkbox cards as the New task wizard's
-validation step). The operator's answers are folded into the SAME bubble as the
-request, in the wizard's ``Clarifications (resolved during validation):``
-format, so every bubble has the same shape and the assistant's "thinking" is
-never shown.
+as its OWN bubble and triggers the LLM CLARIFICATION step; the clarifying
+questions open in their own modal (the same checkbox cards as the New task
+wizard's validation step). The operator's answers are folded into the SAME
+bubble as that request, in the wizard's ``Clarifications (resolved during
+validation):`` format, so every bubble has the same shape and the assistant's
+"thinking" is never shown.
+
+Every prompt bubble carries a status badge: **Run** once the prompt is part of
+the script's current prompt, **Not run yet** while it waits for the Run button.
+The base prompt (original + clarifications) and each prior request recovered
+from the persisted prompt get their own bubble, so re-opening the chat never
+folds several prompts into one block. Every bubble is painted with the modal's
+own light-blue background (``rgb(198, 220, 236)``), scoped to a
+``prompt-bubble`` class so Quasar's default chat colors are untouched elsewhere.
 
 After the last bubble a single **Run modifications** button appears, and only
 when the chat has changes. It regenerates the run's script from the WHOLE
 user-and-clarifications conversation and reconciles the result into the ONE
 live review table — the rows the new script still produces keep their identity
 and status, changed rows go back to pending, rows it no longer produces become
-obsolete.
+obsolete. While that runs, the modal shows a spinner with the backend's current
+stage (regenerating the script, saving it, recomputing the table) and a start
+toast; the closing toast reports the reconciliation counts.
 
 The chat's history lives in this modal's in-memory state. The durable record of
 what the prompt became is the manifest's ``validated_prompt`` (rewritten on
@@ -46,8 +56,11 @@ from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.llm_script_usage import apply_script_llm_usage
 from uwazi_admin_agent.domain.prompt_chat import (
     ChatMessage,
+    ChatPromptStatus,
     ChatRole,
     build_final_prompt_from_chat,
+    mark_prompts_applied,
+    reconstruct_chat,
 )
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
@@ -62,6 +75,29 @@ from uwazi_admin_agent.drivers.web.task_dialogs import footer_close, modal_heade
 # The projected output tokens per regeneration turn (the Run button's planning
 # pass). The clarification turns are cheap and run on the configured defaults.
 _CHAT_OUT_TOKENS: int = 1024
+
+# The status badge on every prompt bubble. "Run" means the prompt is part of the
+# script's current prompt (it was applied); "Not run yet" means the operator
+# wrote it and has not pressed Run since.
+_PROMPT_STATUS_TEXT: dict[ChatPromptStatus, str] = {
+    ChatPromptStatus.APPLIED: "Run",
+    ChatPromptStatus.PENDING: "Not run yet",
+}
+_PROMPT_STATUS_COLOR: dict[ChatPromptStatus, str] = {
+    ChatPromptStatus.APPLIED: "green",
+    ChatPromptStatus.PENDING: "orange",
+}
+
+# Every prompt bubble carries this class so the modal paints its background
+# without touching Quasar's own chat colors. Quasar fills a received bubble with
+# ``background: currentColor`` and sets that color on ``.q-message-text--received``,
+# so overriding the color there (leaving the inner content black) is what
+# changes the bubble background.
+PROMPT_BUBBLE_CLASS = "prompt-bubble"
+PROMPT_BUBBLE_BACKGROUND = "rgb(198, 220, 236)"
+_PROMPT_BUBBLE_CSS = (
+    f"<style>.{PROMPT_BUBBLE_CLASS} .q-message-text--received {{ color: {PROMPT_BUBBLE_BACKGROUND} !important; }}</style>"
+)
 
 
 def _stamp() -> str:
@@ -110,8 +146,13 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
 
+    # The bubble color: injected with the dialog (not the page) so both pages
+    # that can open the chat get it, and an already-built page is updated too.
+    ui.add_head_html(_PROMPT_BUBBLE_CSS)
+
     # The chat's state: the history (what the generation LLM sees), plus the UI
-    # handles the handlers need to touch.
+    # handles the handlers need to touch. ``_unrun_bubbles`` holds the prompt
+    # bubbles written in THIS session that a successful Run has not applied yet.
     state: dict[str, Any] = {
         "run_id": run_id,
         "history": [],
@@ -119,6 +160,10 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
         "dirty": False,
         "_pending_index": None,
         "_pending_request": None,
+        "_pending_bubble": None,
+        "_unrun_bubbles": [],
+        "_run_spinner": None,
+        "_run_status": None,
     }
 
     client = context.client
@@ -147,13 +192,18 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                 footer_close(dialog)
 
             with run_area:
+                spinner = ui.spinner(size="sm", color="primary")
+                status_label = ui.label("").classes("text-caption text-grey-7")
                 run_button = ui.button(
                     "Run modifications",
                     icon="play_arrow",
                     on_click=lambda: _run_clicked(state, on_table_changed),
                 ).props("color=primary")
             run_button.set_visibility(False)
+            spinner.set_visibility(False)
             state["_run_button"] = run_button
+            state["_run_spinner"] = spinner
+            state["_run_status"] = status_label
 
             _load_initial_context(state, detail)
 
@@ -170,31 +220,96 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
     dialog.open()
 
 
-def _add_prompt_bubble(state: dict[str, Any], text: str, stamp: str) -> Any:
-    """Render one prompt bubble in the ONE style every chat bubble uses."""
+def _add_prompt_bubble(
+    state: dict[str, Any],
+    text: str,
+    stamp: str,
+    *,
+    label: str = "Prompt",
+    status: ChatPromptStatus = ChatPromptStatus.PENDING,
+) -> dict[str, Any]:
+    """Render ONE prompt bubble with its own run-status badge.
+
+    One bubble per prompt (never one bubble holding the whole conversation), so
+    the operator can point at the exact request they wrote. The badge says
+    whether that prompt is already part of the script ("Run") or is still
+    waiting for the Run button ("Not run yet"). The returned handle lets a
+    successful Run flip the badge in place.
+    """
     with state["_client"]:
         with state["_messages"]:
-            return ui.chat_message(text=text, name="Prompt", stamp=stamp, sent=False)
+            with ui.column().classes("w-full gap-0") as root:
+                with ui.row().classes("items-center gap-2 q-ml-sm no-wrap"):
+                    ui.label(label).classes("text-caption text-weight-medium")
+                    badge = ui.badge(
+                        _PROMPT_STATUS_TEXT[status],
+                        color=_PROMPT_STATUS_COLOR[status],
+                    ).props("rounded")
+                    if stamp:
+                        ui.label(stamp).classes("text-caption text-grey-6")
+                ui.chat_message(text=text, sent=False).classes(PROMPT_BUBBLE_CLASS)
+    return {"root": root, "status": badge, "status_value": status}
+
+
+def _set_bubble_status(state: dict[str, Any], handle: dict[str, Any], status: ChatPromptStatus) -> None:
+    """Flip one prompt bubble's run-status badge (in place)."""
+    handle["status_value"] = status
+    badge = handle.get("status")
+    if badge is not None and not badge.is_deleted:
+        with state["_client"]:
+            badge.set_text(_PROMPT_STATUS_TEXT[status])
+            badge.set_background_color(_PROMPT_STATUS_COLOR[status])
+
+
+def _delete_bubble(state: dict[str, Any], handle: dict[str, Any] | None) -> None:
+    """Remove one prompt bubble (used when its text is replaced)."""
+    root = handle.get("root") if handle else None
+    if root is not None and not root.is_deleted:
+        with state["_client"]:
+            root.delete()
+
+
+def _initial_bubbles(
+    baseline: str,
+    history: list[ChatMessage],
+) -> list[tuple[str, str, str, ChatPromptStatus]]:
+    """The bubbles a re-opened chat renders, in display order (pure).
+
+    Returns one ``(label, text, stamp, status)`` per bubble: the base prompt
+    first, then EVERY prior operator request. Keeping this pure lets the test
+    prove the recovered history is not collapsed back into one bubble.
+    """
+    bubbles: list[tuple[str, str, str, ChatPromptStatus]] = []
+    if baseline:
+        bubbles.append(("Base prompt", baseline, "", ChatPromptStatus.APPLIED))
+    for message in history:
+        if message.role is ChatRole.OPERATOR:
+            bubbles.append(("Prompt", message.text, message.stamp, message.status))
+    return bubbles
 
 
 def _load_initial_context(state: dict[str, Any], detail: Any) -> None:
-    """Record the run's prompt + existing clarifications and show them as ONE bubble.
+    """Record the run's prompt + clarifications and show every prompt in its OWN bubble.
 
     The history keeps the original prompt and the validation message separate
     (that is what :func:`build_final_prompt_from_chat` expects), while the chat
-    shows the validation prompt — the original plus its resolved clarifications
-    — so the first bubble has the same shape as every later one.
+    shows:
+
+    - ONE "Base prompt" bubble for the run itself (the original plus its
+      resolved clarifications), marked Run, and
+    - one bubble per prior operator request recovered from the persisted
+      ``validated_prompt``'s conversation, each marked Run.
+
+    Reconstructing the bubbles (instead of rendering the whole validated prompt
+    as one block) is what stops a re-opened chat from folding the earlier
+    requests into the base prompt.
     """
     original = detail.prompt or ""
     validated = detail.validated_prompt or ""
-    stamp = _stamp()
-    if original:
-        state["history"].append(ChatMessage(role=ChatRole.SYSTEM, text=original, stamp=stamp))
-    if validated and validated != original:
-        state["history"].append(ChatMessage(role=ChatRole.SYSTEM, text=validated, stamp=stamp))
-    context_text = validated if validated and validated != original else original
-    if context_text:
-        _add_prompt_bubble(state, context_text, stamp)
+    baseline, history = reconstruct_chat(original, validated)
+    state["history"].extend(history)
+    for label, text, stamp, status in _initial_bubbles(baseline, history):
+        _add_prompt_bubble(state, text, stamp, label=label, status=status)
 
 
 def _send(state: dict[str, Any], request_input: Any) -> None:
@@ -223,9 +338,11 @@ def _submit_request(state: dict[str, Any], request: str) -> None:
     state["history"].append(ChatMessage(role=ChatRole.OPERATOR, text=request, stamp=stamp))
     state["_pending_index"] = len(state["history"]) - 1
     state["_pending_request"] = request
-    state["_pending_bubble"] = _add_prompt_bubble(state, request, stamp)
+    handle = _add_prompt_bubble(state, request, stamp, status=ChatPromptStatus.PENDING)
+    state["_pending_bubble"] = handle
+    state["_unrun_bubbles"].append(handle)
     state["dirty"] = True
-    _set_busy(state, True)
+    _set_busy(state, True, "Reading your request…")
     prompt = build_final_prompt_from_chat(state["history"])
     background_tasks.create(_do_clarify(state, prompt), name=f"clarify prompt {state['run_id']}")
     _scroll_to_bottom(state)
@@ -336,20 +453,62 @@ def _update_pending_message(state: dict[str, Any], text: str) -> None:
     if index is None:
         return
     previous = state["history"][index]
-    state["history"][index] = ChatMessage(role=ChatRole.OPERATOR, text=text, stamp=previous.stamp)
-    bubble = state.get("_pending_bubble")
-    with state["_client"]:
-        if bubble is not None and not bubble.is_deleted:
-            bubble.delete()
-    state["_pending_bubble"] = _add_prompt_bubble(state, text, previous.stamp)
+    state["history"][index] = ChatMessage(
+        role=ChatRole.OPERATOR,
+        text=text,
+        stamp=previous.stamp,
+        status=previous.status,
+    )
+    previous_handle = state.get("_pending_bubble")
+    _delete_bubble(state, previous_handle)
+    handle = _add_prompt_bubble(state, text, previous.stamp, status=previous.status)
+    state["_pending_bubble"] = handle
+    # Keep the Run button's pending set pointing at the NEW bubble, so a
+    # successful Run flips the one that is actually on screen.
+    unrun = state["_unrun_bubbles"]
+    for position, item in enumerate(unrun):
+        if item is previous_handle:
+            unrun[position] = handle
+            break
+    else:
+        unrun.append(handle)
     _scroll_to_bottom(state)
 
 
-def _set_busy(state: dict[str, Any], busy: bool) -> None:
-    """Flip the busy state and refresh the Send / Run affordances."""
+def _mark_prompts_run(state: dict[str, Any]) -> None:
+    """Mark every prompt written in this session as folded into the Run.
+
+    Called only after the regeneration SUCCEEDED: the requests are now part of
+    the script's prompt, so their bubbles say "Run" instead of "Not run yet".
+    A failed Run leaves them pending (the operator can try again).
+    """
+    state["history"] = mark_prompts_applied(state["history"])
+    for handle in state.get("_unrun_bubbles", []):
+        _set_bubble_status(state, handle, ChatPromptStatus.APPLIED)
+    state["_unrun_bubbles"] = []
+    # No clarification answer may land on an already-applied prompt afterwards.
+    state["_pending_index"] = None
+    state["_pending_request"] = None
+    state["_pending_bubble"] = None
+
+
+def _set_busy(state: dict[str, Any], busy: bool, message: str = "") -> None:
+    """Flip the busy state, refresh the actions, and show/hide the progress row."""
     state["busy"] = busy
     _set_send_enabled(state, not busy)
+    _set_run_progress(state, message if busy else "", visible=busy)
     _refresh_run_button(state)
+
+
+def _set_run_progress(state: dict[str, Any], message: str, *, visible: bool) -> None:
+    """Show the in-modal spinner + the backend's current stage."""
+    spinner = state.get("_run_spinner")
+    label = state.get("_run_status")
+    with state.get("_client"):
+        if spinner is not None and not spinner.is_deleted:
+            spinner.set_visibility(visible)
+        if label is not None and not label.is_deleted:
+            label.set_text(message)
 
 
 def _set_send_enabled(state: dict[str, Any], enabled: bool) -> None:
@@ -394,8 +553,17 @@ def _start_run(
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
 ) -> None:
-    """Regenerate in the background (no spend confirmation)."""
-    _set_busy(state, True)
+    """Regenerate in the background (no spend confirmation), with visible progress."""
+    _set_busy(state, True, "Regenerating the script from the chat…")
+    _scroll_to_bottom(state)
+    # A toast covers the case where the operator is scrolled away from the
+    # in-modal indicator; it auto-hides, and the final result gets its own toast.
+    with state.get("_client"):
+        ui.notify(
+            "Regenerating the script and recomputing the table…",
+            type="ongoing",
+            timeout=8000,
+        )
     background_tasks.create(
         _do_run(state, on_table_changed, budget),
         name=f"chat regeneration {state['run_id']}",
@@ -408,6 +576,10 @@ async def _do_run(
     budget: LlmBudget,
 ) -> None:
     """Regenerate the script from the chat and reconcile the live table."""
+
+    def _on_stage(message: str) -> None:
+        _set_run_progress(state, message, visible=True)
+
     try:
         result = await regenerate_from_chat(
             state["run_id"],
@@ -415,12 +587,15 @@ async def _do_run(
             app.storage.user["user"],
             app.storage.user["password"],
             budget,
+            on_stage=_on_stage,
         )
     except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
         _set_busy(state, False)
-        ui.notify(f"Regeneration failed: {exc}", type="negative", multi_line=True)
+        with state.get("_client"):
+            ui.notify(f"Regeneration failed: {exc}", type="negative", multi_line=True)
         return
     state["dirty"] = False
+    _mark_prompts_run(state)
     _set_busy(state, False)
     with state.get("_client"):
         ui.notify(result.message(), type="positive", multi_line=True)

@@ -13,6 +13,7 @@ the ``drivers/`` layer convention.
 import asyncio
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1190,6 +1191,7 @@ async def regenerate_from_chat(
     user: str,
     password: str,
     budget: LlmBudget | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> TableUpdateResult:
     """Regenerate the run's script from the whole chat history and reconcile the table.
 
@@ -1210,6 +1212,10 @@ async def regenerate_from_chat(
        and status, changed rows go back to pending, rows it no longer produces
        become obsolete).
 
+    ``on_stage`` (optional) is called with a human-readable stage description
+    before each long step, so the caller can show progress instead of a silent
+    modal. It must not block: the driver only forwards text to the UI.
+
     Returns the reconciliation summary. Errors propagate: the caller shows them.
     """
     runtime = build_runtime(user=user, password=password)
@@ -1228,6 +1234,8 @@ async def regenerate_from_chat(
             reused_history = True
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh generation
             logger.warning("could not restore generation history for {}: {}", run_id, exc)
+    if on_stage is not None:
+        on_stage("Regenerating the script from the chat…")
     try:
         if reused_history:
             script = await use_case.repair(final_prompt)
@@ -1236,6 +1244,8 @@ async def regenerate_from_chat(
     except Exception as exc:  # noqa: BLE001 — surface as a generation error
         raise GenerateError(str(exc)) from exc
 
+    if on_stage is not None:
+        on_stage("Saving the new script and prompt…")
     emit_generated_script(script, run_path)
     _persist_generation_history(run_path, use_case)
     manifest.script = script.python_code
@@ -1251,6 +1261,8 @@ async def regenerate_from_chat(
     )
     # The regenerated script needs a planning pass: it merges its rows into the
     # ONE live table.
+    if on_stage is not None:
+        on_stage("Recomputing the table from the new script…")
     summary = await run_auto_scan(run_id, user, password, budget)
     return TableUpdateResult(
         run_id=run_id,
