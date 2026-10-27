@@ -75,8 +75,12 @@ def parse_batch_reply(reply: str, expected: int) -> list[str]:
 
 
 def _usage_of(run: Any) -> LlmUsage:
-    """Convert a pydantic-ai run's usage into the domain usage model."""
-    usage = run.usage()
+    """Convert a pydantic-ai run's usage into the domain usage model.
+
+    ``usage`` is a property on ``AgentRunResult`` (pydantic-ai 2.x), not a
+    method — it already returns a ``RunUsage`` instance.
+    """
+    usage = run.usage
     return LlmUsage(
         requests=int(getattr(usage, "requests", 0) or 0),
         input_tokens=int(getattr(usage, "input_tokens", 0) or 0),

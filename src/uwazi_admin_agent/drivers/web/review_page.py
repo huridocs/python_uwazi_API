@@ -192,6 +192,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     check_drift,
     current_pass,
     discard_ids,
+    entity_is_merge,
     get_drift_state,
     get_entity_segmentation,
     get_entity_suggestions,
@@ -1048,7 +1049,8 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
     """Revert one entity (all its languages) to its single backup, then refresh.
 
     Confirm first: the restore overwrites the entity's rows in every language
-    the task touched, not just the clicked suboperation's language.
+    the task touched, not just the clicked suboperation's language. A merge row
+    also re-creates the sources it absorbed, so the dialog says so.
     """
     tooltip = state.get("_backup_dates", {}).get(shared_id)
     tooltip_text = tooltip.strftime("%Y-%m-%d %H:%M") if tooltip is not None else ""
@@ -1057,7 +1059,7 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
         client = context.client
         background_tasks.create(_revert_entity_rows(state, shared_id, client), name=f"revert {shared_id}")
 
-    title, message = revert_entity_confirmation(shared_id, tooltip_text)
+    title, message = revert_entity_confirmation(shared_id, tooltip_text, merge=entity_is_merge(state["run_id"], shared_id))
     _simple_confirm(title, message, _confirm)
 
 
@@ -1500,6 +1502,7 @@ def _run_refs(
     state: dict[str, Any],
     refs: list[tuple[int, str, str | None, str]],
     ops: list[str] | None = None,
+    confirm: bool = True,
 ) -> None:
     """Execute the given SUBOPERATIONS with the Run heuristic (revertable).
 
@@ -1508,6 +1511,12 @@ def _run_refs(
     the entity-language PAIRS (how the apply path addresses a row) and the
     suggestion IDS (how it narrows below the pair), so running one property of a
     translation row writes exactly that property.
+
+    ``confirm=False`` writes immediately, with no confirmation dialog. The
+    entity window's Run buttons use it: that window is a per-entity working
+    surface where the operator runs one row or one property at a time, and a
+    modal on every press made the loop slower than the write it guards. The
+    table's Run (a whole selection) keeps its confirmation.
     """
     ids = ids_of_refs(refs)
     if not ids:
@@ -1526,6 +1535,10 @@ def _run_refs(
             _run_rows(state, pairs, ids, client, resolved_ops),
             name=f"run {state['run_id']}",
         )
+
+    if not confirm:
+        _confirm()
+        return
 
     title, message = run_confirmation(len(ids), resolved_ops, languages)
     _simple_confirm(title, message, _confirm)
@@ -1641,9 +1654,9 @@ async def _run_rows(
             return
         try:
             await apply_outcomes(state["run_id"], user, password, pairs, ids, progress=set_progress)
-            # The writes bumped Uwazi editDates: re-sync the baseline so the run's
-            # own writes are the new reference, not drift.
-            refresh_baseline_after_run(state["run_id"], user, password)
+            # The writes have landed: say so NOW, before any bookkeeping, so the
+            # operator can read the outcome and move on to the next row while the
+            # run finishes its tail.
             with client:
                 if FILE_OPS.intersection(ops or []):
                     # A file copy appends bytes: no entity snapshot can remove
@@ -1662,6 +1675,16 @@ async def _run_rows(
                         multi_line=True,
                         group=GATE_TOAST_GROUP,
                     )
+            # The writes bumped Uwazi editDates: re-sync the baseline so the run's
+            # own writes are the new reference, not drift. That is a PAGED
+            # ``/api/v2/search`` per language, so it runs in a THREAD: on the event
+            # loop it froze the page (no clicks, no row navigation) for the whole
+            # scan — the same reason the table refresh threads it. Bookkeeping
+            # never turns a landed Run into a failure.
+            try:
+                await asyncio.to_thread(refresh_baseline_after_run, state["run_id"], user, password)
+            except Exception as exc:  # noqa: BLE001 — the writes landed; the baseline is best-effort
+                logger.warning("post-run baseline sync failed for {}: {}", state["run_id"], exc)
         except Exception as exc:  # noqa: BLE001
             logger.exception("run (heuristic apply) failed")
             with client:
@@ -2283,9 +2306,9 @@ def _open_entity_window(
                 # Run/Revert refreshes them in place (the document viewer on the
                 # left keeps its iframe and scroll position).
                 header_host = ui.column().classes("w-full shrink-0")
-                with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
-                    document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
-                    details_host = ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto")
+                # The navigation row sits BETWEEN the header and the panels: the
+                # operator sees the row controls while looking at the document
+                # and the values, without them crowding the top bar.
                 with ui.row().classes("w-full justify-center shrink-0"):
                     ui.button(
                         "Previous row",
@@ -2298,6 +2321,9 @@ def _open_entity_window(
                         on_click=lambda: _navigate_entity(state, shared_id, language, 1),
                     ).props("flat dense")
                     ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat")
+                with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
+                    document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
+                    details_host = ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto")
     state["_entity_dialog"] = dialog
     state["_entity_header_host"] = header_host
     state["_entity_details_host"] = details_host
@@ -2379,8 +2405,11 @@ def _entity_is_revertable(
 
     The Revert is entity-wide, not a property action, so it is decided from the
     UNFILTERED language group: a filter that hides the applied rows must not
-    hide their undo. The same in-place rule as the table applies — created,
-    deleted and merged entities revert at run level, not from this button.
+    hide their undo. The same in-place rule as the table applies — a created
+    entity, a deleted one, a create-merge (its target is a dry-created
+    placeholder) and a file copy revert at run level, not from this button. An
+    ``update_and_delete`` merge IS revertable here: its undo restores the target
+    and re-creates the sources it deleted.
     """
     rows = get_entity_suggestions(state["run_id"], shared_id, language) or suggestions
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in rows)
@@ -2494,8 +2523,10 @@ def _entity_header(
 
     The buttons mirror the review table's operation actions. Run writes the
     rows that are still waiting (an applied/discarded part is not written
-    again); Revert restores the entity's backup, and is offered only when the
-    entity actually has a completed in-place write to undo.
+    again) and does so WITHOUT a confirmation dialog — the window is a
+    per-entity working surface, so a modal on every press only slowed the loop;
+    Revert restores the entity's backup, and is offered only when the entity
+    actually has a completed in-place write to undo.
     """
     rows = suggestions or []
     refs = [(s.id, s.shared_id, s.language, s.op) for s in rows if s.id is not None and _suggestion_is_runnable(s)]
@@ -2508,7 +2539,7 @@ def _entity_header(
             run_button = ui.button(
                 "Run this row",
                 icon="play_arrow",
-                on_click=lambda: _run_refs(state, refs),
+                on_click=lambda: _run_refs(state, refs, confirm=False),
             ).props("flat dense color=primary")
             if not refs:
                 run_button.disable()
@@ -2621,6 +2652,11 @@ def _entity_suggestions(
     resolved = labels or {}
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in suggestions)
     merge_rows = [s for s in suggestions if s.op in MERGE_OPS]
+    # A merge's PARTS are never revertable on their own: putting one target
+    # property back (or undoing one copied file) is not a complete undo of the
+    # operation — its row-level Revert restores the target AND re-creates the
+    # sources, which is what the table's operation row offers.
+    sub_in_place = in_place and not merge_rows
     move_rows = [s for s in suggestions if is_file_move_row(s)]
     for suggestion in suggestions:
         if is_merge_anchor(suggestion) or is_file_move_row(suggestion):
@@ -2644,9 +2680,14 @@ def _entity_suggestions(
                     if _suggestion_is_runnable(suggestion) and is_selectable(suggestion.op):
                         ui.button(
                             icon="play_arrow",
-                            on_click=lambda s=suggestion: _run_refs(state, [(s.id, s.shared_id, s.language, s.op)], [s.op]),
+                            on_click=lambda s=suggestion: _run_refs(
+                                state,
+                                [(s.id, s.shared_id, s.language, s.op)],
+                                [s.op],
+                                confirm=False,
+                            ),
                         ).props("flat dense color=primary").tooltip("Run this property")
-                    if sub_revertable(suggestion, in_place=in_place):
+                    if sub_revertable(suggestion, in_place=sub_in_place):
                         ui.button(
                             icon="undo",
                             on_click=lambda s=suggestion: _revert_suboperation_clicked(

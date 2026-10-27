@@ -78,6 +78,7 @@ from uwazi_admin_agent.domain.suggestion import (
     PredictionPass,
     Suggestion,
     SuggestionFilter,
+    is_revertable_merge,
 )
 from uwazi_admin_agent.domain.task import TaskView
 from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
@@ -550,8 +551,9 @@ async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget
     summary = await generate_predictions(run_id, user, password, budget or _script_caps_budget(), None)
     # The rows just recorded are Uwazi's CURRENT state: capture their editDates
     # as the drift baseline now, so a later manual edit is detectable. Failure
-    # is non-fatal (the table is still built).
-    refresh_baseline_after_run(run_id, user, password)
+    # is non-fatal (the table is still built). Threaded: it is a paged
+    # ``/api/v2/search`` per language, and on the event loop it froze the page.
+    await asyncio.to_thread(refresh_baseline_after_run, run_id, user, password)
     return summary
 
 
@@ -1364,6 +1366,23 @@ async def revert_entity_rows(run_id: str, shared_id: str, user: str, password: s
     return entity_backup_info(run_id, shared_id)
 
 
+def entity_is_merge(run_id: str, shared_id: str) -> bool:
+    """Whether this run's APPLIED rows of ``shared_id`` describe a merge (``update_and_delete``).
+
+    The Revert dialog is the caller: a merge's undo is bigger than the entity's
+    own backup (the sources it absorbed are re-created), so the confirmation
+    has to say so before the operator clicks. Reads the review rows (no
+    network); any store failure reads as "not a merge" — the dialog then shows
+    the plain wording, and the undo itself still does the right thing.
+    """
+    try:
+        rows = build_suggestion_store().applied_rows_for(run_id, [shared_id])
+    except Exception as exc:  # noqa: BLE001 — wording only: never block the dialog
+        logger.warning("could not read the review rows of {}: {}", shared_id, exc)
+        return False
+    return any(is_revertable_merge(row) for row in rows)
+
+
 async def revert_suboperation(
     run_id: str,
     shared_id: str,
@@ -1940,6 +1959,7 @@ __all__ = [
     "current_pass",
     "delete_run",
     "document_language_candidates",
+    "entity_is_merge",
     "generate_predictions",
     "get_drift_state",
     "get_entity_rows",

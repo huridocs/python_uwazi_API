@@ -74,6 +74,16 @@ RUN_STATUS_COLORS: dict[str, str] = {
 # opening it would land on nothing.
 OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files"})
 
+# Ops whose per-entity undo is NOT an in-place restore of one live entity, so
+# their rows never offer the Revert icon: a `delete` row's undo is a re-create
+# (a fresh sharedId, files and connection rows), a `create` row's undo is a
+# deletion, and a `create_and_delete` merge's target is only a ``dry-created-N``
+# placeholder in the review rows (Uwazi has no such entity; undoing it is that
+# same deletion). An `update_and_delete` merge IS revertable from its row — it
+# restores the target and re-creates the sources it deleted — so it is absent
+# here (see RevertRunUseCase.revert_entity).
+RUN_LEVEL_ONLY_OPS: frozenset[str] = frozenset({"delete", "create", "create_and_delete"})
+
 # ``_title`` is the review table's synthetic name for a title change — no
 # template property carries it, so it gets the same human word Uwazi uses.
 TITLE_LABELS: dict[str, str] = {TITLE_PROPERTY: "Title"}
@@ -110,25 +120,36 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
     phrases = [RUN_OP_PHRASES[op] for op in ops or [] if op in RUN_OP_PHRASES]
     action = " + ".join(dict.fromkeys(phrases)) or "Write"
     # A file copy adds bytes to the target; Revert restores entity snapshots and
-    # has no way to remove an uploaded file the source still owns. Saying
-    # "Revertable" for it would promise an undo the Run cannot keep.
+    # has no way to remove an uploaded file the source still owns, so the one
+    # thing the dialog must warn about is that those bytes stay behind.
     if FILE_OPS.intersection(ops or []):
         return title, f"{action} {count} {entities} in Uwazi now. The copied files stay on the target."
-    return title, f"{action} {count} {entities} in Uwazi now. Revertable from the task page."
+    return title, f"{action} {count} {entities} in Uwazi now."
 
 
-def revert_entity_confirmation(shared_id: str, tooltip: str = "") -> tuple[str, str]:
+def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = False) -> tuple[str, str]:
     """``(title, message)`` for the per-row Revert dialog (pure).
 
     The restore rolls the WHOLE entity back — every language row the backup
     captured — because the rows share one backup per entity; the message says
     so (and shows the backup's creation time when one exists) so reverting the
     ``es`` row never silently rewrites the ``en`` text.
+
+    ``merge`` (an ``update_and_delete`` row) makes the undo bigger than this
+    entity's own backup: the sources the merge absorbed are re-created from
+    their backups with NEW sharedIds, and the files the merge copied onto the
+    target cannot be taken off it again — so the message spells both out
+    instead of promising a clean rollback.
     """
     when = f" made {tooltip.removeprefix('entity backup creation ')}" if tooltip else ""
+    restored = f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup)."
+    if not merge:
+        return "Revert entity", restored
     return (
-        "Revert entity",
-        f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup).",
+        "Revert merge",
+        restored
+        + " The source entities this merge absorbed are re-created from their backups"
+        + " (with new sharedIds). Files it copied onto the target stay on it.",
     )
 
 
@@ -484,16 +505,14 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     Undo one, and the operator can filter the table by this state.
     """
     status_label, status_color = run_status(item)
-    # Per-entity revert is an IN-PLACE restore of the live row. It is therefore
-    # only offered for entities the run merely MODIFIED: a `delete` row's undo is
-    # a re-create (a fresh sharedId, files and connection rows) and a `create`
-    # row's undo is a deletion — both are ordered run-level operations. A merge
-    # row's undo is likewise ordered: the target was modified/created AND its
-    # sources deleted, so restoring the target alone would not restore them. A
-    # file copy appends bytes an entity snapshot cannot remove, so it is not
-    # in-place revertable either.
+    # Per-entity revert is an IN-PLACE restore of the live row. It is offered for
+    # entities the run merely MODIFIED and for an `update_and_delete` merge,
+    # whose row owns the target's write AND the source deletes — its undo
+    # restores the target and re-creates the absorbed sources. Everything in
+    # RUN_LEVEL_ONLY_OPS is undone by the run-level Revert instead, and a file
+    # copy appends bytes an entity snapshot cannot remove.
     in_place_revertable = status_label in ("runned", "reverted") and not any(
-        op in ("delete", "create", "update_and_delete", "create_and_delete") or op in FILE_OPS for op in item.ops
+        op in RUN_LEVEL_ONLY_OPS or op in FILE_OPS for op in item.ops
     )
     title = item.entity_title or item.shared_id
     try:

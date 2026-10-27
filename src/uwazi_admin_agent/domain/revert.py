@@ -208,8 +208,22 @@ def build_revert_actions(
     manifest: MigrationManifest,
     load_snapshot: Callable[[str], EntitySnapshot],
     load_current_hubs: Callable[[str, str | None], list[dict[str, Any]]] | None = None,
+    shared_ids: set[str] | None = None,
 ) -> list[RevertAction]:
     """Build the ordered revert actions for a run (§2.6).
+
+    ``shared_ids`` narrows the list to the entities of ONE operation (the
+    per-row Revert): a merge row owns its target AND the sources it deleted, so
+    its undo is exactly this run's actions for those entities, in this same
+    order. ``None`` (the default) is the whole run. Two consequences of a
+    narrowed list:
+
+    - The run's standalone deleted FILE rows are left out: those belong to the
+      file-delete operation that recorded them, not to the entity being
+      restored (an entity's own files ride its snapshot).
+    - Entities OUTSIDE the scope are not treated as "handled elsewhere" for the
+      inbound-ref restore, so an in-scope entity that referenced a re-created
+      source (the merge target, typically) gets its stripped ref re-added.
 
     Ordering:
     1. Restore rewired relationships — so references are in place before
@@ -248,7 +262,13 @@ def build_revert_actions(
     """
     actions: list[RevertAction] = []
 
+    def in_scope(shared_id: str) -> bool:
+        """Whether ``shared_id`` belongs to the requested operation scope."""
+        return shared_ids is None or shared_id in shared_ids
+
     for rewired in manifest.rewired:
+        if not in_scope(rewired.entity.shared_id):
+            continue
         actions.append(
             RestoreRelationshipAction(
                 entity=rewired.entity,
@@ -258,6 +278,8 @@ def build_revert_actions(
         )
 
     for modified in manifest.modified:
+        if not in_scope(modified.shared_id):
+            continue
         snapshot: EntitySnapshot = load_snapshot(modified.shared_id)
         actions.append(RestoreEntityAction(snapshot=snapshot))
         # Publish/permissions are NOT part of the raw write path: Uwazi strips them
@@ -282,6 +304,8 @@ def build_revert_actions(
 
     deleted_snapshots: dict[str, EntitySnapshot] = {}
     for deleted in manifest.deleted:
+        if not in_scope(deleted.shared_id):
+            continue
         snap = load_snapshot(deleted.shared_id)
         deleted_snapshots[deleted.shared_id] = snap
         actions.append(RecreateEntityAction(snapshot=snap))
@@ -308,7 +332,11 @@ def build_revert_actions(
         | {e.shared_id for e in manifest.deleted}
         | {e.shared_id for e in manifest.created}
     )
-    inbound_targets = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=manifest_ids)
+    # Only OUT-OF-SCOPE manifest entities are "handled elsewhere": a scoped undo
+    # must still re-add the refs an IN-SCOPE entity holds to a re-created source
+    # (the merge target typically referenced the entities it absorbed).
+    excluded_existing = manifest_ids - (shared_ids or set())
+    inbound_targets = extract_inbound_refs_from_existing(deleted_snapshots, deleted_ids, excluded_existing=excluded_existing)
     if recreate_targets or inbound_targets:
         actions.append(
             ReapplyRelationshipRefsAction(
@@ -317,7 +345,7 @@ def build_revert_actions(
             )
         )
 
-    if manifest.deleted_files:
+    if shared_ids is None and manifest.deleted_files:
         # Documents first (the primary PDF lands before attachments), then
         # uploaded attachments — the same order as build_file_restore_actions.
         # sorted() is stable, so the manifest's insertion order survives within
@@ -326,6 +354,8 @@ def build_revert_actions(
         actions.append(RestoreDeletedFilesAction(files=list(ordered)))
 
     for created in manifest.created:
+        if not in_scope(created.shared_id):
+            continue
         actions.append(DeleteEntityAction(shared_id=created.shared_id))
 
     return actions

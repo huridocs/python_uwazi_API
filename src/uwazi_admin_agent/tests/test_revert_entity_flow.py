@@ -334,3 +334,13 @@ def test_revert_entity_confirmation_says_backup_time_and_all_languages() -> None
     assert title == "Revert entity"
     assert "2026-02-03 10:05" in message
     assert "ALL languages" in message
+
+
+def test_revert_merge_confirmation_names_the_recreated_sources_and_the_copied_files() -> None:
+    title, message = revert_entity_confirmation("T", "entity backup creation 2026-02-03 10:05", merge=True)
+
+    assert title == "Revert merge"
+    assert "Restore T to its backup made 2026-02-03 10:05" in message
+    assert "source entities this merge absorbed are re-created" in message
+    assert "new sharedIds" in message
+    assert "copied onto the target stay on it" in message

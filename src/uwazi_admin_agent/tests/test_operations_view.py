@@ -216,3 +216,29 @@ def test_the_any_property_option_leaves_out_the_unscored_properties() -> None:
 def test_the_any_property_option_reads_plainly_with_no_scored_property() -> None:
     assert view.any_property_option({}) == "any property"
     assert view.any_property_option({"unscored": (0, 0)}) == "any property"
+
+
+def test_merge_operation_offers_the_operation_revert_but_no_per_part_revert() -> None:
+    """A merge row is undone as ONE operation; its parts stay non-revertable."""
+    subs = [
+        _sub(1, op="update_and_delete", status=SuggestionStatus.APPLIED),
+        _sub(2, op="update_and_delete", property_name="excerpt", status=SuggestionStatus.APPLIED),
+    ]
+    item = _operation(subs, ops=["update_and_delete"], applied=2)
+
+    row = view.operation_row(item, checked_ids=[])
+
+    assert row["in_place"] is True
+    assert row["revertable"] is True
+    assert [sub["revertable"] for sub in row["subs"]] == [False, False]
+
+
+def test_create_merge_operation_is_not_revertable_from_its_row() -> None:
+    """A create-merge's target is a dry-created placeholder: run-level undo only."""
+    subs = [_sub(1, op="create_and_delete", status=SuggestionStatus.APPLIED)]
+    item = _operation(subs, shared_id="dry-created-0", ops=["create_and_delete"], applied=1)
+
+    row = view.operation_row(item, checked_ids=[])
+
+    assert row["revertable"] is False
+    assert [sub["revertable"] for sub in row["subs"]] == [False]

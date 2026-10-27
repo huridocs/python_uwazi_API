@@ -8,6 +8,7 @@ from uwazi_admin_agent.domain.revert import (
     DeleteEntityAction,
     ReapplyRelationshipRefsAction,
     RecreateEntityAction,
+    RestoreDeletedFilesAction,
     RestoreEntityAction,
     RestoreRelationshipAction,
     build_revert_actions,
@@ -452,3 +453,85 @@ def test_reapply_relationship_refs_action_is_frozen() -> None:
     action = ReapplyRelationshipRefsAction()
     with pytest.raises(Exception):
         action.recreate_targets = []  # type: ignore[misc]
+
+
+# --- one operation's entities (the per-row merge undo) ------------------------
+
+
+def test_scope_keeps_only_the_given_entities_actions() -> None:
+    # A merge row owns its target (modified) and the sources it deleted. Its undo
+    # must not touch the run's other entities — nor even load their snapshots.
+    store = _SnapshotStore(
+        {
+            "T": _snapshot("T", {"_id": "t1", "title": "target"}),
+            "S1": _snapshot("S1", {"_id": "s1", "title": "source"}),
+            "OTHER": _snapshot("OTHER", {"_id": "o1", "title": "other"}),
+        }
+    )
+    manifest = _manifest(modified=[_identity("T"), _identity("OTHER")], deleted=[_identity("S1")])
+
+    actions = build_revert_actions(manifest, store, shared_ids={"T", "S1"})
+
+    assert [type(a) for a in actions] == [RestoreEntityAction, RecreateEntityAction]
+    assert store.requested == ["T", "S1"]
+
+
+def test_scope_restores_the_targets_refs_to_the_recreated_sources() -> None:
+    # The merge target (T, modified) referenced the source (S1, deleted): the
+    # delete cascade stripped that ref, so the merge undo must put it back. The
+    # run-level list skips manifest members; a scoped undo keeps its own.
+    store = _SnapshotStore(
+        {
+            "T": _snapshot("T", {"_id": "t1"}),
+            "S1": _snapshot(
+                "S1",
+                {
+                    "template": "tmplS",
+                    "metadata": {},
+                    "relations": [_rel("T", "h1", None), _rel("S1", "h1", "rtype1")],
+                },
+            ),
+        }
+    )
+    manifest = _manifest(modified=[_identity("T")], deleted=[_identity("S1")])
+
+    scoped = build_revert_actions(manifest, store, shared_ids={"T", "S1"})
+    run_level = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in scoped] == [
+        RestoreEntityAction,
+        RecreateEntityAction,
+        ReapplyRelationshipRefsAction,
+    ]
+    rel_action = scoped[2]
+    assert isinstance(rel_action, ReapplyRelationshipRefsAction)
+    assert [ref.existing_shared_id for ref in rel_action.inbound_targets] == ["T"]
+    assert [ref.deleted_shared_id for ref in rel_action.inbound_targets] == ["S1"]
+    # The run-level list still treats T as handled elsewhere (unchanged rule).
+    assert [type(a) for a in run_level] == [RestoreEntityAction, RecreateEntityAction]
+
+
+def test_scope_leaves_the_runs_standalone_deleted_files_alone() -> None:
+    # A file-delete row is its own operation's undo; an entity's own files ride
+    # its snapshot. Restoring it from a merge row would over-revert.
+    from uwazi_admin_agent.domain.deleted_file import DeletedFile
+
+    store = _SnapshotStore({"T": _snapshot("T", {"_id": "t1"})})
+    manifest = _manifest(modified=[_identity("T")])
+    manifest.deleted_files.append(
+        DeletedFile(
+            shared_id="T",
+            file_id="f1",
+            kind="document",
+            originalname="doc.pdf",
+            filename="abc.pdf",
+            content_type="application/pdf",
+            source="explicit",
+        )
+    )
+
+    scoped = build_revert_actions(manifest, store, shared_ids={"T"})
+    run_level = build_revert_actions(manifest, store)
+
+    assert [type(a) for a in scoped] == [RestoreEntityAction]
+    assert [type(a) for a in run_level] == [RestoreEntityAction, RestoreDeletedFilesAction]

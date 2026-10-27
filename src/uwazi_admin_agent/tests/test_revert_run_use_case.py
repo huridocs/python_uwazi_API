@@ -6,6 +6,7 @@ import pytest
 from uwazi_admin_agent.domain.manifest import EntityIdentity, MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot, FileRef
+from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter, SuggestionStatus
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
@@ -775,3 +776,104 @@ async def test_revert_deleted_self_ref_is_stripped_then_reapplied_remapped() -> 
     assert repo.has("new-1")
     assert repo.get("new-1")["metadata"]["entity_relation"] == [{"value": "new-1", "label": "A"}]
     assert store.load_snapshot("run-1", "A").raw["metadata"]["entity_relation"] == [{"value": "A", "label": "A"}]
+
+
+# --- per-row merge undo (the row owns its target AND the sources it deleted) ---
+
+
+def _merge_row(shared_id: str, sources: list[str]) -> Suggestion:
+    """One APPLIED ``update_and_delete`` review row for ``shared_id``."""
+    return Suggestion(
+        run_id="run-1",
+        shared_id=shared_id,
+        op="update_and_delete",
+        merge_source_ids=list(sources),
+        status=SuggestionStatus.APPLIED,
+    )
+
+
+async def test_revert_entity_merge_restores_the_target_and_recreates_its_sources(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # T was updated and S1 was absorbed (deleted) by the same merge.
+    repo = InMemoryEntityRepository(entities={"T": {"sharedId": "T", "_id": "t1", "title": "MERGED", "language": "en"}})
+    store = InMemoryBackupStore()
+    store.save_snapshot("run-1", _snapshot("T", {"sharedId": "T", "_id": "t1", "title": "old T", "language": "en"}))
+    store.save_snapshot("run-1", _snapshot("S1", {"sharedId": "S1", "_id": "s1", "title": "source", "language": "en"}))
+    store.save_manifest("run-1", _manifest(modified=[_identity("T")], deleted=[_identity("S1")]))
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, suggestion_store=suggestions)
+        snapshot = await use_case.revert_entity("run-1", "T")
+
+        assert snapshot is not None and snapshot.shared_id == "T"
+        # The target is back to its backup...
+        assert repo.get("T")["title"] == "old T"
+        # ...and the source the merge deleted exists again (new sharedId, same data).
+        assert not repo.has("S1")
+        assert repo.get("new-1")["title"] == "source"
+        assert store.load_manifest("run-1").deleted[0].restored_shared_id == "new-1"
+        # The rows the undo covered read REVERTED (runnable again).
+        rows, _total = suggestions.query("run-1", SuggestionFilter())
+        assert [row.status.value for row in rows] == ["reverted"]
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_of_a_plain_update_does_not_recreate_anything(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    repo = InMemoryEntityRepository(entities={"T": {"sharedId": "T", "_id": "t1", "title": "CHANGED", "language": "en"}})
+    store = InMemoryBackupStore()
+    store.save_snapshot("run-1", _snapshot("T", {"sharedId": "T", "_id": "t1", "title": "old T", "language": "en"}))
+    store.save_manifest("run-1", _manifest(modified=[_identity("T")]))
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions(
+            [
+                Suggestion(
+                    run_id="run-1",
+                    shared_id="T",
+                    op="update",
+                    property_name="title",
+                    status=SuggestionStatus.APPLIED,
+                )
+            ]
+        )
+
+        use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, suggestion_store=suggestions)
+        await use_case.revert_entity("run-1", "T")
+
+        assert repo.get("T")["title"] == "old T"
+        assert repo._next_id == 0  # no create_raw: an update has no sources to restore
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_of_a_file_only_merge_recreates_sources_without_a_target_backup(tmp_path: Any) -> None:
+    """A merge that wrote NOTHING to its target has no target backup — the undo is the sources."""
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # The review row is the propertyless anchor: the target was never written, so
+    # only the deleted source has a snapshot. The undo must not read as a refusal.
+    repo = InMemoryEntityRepository(entities={"T": {"sharedId": "T", "_id": "t1", "title": "T", "language": "en"}})
+    store = InMemoryBackupStore()
+    store.save_snapshot("run-1", _snapshot("S1", {"sharedId": "S1", "_id": "s1", "title": "source", "language": "en"}))
+    store.save_manifest("run-1", _manifest(deleted=[_identity("S1")]))
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, suggestion_store=suggestions)
+        snapshot = await use_case.revert_entity("run-1", "T")
+
+        # A snapshot IS returned (the source's), so the caller does not refuse.
+        assert snapshot is not None
+        assert repo.get("new-1")["title"] == "source"
+        assert repo.get("T")["title"] == "T"  # the untouched target stays as it was
+        rows, _total = suggestions.query("run-1", SuggestionFilter())
+        assert [row.status.value for row in rows] == ["reverted"]
+    finally:
+        suggestions.close()

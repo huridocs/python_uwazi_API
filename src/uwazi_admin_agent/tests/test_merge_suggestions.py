@@ -949,7 +949,7 @@ def test_store_migrates_an_old_database_without_merge_source_ids(tmp_path) -> No
 # --- review UI ----------------------------------------------------------------
 
 
-def test_merge_entity_row_is_not_offered_the_in_place_revert() -> None:
+def test_merge_entity_row_is_offered_the_in_place_revert() -> None:
     item = EntityReviewRow(
         shared_id="T",
         language=None,
@@ -970,6 +970,32 @@ def test_merge_entity_row_is_not_offered_the_in_place_revert() -> None:
     row = entity_row(item)
 
     assert row["ops"] == "update_and_delete"
+    # The merge row owns its target AND the sources it deleted: its undo
+    # restores the target and re-creates the sources, so the icon is offered.
+    assert row["revertable"] is True
+
+
+def test_create_merge_entity_row_is_not_offered_the_in_place_revert() -> None:
+    """A create-merge's target is a dry-created placeholder, not an entity Uwazi knows."""
+    item = EntityReviewRow(
+        shared_id="dry-created-0",
+        language=None,
+        entity_title="Target",
+        template_names=["Case"],
+        ops=["create_and_delete"],
+        properties=["a"],
+        proposal_count=1,
+        pending=0,
+        accepted=0,
+        applied=1,
+        reverted=0,
+        discarded=0,
+        match_summary="exact",
+        has_outcome=True,
+    )
+
+    row = entity_row(item)
+
     assert row["revertable"] is False
 
 
@@ -1000,12 +1026,11 @@ def test_file_copy_entity_row_is_not_offered_the_in_place_revert() -> None:
 def test_run_confirmation_names_the_merge_action() -> None:
     _title, message = run_confirmation(1, ["update_and_delete"])
 
-    assert "Merge (update + delete)" in message
+    # The revert lives in the review window; the dialog only states the change.
+    assert message == "Merge (update + delete) 1 row in Uwazi now."
 
 
 def test_run_confirmation_does_not_promise_a_revert_for_a_file_copy() -> None:
     _title, message = run_confirmation(1, ["move_files"])
 
-    assert "Add files" in message
-    assert "stay on the target" in message
-    assert "Revertable" not in message
+    assert message == "Add files 1 row in Uwazi now. The copied files stay on the target."

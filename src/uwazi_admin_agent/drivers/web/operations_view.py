@@ -104,11 +104,13 @@ SUB_STATUS_COLORS: dict[str, str] = {
     "runned": RUN_STATUS_COLORS["runned"],
 }
 
-# Ops whose undo is an in-place restore of a modified entity. A create's undo is
-# a deletion, a delete's is a re-create, and a merge's touches several entities
-# (the target AND its deleted sources), so none of them can be restored row by
-# row — the same rule the entity table already applied.
-NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_delete", "update_and_delete", MOVE_OP})
+# Ops whose OPERATION-level undo is not an in-place restore of one live entity:
+# a create's undo is a deletion, a delete's is a re-create, a create-merge's
+# target exists only as a ``dry-created-N`` placeholder, and a file copy appends
+# bytes no entity snapshot can remove. An ``update_and_delete`` merge is NOT in
+# this set: it is one operation whose undo restores its target AND re-creates the
+# sources it deleted, so its row offers Revert like any modified entity.
+NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_delete", MOVE_OP})
 
 
 def is_selectable(op: str) -> bool:
@@ -226,8 +228,11 @@ def sub_revertable(sub: Suggestion, *, in_place: bool) -> bool:
 
     Only a WRITTEN property row of an entity the run merely modified: that is
     the one case where putting a single key back is a complete undo. A link's
-    undo is not recorded per link, and a created/deleted/merged entity's undo is
-    the operation/run-level restore.
+    undo is not recorded per link, and a created/deleted entity's undo is the
+    operation/run-level restore. A MERGE's parts are excluded by the caller
+    (``in_place=False`` for a merge operation): one target property is not the
+    undo of an operation that also deleted its sources — that is the operation
+    row's Revert.
     """
     return (
         in_place
@@ -586,6 +591,10 @@ def operation_row(
     checked = set(checked_ids)
     is_info = bool(item.ops) and all(op == INFO_OP for op in item.ops)
     in_place = not any(op in NON_IN_PLACE_OPS for op in item.ops)
+    # A merge's own row is revertable (the operation restores its target and
+    # re-creates the sources it deleted), but its PARTS are not: putting one
+    # target property back, or undoing one copied file, is not a complete undo.
+    sub_in_place = in_place and not any(op in MERGE_OPS for op in item.ops)
     if is_info:
         # The parent row carries the headline; only its detail lines are
         # rendered as suboperations. The parent itself is not a change, so it
@@ -594,7 +603,7 @@ def operation_row(
     else:
         submodels = list(item.subs)
     rendered = [
-        (sub, suboperation_row(sub, checked=sub.id in checked, in_place=in_place, labels=labels)) for sub in submodels
+        (sub, suboperation_row(sub, checked=sub.id in checked, in_place=sub_in_place, labels=labels)) for sub in submodels
     ]
     # The all-no-op merge anchor and a standalone file-copy row write no
     # property value of their own: their structural file/delete parts carry the

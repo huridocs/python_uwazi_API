@@ -60,7 +60,7 @@ from uwazi_admin_agent.domain.revert import (
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
 from uwazi_admin_agent.domain.review_refresh import restored_value
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
-from uwazi_admin_agent.domain.suggestion import SuggestionStatus
+from uwazi_admin_agent.domain.suggestion import SuggestionStatus, is_revertable_merge
 from uwazi_admin_agent.domain.suggestion_scoring import compare_values
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -181,6 +181,12 @@ class RevertRunUseCase:
         the run) are revertable; created entities revert by deletion and are
         refused here.
 
+        A MERGE row (``update_and_delete``) is the one multi-entity case: it
+        writes its target AND deletes the sources it absorbed, so its undo
+        restores the target and re-creates those sources (see
+        :meth:`_revert_merge`). Restoring the target alone would leave the
+        absorbed entities deleted.
+
         Returns the snapshot restored (its ``captured_at`` feeds the tooltip),
         or ``None`` when the run has no snapshot for this entity.
 
@@ -190,6 +196,9 @@ class RevertRunUseCase:
         run-level path.
         """
         manifest = self._backup_store.load_manifest(run_id)
+        merge_sources = self._merge_sources(run_id, shared_id)
+        if merge_sources:
+            return await self._revert_merge(run_id, shared_id, merge_sources, manifest)
         if shared_id in {e.shared_id for e in manifest.created}:
             raise RevertRefusedError(
                 "this row's entity was created by the run — revert it from the run-level Revert (undo deletes the entity)"
@@ -232,15 +241,96 @@ class RevertRunUseCase:
             )
         self._emit(run_id, "restore_entity", [shared_id])
         logger.info("revert entity: run={} sharedId={} languages={}", run_id, shared_id, [r.language for r in snapshot.rows])
-        if self._suggestion_store is not None:
-            try:
-                applied = self._suggestion_store.applied_rows_for(run_id, [shared_id])
-                updates = self._restored_current_updates(applied, run_id)
-                self._suggestion_store.mark_applied_reverted_for(run_id, [shared_id])
-                self._suggestion_store.set_current_values(updates)
-            except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
-                logger.warning("could not mark rows reverted for entity {}: {}", shared_id, exc)
+        self._flip_rows_reverted(run_id, [shared_id])
         return snapshot
+
+    def _merge_sources(self, run_id: str, shared_id: str) -> list[str]:
+        """The sources this run's merge row absorbed into ``shared_id`` (empty when not a merge target).
+
+        The target↔sources mapping lives on the review rows: every merge row of
+        one target carries the same ``merge_source_ids`` (see
+        :func:`~uwazi_admin_agent.domain.suggestion_scoring.merge_operations`),
+        so the APPLIED rows of this entity are the record of which entities the
+        merge deleted.
+
+        Only ``update_and_delete`` is handled here. A ``create_and_delete``
+        target's review row carries the ``dry-created-N`` placeholder, not the
+        sharedId Uwazi minted (creates have no id until Run), and undoing a
+        create is a DELETION — both are the run-level ordered revert's job.
+        """
+        if self._suggestion_store is None:
+            return []
+        try:
+            rows = self._suggestion_store.applied_rows_for(run_id, [shared_id])
+        except Exception as exc:  # noqa: BLE001 — no rows is not an error: the plain undo still works
+            logger.warning("revert: could not read the review rows of {}: {}", shared_id, exc)
+            return []
+        sources: list[str] = []
+        for row in rows:
+            if not is_revertable_merge(row):
+                continue
+            for source in row.merge_source_ids:
+                if source and source != shared_id and source not in sources:
+                    sources.append(source)
+        return sources
+
+    async def _revert_merge(self, run_id: str, target: str, sources: list[str], manifest: Any) -> EntitySnapshot | None:
+        """Undo ONE merge row: restore the target AND re-create the sources it absorbed.
+
+        A merge is one operation over several entities — it writes the target
+        and deletes its sources — so its undo is the run-level action list
+        restricted to exactly those entities: the target's snapshot restore
+        (content, publish state, connection rows), each source re-created from
+        its own snapshot (new sharedId, files re-uploaded), and the relationship
+        refs the delete cascade stripped, re-applied once both endpoints exist.
+
+        Residual, and the UI says so: a file the merge COPIED onto the target
+        stays there — Uwazi's raw restore cannot remove file rows, the same
+        limit the run-level revert has.
+        """
+        scope = {target, *sources}
+        actions = build_revert_actions(
+            manifest,
+            lambda sid: self._backup_store.load_snapshot(run_id, sid),
+            self._load_current_hubs,
+            shared_ids=scope,
+        )
+        for action in actions:
+            await self._execute_action(action, run_id, manifest)
+        # The re-creates checkpointed their new sharedIds as they went; persist
+        # the manifest once more so the run's record matches what landed.
+        self._backup_store.save_manifest(run_id, manifest)
+        logger.info("revert merge: run={} target={} sources={}", run_id, target, sources)
+        self._flip_rows_reverted(run_id, [target, *sources])
+        # The undo covered several entities, so report any snapshot it restored.
+        # The target comes first (a target write is the usual case), but a
+        # file-only merge writes NOTHING to its target — the review row is the
+        # propertyless anchor — so the target has no backup and the undo is the
+        # source re-creates alone. Returning None there would report that
+        # completed undo as a refusal.
+        for restored in (target, *sources):
+            try:
+                return self._backup_store.load_snapshot(run_id, restored)
+            except FileNotFoundError:
+                continue
+        return None
+
+    def _flip_rows_reverted(self, run_id: str, shared_ids: list[str]) -> None:
+        """Mark the run's APPLIED review rows of ``shared_ids`` REVERTED (best-effort).
+
+        The writes are already undone by this point; this only keeps the review
+        table honest — every language row of every entity the undo covered. A
+        store failure (or no store wired) is logged, never raised.
+        """
+        if self._suggestion_store is None:
+            return
+        try:
+            applied = self._suggestion_store.applied_rows_for(run_id, shared_ids)
+            updates = self._restored_current_updates(applied, run_id)
+            self._suggestion_store.mark_applied_reverted_for(run_id, shared_ids)
+            self._suggestion_store.set_current_values(updates)
+        except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
+            logger.warning("could not mark rows reverted for {}: {}", shared_ids, exc)
 
     async def revert_property(
         self,

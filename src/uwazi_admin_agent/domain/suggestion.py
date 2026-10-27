@@ -59,6 +59,24 @@ PROPERTY_OPS: frozenset[str] = UPDATE_OPS | CREATE_OPS
 # A merge is ONE review row that writes a target (new or existing) and removes
 # every source in the same Run; the sources are never separate table rows.
 MERGE_OPS: frozenset[str] = frozenset({"update_and_delete", "create_and_delete"})
+# The merge whose row the per-row Revert can undo: its target is an entity that
+# already exists in Uwazi (so its sharedId is real and its backup restorable) and
+# its undo restores that target while re-creating the sources it deleted.
+# ``create_and_delete`` is NOT undoable this way: the row's sharedId is the
+# ``dry-created-N`` placeholder (Uwazi has no such entity), and undoing a create
+# is a deletion — the run-level ordered revert's job.
+REVERTABLE_MERGE_OPS: frozenset[str] = frozenset({"update_and_delete"})
+
+
+def is_revertable_merge(row: Suggestion) -> bool:
+    """Whether ``row`` is a merge the per-row Revert can undo (pure).
+
+    True for an ``update_and_delete`` row (see :data:`REVERTABLE_MERGE_OPS`);
+    every other row — including a ``create_and_delete`` merge — is undone from
+    the run-level Revert.
+    """
+    return row.op in REVERTABLE_MERGE_OPS
+
 
 # A standalone file copy: the recorded ``move_files_to_entity`` that is NOT part
 # of a merge (the target is not written and the sources are not deleted). It is
