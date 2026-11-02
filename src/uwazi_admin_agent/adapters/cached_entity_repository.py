@@ -57,6 +57,26 @@ class CachedEntityRepository(EntityRepositoryPort):
             self._cache.invalidate_entities([shared_id])
 
     @override
+    async def save_raw_properties(self, payload: dict[str, Any]) -> None:
+        await self._inner.save_raw_properties(payload)
+        shared_id = payload.get("sharedId")
+        if isinstance(shared_id, str) and shared_id:
+            self._cache.invalidate_entities([shared_id])
+
+    @override
+    async def update_many_properties(
+        self,
+        shared_ids: list[str],
+        metadata: dict[str, Any],
+        language: str,
+    ) -> list[str]:
+        updated = await self._inner.update_many_properties(shared_ids, metadata, language)
+        # Every id in the batch may have been written (the endpoint is
+        # all-or-nothing), so drop them all rather than trusting the echoed set.
+        self._cache.invalidate_entities(list(shared_ids))
+        return updated
+
+    @override
     async def create_raw(self, raw: dict[str, Any]) -> str:
         return await self._inner.create_raw(raw)
 

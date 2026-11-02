@@ -10,7 +10,7 @@ from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.template import Template
-from uwazi_api.domain.thesauri_label import qualify_label
+from uwazi_api.domain.thesauri_label import label_id_map, qualify_label
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 
@@ -555,7 +555,7 @@ def _resolve_thesaurus_label(
     label_to_id: dict[str, str] = {}
     for thesaurus in thesauri_repo.get(language=language):
         if thesaurus.id == prop.content:
-            _build_label_map(thesaurus.values, label_to_id)
+            label_to_id = label_id_map(thesaurus.values)
             break
     if value in label_to_id:
         return label_to_id[value]
@@ -568,20 +568,6 @@ def _resolve_thesaurus_label(
         f"Value '{value}' is not a valid thesaurus label for property '{prop.name}' "
         f"(thesaurus id {prop.content}). Pass a label, not a UUID."
     )
-
-
-def _build_label_map(values: list, label_map: dict[str, str], parent_label: Optional[str] = None) -> None:
-    for v in values:
-        if v.values:
-            # A group: its children are the selectable options. Recurse with the
-            # group name as the parent so each child also gets a qualified
-            # "Group: Child" key (the bare child label alone is ambiguous when
-            # two groups share a child label).
-            _build_label_map(v.values, label_map, v.label)
-        else:
-            label_map[v.label] = v.id
-            if parent_label:
-                label_map[qualify_label(parent_label, v.label)] = v.id
 
 
 def _flatten_values(values: list) -> list:

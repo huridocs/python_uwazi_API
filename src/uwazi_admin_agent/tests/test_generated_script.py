@@ -1,7 +1,7 @@
 """Unit tests for the single-script GeneratedScript model."""
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 

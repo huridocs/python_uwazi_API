@@ -22,6 +22,7 @@ from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
     format_write_failures,
     language_groups,
     language_scoped_value,
+    metadata_value,
     partition_for_apply,
     pushable_rows,
     stamp_language,
@@ -281,11 +282,41 @@ def test_dict_value_passes_through_unchanged() -> None:
     assert updates[0]["metadata"]["source_page_url"] == payload
 
 
-def test_none_value_passes_through_so_the_clear_is_explicit() -> None:
-    """A reviewed "clear this property" proposal stays None; the write adapter
-    turns it into the empty shape Uwazi accepts."""
-    updates = build_apply_updates([_s(property_name="excerpt", proposed=None)])
-    assert updates[0]["metadata"]["excerpt"] is None
+def test_a_clear_proposal_becomes_an_empty_array() -> None:
+    """Every metadata key is an array in Uwazi; clearing means ``[]``, not ``null``.
+
+    Sending ``None`` is refused (``422 Expected array, received null`` on the
+    per-entity write, a retried 500 on the bulk endpoint), so the payload
+    boundary expresses the clear the way the schema does.
+    """
+    updates = build_apply_updates([_s(property_name="date_published", proposed=None)])
+    assert updates[0]["metadata"]["date_published"] == []
+
+
+def test_metadata_value_normalizes_none_and_keeps_every_other_shape() -> None:
+    assert metadata_value(None, None) == []
+    assert metadata_value(None, "es") == []
+    assert metadata_value("Published", None) == "Published"
+    assert metadata_value(0, None) == 0
+    assert metadata_value([], "es") == []
+    assert metadata_value([{"label": "T1", "value": "t1"}], "es") == [{"label": "T1", "value": "t1"}]
+    assert metadata_value([{"value": "hola", "language": "es"}], "es") == [{"value": "hola", "language": "es"}]
+    assert metadata_value("hola", "es") == [{"value": "hola", "language": "es"}]
+
+
+def test_a_created_entities_clear_proposal_also_becomes_an_empty_array() -> None:
+    creates = build_apply_creates(
+        [
+            _s(
+                shared_id="dry-created-0",
+                op="create",
+                property_name="date_published",
+                proposed=None,
+                template_name="DOCUMENT",
+            )
+        ]
+    )
+    assert creates[0]["metadata"]["date_published"] == []
 
 
 def test_build_apply_updates_skips_everything_unpushable() -> None:
@@ -677,3 +708,122 @@ def test_language_groups_falls_back_to_the_run_default_and_stamps_it() -> None:
 
 def test_language_groups_on_empty_input() -> None:
     assert language_groups([], "en") == []
+
+
+# --- multiselect rejected values ---------------------------------------------
+
+
+def test_effective_value_subtracts_rejected_labels() -> None:
+    row = _s(
+        property_name="keywords",
+        proposed=["A", "B"],
+    )
+    row = row.model_copy(update={"rejected_values": ["B"]})
+    assert effective_value(row) == ["A"]
+
+
+def test_effective_value_untouched_without_rejections() -> None:
+    row = _s(proposed=["A", "B"])
+    assert effective_value(row) == ["A", "B"]
+
+
+def test_effective_value_never_filters_non_string_entries() -> None:
+    # A relationship list of dicts must never lose an entry because a rejected
+    # label collision could not happen — only str entries are ever filtered.
+    row = _s(property_name="link", proposed=[{"value": "u1"}])
+    row = row.model_copy(update={"rejected_values": ["u1"]})
+    assert effective_value(row) == [{"value": "u1"}]
+
+
+def test_apply_updates_write_multiselect_accepted_labels_as_uuids() -> None:
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Alpha", "Beta"],
+    )
+    row = row.model_copy(update={"rejected_values": ["Beta"]})
+    updates = build_apply_updates(
+        [row],
+        property_types={"keywords": "multiselect"},
+        select_value_ids={("Case", "keywords"): {"Alpha": "u1", "Beta": "u2"}},
+    )
+    assert updates == [
+        {
+            "shared_id": "s1",
+            "language": None,
+            "metadata": {"keywords": [{"value": "u1"}]},
+            "template_name": "Case",
+        }
+    ]
+
+
+def test_apply_updates_write_all_accepted_labels_when_none_rejected() -> None:
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Alpha", "Beta"],
+    )
+    updates = build_apply_updates(
+        [row],
+        property_types={"keywords": "multiselect"},
+        select_value_ids={("Case", "keywords"): {"Alpha": "u1", "Beta": "u2"}},
+    )
+    assert updates[0]["metadata"]["keywords"] == [{"value": "u1"}, {"value": "u2"}]
+
+
+def test_apply_updates_empty_accepted_list_clears_the_property() -> None:
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Alpha"],
+    )
+    row = row.model_copy(update={"rejected_values": ["Alpha"]})
+    updates = build_apply_updates(
+        [row],
+        property_types={"keywords": "multiselect"},
+        select_value_ids={("Case", "keywords"): {"Alpha": "u1"}},
+    )
+    assert updates[0]["metadata"]["keywords"] == []
+
+
+def test_apply_updates_raise_from_the_thesaurus_lookup() -> None:
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Alpha"],
+    )
+    with pytest.raises(ApplyRefusedError) as err:
+        build_apply_updates(
+            [row],
+            property_types={"keywords": "multiselect"},
+            select_value_ids={},
+        )
+    assert "thesaurus" in str(err.value)
+
+
+def test_apply_updates_unknown_label_is_refused() -> None:
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Omega"],
+    )
+    with pytest.raises(ApplyRefusedError) as err:
+        build_apply_updates(
+            [row],
+            property_types={"keywords": "multiselect"},
+            select_value_ids={("Case", "keywords"): {"Alpha": "u1"}},
+        )
+    assert "Omega" in str(err.value)
+
+
+def test_apply_updates_unknown_property_type_keeps_previous_behaviour() -> None:
+    # The types lookup unwired (no type known): the row keeps its recorded
+    # value shape — there is nothing to detect a select from.
+    row = _s(shared_id="s1", property_name="keywords", proposed=["Alpha", "Beta"])
+    updates = build_apply_updates([row], property_types=None, select_value_ids=None)
+    assert updates[0]["metadata"]["keywords"] == ["Alpha", "Beta"]

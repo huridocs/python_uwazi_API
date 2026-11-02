@@ -86,7 +86,7 @@ class SuggestionStorePort(ABC):
 
     @abstractmethod
     def set_current_values(self, updates: list[tuple[int, Any, bool | None]]) -> None:
-        """Refresh rows' live before-state after an apply/revert/table refresh."""
+        """Refresh rows' live before-state after a revert or a table refresh."""
         ...
 
     @abstractmethod
@@ -149,12 +149,21 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def selection_rows(self, run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+    def selection_rows(
+        self,
+        run_id: str,
+        f: SuggestionFilter,
+        *,
+        runnable_only: bool = False,
+    ) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection.
 
         The whole-result selection ("select all results") spans every page, so the
         bulk actions resolve their identities from the store through this
-        projection. Limit/offset are ignored on purpose.
+        projection. Limit/offset are ignored on purpose. ``runnable_only``
+        narrows to the statuses a Run may still write (PENDING/ACCEPTED/EDITED/
+        REVERTED), so a whole-result selection never includes already-applied or
+        discarded rows.
         """
         ...
 
@@ -193,6 +202,17 @@ class SuggestionStorePort(ABC):
         reason: str | None = None,
     ) -> None:
         """Set the review status of explicit rows (per-row buttons, selection bulk)."""
+        ...
+
+    @abstractmethod
+    def set_rejected_values(
+        self,
+        row_id: int,
+        rejected: list[str],
+        status: SuggestionStatus | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Persist one row's rejected multiselect labels (and its derived status, when given)."""
         ...
 
     @abstractmethod

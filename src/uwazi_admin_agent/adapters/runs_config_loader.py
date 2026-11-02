@@ -28,7 +28,8 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from uwazi_admin_agent.configuration import PROMPTS_PATH, RUNS_FILE, RUNS_PATH
+from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.domain.run_config import RunConfig
 
 
@@ -45,9 +46,10 @@ class RunsConfigLoader:
         self._runs_path: Path = Path(runs_path)
 
     @classmethod
-    def default(cls) -> RunsConfigLoader:
-        """Return a loader wired to the ``configuration.py`` path constants."""
-        return cls(RUNS_FILE, PROMPTS_PATH, RUNS_PATH)
+    def default(cls, url: str) -> RunsConfigLoader:
+        """Return a loader wired to the instance's own paths."""
+        paths = instance_paths(url, INSTANCE_IDS_DIR)
+        return cls(paths.runs_file, paths.prompts_path, paths.runs_path)
 
     def load_active(self) -> RunConfig:
         """Return the active :class:`RunConfig` from ``prompts/<active_run>.yaml``."""

@@ -5,8 +5,8 @@ row's info button, and the review page opens it from its own menu. Living it
 here is what makes the two show the SAME modal — one implementation, one copy
 of the script.
 
-The modal chrome (the header with its Close, the pinned footer, the copy
-buttons) lives here too, because the modals are the only things that use it.
+The modal chrome (the header with its top-right Close, the copy buttons) lives
+here too, because the modals are the only things that use it.
 The PROMPT modal is not here any more: it became the prompt-improvement chat
 (:mod:`uwazi_admin_agent.drivers.web.prompt_chat_dialog`), which reuses this
 module's chrome.
@@ -20,6 +20,7 @@ from typing import Any, Callable
 from nicegui import context, ui
 
 from uwazi_admin_agent.drivers.web.run_service import get_run
+from uwazi_admin_agent.drivers.web.session import session_instance_url
 
 
 def close_button(dialog: Any, dense: bool = False) -> Any:
@@ -33,10 +34,10 @@ def close_button(dialog: Any, dense: bool = False) -> Any:
 def modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = None) -> None:
     """Modal title row with a top-right Close button.
 
-    Every modal keeps its Close at the BOTTOM-right too (pinned footers in the
-    maximized dialogs); this is the second, always-reachable escape hatch at
-    the top. ``trailing`` builds extra header widgets (e.g. Refresh / Copy all)
-    that sit between the title and the Close button.
+    The header's Close is the modal's ONLY Close: there is no bottom-right
+    duplicate, so the operator has one predictable escape hatch. ``trailing``
+    builds extra header widgets (e.g. Refresh / Copy all) that sit between the
+    title and the Close button.
 
     The row is ``shrink-0``: the maximized cards are fixed-height flex columns
     whose middle section scrolls, and a compressible header would be squeezed
@@ -48,15 +49,6 @@ def modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = N
             if trailing is not None:
                 trailing()
             close_button(dialog)
-
-
-def footer_close(dialog: Any) -> None:
-    """The bottom-right Close row that closes a maximized modal.
-
-    ``shrink-0`` keeps it pinned: only the middle scroll column may shrink.
-    """
-    with ui.row().classes("w-full justify-end shrink-0"):
-        ui.button("Close", icon="close", on_click=dialog.close).props("flat")
 
 
 def copy_to_clipboard(text: str, label: str = "Copy") -> None:
@@ -89,8 +81,8 @@ def script_dialog(run_id: str) -> None:
     run's generated script lives at ``<run>/script.py``; a run whose generation
     failed has none, and the caller hides the item in that case.
 
-    The dialog is maximized: the title row and the Close footer stay pinned
-    while the middle column scrolls. Every child of that scrolling column is
+    The dialog is maximized: the title row (with its top-right Close) stays
+    pinned while the middle column scrolls. Every child of that scrolling column is
     ``shrink-0`` — a compressible child lets the autogrow prompt textarea (and
     the ``ui.code`` block, whose inner markdown is sized ``height: 100%``) keep
     its full content height while its box is squeezed, so the script text
@@ -98,7 +90,7 @@ def script_dialog(run_id: str) -> None:
     shrinkable the column simply scrolls instead.
     """
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -138,5 +130,4 @@ def script_dialog(run_id: str) -> None:
                         ui.label("Script").classes("text-subtitle1 text-grey-7")
                         copy_to_clipboard(detail.script, "Copy script")
                     ui.code(detail.script, language="python").classes("w-full shrink-0")
-                footer_close(dialog)
     dialog.open()

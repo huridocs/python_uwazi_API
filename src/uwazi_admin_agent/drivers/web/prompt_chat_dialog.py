@@ -37,7 +37,7 @@ clarification turn is one tool-free request and the Run is the run's normal
 planning pass, so both run on the configured default caps without asking the
 operator to review caps or estimates.
 
-The modal chrome (the header with its Close, the pinned footer) is reused from
+The modal chrome (the header with its top-right Close) is reused from
 :mod:`uwazi_admin_agent.drivers.web.task_dialogs` rather than re-implemented.
 """
 
@@ -70,7 +70,8 @@ from uwazi_admin_agent.drivers.web.run_service import (
     read_run_script,
     regenerate_from_chat,
 )
-from uwazi_admin_agent.drivers.web.task_dialogs import footer_close, modal_header
+from uwazi_admin_agent.drivers.web.session import session_instance_url
+from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
 
 # The projected output tokens per regeneration turn (the Run button's planning
 # pass). The clarification turns are cheap and run on the configured defaults.
@@ -113,7 +114,7 @@ def _regeneration_estimate(run_id: str) -> SpendEstimate:
     count is unknown until the pass runs.
     """
     try:
-        script = read_run_script(run_id)
+        script = read_run_script(session_instance_url(), run_id)
     except OSError:
         script = ""
     usage = apply_script_llm_usage(script)
@@ -141,7 +142,7 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
     the runs table opens the modal without one.
     """
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -189,7 +190,6 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                     )
                     send_button = ui.button("Send", icon="send", on_click=lambda: _send(state, request_input))
                     state["_send_button"] = send_button
-                footer_close(dialog)
 
             with run_area:
                 spinner = ui.spinner(size="sm", color="primary")
@@ -352,6 +352,7 @@ async def _do_clarify(state: dict[str, Any], prompt: str) -> None:
     """Run the clarification step and open its questions modal."""
     try:
         understanding = await clarify_prompt(
+            session_instance_url(),
             prompt,
             app.storage.user["user"],
             app.storage.user["password"],
@@ -582,6 +583,7 @@ async def _do_run(
 
     try:
         result = await regenerate_from_chat(
+            session_instance_url(),
             state["run_id"],
             state["history"],
             app.storage.user["user"],

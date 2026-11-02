@@ -209,6 +209,28 @@ class RevertVerificationResult(BaseModel):
     )
 
 
+def property_row_differs(row: EntityRowSnapshot, actual: dict[str, Any] | None) -> bool:
+    """Whether a post-revert row still differs from a property-scoped snapshot (pure).
+
+    Compares exactly what the run wrote and the revert put back — the touched
+    metadata keys (an absent key means "was not there before", so the restore
+    cleared it) and the ``title`` (Uwazi's update schema always writes one, so
+    the restore always re-sends the captured one).
+
+    Whole-raw comparison is wrong here: a property-scoped snapshot's raw is
+    MINIMAL by design, so every untouched property would read as a difference
+    and every bulk edit would verify as failed.
+    """
+    if not isinstance(actual, dict):
+        return True
+    expected_metadata = row.raw.get("metadata") if isinstance(row.raw.get("metadata"), dict) else {}
+    actual_metadata = actual.get("metadata") if isinstance(actual.get("metadata"), dict) else {}
+    for key in row.touched_properties:
+        if (expected_metadata.get(key) or []) != (actual_metadata.get(key) or []):
+            return True
+    return actual.get("title") != row.raw.get("title")
+
+
 def _hint(value: Any) -> str:
     """Compact one-line hint of an expected/actual value for the summary."""
     if value is None:
@@ -287,6 +309,17 @@ def verify_revert(
             checked += 1
             key = modified.shared_id if index == 0 else f"{modified.shared_id}|{row.language}"
             actual = current_raws.get(key)
+            if snap.scope == "property":
+                # A property-scoped snapshot holds a MINIMAL raw, so comparing
+                # whole raws would flag every untouched field. Compare exactly
+                # what the run wrote and the revert restored: the touched keys
+                # (an absent key means "cleared") plus the title the restore
+                # always re-sends.
+                if property_row_differs(row, actual):
+                    mismatches.append(
+                        VerificationMismatch(shared_id=modified.shared_id, kind="entity", expected=row.raw, actual=actual)
+                    )
+                continue
             if _strip_platform_managed(actual) != _strip_platform_managed(row.raw):
                 mismatches.append(
                     VerificationMismatch(shared_id=modified.shared_id, kind="entity", expected=row.raw, actual=actual)

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, override
+from typing import Any, Literal, override
 
 import pytest
 
@@ -52,6 +52,18 @@ class InMemoryEntityRepository(EntityRepositoryPort):
             raise RuntimeError("raw missing sharedId")
         self._entities[sid] = dict(raw)
         self.save_calls.append(dict(raw))
+
+    @override
+    async def save_raw_properties(self, payload: dict[str, Any]) -> None:
+        # Model Uwazi's property-scoped save: write the payload's keys, leave
+        # everything else (including the joined documents/attachments) alone.
+        sid = payload.get("sharedId")
+        if sid is None or sid not in self._entities:
+            raise RuntimeError(f"Entity not found: {sid}")
+        current = dict(self._entities[sid])
+        current.update(payload)
+        self._entities[sid] = current
+        self.save_calls.append(dict(current))
 
     @override
     async def create_raw(self, raw: dict[str, Any]) -> str:
@@ -157,13 +169,15 @@ class InMemoryFileRepository(FileRepositoryPort):
     ``failing`` turns every upload into a failure to exercise the best-effort path.
     """
 
-    def __init__(self, failing: bool = False) -> None:
+    def __init__(self, failing: bool = False, bytes_by_filename: dict[str, bytes] | None = None) -> None:
         self.uploads: list[tuple[str, str, str, str]] = []  # (kind, shared_id, originalname, content_type)
+        self.deleted: list[str] = []
+        self.bytes_by_filename: dict[str, bytes] = dict(bytes_by_filename or {})
         self.failing: bool = failing
 
     @override
     async def get_file_bytes(self, filename: str) -> bytes | None:
-        return None  # not used by revert (bytes come from the backup store)
+        return self.bytes_by_filename.get(filename)
 
     @override
     async def upload_document(
@@ -185,10 +199,8 @@ class InMemoryFileRepository(FileRepositoryPort):
 
     @override
     async def delete_file(self, file_id: str) -> bool:
-        # Revert never deletes file rows; the port grew the method for the
-        # duplicate-file cleanup, so the in-memory repo accepts and records.
-        self.uploads.append(("delete", "", file_id, ""))
-        return True
+        self.deleted.append(file_id)
+        return not self.failing
 
 
 class InMemoryTemplatePropertyLookup(TemplatePropertyLookupPort):
@@ -230,13 +242,19 @@ def _identity(shared_id: str, language: str | None = None) -> EntityIdentity:
     return EntityIdentity(shared_id=shared_id, language=language)
 
 
-def _snapshot(shared_id: str, raw: dict[str, Any], files: list[FileRef] | None = None) -> EntitySnapshot:
+def _snapshot(
+    shared_id: str,
+    raw: dict[str, Any],
+    files: list[FileRef] | None = None,
+    scope: Literal["full", "property"] = "full",
+) -> EntitySnapshot:
     return EntitySnapshot(
         shared_id=shared_id,
         internal_id=raw.get("_id"),
         language=raw.get("language"),
         raw=raw,
         captured_at=_now(),
+        scope=scope,
         files=files,
     )
 
@@ -508,7 +526,52 @@ async def test_revert_deleted_reuploads_files_to_new_shared_id() -> None:
         ("document", "new-1", "report.pdf", "application/pdf"),
         ("attachment", "new-1", "scan.png", "image/png"),
     ]
+    # BOTH checkpoints persisted: a resumed revert must not re-upload either.
+    restored = store.load_snapshot("run-1", "X").files or []
+    assert [(ref.file_id, ref.restored) for ref in restored] == [("fdoc1", True), ("fatt1", True)]
     assert store.load_manifest("run-1").status == RunStatus.REVERTED
+
+
+async def test_revert_deleted_skips_a_file_already_on_the_recreated_entity() -> None:
+    # A resumed/older revert: the manifest points at the re-created id and the
+    # entity already carries the exact document, but the snapshot checkpoint says
+    # restored=False. Re-uploading would mint a duplicate, so the bytes are checked.
+    doc_bytes = b"PDF-BYTES"
+    repo = InMemoryEntityRepository(
+        entities={
+            "new-1": {
+                "sharedId": "new-1",
+                "_id": "n1",
+                "title": "old X",
+                "language": "en",
+                "documents": [
+                    {"_id": "live-doc", "filename": "live.pdf", "originalname": "report.pdf", "size": len(doc_bytes)}
+                ],
+                "attachments": [],
+            }
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "X",
+            {"sharedId": "X", "_id": "x1", "title": "old X", "language": "en"},
+            files=[_file_ref("fdoc1", "document", "report.pdf")],
+        ),
+    )
+    store.save_file_bytes("run-1", "X", "fdoc1", doc_bytes)
+    manifest = _manifest(deleted=[_identity("X")])
+    manifest.deleted[0] = manifest.deleted[0].model_copy(update={"restored_shared_id": "new-1"})
+    store.save_manifest("run-1", manifest)
+
+    file_repo = InMemoryFileRepository(bytes_by_filename={"live.pdf": doc_bytes})
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, file_repository=file_repo)
+    await use_case.revert("run-1")
+
+    assert file_repo.uploads == []
+    restored = store.load_snapshot("run-1", "X").files or []
+    assert [ref.restored for ref in restored] == [True]
 
 
 async def test_revert_deleted_without_file_repository_skips_file_restore() -> None:
@@ -818,6 +881,10 @@ async def test_revert_entity_merge_restores_the_target_and_recreates_its_sources
         # The rows the undo covered read REVERTED (runnable again).
         rows, _total = suggestions.query("run-1", SuggestionFilter())
         assert [row.status.value for row in rows] == ["reverted"]
+        # The target and the re-created source are no longer outstanding.
+        manifest = store.load_manifest("run-1")
+        assert set(manifest.reverted_shared_ids) == {"T", "S1"}
+        assert manifest.status == RunStatus.REVERTED
     finally:
         suggestions.close()
 
@@ -848,6 +915,9 @@ async def test_revert_entity_of_a_plain_update_does_not_recreate_anything(tmp_pa
 
         assert repo.get("T")["title"] == "old T"
         assert repo._next_id == 0  # no create_raw: an update has no sources to restore
+        manifest = store.load_manifest("run-1")
+        assert manifest.reverted_shared_ids == ["T"]
+        assert manifest.status == RunStatus.REVERTED
     finally:
         suggestions.close()
 
@@ -875,5 +945,274 @@ async def test_revert_entity_of_a_file_only_merge_recreates_sources_without_a_ta
         assert repo.get("T")["title"] == "T"  # the untouched target stays as it was
         rows, _total = suggestions.query("run-1", SuggestionFilter())
         assert [row.status.value for row in rows] == ["reverted"]
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_of_a_plain_update_ignores_a_pending_merge_row(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # T has an APPLIED property write and a PENDING merge row whose source was
+    # never deleted. Undoing T's property must stay a plain restore: reading a
+    # not-yet-run merge row would re-create a source that still exists.
+    repo = InMemoryEntityRepository(entities={"T": {"sharedId": "T", "_id": "t1", "title": "CHANGED", "language": "en"}})
+    store = InMemoryBackupStore()
+    store.save_snapshot("run-1", _snapshot("T", {"sharedId": "T", "_id": "t1", "title": "old T", "language": "en"}))
+    store.save_manifest("run-1", _manifest(modified=[_identity("T")]))
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions(
+            [
+                Suggestion(
+                    run_id="run-1",
+                    shared_id="T",
+                    op="update",
+                    property_name="_title",
+                    status=SuggestionStatus.APPLIED,
+                ),
+                _merge_row("T", ["S1"]).model_copy(update={"status": SuggestionStatus.PENDING}),
+            ]
+        )
+
+        use_case = RevertRunUseCase(entity_repository=repo, backup_store=store, suggestion_store=suggestions)
+        await use_case.revert_entity("run-1", "T")
+
+        assert repo.get("T")["title"] == "old T"
+        assert repo._next_id == 0
+    finally:
+        suggestions.close()
+
+
+# --- merge-revert file cleanup (the copied files must leave the target) -----
+
+_RUN_START_MS = int(_now().timestamp() * 1000)
+_SOURCE_BYTES = b"the absorbed source document"
+
+
+def _source_file(size: int | None = None, restored: bool = False) -> FileRef:
+    return FileRef(
+        file_id="s-doc",
+        kind="document",
+        filename="source-storage.pdf",
+        originalname="source.pdf",
+        content_type="application/pdf",
+        size=len(_SOURCE_BYTES) if size is None else size,
+        restored=restored,
+    )
+
+
+def _target_with_copied_file(creation_date: int | None) -> dict[str, Any]:
+    """A live target whose joined file list carries a merge copy of ``source.pdf``."""
+    return {
+        "sharedId": "T",
+        "_id": "t1",
+        "title": "T",
+        "language": "en",
+        "documents": [
+            {
+                "_id": "copied-doc",
+                "filename": "copied-doc.pdf",
+                "originalname": "source.pdf",
+                "size": len(_SOURCE_BYTES),
+                "creationDate": creation_date,
+            }
+        ],
+        "attachments": [],
+    }
+
+
+def _source_run_store() -> InMemoryBackupStore:
+    """The run record of a file-only merge: the source is deleted and snapshotted."""
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "S1",
+            {"sharedId": "S1", "_id": "s1", "title": "source", "language": "en"},
+            files=[_source_file()],
+        ),
+    )
+    store.save_file_bytes("run-1", "S1", "s-doc", _SOURCE_BYTES)
+    store.save_manifest("run-1", _manifest(deleted=[_identity("S1")]))
+    return store
+
+
+async def test_revert_entity_merge_deletes_the_file_the_merge_copied_onto_the_target(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    repo = InMemoryEntityRepository(entities={"T": _target_with_copied_file(_RUN_START_MS + 60_000)})
+    store = _source_run_store()
+    file_repo = InMemoryFileRepository(bytes_by_filename={"copied-doc.pdf": _SOURCE_BYTES})
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        await use_case.revert_entity("run-1", "T")
+
+        assert file_repo.deleted == ["copied-doc"]
+        assert repo.get("new-1")["title"] == "source"  # the source still comes back
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_merge_removes_the_copy_from_a_property_scoped_target(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # The review-path merge snapshots the target PROPERTY-SCOPED: its minimal raw
+    # has no file list, and save_raw_properties echoes the live files back. The
+    # cleanup must therefore read the live raw and remove the copy itself.
+    repo = InMemoryEntityRepository(entities={"T": {**_target_with_copied_file(_RUN_START_MS + 60_000), "title": "MERGED"}})
+    store = _source_run_store()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "T",
+            {"_id": "t1", "sharedId": "T", "language": "en", "title": "old T", "metadata": {}},
+            scope="property",
+        ),
+    )
+    store.save_manifest("run-1", _manifest(modified=[_identity("T")], deleted=[_identity("S1")]))
+    file_repo = InMemoryFileRepository(bytes_by_filename={"copied-doc.pdf": _SOURCE_BYTES})
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        await use_case.revert_entity("run-1", "T")
+
+        assert repo.get("T")["title"] == "old T"
+        assert file_repo.deleted == ["copied-doc"]
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_merge_keeps_a_pre_existing_identical_file(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # Same name/size as the source, but it predates the run: the merge would have
+    # SKIPPED its upload, so this row is the target's own file and must survive.
+    repo = InMemoryEntityRepository(entities={"T": _target_with_copied_file(_RUN_START_MS - 86_400_000)})
+    store = _source_run_store()
+    file_repo = InMemoryFileRepository(bytes_by_filename={"copied-doc.pdf": _SOURCE_BYTES})
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        await use_case.revert_entity("run-1", "T")
+
+        assert file_repo.deleted == []
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_merge_keeps_a_copy_whose_bytes_cannot_be_verified(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    repo = InMemoryEntityRepository(entities={"T": _target_with_copied_file(_RUN_START_MS + 60_000)})
+    store = _source_run_store()
+    # No live bytes for the candidate: the digest cannot match, so no delete.
+    file_repo = InMemoryFileRepository()
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        await use_case.revert_entity("run-1", "T")
+
+        assert file_repo.deleted == []
+    finally:
+        suggestions.close()
+
+
+async def test_revert_entity_merge_repairs_a_reverted_row_that_left_copied_files(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # The old revert flipped the row and re-created the source (checkpointed),
+    # but left the copy behind. A second click must finish the cleanup without
+    # minting another source entity.
+    repo = InMemoryEntityRepository(
+        entities={
+            "T": _target_with_copied_file(_RUN_START_MS + 60_000),
+            "new-1": {"sharedId": "new-1", "_id": "n1", "title": "source", "language": "en"},
+        }
+    )
+    store = InMemoryBackupStore()
+    store.save_snapshot(
+        "run-1",
+        _snapshot(
+            "S1",
+            {"sharedId": "S1", "_id": "s1", "title": "source", "language": "en"},
+            files=[_source_file(restored=True)],
+        ),
+    )
+    store.save_file_bytes("run-1", "S1", "s-doc", _SOURCE_BYTES)
+    manifest = _manifest(deleted=[_identity("S1")])
+    manifest.deleted[0] = manifest.deleted[0].model_copy(update={"restored_shared_id": "new-1"})
+    store.save_manifest("run-1", manifest)
+    file_repo = InMemoryFileRepository(bytes_by_filename={"copied-doc.pdf": _SOURCE_BYTES})
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"]).model_copy(update={"status": SuggestionStatus.REVERTED})])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        snapshot = await use_case.revert_entity("run-1", "T")
+
+        assert snapshot is not None
+        assert file_repo.deleted == ["copied-doc"]
+        assert file_repo.uploads == []  # no second re-upload of the restored source
+        assert repo._next_id == 0  # and no second source entity
+    finally:
+        suggestions.close()
+
+
+async def test_revert_run_removes_files_a_merge_copied_onto_an_unsnapshotted_target(tmp_path: Any) -> None:
+    from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
+
+    # The live shape: the script's title update touched one entity, its file
+    # move targeted another that was never written (no snapshot at all).
+    repo = InMemoryEntityRepository(entities={"T": _target_with_copied_file(_RUN_START_MS + 60_000)})
+    store = _source_run_store()
+    file_repo = InMemoryFileRepository(bytes_by_filename={"copied-doc.pdf": _SOURCE_BYTES})
+    suggestions = SqliteSuggestionStore(tmp_path / "suggestions.db")
+    try:
+        suggestions.add_suggestions([_merge_row("T", ["S1"])])
+
+        use_case = RevertRunUseCase(
+            entity_repository=repo,
+            backup_store=store,
+            suggestion_store=suggestions,
+            file_repository=file_repo,
+        )
+        await use_case.revert("run-1")
+
+        assert file_repo.deleted == ["copied-doc"]
+        assert store.load_manifest("run-1").status == RunStatus.REVERTED
     finally:
         suggestions.close()

@@ -85,6 +85,11 @@ def is_revertable_merge(row: Suggestion) -> bool:
 MOVE_OP: str = "move_files"
 FILE_OPS: frozenset[str] = frozenset({MOVE_OP})
 
+# Ops that change the entity's publish state / permission grants. Those live in
+# their own collection — `POST /api/entities` never writes them — so a backup
+# only needs the extra publish-state read when the run contains one of these.
+PUBLISH_OPS: frozenset[str] = frozenset({"publish", "unpublish", "set_publish_status"})
+
 # Synthetic property name used for a whole-entity title change on an
 # update/create record (metadata keys use their own name).
 TITLE_PROPERTY: str = "_title"
@@ -199,6 +204,14 @@ class Suggestion(BaseModel):
     )
     status: SuggestionStatus = Field(default=SuggestionStatus.PENDING, description="Review state.")
     edited_value: str | None = Field(default=None, description="Operator-supplied replacement (status=EDITED).")
+    rejected_values: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Multiselect labels of the proposal the operator refused. The Run writes "
+            "`proposed_value` minus these (see select_values.accepted_values). Empty for every "
+            "other row and for an untouched multiselect."
+        ),
+    )
     discard_reason: str | None = Field(default=None, description="Why the operator discarded this row.")
     reviewed_at: datetime | None = Field(default=None, description="When the operator last changed the status.")
     created_at: datetime | None = Field(default=None, description="When the suggestion was persisted.")

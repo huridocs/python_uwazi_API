@@ -23,6 +23,14 @@ class HttpClientAdapter(HttpClientPort):
         self.password = password
         self.token = token
         self.request_adapter = requests_retry_session()
+        # A NO-RETRY twin of the retry session: same timeout guarantee, but a
+        # 4xx/5xx answers in one round trip. Callers opt in per request via
+        # ``post_json(..., retries=False)`` — the bulk ``multipleupdate`` call
+        # uses it, because its refusal is DETERMINISTIC (a payload Uwazi's
+        # validator crashes on) and callers fall back per entity anyway: with
+        # the maintenance-grade retry package (10 retries, backoff up to 120 s)
+        # a bad payload stalled the caller for ~10 minutes of silent retries.
+        self.fast_adapter = requests_retry_session(retries=0)
         self.headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Content-Type": "application/json",
@@ -56,12 +64,18 @@ class HttpClientAdapter(HttpClientPort):
         url: str,
         json: dict,
         cookies: Optional[dict] = None,
+        retries: bool = True,
     ):
         """Send a JSON POST request.
 
         Sends the payload as ``application/json`` using the default headers.
+        ``retries=False`` answers the FIRST refused status instead of riding
+        the maintenance-retry backoff — for callers that fall back per entity
+        on a refusal (the bulk ``multipleupdate`` write), whose retry storm
+        only delayed the per-entity attribution by minutes.
         """
-        return self.request_adapter.post(
+        session = self.request_adapter if retries else self.fast_adapter
+        return session.post(
             url,
             headers=self.headers,
             json=json,

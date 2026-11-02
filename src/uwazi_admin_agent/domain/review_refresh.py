@@ -188,7 +188,7 @@ class PreflightResult(BaseModel):
             lines.append(f"…and {more} more")
         return (
             "Run blocked: the table is out of date for this selection. "
-            "Use 'Update table from Uwazi' first, then run again.\n" + "\n".join(lines)
+            "Use 'Sync with Uwazi' first, then run again.\n" + "\n".join(lines)
         )
 
 

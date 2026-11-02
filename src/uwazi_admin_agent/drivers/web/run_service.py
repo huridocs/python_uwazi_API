@@ -11,7 +11,6 @@ the ``drivers/`` layer convention.
 """
 
 import asyncio
-import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,13 +30,9 @@ from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionS
 from uwazi_admin_agent.adapters.tasks_store import YamlTaskStore
 from uwazi_admin_agent.configuration import (
     DUMMY_LANGUAGE,
+    INSTANCE_IDS_DIR,
     LLM_PRICE_INPUT_PER_MTOK,
     LLM_PRICE_OUTPUT_PER_MTOK,
-    PROMPTS_PATH,
-    RUNS_FILE,
-    RUNS_PATH,
-    SUGGESTIONS_DB_PATH,
-    TASKS_PATH,
 )
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditRecord, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
@@ -60,6 +55,7 @@ from uwazi_admin_agent.domain.file_drift import (
     recorded_file_signatures,
 )
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.instance_paths import InstancePaths, instance_paths
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.prompt_chat import ChatMessage, ChatTurn, build_final_prompt_from_chat
@@ -71,6 +67,7 @@ from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
     evaluate_preflight,
 )
+from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON, all_values_rejected
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 from uwazi_admin_agent.domain.suggestion import (
     EntityReviewRow,
@@ -78,6 +75,7 @@ from uwazi_admin_agent.domain.suggestion import (
     PredictionPass,
     Suggestion,
     SuggestionFilter,
+    SuggestionStatus,
     is_revertable_merge,
 )
 from uwazi_admin_agent.domain.task import TaskView
@@ -148,7 +146,7 @@ class ExecutionEvent:
 
 @dataclass(frozen=True)
 class TableUpdateResult:
-    """What one "Update table from Uwazi" pass changed."""
+    """What one "Sync with Uwazi" pass changed."""
 
     run_id: str
     changed_in_uwazi: int | None
@@ -156,12 +154,12 @@ class TableUpdateResult:
 
     def message(self) -> str:
         if self.changed_in_uwazi is None:
-            changed = "table refreshed (Uwazi change scan unavailable)"
+            changed = "table re-read (Uwazi change scan unavailable)"
         elif self.changed_in_uwazi:
             changed = f"{self.changed_in_uwazi} entity change(s) detected in Uwazi"
         else:
             changed = "no Uwazi changes detected"
-        return f"Table updated: {changed}; {self.reconciliation.summary_text()}."
+        return f"Synced with Uwazi: {changed}; {self.reconciliation.summary_text()}."
 
 
 @dataclass(frozen=True)
@@ -189,21 +187,23 @@ class RunResults:
     titles: dict[str, str]
 
 
+def _paths(url: str) -> InstancePaths:
+    """The on-disk paths of ONE instance (every path this module writes)."""
+    return instance_paths(url, INSTANCE_IDS_DIR)
+
+
 def _touch_counts(manifest: MigrationManifest) -> tuple[int, int, int, int]:
-    """(modified, deleted, created, rewired) counts shown in the table.
+    """(modified, deleted, created, rewired) counts still outstanding in Uwazi.
 
-    A reverted run has no outstanding changes — everything was restored or
-    deleted — so its counts read as 0 even though the manifest keeps the
-    touch-set for post-revert verification and audit.
+    Delegates to the manifest so the partial-revert subtraction (and the
+    full-revert zeroing) lives with the touch-set data it describes.
     """
-    if manifest.status == RunStatus.REVERTED:
-        return 0, 0, 0, 0
-    return len(manifest.modified), len(manifest.deleted), len(manifest.created), len(manifest.rewired)
+    return manifest.touch_counts()
 
 
-def list_runs() -> list[RunSummary]:
+def list_runs(url: str) -> list[RunSummary]:
     """Return all persisted runs (skips folders whose manifest is unreadable)."""
-    store = build_backup_store()
+    store = build_backup_store(url)
     summaries: list[RunSummary] = []
     for run_id in store.list_runs():
         try:
@@ -228,11 +228,11 @@ def list_runs() -> list[RunSummary]:
     return summaries
 
 
-def get_run(run_id: str) -> RunDetail:
+def get_run(url: str, run_id: str) -> RunDetail:
     """Return a run's manifest fields + the emitted script source."""
-    store = build_backup_store()
+    store = build_backup_store(url)
     manifest = store.load_manifest(run_id)
-    script_path = RUNS_PATH / run_id / "script.py"
+    script_path = _paths(url).runs_path / run_id / "script.py"
     script = script_path.read_text(encoding="utf-8") if script_path.is_file() else manifest.script
     modified, deleted, created, rewired = _touch_counts(manifest)
     return RunDetail(
@@ -250,12 +250,12 @@ def get_run(run_id: str) -> RunDetail:
     )
 
 
-def get_run_audit(run_id: str) -> list[AuditRecord]:
+def get_run_audit(url: str, run_id: str) -> list[AuditRecord]:
     """Return a run's full audit trail (empty when the run has no audit log)."""
-    return build_audit_log().load(run_id)
+    return build_audit_log(url).load(run_id)
 
 
-def get_run_results(run_id: str) -> RunResults:
+def get_run_results(url: str, run_id: str) -> RunResults:
     """Return a run's touch-set (the entities/files it changed).
 
     Reads the manifest directly (not the count-reduced :func:`get_run`) so a
@@ -268,7 +268,7 @@ def get_run_results(run_id: str) -> RunResults:
     rewire/delete) is read out of that entity's on-disk before-snapshot. A
     missing snapshot is skipped — the UI falls back to the shared id.
     """
-    store = build_backup_store()
+    store = build_backup_store(url)
     manifest = store.load_manifest(run_id)
     return RunResults(
         run_id=manifest.run_id,
@@ -312,7 +312,7 @@ def _resolve_titles(store: BackupStorePort, run_id: str, manifest: MigrationMani
     return titles
 
 
-async def get_entity_segmentation(user: str, password: str, shared_id: str, language: str) -> Segmentation:
+async def get_entity_segmentation(url: str, user: str, password: str, shared_id: str, language: str) -> Segmentation:
     """Fetch one entity's primary-document segmentation (the entity window's viewer).
 
     Resolves the entity's document for ``language`` on the controlled instance and
@@ -320,7 +320,7 @@ async def get_entity_segmentation(user: str, password: str, shared_id: str, lang
     :class:`SegmentationRepositoryPort`, so a repeat view is served from the
     persistent cache. Raises on any failure — the caller degrades to an error label.
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     return await runtime.deps.segmentation_repository.get_by_shared_id(shared_id, language)
 
 
@@ -362,7 +362,7 @@ async def _instance_languages(runtime: Any) -> list[str]:
 
 
 async def resolve_entity_document(
-    user: str, password: str, shared_id: str, language: str | None = None
+    url: str, user: str, password: str, shared_id: str, language: str | None = None
 ) -> EntityDocument | None:
     """The entity's primary document (and the language it lives in), or None.
 
@@ -374,7 +374,7 @@ async def resolve_entity_document(
     has no uploaded primary document in ANY configured language — the caller
     then falls back to the document text instead of showing an empty viewer.
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     candidates = document_language_candidates(language, await _instance_languages(runtime))
     for candidate in candidates:
         try:
@@ -388,7 +388,9 @@ async def resolve_entity_document(
     return None
 
 
-async def fetch_entity_document_bytes(user: str, password: str, shared_id: str, language: str | None = None) -> bytes | None:
+async def fetch_entity_document_bytes(
+    url: str, user: str, password: str, shared_id: str, language: str | None = None
+) -> bytes | None:
     """Fetch an entity's PRIMARY document bytes for the review window's viewer.
 
     Resolves the file the same way :func:`resolve_entity_document` does (so the
@@ -396,8 +398,8 @@ async def fetch_entity_document_bytes(user: str, password: str, shared_id: str, 
     and returns them through the cached file repository — re-opening the same
     entity is free. ``None`` when the entity has no uploaded primary document.
     """
-    runtime = build_runtime(user=user, password=password)
-    document = await resolve_entity_document(user, password, shared_id, language)
+    runtime = build_runtime(user=user, password=password, url=url)
+    document = await resolve_entity_document(url, user, password, shared_id, language)
     if document is None:
         return None
     return await runtime.file_repository.get_file_bytes(document.filename)
@@ -413,14 +415,14 @@ def _run_level_events(records: list[AuditRecord]) -> list[AuditRecord]:
     return [r for r in records if r.op_kind in ("execute", "revert")]
 
 
-def get_execution_history(run_id: str, audit_log: AuditLogPort | None = None) -> list[ExecutionEvent]:
+def get_execution_history(url: str, run_id: str, audit_log: AuditLogPort | None = None) -> list[ExecutionEvent]:
     """Return a run's execute/revert events, newest first, for the history modal.
 
-    Reads the run's on-disk audit log (``<RUNS_PATH>/<run_id>/audit.jsonl``) unless
+    Reads the run's on-disk audit log (``<runs>/<run_id>/audit.jsonl``) unless
     an ``audit_log`` is injected (used by tests); a run with no audit log (never
     executed, or pre-Phase 6) yields an empty list.
     """
-    log = audit_log if audit_log is not None else JsonlAuditLog(RUNS_PATH)
+    log = audit_log if audit_log is not None else JsonlAuditLog(_paths(url).runs_path)
     audit = log.load(run_id)
     events = _run_level_events(audit)
     events.sort(key=lambda r: r.timestamp, reverse=True)
@@ -435,18 +437,19 @@ def get_execution_history(run_id: str, audit_log: AuditLogPort | None = None) ->
     ]
 
 
-async def clarify_prompt(prompt: str, user: str, password: str) -> PromptUnderstanding:
+async def clarify_prompt(url: str, prompt: str, user: str, password: str) -> PromptUnderstanding:
     """Run the prompt-validation step: restate the prompt + surface ambiguities.
 
     A lightweight, tool-free LLM call that runs BEFORE generation so the operator
     can confirm/rephrase. Raises on LLM failure; the caller shows a skip affordance.
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     use_case = ClarifyPromptUseCase(llm=runtime.llm, deps=runtime.deps)
     return await use_case.execute(prompt)
 
 
 async def create_and_generate(
+    url: str,
     name: str,
     prompt: str,
     user: str,
@@ -465,18 +468,18 @@ async def create_and_generate(
     yaml stays on disk for retry) and :class:`GenerateError` is raised so the
     caller shows a short toast; the full detail lives on the manifest.
     """
-    PROMPTS_PATH.mkdir(parents=True, exist_ok=True)
-    (PROMPTS_PATH / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
-    RUNS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RUNS_FILE.write_text(yaml.dump({"active_run": name}), encoding="utf-8")
+    _paths(url).prompts_path.mkdir(parents=True, exist_ok=True)
+    (_paths(url).prompts_path / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
+    _paths(url).runs_file.parent.mkdir(parents=True, exist_ok=True)
+    _paths(url).runs_file.write_text(yaml.dump({"active_run": name}), encoding="utf-8")
 
     # Resolve the run folder directly from the name: resolving through the
-    # RUNS_FILE pointer (load_active_path) is a TOCTOU race — two concurrent
+    # the active-run pointer (load_active_path) is a TOCTOU race — two concurrent
     # generations would both read whatever pointer was written last and emit
-    # into the WRONG run folder. RUNS_FILE stays written for CLI compatibility.
-    run_path = RUNS_PATH / name
+    # into the WRONG run folder. The pointer stays written for CLI compatibility.
+    run_path = _paths(url).runs_path / name
     run_path.mkdir(parents=True, exist_ok=True)
-    prompt_snapshot = PROMPTS_PATH / f"{name}.yaml"
+    prompt_snapshot = _paths(url).prompts_path / f"{name}.yaml"
     if prompt_snapshot.is_file():
         shutil.copy2(prompt_snapshot, run_path / prompt_snapshot.name)
 
@@ -485,7 +488,7 @@ async def create_and_generate(
     # before the try below exists and before any manifest is written. Without the
     # log the operator saw only the toast and the terminal stayed silent.
     try:
-        runtime = build_runtime(user=user, password=password)
+        runtime = build_runtime(user=user, password=password, url=url)
     except Exception as exc:
         logger.exception("run {}: could not build the Uwazi runtime", name)
         raise GenerateError(
@@ -532,10 +535,12 @@ async def create_and_generate(
     # LLM in this pass (it is bound no-LLM dry-run namespace), so nothing here
     # costs money — the review table's rows are simply built the moment the
     # script exists.
-    await run_auto_scan(name, user, password, budget)
+    await run_auto_scan(url, name, user, password, budget)
 
 
-async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget | None = None) -> ReconciliationSummary:
+async def run_auto_scan(
+    url: str, run_id: str, user: str, password: str, budget: LlmBudget | None = None
+) -> ReconciliationSummary:
     """Run the PLANNING pass over ``run_id``'s script and fill the review table.
 
     The ONE generated script runs in the recorded-write namespace with the LLM
@@ -548,12 +553,12 @@ async def run_auto_scan(run_id: str, user: str, password: str, budget: LlmBudget
     Errors propagate: the same path the wizard shows a toast for. Returns the
     reconciliation summary of the merge into the live table.
     """
-    summary = await generate_predictions(run_id, user, password, budget or _script_caps_budget(), None)
+    summary = await generate_predictions(url, run_id, user, password, budget or _script_caps_budget(), None)
     # The rows just recorded are Uwazi's CURRENT state: capture their editDates
     # as the drift baseline now, so a later manual edit is detectable. Failure
     # is non-fatal (the table is still built). Threaded: it is a paged
     # ``/api/v2/search`` per language, and on the event loop it froze the page.
-    await asyncio.to_thread(refresh_baseline_after_run, run_id, user, password)
+    await asyncio.to_thread(refresh_baseline_after_run, url, run_id, user, password)
     return summary
 
 
@@ -597,27 +602,28 @@ def _persist_generation_history(run_path: Path, use_case: GenerateScriptUseCase)
         logger.warning("could not persist generation history for {}: {}", run_path.name, exc)
 
 
-def has_generation_history(run_id: str) -> bool:
+def has_generation_history(url: str, run_id: str) -> bool:
     """True when a run has a persisted generation conversation (repair is cheap)."""
-    return (RUNS_PATH / run_id / GENERATION_HISTORY_FILENAME).is_file()
+    return (_paths(url).runs_path / run_id / GENERATION_HISTORY_FILENAME).is_file()
 
 
-def build_suggestion_store() -> SuggestionStorePort:
+def build_suggestion_store(url: str) -> SuggestionStorePort:
     """Return the shared SQLite suggestion store (schema ensured on build)."""
-    return SqliteSuggestionStore(SUGGESTIONS_DB_PATH)
+    return SqliteSuggestionStore(_paths(url).suggestions_db)
 
 
-def read_run_script(run_id: str) -> str:
+def read_run_script(url: str, run_id: str) -> str:
     """Read a run's script source (the ONE stable path the emitter writes).
 
     There is one script per run: ``script.py`` is overwritten when a
     regeneration produces a new one, so the live table always reflects the
     script that produced it.
     """
-    return (RUNS_PATH / run_id / "script.py").read_text(encoding="utf-8")
+    return (_paths(url).runs_path / run_id / "script.py").read_text(encoding="utf-8")
 
 
 async def generate_predictions(
+    url: str,
     run_id: str,
     user: str,
     password: str,
@@ -634,15 +640,15 @@ async def generate_predictions(
 
     Returns the reconciliation summary of the merge into the ONE live table.
     """
-    runtime = build_runtime(user=user, password=password)
-    script = read_run_script(run_id)
+    runtime = build_runtime(user=user, password=password, url=url)
+    script = read_run_script(url, run_id)
     use_case = GeneratePredictionsUseCase(
         entity_api=runtime.entity_api,
         entity_repository=runtime.entity_repository,
         file_repository=runtime.file_repository,
         segmentation_repository=runtime.segmentation_repository,
         url_fetcher=runtime.url_fetcher,
-        suggestion_store=build_suggestion_store(),
+        suggestion_store=build_suggestion_store(url),
         llm_runtime=PydanticAiLlmRuntime(runtime.llm),
         default_language=DUMMY_LANGUAGE,
         template_labels=runtime.template_labels,
@@ -657,7 +663,7 @@ async def generate_predictions(
     return use_case.last_reconciliation or ReconciliationSummary()
 
 
-async def update_table_from_uwazi(run_id: str, user: str, password: str) -> TableUpdateResult:
+async def update_table_from_uwazi(url: str, run_id: str, user: str, password: str) -> TableUpdateResult:
     """Refresh the review table in place against current Uwazi state.
 
     Full script pass with the persistent caches: LLM/translation answers for
@@ -666,14 +672,14 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
     pass sees live data. The same pass row and the same suggestion rows are
     kept; :meth:`GeneratePredictionsUseCase.refresh` merges by identity.
     """
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     assert isinstance(store, SqliteSuggestionStore)
-    pass_row = current_pass(run_id)
+    pass_row = current_pass(url, run_id)
     if pass_row is None:
         raise GenerateError(f"run {run_id!r} has no prediction pass to refresh")
 
-    runtime = await asyncio.to_thread(build_runtime, user, password)
-    script = read_run_script(run_id)
+    runtime = await asyncio.to_thread(build_runtime, user, password, url)
+    script = read_run_script(url, run_id)
     now = datetime.now(timezone.utc)
     report = await asyncio.to_thread(
         _scan_drift_report,
@@ -724,6 +730,7 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
 
     baseline_rows = await asyncio.to_thread(
         sync_drift_baseline,
+        url,
         run_id,
         user,
         password,
@@ -742,7 +749,7 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
             detail=None,
         )
     try:
-        build_audit_log().append(
+        build_audit_log(url).append(
             run_id,
             make_audit_record(
                 run_id,
@@ -762,14 +769,15 @@ async def update_table_from_uwazi(run_id: str, user: str, password: str) -> Tabl
     )
 
 
-def get_table_update_time(run_id: str) -> datetime | None:
+def get_table_update_time(url: str, run_id: str) -> datetime | None:
     """When the table was last refreshed from Uwazi (None = never)."""
-    records = build_audit_log().load(run_id)
+    records = build_audit_log(url).load(run_id)
     timestamps = [record.timestamp for record in records if record.step is AuditStep.TABLE_SYNC]
     return max(timestamps) if timestamps else None
 
 
 def preflight_selection(
+    url: str,
     run_id: str,
     suggestion_ids: list[int],
     user: str,
@@ -783,8 +791,8 @@ def preflight_selection(
     """
     if not suggestion_ids:
         return PreflightResult()
-    store = build_suggestion_store()
-    pass_row = current_pass(run_id)
+    store = build_suggestion_store(url)
+    pass_row = current_pass(url, run_id)
     if pass_row is None:
         return PreflightResult()
     rows: list[Suggestion] = []
@@ -796,7 +804,7 @@ def preflight_selection(
             SuggestionFilter(suggestion_ids=chunk, limit=len(chunk)),
         )
         rows.extend(page)
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     pairs = {
         (row.shared_id, row.language or DUMMY_LANGUAGE)
         for row in rows
@@ -912,41 +920,42 @@ def _scan_drift_report(
     )
 
 
-def get_suggestions(run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
+def get_suggestions(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
     """Return a page of suggestions + the filter's total (the review grid's read)."""
-    return build_suggestion_store().query(run_id, f)
+    return build_suggestion_store(url).query(run_id, f)
 
 
-def current_pass(run_id: str) -> PredictionPass | None:
+def current_pass(url: str, run_id: str) -> PredictionPass | None:
     """The run's single prediction pass row, or None when none is recorded.
 
     The review page never carries a pass number — the table is ONE live table
     per run — so the review reads below resolve the current pass HERE. A later
     pass overwrites this row, and that is the one the review surface follows.
     """
-    return build_suggestion_store().get_pass(run_id)
+    return build_suggestion_store(url).get_pass(run_id)
 
 
-def get_suggestion_entity_languages(run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+def get_suggestion_entity_languages(url: str, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
     """Return every (sharedId, language) row matching a filter (the window's prev/next)."""
-    return build_suggestion_store().entity_languages(run_id, f)
+    return build_suggestion_store(url).entity_languages(run_id, f)
 
 
-def get_suggestion_counts(run_id: str) -> dict[str, int]:
+def get_suggestion_counts(url: str, run_id: str) -> dict[str, int]:
     """Return the review header's aggregate counters (SQL-side group-bys).
 
     The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table shows
     — so the cards and the table agree; ``match_*`` stay row-level.
     """
-    return build_suggestion_store().counts(run_id)
+    return build_suggestion_store(url).counts(run_id)
 
 
-def get_suggestion_properties(run_id: str) -> list[str]:
+def get_suggestion_properties(url: str, run_id: str) -> list[str]:
     """Return the distinct property names in a set (the property dropdown)."""
-    return build_suggestion_store().property_names(run_id)
+    return build_suggestion_store(url).property_names(run_id)
 
 
 def get_entity_suggestions(
+    url: str,
     run_id: str,
     shared_id: str,
     language: str | None = None,
@@ -958,7 +967,7 @@ def get_entity_suggestions(
     same properties the table does; ``language=None`` reads the
     language-independent group, exactly as the table's own rows do.
     """
-    return build_suggestion_store().get_entity(run_id, shared_id, language, f)
+    return build_suggestion_store(url).get_entity(run_id, shared_id, language, f)
 
 
 # Property labels belong to the TEMPLATE, not to a run, so they are resolved once
@@ -968,7 +977,7 @@ def get_entity_suggestions(
 _PROPERTY_LABELS: dict[tuple[str, str], dict[str, str]] = {}
 
 
-def property_labels_for(template_name: str | None, user: str, password: str) -> dict[str, str]:
+def property_labels_for(url: str, template_name: str | None, user: str, password: str) -> dict[str, str]:
     """``{property_name: label}`` for one template, cached; ``{}`` when unresolvable.
 
     A suggestion row names its property by the template's property ``name``
@@ -987,7 +996,7 @@ def property_labels_for(template_name: str | None, user: str, password: str) -> 
         return cached
     labels: dict[str, str] = {}
     try:
-        runtime = build_runtime(user=user, password=password)
+        runtime = build_runtime(user=user, password=password, url=url)
         labels = dict(runtime.template_labels.property_labels(template_name)) if runtime.template_labels else {}
     except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the window
         logger.warning("could not resolve property labels for template {}: {}", template_name, exc)
@@ -995,46 +1004,91 @@ def property_labels_for(template_name: str | None, user: str, password: str) -> 
     return labels
 
 
-def get_entity_rows(run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
+# Property TYPES belong to the template, exactly like labels, so they share the
+# same cache lifetime and degrade to ``{}`` on failure. The key includes the
+# instance: two instances may define the same template/property names with
+# DIFFERENT types, and a cross-instance hit would render the wrong thing.
+_PROPERTY_TYPES: dict[tuple[str, str, str], dict[str, str]] = {}
+
+
+def property_types_for(url: str, template_name: str | None, user: str, password: str) -> dict[str, str]:
+    """``{property_name: type}`` for one template, cached; ``{}`` when unresolvable.
+
+    The review table and the entity window need the property TYPE to render a
+    value correctly: a ``date``/``daterange``/``multidate`` family value is
+    stored as a numeric timestamp and would otherwise print as a raw epoch
+    number. The lookup goes through the property-type port (the same cached
+    ``/api/templates`` read the label lookup uses) and degrades to ``{}`` so a
+    display path never depends on the instance being reachable.
+    """
+    if not template_name:
+        return {}
+    key = (url, user, template_name)
+    cached = _PROPERTY_TYPES.get(key)
+    if cached is not None:
+        return cached
+    types: dict[str, str] = {}
+    try:
+        runtime = build_runtime(user=user, password=password, url=url)
+        types = dict(runtime.property_types.property_types(template_name)) if runtime.property_types else {}
+    except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the window
+        logger.warning("could not resolve property types for template {}: {}", template_name, exc)
+    _PROPERTY_TYPES[key] = types
+    return types
+
+
+def get_entity_rows(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:
     """Return a page of per-entity aggregate rows + the distinct-entity total.
 
     The entity table's read: one row per affected entity (checkbox column feeds
     the selection-driven actions), grouped in SQL like every other review read.
     """
-    return build_suggestion_store().entity_rows(run_id, f)
+    return build_suggestion_store(url).entity_rows(run_id, f)
 
 
-def get_operation_rows(run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
+def get_operation_rows(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[OperationReviewRow], int]:
     """Return a page of OPERATIONS (one row per entity) with their suboperations.
 
     The review table's read: the filter is a SUBOPERATION filter, so an operation
     whose every part the filter removed never reaches the page. ``subs`` carries
     the page's matching suggestion rows.
     """
-    return build_suggestion_store().operations(run_id, f)
+    return build_suggestion_store(url).operations(run_id, f)
 
 
-def get_property_scores(run_id: str) -> dict[str, tuple[int, int]]:
+def get_property_scores(url: str, run_id: str) -> dict[str, tuple[int, int]]:
     """``property -> (exact, mismatch)`` over the whole run (the Property filter)."""
-    return build_suggestion_store().property_scores(run_id)
+    return build_suggestion_store(url).property_scores(run_id)
 
 
-def get_templates(run_id: str) -> list[str]:
+def get_templates(url: str, run_id: str) -> list[str]:
     """The distinct template names of the run — the property-label lookup."""
-    return build_suggestion_store().templates(run_id)
+    return build_suggestion_store(url).templates(run_id)
 
 
-def get_suggestion_languages(run_id: str) -> list[str]:
+def get_suggestion_languages(url: str, run_id: str) -> list[str]:
     """The distinct languages the run writes — the Language filter's options."""
-    return build_suggestion_store().languages(run_id)
+    return build_suggestion_store(url).languages(run_id)
 
 
-def get_selection_rows(run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
-    """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection."""
-    return build_suggestion_store().selection_rows(run_id, f)
+def get_selection_rows(
+    url: str,
+    run_id: str,
+    f: SuggestionFilter,
+    *,
+    runnable_only: bool = False,
+) -> list[tuple[int, str, str | None, str]]:
+    """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection.
+
+    ``runnable_only`` restricts the projection to the statuses a Run may write
+    (PENDING/ACCEPTED/EDITED/REVERTED). "Select all" uses it so already-applied
+    or discarded parts cannot inflate the Run/Discard counts; entity navigation
+    reads the whole projection so it can still step through every row.
+    """
+    return build_suggestion_store(url).selection_rows(run_id, f, runnable_only=runnable_only)
 
 
-def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:
+def discard_rows(url: str, run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:
     """Mark the given entity-language groups' rows DISCARDED; return how many moved.
 
     The review table's Discard action, per row and over the checked selection:
@@ -1046,7 +1100,7 @@ def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str |
     row identity, so discarding a translation's ``es`` row leaves its ``en``
     sibling alone. An empty list discards nothing.
     """
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     return store.discard_by_filter(
         run_id,
         SuggestionFilter(entity_languages=pairs),
@@ -1054,20 +1108,20 @@ def discard_rows(run_id: str, pairs: list[tuple[str, str | None]], reason: str |
     )
 
 
-def restore_rows(run_id: str, pairs: list[tuple[str, str | None]]) -> int:
+def restore_rows(url: str, run_id: str, pairs: list[tuple[str, str | None]]) -> int:
     """Undo a discard: the groups' DISCARDED rows go back to PENDING; return the count.
 
     The counterpart of :func:`discard_rows` — an operation the operator marked
     as discarded becomes runnable again.
     """
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     return store.restore_by_filter(
         run_id,
         SuggestionFilter(entity_languages=pairs),
     )
 
 
-def discard_ids(run_id: str, ids: list[int], reason: str | None = None) -> int:
+def discard_ids(url: str, run_id: str, ids: list[int], reason: str | None = None) -> int:
     """Mark exactly these SUBOPERATIONS discarded; return how many moved.
 
     The table's Discard acts on checked suboperation rows, so the selection is a
@@ -1078,7 +1132,7 @@ def discard_ids(run_id: str, ids: list[int], reason: str | None = None) -> int:
     """
     if not ids:
         return 0
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     return store.discard_by_filter(
         run_id,
         SuggestionFilter(suggestion_ids=ids),
@@ -1086,15 +1140,61 @@ def discard_ids(run_id: str, ids: list[int], reason: str | None = None) -> int:
     )
 
 
-def restore_ids(run_id: str, ids: list[int]) -> int:
+def restore_ids(url: str, run_id: str, ids: list[int]) -> int:
     """Undo the discard of exactly these SUBOPERATIONS; return the count."""
     if not ids:
         return 0
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     return store.restore_by_filter(
         run_id,
         SuggestionFilter(suggestion_ids=ids),
     )
+
+
+def set_rejected_values(url: str, run_id: str, row_id: int, rejected: list[str]) -> Suggestion:
+    """Persist one multiselect row's rejected labels and its derived status; return the fresh row.
+
+    Rules: only runnable rows and rows discarded BY this mechanism
+    (``discard_reason == ALL_VALUES_REJECTED_REASON``) may be edited; APPLIED
+    rows raise ``ValueError`` "already applied — revert it first", OBSOLETE rows
+    "refresh the table", and a row discarded for another reason raises
+    ``ValueError`` "restore it first". When
+    ``all_values_rejected(proposal, rejected)`` the row becomes DISCARDED with
+    reason ``ALL_VALUES_REJECTED_REASON`` (a Run then writes nothing); when
+    values are accepted again and the row's discard reason is that same
+    sentinel, it returns to PENDING with the reason cleared. Any other discard
+    reason is never touched.
+    """
+    store = build_suggestion_store(url)
+    found, _total = store.query(
+        run_id,
+        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+    )
+    if not found:
+        raise ValueError(f"row {row_id} not found in run {run_id}")
+    row = found[0]
+    if row.status is SuggestionStatus.APPLIED:
+        raise ValueError("already applied — revert it first")
+    if row.status is SuggestionStatus.OBSOLETE:
+        raise ValueError("refresh the table")
+    if row.discard_reason not in (None, ALL_VALUES_REJECTED_REASON):
+        raise ValueError("restore it first")
+    status: SuggestionStatus | None = None
+    reason: str | None = None
+    if all_values_rejected(row.proposed_value, rejected):
+        status = SuggestionStatus.DISCARDED
+        reason = ALL_VALUES_REJECTED_REASON
+    elif row.status is SuggestionStatus.DISCARDED and row.discard_reason == ALL_VALUES_REJECTED_REASON:
+        status = SuggestionStatus.PENDING
+        reason = None
+    store.set_rejected_values(row_id, rejected, status, reason)
+    fresh, _total = store.query(
+        run_id,
+        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+    )
+    if not fresh:
+        raise ValueError(f"row {row_id} not found in run {run_id}")
+    return fresh[0]
 
 
 def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
@@ -1109,17 +1209,20 @@ def _apply_use_case(runtime: Any) -> ApplySuggestionsUseCase:
         entity_repository=runtime.entity_repository,
         backup_store=runtime.backup_store,
         audit_log=runtime.audit_log,
-        suggestion_store=build_suggestion_store(),
+        suggestion_store=build_suggestion_store(runtime.url),
         file_repository=runtime.file_repository,
         segmentation_repository=runtime.segmentation_repository,
         url_fetcher=runtime.url_fetcher,
         cache_control=runtime.file_cache,
         default_language=DUMMY_LANGUAGE,
         publish_state=getattr(runtime, "publish_state", None),
+        property_types=getattr(runtime, "property_types", None),
+        thesaurus_values=getattr(runtime, "thesaurus_values", None),
     )
 
 
 async def apply_outcomes(
+    url: str,
     run_id: str,
     user: str,
     password: str,
@@ -1155,7 +1258,7 @@ async def apply_outcomes(
         raise ApplyRefusedError("nothing selected to run")
 
     def _work() -> list[str]:
-        runtime = build_runtime(user=user, password=password)
+        runtime = build_runtime(user=user, password=password, url=url)
         use_case = _apply_use_case(runtime)
         use_case.apply(run_id, selection, row_ids, progress=progress)
         return [run_id]
@@ -1164,6 +1267,7 @@ async def apply_outcomes(
 
 
 async def improve_prompt(
+    url: str,
     run_id: str,
     history: list[ChatMessage],
     request: str,
@@ -1181,13 +1285,14 @@ async def improve_prompt(
     ``budget`` carries the operator's approved caps from the cost dialog: its
     request backstop is the ENFORCED limit for the turn.
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     use_case = ImprovePromptUseCase(llm=runtime.llm, deps=runtime.deps)
     max_requests = budget.max_requests if budget is not None else None
     return await use_case.execute(history, request, max_requests=max_requests)
 
 
 async def regenerate_from_chat(
+    url: str,
     run_id: str,
     history: list[ChatMessage],
     user: str,
@@ -1220,9 +1325,9 @@ async def regenerate_from_chat(
 
     Returns the reconciliation summary. Errors propagate: the caller shows them.
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     manifest = runtime.backup_store.load_manifest(run_id)
-    run_path = RUNS_PATH / run_id
+    run_path = _paths(url).runs_path / run_id
     final_prompt = build_final_prompt_from_chat(history)
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
@@ -1265,7 +1370,7 @@ async def regenerate_from_chat(
     # ONE live table.
     if on_stage is not None:
         on_stage("Recomputing the table from the new script…")
-    summary = await run_auto_scan(run_id, user, password, budget)
+    summary = await run_auto_scan(url, run_id, user, password, budget)
     return TableUpdateResult(
         run_id=run_id,
         changed_in_uwazi=None,
@@ -1276,31 +1381,33 @@ async def regenerate_from_chat(
 # --- multistep tasks ---------------------------------------------------------
 
 
-def build_task_store() -> TaskStorePort:
-    """Return the YAML task store under ``TASKS_PATH``."""
-    return YamlTaskStore(TASKS_PATH)
+def build_task_store(url: str) -> TaskStorePort:
+    """Return the YAML task store under the instance's ``tasks/`` directory."""
+    return YamlTaskStore(_paths(url).tasks_path)
 
 
-def _task_use_case() -> Any:
+def _task_use_case(url: str) -> Any:
     """Wire the task use case over the existing single-run functions.
 
     The task layer is pure orchestration, so it is handed the very same
     revert/create functions the single-run flow uses — one code
-    path for the actual work, no second implementation to keep in sync.
+    path for the actual work, no second implementation to keep in sync. The
+    instance URL is bound here, so the use case keeps the single-run
+    signatures it already knows.
     """
     from uwazi_admin_agent.use_cases.task_use_case import TaskUseCase
 
     return TaskUseCase(
-        task_store=build_task_store(),
-        backup_store=build_backup_store(),
-        revert_run=revert_run,
-        create_run=create_and_generate,
+        task_store=build_task_store(url),
+        backup_store=build_backup_store(url),
+        revert_run=lambda run_id, user, password: revert_run(url, run_id, user, password),
+        create_run=lambda name, prompt, user, password: create_and_generate(url, name, prompt, user, password),
     )
 
 
-def task_view(task_id: str) -> TaskView:
+def task_view(url: str, task_id: str) -> TaskView:
     """A task's live view: steps, statuses, next executable step, revert plan."""
-    return _task_use_case().get_task(task_id)
+    return _task_use_case(url).get_task(task_id)
 
 
 class EntityBackupInfo(BaseModel):
@@ -1323,14 +1430,14 @@ class EntityBackupInfo(BaseModel):
     )
 
 
-def entity_backup_info(run_id: str, shared_id: str) -> EntityBackupInfo:
+def entity_backup_info(url: str, run_id: str, shared_id: str) -> EntityBackupInfo:
     """One entity's backup metadata for a run (the per-row revert tooltip).
 
     Reads the snapshot file directly (no network). A legacy/missing snapshot
     returns ``backup_created_at=None``, and the UI shows the revert button
     without a tooltip date only when a backup actually exists.
     """
-    store = build_backup_store()
+    store = build_backup_store(url)
     try:
         snapshot = store.load_snapshot(run_id, shared_id)
     except FileNotFoundError:
@@ -1345,7 +1452,7 @@ def entity_backup_info(run_id: str, shared_id: str) -> EntityBackupInfo:
     )
 
 
-async def revert_entity_rows(run_id: str, shared_id: str, user: str, password: str) -> EntityBackupInfo:
+async def revert_entity_rows(url: str, run_id: str, shared_id: str, user: str, password: str) -> EntityBackupInfo:
     """Revert ONE entity of a run to its single first-touch backup (per-row action).
 
     The restore rolls the WHOLE entity back — every language row the snapshot
@@ -1359,24 +1466,35 @@ async def revert_entity_rows(run_id: str, shared_id: str, user: str, password: s
     written by this run) or the entity was created by the run (reverting it
     means deleting it — a run-level operation).
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
     if snapshot is None:
         raise RevertRefusedError("this row has no backup — the run has not written to this entity")
-    return entity_backup_info(run_id, shared_id)
+    return entity_backup_info(url, run_id, shared_id)
 
 
-def entity_is_merge(run_id: str, shared_id: str) -> bool:
-    """Whether this run's APPLIED rows of ``shared_id`` describe a merge (``update_and_delete``).
+def entity_is_merge(url: str, run_id: str, shared_id: str) -> bool:
+    """Whether this run's review rows of ``shared_id`` describe a merge (``update_and_delete``).
 
     The Revert dialog is the caller: a merge's undo is bigger than the entity's
     own backup (the sources it absorbed are re-created), so the confirmation
     has to say so before the operator clicks. Reads the review rows (no
     network); any store failure reads as "not a merge" — the dialog then shows
     the plain wording, and the undo itself still does the right thing.
+
+    Already-REVERTED rows are read too: clicking Revert again on a merge whose
+    older revert left copied files behind is the repair path, and the dialog
+    must keep the merge wording for it.
     """
     try:
-        rows = build_suggestion_store().applied_rows_for(run_id, [shared_id])
+        store = build_suggestion_store(url)
+        rows = store.applied_rows_for(run_id, [shared_id])
+        if not any(is_revertable_merge(row) for row in rows):
+            rows = [
+                row
+                for row in store.get_entity(run_id, shared_id)
+                if row.status in {SuggestionStatus.APPLIED, SuggestionStatus.REVERTED}
+            ]
     except Exception as exc:  # noqa: BLE001 — wording only: never block the dialog
         logger.warning("could not read the review rows of {}: {}", shared_id, exc)
         return False
@@ -1384,6 +1502,7 @@ def entity_is_merge(run_id: str, shared_id: str) -> bool:
 
 
 async def revert_suboperation(
+    url: str,
     run_id: str,
     shared_id: str,
     language: str | None,
@@ -1400,7 +1519,7 @@ async def revert_suboperation(
     ``RevertRefusedError`` when the entity has no backup or was created/deleted
     by the run (those undos stay run-level).
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     return await runtime.revert_use_case.revert_property(run_id, shared_id, language, property_name, suggestion_id)
 
 
@@ -1449,6 +1568,7 @@ class BulkRevertOutcome(BaseModel):
 
 
 async def revert_entities_selection(
+    url: str,
     run_id: str,
     selection: list[tuple[str, str | None]],
     user: str,
@@ -1483,8 +1603,8 @@ async def revert_entities_selection(
             seen.append(shared_id)
     if not seen:
         return outcome
-    runtime = build_runtime(user=user, password=password)
-    store = build_suggestion_store()
+    runtime = build_runtime(user=user, password=password, url=url)
+    store = build_suggestion_store(url)
     reverted: list[str] = []
     for index, shared_id in enumerate(seen):
         try:
@@ -1522,14 +1642,14 @@ async def revert_entities_selection(
     return outcome
 
 
-async def revert_run(run_id: str, user: str, password: str) -> None:
+async def revert_run(url: str, run_id: str, user: str, password: str) -> None:
     """Revert a run and verify the restore.
 
     Raises :class:`RevertRefusedError` on refusal and
     :class:`RevertVerificationError` when the revert succeeded but the
     post-revert verification found mismatches (persisted on the manifest).
     """
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     await runtime.revert_use_case.revert(run_id)
     result = await runtime.verify_use_case.verify(run_id)
     if not result.ok:
@@ -1541,34 +1661,23 @@ async def revert_run(run_id: str, user: str, password: str) -> None:
         raise RevertVerificationError(detail)
 
 
-def uwazi_base_url() -> str | None:
-    """The controlled Uwazi instance's base URL, or None when unconfigured.
-
-    The review table links an entity to its public page on that instance, which
-    needs the same ``UWAZI_URL`` the login screen caches. It lives here rather
-    than in ``app`` because ``app`` already imports the review page, so reading
-    the env var here avoids an import cycle.
-    """
-    return os.environ.get("UWAZI_URL") or None
-
-
-def delete_run(run_id: str) -> None:
+def delete_run(url: str, run_id: str) -> None:
     """Remove a run's entire folder from the backup store + its suggestion rows."""
-    build_backup_store().delete_run(run_id)
+    build_backup_store(url).delete_run(run_id)
     # The suggestion DB is one shared file, so a run's rows do not disappear
     # with its folder: they are deleted explicitly here.
-    build_suggestion_store().delete_run(run_id)
+    build_suggestion_store(url).delete_run(run_id)
 
 
-def clear_cache() -> int:
-    """Clear the persistent file/entity cache for the configured instance.
+def clear_cache(url: str) -> int:
+    """Clear the persistent file/entity cache of ONE instance.
 
     Returns the number of entries removed (0 when the cache is disabled or
     empty). Forces the next read to re-fetch server truth after direct human
     edits in Uwazi, which bypass write-path invalidation and are otherwise
-    bounded only by the raw TTL.
+    bounded only by the raw TTL. The cache is already namespaced per instance,
+    so this clears only the selected instance's cache.
     """
-    url = os.environ.get("UWAZI_URL")
     if not url:
         return 0
     cache = build_file_cache(url)
@@ -1577,11 +1686,11 @@ def clear_cache() -> int:
     return cache.clear()
 
 
-def rename_run(old_id: str, new_id: str) -> None:
+def rename_run(url: str, old_id: str, new_id: str) -> None:
     """Rename a run end-to-end.
 
     Moves the run folder + manifest (via the backup store), relocates its prompt
-    YAML under ``PROMPTS_PATH``, and repoints ``active_run.yaml`` if it targets
+    YAML under the instance's ``prompts/`` dir, and repoints ``active_run.yaml`` if it targets
     the old id. ``new_id`` must be a non-empty, filesystem-safe name (no path
     separators or ``..``); the store raises if the target already exists.
     """
@@ -1591,21 +1700,21 @@ def rename_run(old_id: str, new_id: str) -> None:
     if "/" in new_id or "\\" in new_id or new_id in (".", ".."):
         raise ValueError(f"Invalid run name: {new_id!r}")
     # Relocate the prompt YAML if one exists for the old id.
-    old_prompt = PROMPTS_PATH / f"{old_id}.yaml"
-    new_prompt = PROMPTS_PATH / f"{new_id}.yaml"
+    old_prompt = _paths(url).prompts_path / f"{old_id}.yaml"
+    new_prompt = _paths(url).prompts_path / f"{new_id}.yaml"
     if old_prompt.is_file():
         old_prompt.rename(new_prompt)
     # Repoint the active-run pointer if it targets the old id.
-    if RUNS_FILE.is_file():
-        data = yaml.safe_load(RUNS_FILE.read_text(encoding="utf-8")) or {}
+    if _paths(url).runs_file.is_file():
+        data = yaml.safe_load(_paths(url).runs_file.read_text(encoding="utf-8")) or {}
         if isinstance(data, dict) and data.get("active_run") == old_id:
             data["active_run"] = new_id
-            RUNS_FILE.write_text(yaml.dump(data), encoding="utf-8")
-    build_backup_store().rename_run(old_id, new_id)
+            _paths(url).runs_file.write_text(yaml.dump(data), encoding="utf-8")
+    build_backup_store(url).rename_run(old_id, new_id)
     # The review table, the prediction pass and drift rows live in the shared
     # SQLite database keyed by run_id — renaming only the folder left the
     # renamed run's review page empty and the old id's rows orphaned.
-    build_suggestion_store().rename_run(old_id, new_id)
+    build_suggestion_store(url).rename_run(old_id, new_id)
 
 
 # --- drift -------------------------------------------------------------------
@@ -1668,6 +1777,7 @@ def _baseline_max(store: SqliteSuggestionStore, run_id: str) -> int | None:
 
 
 def sync_drift_baseline(
+    url: str,
     run_id: str,
     user: str,
     password: str,
@@ -1678,9 +1788,9 @@ def sync_drift_baseline(
     Returns the number of baseline rows written. Called after generation and
     after each apply, so the baseline never flags the run's own writes.
     """
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     assert isinstance(store, SqliteSuggestionStore)
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     if runtime.drift_probe is None:
         logger.warning("drift probe not wired — baseline not synced for {}", run_id)
         return 0
@@ -1753,12 +1863,13 @@ def _dominant_template_name(store: SuggestionStorePort, run_id: str) -> str | No
     return max(tally.items(), key=lambda kv: kv[1])[0]
 
 
-def get_drift_state(run_id: str) -> DriftStateRow | None:
+def get_drift_state(url: str, run_id: str) -> DriftStateRow | None:
     """The run's last-check outcome (the banner reads this)."""
-    return build_suggestion_store().drift_state(run_id)
+    return build_suggestion_store(url).drift_state(run_id)
 
 
 def check_drift(
+    url: str,
     run_id: str,
     user: str,
     password: str,
@@ -1771,9 +1882,9 @@ def check_drift(
     ERROR — the banner says so and the check can be retried; correctness never
     relies on a failed probe's silence.
     """
-    store = build_suggestion_store()
+    store = build_suggestion_store(url)
     assert isinstance(store, SqliteSuggestionStore)
-    runtime = build_runtime(user=user, password=password)
+    runtime = build_runtime(user=user, password=password, url=url)
     now = datetime.now(timezone.utc)
     if runtime.drift_probe is None:
         state = DriftStateRow(
@@ -1934,13 +2045,13 @@ def _drift_detail(report: DriftReport) -> str:
     return ", ".join(parts)
 
 
-def refresh_baseline_after_run(run_id: str, user: str, password: str) -> None:
+def refresh_baseline_after_run(url: str, run_id: str, user: str, password: str) -> None:
     """After an apply: re-sync the baseline for the run's template (best effort)."""
     try:
-        sync_drift_baseline(run_id, user, password)
+        sync_drift_baseline(url, run_id, user, password)
     except Exception as exc:  # noqa: BLE001 — the apply succeeded; drift bookkeeping must not fail it
         logger.warning("post-run baseline sync failed for {}: {}", run_id, exc)
-        build_suggestion_store().drift_mark_stale(run_id)
+        build_suggestion_store(url).drift_mark_stale(run_id)
 
 
 __all__ = [
@@ -1975,6 +2086,7 @@ __all__ = [
     "get_templates",
     "list_runs",
     "property_labels_for",
+    "property_types_for",
     "read_run_script",
     "refresh_baseline_after_run",
     "rename_run",
@@ -1982,5 +2094,4 @@ __all__ = [
     "revert_run",
     "run_auto_scan",
     "sync_drift_baseline",
-    "uwazi_base_url",
 ]

@@ -41,6 +41,7 @@ from uwazi_admin_agent.domain.review_refresh import (
     same_proposal,
     suggestion_identity,
 )
+from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     EntityReviewRow,
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     merge_files TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     edited_value TEXT,
+    rejected_values TEXT,
     discard_reason TEXT,
     reviewed_at TEXT,
     created_at TEXT
@@ -130,6 +132,16 @@ CREATE INDEX IF NOT EXISTS suggestion_entity_language
 
 # Statuses the apply path pushes (accepted, or accepted-then-edited).
 APPLYABLE_STATUSES: tuple[str, ...] = (SuggestionStatus.ACCEPTED.value, SuggestionStatus.EDITED.value)
+
+# Statuses a Run may still write: never-applied rows and rows whose earlier
+# write was reverted (runnable again). APPLIED, DISCARDED and OBSOLETE rows are
+# deliberately absent — selecting one would promise a write the Run refuses.
+RUNNABLE_STATUSES: tuple[str, ...] = (
+    SuggestionStatus.PENDING.value,
+    SuggestionStatus.ACCEPTED.value,
+    SuggestionStatus.EDITED.value,
+    SuggestionStatus.REVERTED.value,
+)
 
 
 def match_summary_of(verdicts: int, verdict_rows: int, has_mismatch: bool) -> str:
@@ -202,6 +214,37 @@ def _dt_from_text(text: str | None) -> datetime | None:
         return None
 
 
+def _pairs_by_language(
+    pairs: list[tuple[str, str | None]],
+) -> list[tuple[str | None, list[str]]]:
+    """Group ``(sharedId, language)`` pairs by language, deduping ids (pure).
+
+    Groups and ids keep their first-appearance order, so the generated clause
+    and its bound parameters are deterministic.
+    """
+    grouped: dict[str | None, dict[str, None]] = {}
+    for shared_id, language in pairs:
+        grouped.setdefault(language, {}).setdefault(shared_id, None)
+    return [(language, list(ids_by_shared_id)) for language, ids_by_shared_id in grouped.items()]
+
+
+def _or_tree(terms: list[str]) -> str:
+    """Join ``terms`` with OR as a BALANCED tree (pure).
+
+    SQLite parses a flat ``a OR b OR c ...`` chain into a left-deep tree, so its
+    depth grows with the number of terms and can exceed
+    ``SQLITE_MAX_EXPR_DEPTH`` (1000 in stock builds), failing with "Expression
+    tree is too large" before touching any row. The pair selection is already
+    collapsed to one term per language by :func:`_pairs_by_language`; this keeps
+    any many-term OR shallow (depth ``O(log n)``) while preserving order, so the
+    bound parameters still line up with their placeholders.
+    """
+    if len(terms) == 1:
+        return terms[0]
+    mid = len(terms) // 2
+    return f"({_or_tree(terms[:mid])} OR {_or_tree(terms[mid:])})"
+
+
 def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
     """Compose the parameterized WHERE clause for a filter (pure).
 
@@ -249,22 +292,27 @@ def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
             params.extend(f.shared_ids)
     if f.entity_languages is not None:
         # The table's rows are per language, so the selection is (sharedId,
-        # language) pairs: OR over pairs, each an AND of the two. A None
-        # language means the language-independent group, hence IS NULL.
+        # language) pairs. Grouping them by language turns thousands of
+        # ``(shared_id = ? AND language = ?)`` OR terms into ONE
+        # ``language = ? AND shared_id IN (...)`` term per language: the clause
+        # stays small, the ids use the shared_id index, and a whole-result
+        # selection no longer builds a tree deep enough to trip SQLite's
+        # expression-depth limit. A None language is the language-independent
+        # group, hence IS NULL.
         if not f.entity_languages:
             clause.append("1 = 0")
         else:
-            parts = []
-            for shared_id, language in f.entity_languages:
+            terms = []
+            for language, shared_ids in _pairs_by_language(f.entity_languages):
+                placeholders = ", ".join("?" for _ in shared_ids)
                 if language is None:
-                    parts.append("(shared_id = ? AND language IS NULL)")
+                    terms.append(f"(language IS NULL AND shared_id IN ({placeholders}))")
+                    params.extend(shared_ids)
                 else:
-                    parts.append("(shared_id = ? AND language = ?)")
-            clause.append(f"({' OR '.join(parts)})")
-            for shared_id, language in f.entity_languages:
-                params.append(shared_id)
-                if language is not None:
+                    terms.append(f"(language = ? AND shared_id IN ({placeholders}))")
                     params.append(language)
+                    params.extend(shared_ids)
+            clause.append(_or_tree(terms))
     if f.languages is not None:
         # The table's Language filter names the languages a SUBOPERATION is
         # written in; the language-independent rows belong to no language, so
@@ -306,6 +354,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         merge_files=_value_from_json(row["merge_files"]) or [],
         status=SuggestionStatus(row["status"]),
         edited_value=row["edited_value"],
+        rejected_values=_value_from_json(row["rejected_values"]) or [],
         discard_reason=row["discard_reason"],
         reviewed_at=_dt_from_text(row["reviewed_at"]),
         created_at=_dt_from_text(row["created_at"]),
@@ -389,6 +438,8 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN merge_files TEXT")
             if "detail_key" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN detail_key TEXT")
+            if "rejected_values" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN rejected_values TEXT")
             self._migrate_attempts_to_single_pass()
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
@@ -530,6 +581,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 _json_or_none(s.merge_files) if s.merge_files else None,
                 s.status.value,
                 s.edited_value,
+                _json_or_none(s.rejected_values) if s.rejected_values else None,
                 s.discard_reason,
                 _dt_to_text(s.reviewed_at),
                 _dt_to_text(s.created_at),
@@ -543,8 +595,9 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 INSERT INTO suggestion
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, match_state, merge_source_ids,
-                     merge_files, status, edited_value, discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     merge_files, status, edited_value, rejected_values, discard_reason,
+                     reviewed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
@@ -629,6 +682,17 @@ class SqliteSuggestionStore(SuggestionStorePort):
             edited_value = old["edited_value"] if status is SuggestionStatus.EDITED else None
             discard_reason = old["discard_reason"] if status is SuggestionStatus.DISCARDED else None
             reviewed_at = old["reviewed_at"] if status is old_status else now_text
+            old_rejected = _value_from_json(old["rejected_values"]) or []
+            # Same proposal keeps the operator's value-level choices; a changed
+            # proposal clears them (never carry stale tokens into a new list).
+            rejected_values: list[str] = old_rejected if same else []
+            if not same and old_status is SuggestionStatus.DISCARDED:
+                # A whole-row discard left by the value mechanism only means
+                # "nothing left to keep", not a real refusal: the refresh puts
+                # the new proposal back into review.
+                if old["discard_reason"] == ALL_VALUES_REJECTED_REASON:
+                    status = SuggestionStatus.PENDING
+                    discard_reason = None
             old_match = old["match_state"]
             new_match = None if suggestion.match is None else (1 if suggestion.match else 0)
             if (
@@ -652,6 +716,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     status.value,
                     edited_value,
                     discard_reason,
+                    _json_or_none(rejected_values) if rejected_values else None,
                     reviewed_at,
                     int(old["id"]),
                 )
@@ -680,6 +745,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                         status.value,
                         None if status is not SuggestionStatus.EDITED else old["edited_value"],
                         None if status is not SuggestionStatus.DISCARDED else old["discard_reason"],
+                        _json_or_none(_value_from_json(old["rejected_values"]) or []),
                         now_text,
                         int(old["id"]),
                     )
@@ -693,7 +759,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                        SET entity_title = ?, template_name = ?, proposed_value = ?,
                            current_value = ?, match_state = ?, merge_source_ids = ?,
                            merge_files = ?, status = ?, edited_value = ?, discard_reason = ?,
-                           reviewed_at = ?
+                           rejected_values = ?, reviewed_at = ?
                      WHERE id = ?
                     """,
                     updates,
@@ -718,11 +784,16 @@ class SqliteSuggestionStore(SuggestionStorePort):
         return summary
 
     def set_current_values(self, updates: list[tuple[int, Any, bool | None]]) -> None:
-        """Refresh rows' before-state in place after a write or a revert (bulk).
+        """Refresh rows' before-state in place after a revert (bulk).
 
         ``updates`` carries ``(row id, live value, match)``. ``match=None`` is
         the "nothing to compare" case (a removed value / a new one), matching
         the prediction hydration rule.
+
+        A Run deliberately does NOT use this: ``current_value`` is the row's
+        BEFORE state, which the review table's "Value" column and the entity
+        window show and which the Revert restores. Overwriting it with the
+        written value would hide what an undo puts back.
         """
         if not updates:
             return
@@ -1037,7 +1108,13 @@ class SqliteSuggestionStore(SuggestionStorePort):
         )
         return {str(row["property_name"]): (int(row["exact"] or 0), int(row["mismatch"] or 0)) for row in rows}
 
-    def selection_rows(self, run_id: str, f: SuggestionFilter) -> list[tuple[int, str, str | None, str]]:
+    def selection_rows(
+        self,
+        run_id: str,
+        f: SuggestionFilter,
+        *,
+        runnable_only: bool = False,
+    ) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection (SQL).
 
         The table's whole-result selection ("select all results") spans every
@@ -1045,12 +1122,18 @@ class SqliteSuggestionStore(SuggestionStorePort):
         the page payload. This is a projection, not a page: limit/offset are
         deliberately ignored, exactly like :meth:`shared_ids`. Display-only
         ``info`` rows are excluded: they can never be selected or run.
+        ``runnable_only`` narrows to the statuses a Run may write, so a
+        whole-result selection cannot include rows that are already applied or
+        discarded.
         """
         where, params = build_where(f, run_id)
-        rows = self._query(
-            f"SELECT id, shared_id, language, op FROM suggestion WHERE {where} AND op != ? ORDER BY id",
-            [*params, INFO_OP],
-        )
+        clause = f"WHERE {where} AND op != ?"
+        query_params: list[Any] = [*params, INFO_OP]
+        if runnable_only:
+            placeholders = ", ".join("?" for _ in RUNNABLE_STATUSES)
+            clause += f" AND status IN ({placeholders})"
+            query_params.extend(RUNNABLE_STATUSES)
+        rows = self._query(f"SELECT id, shared_id, language, op FROM suggestion {clause} ORDER BY id", query_params)
         return [(int(row["id"]), str(row["shared_id"]), row["language"], str(row["op"])) for row in rows]
 
     def _detail_fields(self, detail_rows: list[sqlite3.Row]) -> dict[str, dict[str, list[str]]]:
@@ -1112,10 +1195,35 @@ class SqliteSuggestionStore(SuggestionStorePort):
         self._execute(
             f"""
             UPDATE suggestion
-               SET status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?
+               SET status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?,
+                   rejected_values = CASE WHEN ? = 'edited' THEN NULL ELSE rejected_values END
              WHERE id IN ({placeholders})
             """,
-            [status.value, edited_value, reason, _dt_to_text(datetime.now().astimezone()), *ids],
+            [status.value, edited_value, reason, _dt_to_text(datetime.now().astimezone()), status.value, *ids],
+        )
+
+    def set_rejected_values(
+        self,
+        row_id: int,
+        rejected: list[str],
+        status: SuggestionStatus | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Persist one row's rejected multiselect labels (and its derived status, when given)."""
+        self._execute(
+            """
+            UPDATE suggestion
+               SET rejected_values = ?, status = COALESCE(?, status), discard_reason = ?,
+                   reviewed_at = ?
+             WHERE id = ?
+            """,
+            [
+                _json_or_none(rejected) if rejected else None,
+                None if status is None else status.value,
+                reason,
+                _dt_to_text(datetime.now().astimezone()),
+                row_id,
+            ],
         )
 
     def set_status_by_filter(
@@ -1145,10 +1253,17 @@ class SqliteSuggestionStore(SuggestionStorePort):
         self._execute(
             f"""
             UPDATE suggestion
-               SET status = ?, discard_reason = NULL, reviewed_at = ?
+               SET status = ?, discard_reason = NULL, reviewed_at = ?,
+                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END
              WHERE id IN ({placeholders}) AND status = ?
             """,
-            [SuggestionStatus.PENDING.value, now, *ids, SuggestionStatus.DISCARDED.value],
+            [
+                SuggestionStatus.PENDING.value,
+                now,
+                ALL_VALUES_REJECTED_REASON,
+                *ids,
+                SuggestionStatus.DISCARDED.value,
+            ],
         )
 
     def discard_by_filter(
@@ -1195,12 +1310,14 @@ class SqliteSuggestionStore(SuggestionStorePort):
         cursor = self._execute(
             f"""
             UPDATE suggestion
-               SET status = ?, discard_reason = NULL, reviewed_at = ?
+               SET status = ?, discard_reason = NULL, reviewed_at = ?,
+                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END
              WHERE {where} AND status = ?
             """,
             [
                 SuggestionStatus.PENDING.value,
                 _dt_to_text(datetime.now().astimezone()),
+                ALL_VALUES_REJECTED_REASON,
                 *params,
                 SuggestionStatus.DISCARDED.value,
             ],

@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uwazi_admin_agent.domain.date_values import coerce_date_property_value, is_date_property_type
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.property_language_scope import is_per_language_property_type
 from uwazi_admin_agent.domain.suggestion import (
@@ -535,7 +536,17 @@ def records_to_suggestions(
                 suggestions.append(Suggestion(**base, property_name=TITLE_PROPERTY, proposed_value=record.get("title")))
                 emitted = True
             for key, value in metadata.items():
+                # A DATE-typed property's value is coerced to Uwazi's shape
+                # HERE, at recording: a date the script passed as an ISO
+                # string lands in the review table (and in the store) as the
+                # ``[seconds]`` Uwazi accepts, so the Run writes it without a
+                # reshaping surprise, and the raw string the script sent never
+                # reached a 422.
+                prop_type = (property_types or {}).get(str(key))
+                date_typed = is_date_property_type(prop_type)
                 for language, split_value in per_language_split(value):
+                    if date_typed:
+                        split_value = coerce_date_property_value(split_value, prop_type)
                     # A property whose type is LANGUAGE-INDEPENDENT holds ONE
                     # value shared by every language row, so it is ONE change:
                     # it is never filed under a language, and it is never

@@ -66,7 +66,7 @@ class TaskDef(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    task_id: str = Field(description="Unique id; also the YAML filename under TASKS_PATH.")
+    task_id: str = Field(description="Unique id; also the YAML filename under the instance's tasks dir.")
     name: str = Field(description="Operator-facing task name.")
     steps: list[StepDef] = Field(default_factory=list, description="Steps in execution order.")
     created_at: datetime = Field(description="When the task was created.")

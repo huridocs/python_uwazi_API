@@ -29,6 +29,7 @@ from uwazi_admin_agent.configuration import (
     SCRIPT_DEFAULT_MAX_REQUESTS,
 )
 from uwazi_admin_agent.domain.execute_gate import ExecuteRefusedError
+from uwazi_admin_agent.domain.instance import parse_instance_urls
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
 from uwazi_admin_agent.domain.metadata_diff import PropertyChange, build_property_changes
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
@@ -55,9 +56,9 @@ from uwazi_admin_agent.drivers.web.run_service import (
     list_runs,
     rename_run,
 )
+from uwazi_admin_agent.drivers.web.session import session_instance_url
 from uwazi_admin_agent.drivers.web.task_dialogs import (
     close_button,
-    footer_close,
     modal_header,
 )
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
@@ -254,48 +255,73 @@ _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.it
 # In-memory ring buffer of recent log lines (mirrors container stderr output).
 # A loguru sink appends formatted lines here so the UI can display them live.
 _LOG_BUFFER: deque[str] = deque(maxlen=2000)
-# The Uwazi instance this admin agent controls (mirrored into the container via
-# the UWAZI_URL env var). Shown in the header so the operator always knows which
-# instance a generated run will mutate.
-_CONTROLLED_UWAZI_URL = os.environ.get("UWAZI_URL", "not configured")
+# The Uwazi instances this admin agent can administer. ``UWAZI_URL`` holds ONE
+# url or a COMMA-SEPARATED LIST of them; the login screen shows a dropdown when
+# there is more than one, and the operator's choice is bound to the session.
+# The env does not change while the server runs, so it is read once at import.
+_INSTANCE_URLS: list[str] = parse_instance_urls(os.environ.get("UWAZI_URL"))
 
 
 def _is_logged_in() -> bool:
-    """True when the session holds cached Uwazi credentials."""
-    return bool(app.storage.user.get("user") and app.storage.user.get("password"))
+    """True when the session holds cached Uwazi credentials AND an instance.
+
+    A session without an instance is not logged in: every page resolves the
+    instance's own runs/tasks, so an unbound session could not serve them.
+    """
+    return bool(app.storage.user.get("user") and app.storage.user.get("password") and app.storage.user.get("instance_url"))
 
 
 def _login_page() -> None:
     """Full-page login gate: validates the Uwazi account before the app loads.
 
     Nothing of the admin app renders until the credentials pass a real
-    ``/api/login`` against the controlled Uwazi instance. Successful logins are
-    cached in the session (``app.storage.user``) and the user is sent to
-    ``/app``; failures show an inline error and keep the login page up.
+    ``/api/login`` against the SELECTED Uwazi instance. Successful logins are
+    cached in the session (``app.storage.user``) together with the chosen
+    instance, and the user is sent to ``/app``; failures show an inline error
+    and keep the login page up.
     """
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
     with ui.column().classes("w-full items-center justify-center min-h-screen"):
         with ui.card().classes("w-full max-w-sm"):
             ui.label("Uwazi Admin Agent").classes("text-h6")
-            ui.label(
-                "Log in with the Uwazi account used to administer the instance. "
-                "The page stays locked until the credentials are validated."
-            ).classes("text-body1 q-mt-sm")
+            ui.label("Log in with the Uwazi account used to administer the instance. ").classes("text-body1 q-mt-sm")
+            error_label = ui.label().classes("text-negative text-body2")
+
+            if not _INSTANCE_URLS:
+                # Nothing to log in to: say so instead of offering a form that
+                # could never validate.
+                error_label.set_text("No Uwazi instance configured — set UWAZI_URL in .env")
+                return
+
+            # The instance picker, ABOVE the credentials. It appears only when
+            # more than one instance is configured — a single instance needs no
+            # choice. The first configured url is the default.
+            instance_select: Any = None
+            if len(_INSTANCE_URLS) > 1:
+                instance_select = ui.select(
+                    options=_INSTANCE_URLS,
+                    label="Uwazi instance",
+                    value=_INSTANCE_URLS[0],
+                ).classes("w-full")
+
             user_input = ui.input("Username").classes("w-full text-h6")
             password_input = ui.input("Password", password=True).classes("w-full text-h6")
-            error_label = ui.label().classes("text-negative text-body2")
 
             def _submit() -> None:
                 # Empty fields default to the local admin account (admin/admin).
                 user = (user_input.value or "").strip() or "admin"
-                password = password_input.value or "admin"
+                password = (password_input.value or "") or "admin"
+                selected_url = instance_select.value if instance_select is not None else _INSTANCE_URLS[0]
                 try:
-                    UwaziApiAdapter(user=user, password=password, url=_CONTROLLED_UWAZI_URL)
+                    UwaziApiAdapter(user=user, password=password, url=selected_url)
                 except Exception as exc:  # noqa: BLE001 — surface every validation failure
                     error_label.set_text(f"Login failed: {exc}")
                     return
                 app.storage.user["user"] = user
                 app.storage.user["password"] = password
+                # The session is bound to the chosen instance: every run, task
+                # and prompt the session sees belongs to it.
+                app.storage.user["instance_url"] = selected_url
                 ui.navigate.to("/app")
 
             password_input.on("keydown.enter", _submit)
@@ -307,6 +333,9 @@ def _logout() -> None:
     """Drop the session credentials and return to the login page."""
     app.storage.user.pop("user", None)
     app.storage.user.pop("password", None)
+    # The instance binding goes too: logging out returns to the login screen,
+    # where the operator can pick another instance.
+    app.storage.user.pop("instance_url", None)
     ui.notify("Logged out", type="positive")
     ui.navigate.to("/")
 
@@ -405,7 +434,7 @@ def _columns() -> list[dict[str, Any]]:
 
 def _run_rows() -> list[dict[str, Any]]:
     """Compute the current table rows (persisted runs + transient placeholders)."""
-    runs = list_runs()
+    runs = list_runs(session_instance_url())
     persisted_ids = {r.run_id for r in runs}
     rows = [_summary_to_row(r) for r in runs]
     # Merge in runs whose generation is still in flight (not yet persisted).
@@ -535,12 +564,12 @@ def _rowmenu_retry(run_id: str) -> None:
         ui.notify(_busy_label(), type="warning")
         return
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         _release_run(run_id)
         return
-    delete_run(run_id)
+    delete_run(session_instance_url(), run_id)
     _start_generation(
         run_id,
         detail.prompt,
@@ -560,7 +589,7 @@ def _rowmenu_duplicate(run_id: str) -> None:
     duplicate-name validation when the operator goes back to edit.
     """
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -674,7 +703,7 @@ def _delete_selected_and_release(selected: list[str]) -> Any:
     deleted = 0
     try:
         for run_id in selected:
-            delete_run(run_id)
+            delete_run(session_instance_url(), run_id)
             deleted += 1
     finally:
         if deleted:
@@ -713,7 +742,7 @@ def _on_rowmenu(e: Any) -> None:
     show_retry = False
     show_errors = False
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
         show_retry = detail.status.value == "generation_failed"
         show_errors = bool(detail.error)
     except Exception:  # noqa: BLE001 — a missing run just hides the conditional items
@@ -820,12 +849,12 @@ def _error_dialog(run_id: str) -> None:
     auto-refresh doesn't destroy it — same pattern as ``_logs_dialog``.
 
     The dialog is maximized (top to bottom): the error detail and audit trail
-    share the space between a pinned title and a pinned footer, so the Close
-    button is always visible without scrolling.
+    share the space under a pinned title, whose top-right Close button is
+    always visible without scrolling.
     """
     try:
-        detail = get_run(run_id)
-        records = get_run_audit(run_id)
+        detail = get_run(session_instance_url(), run_id)
+        records = get_run_audit(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -869,7 +898,6 @@ def _error_dialog(run_id: str) -> None:
                             row_key="time",
                             pagination={"rowsPerPage": 0},
                         ).classes("w-full")
-                footer_close(dialog)
     dialog.open()
 
 
@@ -881,17 +909,17 @@ def _format_value(value: Any) -> str:
     return text if len(text) <= 200 else text[:200] + "…"
 
 
-def _entity_url(shared_id: str, language: str | None) -> str | None:
-    """The controlled instance's public URL for one entity row, or None if unknown.
+def _entity_url(shared_id: str, language: str | None, base_url: str | None) -> str | None:
+    """One entity row's public URL on ``base_url``, or None when it is unknown.
 
     Uwazi serves an entity at ``/<language>/entity/<sharedId>``; the language
     falls back to ``en`` when the row's locale is unknown. Returns None when
-    ``UWAZI_URL`` is not configured, so the caller omits the link instead of
-    rendering a broken one.
+    no base url is given, so the caller omits the link instead of rendering a
+    broken one.
     """
-    if _CONTROLLED_UWAZI_URL == "not configured":
+    if not base_url:
         return None
-    return f"{_CONTROLLED_UWAZI_URL.rstrip('/')}/{language or 'en'}/entity/{shared_id}"
+    return f"{base_url.rstrip('/')}/{language or 'en'}/entity/{shared_id}"
 
 
 def _merge_changes(writes: list[Any]) -> list[PropertyChange]:
@@ -1013,7 +1041,7 @@ def _entity_section(
         row = {
             "shared_id": shared_id,
             "title": titles.get(shared_id) or shared_id,
-            "url": _entity_url(shared_id, language),
+            "url": _entity_url(shared_id, language, session_instance_url()),
             "language": language or "—",
             "language_raw": language or "en",
             "changes": _change_summary(changes) if show_changes else "—",
@@ -1140,7 +1168,6 @@ def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
                         </q-td>
                         """,
                     )
-                footer_close(dialog)
     dialog.open()
 
 
@@ -1162,7 +1189,6 @@ def _segmentation_dialog(row: dict[str, Any]) -> None:
                     ui.label(f"Fetching segmentation for {row['shared_id']} ({row['language_raw']})…").classes(
                         "text-body2 text-grey-7"
                     )
-                footer_close(dialog)
                 background_tasks.create(_load_segmentation(body, row), name=f"segmentation {row['shared_id']}")
     dialog.open()
 
@@ -1175,7 +1201,13 @@ async def _load_segmentation(body: Any, row: dict[str, Any]) -> None:
         _render_segmentation_error(body, RuntimeError("not logged in to Uwazi"))
         return
     try:
-        segmentation = await get_entity_segmentation(user, password, row["shared_id"], row["language_raw"])
+        segmentation = await get_entity_segmentation(
+            session_instance_url(),
+            user,
+            password,
+            row["shared_id"],
+            row["language_raw"],
+        )
     except Exception as exc:  # noqa: BLE001 — degrade to an error label, never crash the UI
         _render_segmentation_error(body, exc)
         return
@@ -1204,7 +1236,7 @@ def _delete_dialog(run_id: str) -> None:
         "Delete run",
         f"Permanently remove run {run_id!r}? This deletes the entire run folder. "
         "If the run is EXECUTED, revert will no longer be possible.",
-        lambda: delete_run(run_id),
+        lambda: delete_run(session_instance_url(), run_id),
         success_msg=f"Deleted {run_id}",
         run_id=run_id,
         kind="deleting",
@@ -1220,7 +1252,7 @@ def _rename_confirm(dialog: Any, old_id: str, name_input: Any) -> None:
     if new_id == old_id:
         dialog.close()
         return
-    existing = {r.run_id for r in list_runs()}
+    existing = {r.run_id for r in list_runs(session_instance_url())}
     if new_id in existing:
         ui.notify(f"A task named {new_id!r} already exists", type="warning")
         return
@@ -1230,7 +1262,7 @@ def _rename_confirm(dialog: Any, old_id: str, name_input: Any) -> None:
     dialog.close()
 
     async def _do() -> None:
-        rename_run(old_id, new_id)
+        rename_run(session_instance_url(), old_id, new_id)
 
     background_tasks.create(_run_async(_do(), f"Renamed {old_id} → {new_id}", new_id), name=f"rename {old_id}")
 
@@ -1260,7 +1292,6 @@ def _logs_dialog() -> None:
 
                 _refresh_logs(log_area)
                 ui.timer(1.0, lambda: _refresh_logs(log_area))
-                footer_close(dialog)
         dialog.open()
 
 
@@ -1298,7 +1329,6 @@ def _capabilities_dialog() -> None:
                         with ui.card().classes("w-full"):
                             ui.label(title).classes("text-subtitle1 text-bold")
                             ui.label(prompt).classes("text-body2 text-grey-7")
-                footer_close(dialog)
         dialog.open()
 
 
@@ -1330,7 +1360,7 @@ def _do_clear_cache(dialog: Any) -> None:
     """Run the cache clear and report how many entries were removed."""
     dialog.close()
     try:
-        removed = clear_cache()
+        removed = clear_cache(session_instance_url())
     except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
         ui.notify(f"Failed to clear cache: {exc}", type="negative", multi_line=True)
         return
@@ -1391,7 +1421,6 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
             _wizard_step_details(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
-        footer_close(dialog)
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
@@ -1443,7 +1472,7 @@ def _wizard_details_next(state: dict[str, Any], name_input: Any, prompt_input: A
     if not name:
         ui.notify("Name is required", type="warning")
         return
-    if name in {r.run_id for r in list_runs()}:
+    if name in {r.run_id for r in list_runs(session_instance_url())}:
         ui.notify(f"A run named {name!r} already exists", type="warning")
         return
     prompt = (prompt_input.value or "").strip()
@@ -1495,7 +1524,12 @@ async def _do_clarify(state: dict[str, Any], container: Any) -> None:
     try:
         understanding = await asyncio.to_thread(
             asyncio.run,
-            clarify_prompt(prompt, app.storage.user["user"], app.storage.user["password"]),
+            clarify_prompt(
+                session_instance_url(),
+                prompt,
+                app.storage.user["user"],
+                app.storage.user["password"],
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         _render_validation_error(state, container, exc)
@@ -1787,7 +1821,18 @@ async def _do_generate(
     # create_and_generate does synchronous Uwazi HTTP + LLM calls; run it on a
     # worker thread so the event loop stays free to serve the UI and websocket.
     try:
-        await asyncio.to_thread(asyncio.run, create_and_generate(name, prompt, user, password, validated_prompt, budget))
+        await asyncio.to_thread(
+            asyncio.run,
+            create_and_generate(
+                session_instance_url(),
+                name,
+                prompt,
+                user,
+                password,
+                validated_prompt,
+                budget,
+            ),
+        )
         _broadcast_notify(
             f"Run {name!r} generated — the planning pass filled the review table.",
             type="positive",
@@ -1814,7 +1859,7 @@ def _build_page() -> None:
             ui.label("Uwazi Admin Agent").classes("text-h6 q-mr-md")
         with ui.row().classes("items-center"):
             ui.icon("link", color="secondary").classes("q-mr-xs")
-            ui.link(_CONTROLLED_UWAZI_URL, _CONTROLLED_UWAZI_URL, new_tab=True).classes("text-white")
+            ui.link(session_instance_url(), session_instance_url(), new_tab=True).classes("text-white")
             with ui.row().classes("items-center q-ml-md"):
                 with ui.button(icon="menu").props("flat round color=secondary"):
                     with ui.menu():
@@ -1939,7 +1984,7 @@ def _register_static_and_routes() -> None:
             # ``lang`` is the row's language; the resolver falls back to the
             # instance's other configured languages when the entity carries no
             # document in that one.
-            data = asyncio.run(fetch_entity_document_bytes(user, password, sid, lang))
+            data = asyncio.run(fetch_entity_document_bytes(session_instance_url(), user, password, sid, lang))
         except Exception as exc:  # noqa: BLE001 — a fetch failure is a 404 to the viewer
             logger.warning("review-pdf fetch failed run={} sid={} lang={}: {}", run, sid, lang, exc)
             return Response(status_code=404)

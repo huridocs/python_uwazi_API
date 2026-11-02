@@ -95,7 +95,7 @@ def test_preflight_blocks_a_row_whose_live_value_changed() -> None:
     result = evaluate_preflight([row], {("entity-1", "en"): _raw("someone else")}, "en")
     assert not result.ok
     assert result.issues[0].kind == "changed"
-    assert "Update table from Uwazi" in result.message()
+    assert "Sync with Uwazi" in result.message()
 
 
 def test_preflight_blocks_a_row_whose_entity_is_gone() -> None:

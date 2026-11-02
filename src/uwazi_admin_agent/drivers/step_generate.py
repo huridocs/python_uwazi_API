@@ -18,7 +18,7 @@ from loguru import logger
 from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
 from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
-from uwazi_admin_agent.drivers.runtime import build_runtime
+from uwazi_admin_agent.drivers.runtime import build_runtime, default_instance_url
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
 
 
@@ -28,7 +28,7 @@ def run_generate() -> int:
 
 
 async def _run_generate_async() -> int:
-    loader = RunsConfigLoader.default()
+    loader = RunsConfigLoader.default(default_instance_url())
     config = loader.load_active()
     run_path = loader.load_active_path()
 

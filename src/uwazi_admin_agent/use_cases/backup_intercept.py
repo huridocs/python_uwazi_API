@@ -30,11 +30,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
-from uwazi_admin_agent.configuration import ENTITY_CACHE_FRESH_SNAPSHOTS
+from uwazi_admin_agent.configuration import BULK_UPDATE_MAX_IDS, ENTITY_CACHE_FRESH_SNAPSHOTS
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.backup_decision import (
     BackupDecision,
@@ -47,6 +47,13 @@ from uwazi_admin_agent.domain.connection_hubs import extract_connection_hubs
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
+from uwazi_admin_agent.domain.property_restore import (
+    bulk_property_groups,
+    can_bulk_update,
+    merge_touched_properties,
+    minimal_property_row,
+    row_snapshot_for_language,
+)
 from uwazi_admin_agent.domain.publish_state import PublishState
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
@@ -82,6 +89,9 @@ class BackupIntercept:
         settings_languages: list[str] | None = None,
         affected_languages: set[str] | None = None,
         publish_state: PublishStatePort | None = None,
+        property_scope_ids: set[str] | None = None,
+        capture_publish_state: bool = True,
+        note: Callable[[str], None] | None = None,
     ) -> None:
         self._entity_repository: EntityRepositoryPort = entity_repository
         self._backup_store: BackupStorePort = backup_store
@@ -122,6 +132,34 @@ class BackupIntercept:
         # (an update-then-delete, or a refused-then-retried delete) needs the
         # snapshot to build the `deleted` entry without re-reading the row.
         self._snapshots: dict[str, EntitySnapshot] = {}
+        # The entities whose ONLY writes in this pass are property updates (the
+        # review table's bulk edit). They get a PROPERTY-SCOPED snapshot — just
+        # the touched keys of the one row being written — instead of the whole
+        # entity, which is what makes a 5000-entity run cheap in both requests
+        # and disk. Empty for a script run: a script's touch set is emergent, so
+        # its entities always need the full snapshot.
+        self._property_scope_ids: set[str] = set(property_scope_ids or ())
+        # Whether to read the entity's publish/permission grants into the
+        # snapshot. `POST /api/entities` never writes them, so only a pass that
+        # can publish/unpublish needs the extra read; a pure property edit
+        # leaves it off (one request per entity saved).
+        self._capture_publish: bool = capture_publish_state
+        # The raw CRUD helpers, kept so a bulk property write can fall back to
+        # the ordinary update path for the ids that need a full snapshot.
+        self._crud: tuple | None = None
+        # An optional operator-facing note sink (the review UI's live gate
+        # toast): a bulk write refusing and falling back to per-entity writes
+        # is reported HERE so the spinner explains itself while it happens.
+        self._note: Callable[[str], None] | None = note
+
+    def emit_note(self, text: str) -> None:
+        """Publish one operator-facing progress note (best-effort, pure-ish)."""
+        if self._note is None:
+            return
+        try:
+            self._note(text)
+        except Exception as exc:  # noqa: BLE001 — a note must never fail the write pass
+            logger.debug("could not publish the gate note: {}", exc)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the event loop used for raw fetches (called from the worker thread)."""
@@ -134,6 +172,7 @@ class BackupIntercept:
 
     def decorate(self, crud: tuple) -> dict[str, Any]:
         """Wrap the reused sync CRUD tuple with backup-before-apply."""
+        self._crud = crud
         create_entities = crud[0]
         update_entities = crud[1]
         delete_entities = crud[2]
@@ -237,7 +276,29 @@ class BackupIntercept:
         will not try to re-upload bytes it does not have); the snapshot still saves.
         """
         decision = decide_backup("delete", shared_ids, self._created_set(), self._backed_up)
+        self._escalate_property_scopes(decision.promote_to_deleted)
         return self._apply_snapshot_decision(decision, self._language, capture_files=True)
+
+    def _escalate_property_scopes(self, shared_ids: list[str]) -> None:
+        """Replace any property-scoped snapshot about to back a DELETE with a FULL one.
+
+        A delete-revert RE-CREATES the entity from the snapshot raw, so promoting
+        a property-scoped (minimal) raw would mint a broken entity: no relations,
+        no untouched properties, no files. The review table never scopes an entity
+        it also deletes (``property_scope_ids`` excludes it), but the invariant is
+        enforced here too, where the damage would land — the full snapshot simply
+        REPLACES the property one on disk and in memory, and the manifest entry is
+        left alone so the delete decision promotes it as usual.
+        """
+        for shared_id in shared_ids:
+            snapshot = self._snapshots.get(shared_id)
+            if snapshot is None or snapshot.scope != "property":
+                continue
+            logger.info("backup: escalating {} from a property to a full snapshot (it is being deleted)", shared_id)
+            raw = self._loop.run_until_complete(
+                self._entity_repository.get_raw_by_shared_id(shared_id, snapshot.language or self._language)
+            )
+            self._save_snapshots([shared_id], {shared_id: raw}, capture_files=True)
 
     def _backup_before_rewire(self, from_ids: list[str], language: str) -> dict[str, EntitySnapshot]:
         """Snapshot first-touch from-entities, add to modified, record RewiredRelationship."""
@@ -273,6 +334,368 @@ class BackupIntercept:
         self._enforce_cap()
         logger.debug("backup decision: snapshotted {} entities", len(snapshots))
         return snapshots
+
+    # --- property-scoped snapshots + writes (the review table's bulk path) ---
+
+    def write_property_updates(
+        self,
+        payloads: list[dict],
+        language: str,
+        executor: Any | None = None,
+    ) -> list[dict]:
+        """Write reviewed property payloads, backing up only what they touch.
+
+        The review table's bulk edit path. A payload whose entity's ONLY writes
+        in this pass are property updates takes a PROPERTY-SCOPED snapshot (the
+        touched keys of the one row being written) and is written straight
+        through ``save_raw_properties`` — no template read, no client-side
+        metadata merge, no search-index wait. An entity also touched by a
+        delete/publish/merge keeps the full-entity snapshot and the ordinary
+        update helper, because its before-state must be the whole row.
+
+        ``executor`` is the run's :class:`ParallelExecutor`; when given, the
+        writes fan out up to the throttle's allowance (the same 429-aware
+        bounded concurrency the script helpers use). The snapshots are taken
+        BEFORE any write of the batch goes out, so a batch is never half-backed.
+
+        Returns one result dict per payload (``shared_id``/``success``/``error``)
+        — the same shape the reused CRUD helper returns, so the caller's refusal
+        handling is unchanged.
+        """
+        scoped = [payload for payload in payloads if payload["shared_id"] in self._property_scope_ids]
+        plain = [payload for payload in payloads if payload["shared_id"] not in self._property_scope_ids]
+        results: list[dict] = []
+        if scoped:
+            results.extend(self._write_scoped_properties(scoped, language, executor))
+        if plain:
+            results.extend(self._write_full_updates(plain, language))
+        return results
+
+    def _write_scoped_properties(
+        self,
+        payloads: list[dict],
+        language: str,
+        executor: Any | None,
+    ) -> list[dict]:
+        """Snapshot the touched keys, then write one property payload per entity."""
+        entries = [(payload["shared_id"], sorted(payload.get("metadata") or {})) for payload in payloads]
+        self._backup_property_rows(entries, language, executor)
+        plans = [self._property_write_plan(self._snapshots[payload["shared_id"]], payload, language) for payload in payloads]
+        results = self._post_properties(plans, executor)
+        self.record_applied_updates(payloads, results, language)
+        ids = [payload["shared_id"] for payload in payloads]
+        self._invalidate(ids)
+        self._emit("update", ids)
+        return results
+
+    def _write_full_updates(self, payloads: list[dict], language: str) -> list[dict]:
+        """The ordinary update path for entities that need a whole-entity snapshot."""
+        update_entities = (self._crud or (None, None))[1]
+        if update_entities is None:
+            raise RuntimeError("backup intercept: write_property_updates needs decorate() first")
+        ids = [payload["shared_id"] for payload in payloads]
+        self._backup_before_modify(ids, language)
+        result = update_entities(payloads, language)
+        self.record_applied_updates(payloads, result, language)
+        self._invalidate(ids)
+        self._emit("update", ids)
+        return result
+
+    def _backup_property_rows(
+        self,
+        entries: list[tuple[str, list[str]]],
+        language: str,
+        executor: Any | None = None,
+    ) -> dict[str, EntitySnapshot]:
+        """Take/extend one property-scoped snapshot per (entity, row language).
+
+        ``entries`` pairs each sharedId with the metadata keys this write touches.
+        First touch captures only those keys' before-values; a LATER write on an
+        entity that already has a property snapshot adds the keys it did not
+        capture yet (their live values are still the pre-run ones — this run has
+        not written them). An entity that already has a FULL snapshot needs
+        nothing: it covers every key already.
+
+        Falls back to the full-entity snapshot when the raw cannot support a
+        property restore (no ``_id``, or no ``title`` — both required by Uwazi's
+        update schema), so correctness never depends on the cheap shape.
+
+        The reads go through the run's bounded pool when one is given: this is
+        the ONLY read a property-scoped entity costs, so it is also the one that
+        decides the pass's wall clock on a 5000-row table.
+        """
+        raws = self._fetch_rows_parallel([(shared_id, language) for shared_id, _ in entries], executor)
+        snapshots: dict[str, EntitySnapshot] = {}
+        for shared_id, touched in entries:
+            raw = raws[(shared_id, language)]
+            existing = self._existing_snapshot(shared_id)
+            if existing is not None and existing.scope != "property":
+                self._remember_before(shared_id, raw, touched)
+                snapshots[shared_id] = existing
+                continue
+            row = minimal_property_row(raw, language, touched)
+            if row is None:
+                logger.warning(
+                    "backup: {} cannot be property-scoped (no _id/title) — taking the full snapshot",
+                    shared_id,
+                )
+                # ``add_modified`` is what makes the snapshot REVERTABLE: a
+                # decision that only snapshots leaves the entity out of the
+                # manifest, and revert never looks at it.
+                snapshots.update(
+                    self._apply_snapshot_decision(
+                        BackupDecision(snapshot_ids=[shared_id], add_modified=[shared_id]),
+                        language,
+                    )
+                )
+                continue
+            snapshot = self._merge_property_snapshot(existing, row, raw, touched, language)
+            self._backup_store.save_snapshot(self._run_id, snapshot)
+            self._snapshots[shared_id] = snapshot
+            self._backed_up.add(shared_id)
+            self._remember_before(shared_id, raw, touched)
+            snapshots[shared_id] = snapshot
+            if existing is None:
+                _ = populate_manifest(self._manifest, BackupDecision(add_modified=[shared_id]), {shared_id: snapshot})
+                self._enforce_cap()
+        return snapshots
+
+    def _fetch_rows_parallel(
+        self,
+        pairs: list[tuple[str, str]],
+        executor: Any | None,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """Read each ``(sharedId, language)`` row once — concurrently when a pool is given.
+
+        Snapshot reads bypass the raw cache when ``ENTITY_CACHE_FRESH_SNAPSHOTS``
+        is on (the backup must capture live server truth), so they are real HTTP
+        round-trips and the whole point of fanning them out. A failed read
+        propagates: an entity that cannot be read cannot be backed up, and
+        writing it without a snapshot is exactly what the backup exists to
+        prevent.
+        """
+        unique = list(dict.fromkeys(pairs))
+        if not unique:
+            return {}
+        if self._snapshot_fresh:
+            self._invalidate(sorted({shared_id for shared_id, _ in unique}))
+        if executor is None or len(unique) < 2:
+            return {
+                pair: self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(pair[0], pair[1]))
+                for pair in unique
+            }
+
+        def _task(shared_id: str, row_language: str):
+            def _run() -> dict[str, Any]:
+                return asyncio.run(self._entity_repository.get_raw_by_shared_id(shared_id, row_language))
+
+            return _run
+
+        values, errors = executor.run([_task(shared_id, row_language) for shared_id, row_language in unique])
+        raws: dict[tuple[str, str], dict[str, Any]] = {}
+        for pair, value, error in zip(unique, values, errors):
+            if error is not None:
+                raise error
+            raws[pair] = value
+        return raws
+
+    def _merge_property_snapshot(
+        self,
+        existing: EntitySnapshot | None,
+        row: EntityRowSnapshot,
+        raw: dict[str, Any],
+        touched: list[str],
+        language: str,
+    ) -> EntitySnapshot:
+        """The snapshot to persist: the fresh property row, merged into any earlier one."""
+        now = datetime.now(timezone.utc)
+        if existing is None:
+            return EntitySnapshot(
+                shared_id=str(raw.get("sharedId")),
+                internal_id=row.internal_id,
+                language=row.language,
+                raw=row.raw,
+                captured_at=now,
+                scope="property",
+                rows=[row],
+                affected_languages=sorted({row.language} & self._affected_languages),
+            )
+        rows: list[EntityRowSnapshot] = []
+        for prior in existing.rows:
+            if (prior.language or "") == (row.language or ""):
+                rows.append(merge_touched_properties(prior, raw, touched))
+            else:
+                rows.append(prior)
+        if not any((prior.language or "") == (row.language or "") for prior in existing.rows):
+            rows.append(row)
+        return existing.model_copy(update={"rows": rows, "captured_at": now})
+
+    def _existing_snapshot(self, shared_id: str) -> EntitySnapshot | None:
+        """The snapshot already on disk for ``shared_id`` (a prior Run into this manifest)."""
+        if shared_id in self._snapshots:
+            return self._snapshots[shared_id]
+        try:
+            snapshot = self._backup_store.load_snapshot(self._run_id, shared_id)
+        except FileNotFoundError:
+            return None
+        self._snapshots[shared_id] = snapshot
+        return snapshot
+
+    def _remember_before(self, shared_id: str, raw: dict[str, Any], keys: list[str]) -> None:
+        """Keep the before-values the applied-write diff needs — and nothing else.
+
+        A property-scoped pass must NOT retain 5000 full raws in memory (that is
+        the whole point of the cheap shape), so only the touched keys' values are
+        kept. The first captured value wins: a second write on the same entity
+        must diff against the pre-run state, not its own output.
+        """
+        kept = self._raw_before.setdefault(shared_id, {"title": raw.get("title"), "metadata": {}})
+        source = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        captured = kept.setdefault("metadata", {})
+        for key in keys:
+            if key not in captured and key in source:
+                captured[key] = source[key]
+
+    def _property_write_plan(
+        self,
+        snapshot: EntitySnapshot,
+        payload: dict,
+        language: str,
+    ) -> dict[str, Any]:
+        """One property write as a PLAN: the POST body plus what bulk grouping needs.
+
+        Uwazi's update branch requires ``_id``, ``sharedId``, ``language`` and a
+        non-empty ``title``; everything else is the reviewed metadata. The title
+        is the payload's when the row sets one, otherwise the captured one — so
+        a property-only write never blanks the entity's title.
+
+        The plan also carries the ``template`` and ``language`` (the bulk
+        endpoint groups ids by both) and ``title_changed``: a title write can
+        never ride a bulk call, because ``multipleupdate`` has no way to set one.
+        """
+        row = row_snapshot_for_language(snapshot, language)
+        internal_id = row.internal_id if row is not None else snapshot.internal_id
+        row_raw = row.raw if row is not None else snapshot.raw
+        captured_title = row_raw.get("title") or snapshot.raw.get("title")
+        metadata = dict(payload.get("metadata") or {})
+        title = payload.get("title") or captured_title or ""
+        return {
+            "shared_id": payload["shared_id"],
+            "language": language,
+            # The raw's template is Uwazi's own id; a recorded ``template_name``
+            # is a display label and only a fallback, so two rows of one
+            # template always group together.
+            "template": row_raw.get("template") or payload.get("template_name"),
+            "title_changed": bool(payload.get("title")),
+            "metadata": metadata,
+            "body": {
+                "_id": internal_id,
+                "sharedId": payload["shared_id"],
+                "language": language,
+                "title": title,
+                "metadata": metadata,
+            },
+        }
+
+    def _post_properties(self, plans: list[dict[str, Any]], executor: Any | None) -> list[dict]:
+        """Write property plans: one bulk call per homogeneous group, else one POST each.
+
+        The bulk endpoint is preferred even for a SINGLE id: it is one request
+        either way, it never touches the entity's files, and it applies exactly
+        the metadata the plan names. The per-entity POST remains for the plans
+        the endpoint cannot express — a title write (``multipleupdate`` has no
+        title input), a plan with no template, or an empty payload — and for the
+        fallback of a refused bulk chunk. That POST path reads the live row to
+        echo its files back, so it costs one extra read; keeping it off the
+        common path is what makes a 5000-row pass ~2 requests per row instead of
+        ~9.
+
+        A bulk call that is refused (or that does not echo every id) falls back
+        to the per-entity path for that chunk. The endpoint is all-or-nothing,
+        and the retry writes the same values, so the fallback is idempotent and
+        keeps per-entity error attribution.
+        """
+        results: list[dict] = []
+        individual: list[dict[str, Any]] = []
+        for group in bulk_property_groups(plans):
+            if can_bulk_update(group[0]):
+                results.extend(self._post_bulk(group, executor, individual))
+            else:
+                individual.extend(group)
+        if individual:
+            results.extend(self._post_individual(individual, executor))
+        return results
+
+    def _post_bulk(
+        self,
+        group: list[dict[str, Any]],
+        executor: Any | None,
+        fallback: list[dict[str, Any]],
+    ) -> list[dict]:
+        """One bulk call per chunk of ids; refused/incomplete chunks join ``fallback``."""
+        results: list[dict] = []
+        for start in range(0, len(group), BULK_UPDATE_MAX_IDS):
+            chunk = group[start : start + BULK_UPDATE_MAX_IDS]
+            language = str(chunk[0]["language"])
+            try:
+                updated = set(
+                    self._loop.run_until_complete(
+                        self._entity_repository.update_many_properties(
+                            [plan["shared_id"] for plan in chunk],
+                            dict(chunk[0]["metadata"]),
+                            language,
+                        )
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a refused bulk call is a fallback, not a run failure
+                logger.warning(
+                    "backup: bulk property update refused for {} id(s) ({}); retrying per entity",
+                    len(chunk),
+                    exc,
+                )
+                self.emit_note("bulk write refused — applying per entity")
+                fallback.extend(chunk)
+                continue
+            for plan in chunk:
+                if plan["shared_id"] in updated:
+                    results.append({"shared_id": plan["shared_id"], "success": True})
+                else:
+                    # Not echoed back: Uwazi did not report it updated. Retry it
+                    # alone so the failure carries its own error text.
+                    fallback.append(plan)
+        if fallback:
+            self.emit_note("bulk write refused — applying per entity")
+        return results
+
+    def _post_individual(self, plans: list[dict[str, Any]], executor: Any | None) -> list[dict]:
+        """POST each property body, serially or through the run's bounded pool."""
+
+        def _task(plan: dict[str, Any]):
+            def _run() -> dict[str, Any]:
+                asyncio.run(self._entity_repository.save_raw_properties(plan["body"]))
+                return {"shared_id": plan["shared_id"], "success": True}
+
+            return _run
+
+        if executor is None or len(plans) < 2:
+            results: list[dict] = []
+            for plan in plans:
+                try:
+                    self._loop.run_until_complete(self._entity_repository.save_raw_properties(plan["body"]))
+                    results.append({"shared_id": plan["shared_id"], "success": True})
+                except Exception as exc:  # noqa: BLE001 — a refusal is a per-entity result, like the CRUD helper
+                    results.append({"shared_id": plan["shared_id"], "success": False, "error": str(exc)})
+            return results
+        values, errors = executor.run([_task(plan) for plan in plans])
+        results = []
+        for plan, value, error in zip(plans, values, errors):
+            if error is not None:
+                results.append({"shared_id": plan["shared_id"], "success": False, "error": str(error)})
+            elif isinstance(value, dict):
+                results.append(value)
+            else:
+                results.append({"shared_id": plan["shared_id"], "success": True})
+        return results
 
     def _record_created(self, results: list[dict]) -> None:
         """Record script-created shared_ids onto manifest.created (post-create)."""
@@ -440,7 +863,9 @@ class BackupIntercept:
             raws[sid] = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(sid, language))
         return raws
 
-    def _fetch_all_language_rows(self, shared_id: str, language: str) -> EntitySnapshot | None:
+    def _fetch_all_language_rows(
+        self, shared_id: str, language: str, primary_raw: dict[str, Any] | None = None
+    ) -> EntitySnapshot | None:
         """Fetch EVERY configured language's row for one sharedId (None = entity absent).
 
         The first-touch snapshot must cover the whole entity, not one row: a
@@ -452,12 +877,27 @@ class BackupIntercept:
         configured languages. Rows that do not exist in one language are absent
         from ``rows`` (Uwazi keeps a row per language only when the entity was
         translated into it).
+
+        ``primary_raw`` is the row the caller already fetched for the requested
+        language. Reusing it saves one HTTP round-trip per snapshotted entity —
+        the read is the same request the backup had to make anyway.
         """
         candidates = self._language_order(language)
         rows: list[EntityRowSnapshot] = []
-        primary_raw: dict[str, Any] | None = None
         primary_language: str | None = None
+        if primary_raw is not None:
+            row_lang = primary_raw.get("language") if isinstance(primary_raw.get("language"), str) else language
+            rows.append(
+                EntityRowSnapshot(
+                    language=row_lang or language,
+                    internal_id=primary_raw.get("_id"),
+                    raw=primary_raw,
+                )
+            )
+            primary_language = row_lang or language
         for candidate in candidates:
+            if primary_raw is not None and candidate == language:
+                continue  # already captured above
             try:
                 raw = self._loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(shared_id, candidate))
             except Exception as exc:  # noqa: BLE001 — a missing row is normal, not a failure
@@ -465,11 +905,11 @@ class BackupIntercept:
                 continue
             row_lang = raw.get("language") if isinstance(raw.get("language"), str) else candidate
             rows.append(EntityRowSnapshot(language=row_lang or candidate, internal_id=raw.get("_id"), raw=raw))
-            if primary_raw is None:
-                primary_raw = raw
+            if primary_language is None:
                 primary_language = row_lang or candidate
-        if primary_raw is None:
+        if not rows:
             return None
+        primary_raw = rows[0].raw
         return EntitySnapshot(
             shared_id=shared_id,
             internal_id=primary_raw.get("_id"),
@@ -518,7 +958,7 @@ class BackupIntercept:
             # entity whole. Falls back to the single fetched raw when the
             # all-language fetch failed (settings unreadable etc.) so the
             # backup never blocks the write.
-            snapshot = self._fetch_all_language_rows(sid, raw.get("language") or self._language)
+            snapshot = self._fetch_all_language_rows(sid, raw.get("language") or self._language, primary_raw=raw)
             if snapshot is None:
                 file_refs = self._capture_files(sid, raw) if capture_files else None
                 snapshot = EntitySnapshot(
@@ -537,7 +977,7 @@ class BackupIntercept:
             # actually undo a publish or a citation the run created.
             snapshot = snapshot.model_copy(
                 update={
-                    "publish_state": self._capture_publish_state(sid, snapshot.language),
+                    "publish_state": self._capture_publish_state(sid, snapshot.language) if self._capture_publish else None,
                     "connection_hubs": extract_connection_hubs(snapshot.raw.get("relations")),
                 }
             )

@@ -440,7 +440,7 @@ def test_an_all_noop_merge_shows_only_its_file_and_delete_parts() -> None:
     """The anchor writes nothing, so the table must not render it as a change.
 
     Its status still drives the operation's own badge: an applied merge reads
-    "runned" even though the only row left is its file move + source delete.
+    "applied" even though the only row left is its file move + source delete.
     """
     anchor = _hydrated(
         property_name=None,
@@ -453,7 +453,7 @@ def test_an_all_noop_merge_shows_only_its_file_and_delete_parts() -> None:
     row = view.operation_row(_operation(anchor))
 
     assert [sub["label"] for sub in row["subs"]] == ["Uploaded files", "Delete source entity"]
-    assert row["run_status"] == "runned"
+    assert row["run_status"] == "applied"
     assert all(sub["structural"] for sub in row["subs"])
 
 

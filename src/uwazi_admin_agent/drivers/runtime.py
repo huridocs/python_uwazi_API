@@ -5,7 +5,7 @@ step drivers share: a :class:`UwaziApiAdapter` (which is simultaneously the
 ``entity_api``/``relationship_api``/``thesauri_api``/``template_api`` — it
 multi-inherits all the ports), the admin agent's raw
 :class:`UwaziEntityRepository` over the same client, a
-:class:`FilesystemBackupStore` rooted at ``RUNS_PATH`` (one run = one folder,
+:class:`FilesystemBackupStore` rooted at the instance's ``runs`` dir (one run = one folder,
 per the Phase-5 alignment of ``configuration.py``), a :class:`JsonlAuditLog`
 over the same root (Phase 6 — every write is audited), an :class:`OllamaAdapter`
 LLM, and the :class:`AdminAgentDeps` the generation agent runs against.
@@ -55,6 +55,7 @@ from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
+from uwazi_admin_agent.adapters.thesaurus_value_adapter import UwaziThesaurusValues
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
 from uwazi_admin_agent.adapters.template_property_type_adapter import UwaziTemplatePropertyTypes
 from uwazi_admin_agent.adapters.translation_repository_adapter import (
@@ -67,11 +68,12 @@ from uwazi_admin_agent.configuration import (
     FILE_CACHE_ENABLED,
     FILE_CACHE_EVICT_SCAN_INTERVAL,
     FILE_CACHE_MAX_BYTES,
+    INSTANCE_IDS_DIR,
     ROOT_PATH,
-    RUNS_PATH,
-    SUGGESTIONS_DB_PATH,
 )
 from uwazi_admin_agent.domain.file_cache import instance_dir_name
+from uwazi_admin_agent.domain.instance import parse_instance_urls
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.drift_probe_port import DriftProbePort
@@ -83,6 +85,7 @@ from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
+from uwazi_admin_agent.ports.thesaurus_value_port import ThesaurusValueLookupPort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
@@ -103,6 +106,7 @@ class Runtime:
 
     def __init__(
         self,
+        url: str,
         entity_api: EntityApiPort,
         relationship_api: RelationshipApiPort | None,
         entity_repository: EntityRepositoryPort,
@@ -121,10 +125,14 @@ class Runtime:
         translation_port: TranslationPort | None = None,
         template_labels: TemplateLabelPort | None = None,
         property_types: PropertyTypeLookupPort | None = None,
+        thesaurus_values: ThesaurusValueLookupPort | None = None,
         drift_probe: DriftProbePort | None = None,
         publish_state: PublishStatePort | None = None,
         relationship_hubs: RelationshipHubPort | None = None,
     ) -> None:
+        # The Uwazi instance this runtime talks to. Every consumer resolves the
+        # instance's own on-disk paths from it, so no one has to re-read the env.
+        self.url: str = url
         self.entity_api: EntityApiPort = entity_api
         self.relationship_api: RelationshipApiPort | None = relationship_api
         self.entity_repository: EntityRepositoryPort = entity_repository
@@ -150,6 +158,11 @@ class Runtime:
         # Template id/name -> its property types. The recording path reads them
         # to tell a per-language property from a shared one.
         self.property_types: PropertyTypeLookupPort | None = property_types
+        # Template name + property -> {label: thesaurus value uuid}. The apply
+        # path reads it to write select/multiselect metadata as value ids
+        # (None = unwired; the Run then refuses select writes instead of
+        # guessing ids).
+        self.thesaurus_values: ThesaurusValueLookupPort | None = thesaurus_values
         # The instance's settings (``/api/settings``): the configured languages,
         # which the document/segmentation resolvers use as their fallback order
         # when an entity holds its file in a language other than the requested one.
@@ -164,14 +177,38 @@ class Runtime:
         self.relationship_hubs: RelationshipHubPort | None = relationship_hubs
 
 
-def build_backup_store(root: Path | None = None) -> BackupStorePort:
-    """Return a :class:`FilesystemBackupStore` rooted at ``RUNS_PATH`` (or ``root``)."""
-    return FilesystemBackupStore(Path(root) if root is not None else RUNS_PATH)
+def default_instance_url() -> str:
+    """The single instance the CLI targets: the FIRST configured URL.
+
+    Reads ``UWAZI_URL`` and parses it with ``parse_instance_urls``. Raises
+    ``RuntimeError`` when the configured list is empty.
+    """
+    urls = parse_instance_urls(os.environ.get("UWAZI_URL"))
+    if not urls:
+        raise RuntimeError("UWAZI_URL is not set — point it at the instance to administer")
+    return urls[0]
 
 
-def build_audit_log(root: Path | None = None) -> AuditLogPort:
-    """Return a :class:`JsonlAuditLog` rooted at ``RUNS_PATH`` (or ``root``)."""
-    return JsonlAuditLog(Path(root) if root is not None else RUNS_PATH)
+def build_backup_store(url: str | None = None, root: Path | None = None) -> BackupStorePort:
+    """Return a :class:`FilesystemBackupStore` rooted at the instance's runs dir.
+
+    ``url`` defaults to :func:`default_instance_url` (the CLI's single-instance
+    default); every WEB caller passes the session's instance URL explicitly.
+    """
+    if root is not None:
+        return FilesystemBackupStore(Path(root))
+    return FilesystemBackupStore(instance_paths(url or default_instance_url(), INSTANCE_IDS_DIR).runs_path)
+
+
+def build_audit_log(url: str | None = None, root: Path | None = None) -> AuditLogPort:
+    """Return a :class:`JsonlAuditLog` rooted at the instance's runs dir.
+
+    The audit log lives inside each run folder, so its root is the instance's
+    ``runs`` directory (the same rule as :func:`build_backup_store`).
+    """
+    if root is not None:
+        return JsonlAuditLog(Path(root))
+    return JsonlAuditLog(instance_paths(url or default_instance_url(), INSTANCE_IDS_DIR).runs_path)
 
 
 def build_file_cache(url: str) -> FileCacheStore | None:
@@ -202,13 +239,14 @@ def _cache_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
-def build_runtime(user: str | None = None, password: str | None = None) -> Runtime:
+def build_runtime(user: str | None = None, password: str | None = None, url: str | None = None) -> Runtime:
     """Construct the live ports + deps from env (the composition root).
 
-    Explicit ``user``/``password`` win when given; otherwise falls back to
-    ``UWAZI_USER``/``UWAZI_PASSWORD`` from the environment (CLI path).
+    Explicit ``user``/``password``/``url`` win when given; otherwise the
+    credentials fall back to ``UWAZI_USER``/``UWAZI_PASSWORD`` and the URL to
+    :func:`default_instance_url` (the CLI's single-instance default).
     """
-    url = os.environ["UWAZI_URL"]
+    url = url or default_instance_url()
     user = user if user is not None else os.environ["UWAZI_USER"]
     password = password if password is not None else os.environ["UWAZI_PASSWORD"]
 
@@ -227,6 +265,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     )
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     template_labels: TemplateLabelPort = UwaziTemplateLabels(api.client)
+    thesaurus_values: ThesaurusValueLookupPort = UwaziThesaurusValues(api.client)
     # The template property TYPES: what tells the recording path whether a
     # change is per-language (the free-text types) or one shared value. The
     # same cached /api/templates read the label lookup uses.
@@ -238,8 +277,8 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         if file_cache is not None
         else base_segmentation_repository
     )
-    backup_store = build_backup_store()
-    audit_log = build_audit_log()
+    backup_store = build_backup_store(url)
+    audit_log = build_audit_log(url)
     llm = OllamaAdapter()
     url_fetcher: UrlFetcherPort = HttpUrlFetcherAdapter()
     base_translation: TranslationPort = UwaziTranslationRepository(api.client)
@@ -273,7 +312,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         cache_control=file_cache,
         # So a revert also flips the run's APPLIED review rows to REVERTED:
         # their writes are gone, and the review table must show them runnable.
-        suggestion_store=SqliteSuggestionStore(SUGGESTIONS_DB_PATH),
+        suggestion_store=SqliteSuggestionStore(instance_paths(url, INSTANCE_IDS_DIR).suggestions_db),
         # Publish/permissions and non-property connection rows: Uwazi's entity
         # write ignores both, so the raw restore alone cannot undo a
         # publish/unpublish or a file/text citation.
@@ -296,6 +335,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
     )
 
     return Runtime(
+        url=url,
         entity_api=api,
         relationship_api=api,
         entity_repository=entity_repository,
@@ -314,6 +354,7 @@ def build_runtime(user: str | None = None, password: str | None = None) -> Runti
         translation_port=translation_port,
         template_labels=template_labels,
         property_types=property_types,
+        thesaurus_values=thesaurus_values,
         drift_probe=UwaziDriftProbe(api.client),
         publish_state=UwaziPublishStateRepository(api.client),
         relationship_hubs=UwaziRelationshipHubs(api.client),

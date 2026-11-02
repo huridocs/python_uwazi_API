@@ -27,6 +27,11 @@ Operating model:
   relationships to their before-state.
 - **Raw fidelity**: backup/restore use raw entity dicts, not validated models,
   so round-tripping drops no fields.
+- **Per-instance state**: the admin agent can target SEVERAL Uwazi instances
+  (``UWAZI_URL`` holds one url or a comma-separated list). Every instance owns
+  its own tree under ``data/instances/<slug>/`` — its active-run pointer, its
+  prompts, its runs, its tasks and its suggestions database — so a run, a task
+  or a review row never crosses instances.
 
 This package reuses ``uwazi_agent``'s tools/ports/adapters (imported, not
 copied) and depends on ``uwazi_api`` for raw access. It does not modify

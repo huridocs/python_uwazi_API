@@ -108,18 +108,71 @@ def test_set_publish_status_value_follows_the_flag() -> None:
     assert view.sub_values(_sub(op="set_publish_status", property_name=None, proposed=False))[1] == "unpublish"
 
 
-def test_sub_status_vocabulary_maps_applied_to_runned() -> None:
-    assert view.sub_status_label(SuggestionStatus.APPLIED) == "runned"
+def test_sub_status_vocabulary_uses_applied_for_written_rows() -> None:
+    assert view.sub_status_label(SuggestionStatus.APPLIED) == "applied"
     assert view.sub_status_color(SuggestionStatus.APPLIED) == "blue"
     assert view.sub_status_label(SuggestionStatus.DISCARDED) == "discarded"
     assert view.sub_status_label(SuggestionStatus.REVERTED) == "reverted"
 
 
+def test_sub_status_vocabulary_keeps_only_pending_applied_and_reverted() -> None:
+    """A recorded row is stored ACCEPTED and an edit EDITED: both still wait to
+    run, so the badge reads "pending" instead of the retired accept/edit words."""
+    assert view.sub_status_label(SuggestionStatus.PENDING) == "pending"
+    assert view.sub_status_label(SuggestionStatus.ACCEPTED) == "pending"
+    assert view.sub_status_label(SuggestionStatus.EDITED) == "pending"
+    assert view.sub_status_color(SuggestionStatus.ACCEPTED) == "grey"
+    assert view.sub_status_color(SuggestionStatus.EDITED) == "grey"
+
+
 def test_operation_status_is_derived_from_its_parts() -> None:
-    assert view.operation_status([{"status": "runned"}, {"status": "runned"}]) == "runned"
+    assert view.operation_status([{"status": "applied"}, {"status": "applied"}]) == "applied"
     assert view.operation_status([{"status": "discarded"}, {"status": "discarded"}]) == "discarded"
-    assert view.operation_status([{"status": "runned"}, {"status": "pending"}]) == "pending"
+    assert view.operation_status([{"status": "reverted"}, {"status": "reverted"}]) == "reverted"
+    assert view.operation_status([{"status": "applied"}, {"status": "pending"}]) == "pending"
     assert view.operation_status([]) == "pending"
+
+
+def test_only_pending_and_reverted_parts_are_selectable() -> None:
+    """An applied/discarded/obsolete part is visible but cannot inflate Run (N)."""
+    pending = view.suboperation_row(_sub(1, status=SuggestionStatus.PENDING), checked=True, in_place=True)
+    reverted = view.suboperation_row(_sub(2, status=SuggestionStatus.REVERTED), checked=True, in_place=True)
+    applied = view.suboperation_row(_sub(3, status=SuggestionStatus.APPLIED), checked=True, in_place=True)
+    discarded = view.suboperation_row(_sub(4, status=SuggestionStatus.DISCARDED), checked=True, in_place=True)
+    obsolete = view.suboperation_row(_sub(5, status=SuggestionStatus.OBSOLETE), checked=True, in_place=True)
+
+    assert (pending["runnable"], pending["selectable"], pending["checked"]) == (True, True, True)
+    assert (reverted["runnable"], reverted["selectable"], reverted["checked"]) == (True, True, True)
+    assert (applied["runnable"], applied["selectable"], applied["checked"]) == (False, False, False)
+    assert (discarded["runnable"], discarded["selectable"], discarded["checked"]) == (False, False, False)
+    assert (obsolete["runnable"], obsolete["selectable"], obsolete["checked"]) == (False, False, False)
+    assert applied["note"] == "already applied — revert it first"
+    assert discarded["note"] == "discarded — restore it first"
+    assert obsolete["note"] == "obsolete — refresh the table"
+
+
+def test_a_locked_part_stays_independently_unselectable() -> None:
+    """A delete part runs with its operation even when that operation is runnable."""
+    locked = view.suboperation_row(
+        _sub(1, op="delete", property_name=None, language=None, status=SuggestionStatus.PENDING),
+        checked=False,
+        in_place=False,
+    )
+
+    assert locked["runnable"] is True
+    assert locked["independent"] is False
+    assert locked["selectable"] is False
+
+
+def test_operation_row_exposes_whether_any_part_is_runnable() -> None:
+    item = _operation([_sub(1, status=SuggestionStatus.APPLIED)], applied=1)
+    applied = view.operation_row(item)
+
+    pending_item = _operation([_sub(2, status=SuggestionStatus.PENDING)], applied=0)
+    pending = view.operation_row(pending_item)
+
+    assert applied["has_runnable"] is False
+    assert pending["has_runnable"] is True
 
 
 def test_validated_counts_only_checkable_parts() -> None:
@@ -152,15 +205,24 @@ def test_operation_row_combines_parts_and_derives_the_parent_badge() -> None:
     )
     row = view.operation_row(item, checked_ids=[1, 2], uwazi_url="https://uwazi.example")
     assert row["row_key"] == "entity-a"
-    assert row["run_status"] == "runned"
-    assert row["validated"] == "2/2"
+    assert row["run_status"] == "applied"
+    # Applied parts are not checkable any more: Run would refuse them.
+    assert row["validated"] == "n/a"
     assert row["revertable"] is True
     assert row["url"] == "https://uwazi.example/en/entity/entity-a"
     assert [sub["language"] for sub in row["subs"]] == ["en", "es"]
 
-    partial = view.operation_row(item, checked_ids=[1])
+    pending_item = _operation(
+        [
+            _sub(3, status=SuggestionStatus.PENDING, match=True),
+            _sub(4, status=SuggestionStatus.PENDING, language="es", match=True),
+        ]
+    )
+    pending = view.operation_row(pending_item, checked_ids=[3, 4])
+    assert pending["validated"] == "2/2"
+    partial = view.operation_row(pending_item, checked_ids=[3])
     assert partial["validated"] == "1/2"
-    assert partial["run_status"] == "runned"
+    assert partial["run_status"] == "pending"
 
 
 def test_operation_row_locks_the_parts_of_a_delete() -> None:
@@ -172,6 +234,29 @@ def test_operation_row_locks_the_parts_of_a_delete() -> None:
     assert row["validated"] == "n/a"
     assert row["revertable"] is False
     assert row["url"] is None
+
+
+def test_sub_values_render_a_date_property_as_a_calendar_date() -> None:
+    sub = _sub(proposed=1700086400, current=1700000000)
+
+    current, proposed = view.sub_values(sub, {"document_ref": "date"})
+
+    assert (current, proposed) == ("2023-11-14", "2023-11-15")
+
+
+def test_sub_values_without_types_keep_the_raw_value() -> None:
+    sub = _sub(proposed=1700086400, current=1700000000)
+
+    assert view.sub_values(sub) == ("1700000000", "1700086400")
+
+
+def test_operation_row_renders_date_suboperations_with_the_template_types() -> None:
+    item = _operation([_sub(1, proposed=1700000000, current=1690000000)])
+
+    row = view.operation_row(item, checked_ids=[1], types={"document_ref": "date"})
+
+    assert row["subs"][0]["current"] == "2023-07-22"
+    assert row["subs"][0]["proposed"] == "2023-11-14"
 
 
 def test_refs_helpers_deduplicate_and_keep_order() -> None:
@@ -242,3 +327,30 @@ def test_create_merge_operation_is_not_revertable_from_its_row() -> None:
 
     assert row["revertable"] is False
     assert [sub["revertable"] for sub in row["subs"]] == [False]
+
+
+# --- multiselect value-level payload ------------------------------------------
+
+
+def test_suboperation_row_carries_multiselect_value_decisions() -> None:
+    sub = _sub(1, property_name="keywords", proposed=["A", "B"])
+    sub = sub.model_copy(update={"rejected_values": ["B"]})
+    row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
+    assert row["select_type"] == "multiselect"
+    assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": False}]
+    assert row["has_rejected"] is True
+
+
+def test_suboperation_row_values_are_empty_for_a_text_row() -> None:
+    sub = _sub(1, property_name="excerpt", proposed="new text")
+    row = view.suboperation_row(sub, checked=True, in_place=True, types={"excerpt": "text"})
+    assert row["values"] == []
+    assert row["has_rejected"] is False
+    assert row["select_type"] is None
+
+
+def test_suboperation_row_multiselect_without_rejections_reads_all_accepted() -> None:
+    sub = _sub(1, property_name="keywords", proposed=["A", "B"])
+    row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
+    assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": True}]
+    assert row["has_rejected"] is False

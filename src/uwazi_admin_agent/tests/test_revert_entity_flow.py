@@ -343,4 +343,4 @@ def test_revert_merge_confirmation_names_the_recreated_sources_and_the_copied_fi
     assert "Restore T to its backup made 2026-02-03 10:05" in message
     assert "source entities this merge absorbed are re-created" in message
     assert "new sharedIds" in message
-    assert "copied onto the target stay on it" in message
+    assert "copied onto the target are removed again" in message

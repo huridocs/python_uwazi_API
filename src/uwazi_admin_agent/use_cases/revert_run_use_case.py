@@ -25,6 +25,15 @@ case drops the re-upload targets' cached raws itself after the uploads
 repopulate lazily; ``None`` = cache disabled = no-op, the existing
 convention).
 
+A MERGE additionally copied its sources' files onto the target (a fresh upload
+row per file, not an entity-row change). The revert removes those rows after the
+ordered restores: each candidate must match an absorbed source file's identity,
+sit inside the run's time window (or be absent from the target's own snapshot),
+and hash to the same sha256 as the source's backed-up bytes. Anything it cannot
+prove is a copy is kept. This also covers a file-only merge, whose target has no
+snapshot at all — the review row's ``merge_source_ids`` is the only record that
+the copy belongs to the run.
+
 Testable with an in-memory repo + in-memory backup store (the DoD's "with an
 in-memory repo").
 """
@@ -39,9 +48,20 @@ from loguru import logger
 from uwazi_admin_agent.domain.audit_record import AuditOutcome, AuditStep, make_audit_record
 from uwazi_admin_agent.domain.connection_hubs import remap_hub_rows, rows_to_delete
 from uwazi_admin_agent.domain.create_payload import strip_deleted_entity_refs
-from uwazi_admin_agent.domain.file_restore import build_file_restore_actions
+from uwazi_admin_agent.domain.file_dedupe import file_digest
+from uwazi_admin_agent.domain.file_restore import (
+    build_file_restore_actions,
+    extract_file_refs,
+    merge_copy_candidates,
+)
 from uwazi_admin_agent.domain.manifest import RunStatus
-from uwazi_admin_agent.domain.property_restore import property_restore_payload, snapshot_row_raw
+from uwazi_admin_agent.domain.property_restore import (
+    property_restore_payload,
+    restore_row_language,
+    row_snapshot_for_language,
+    snapshot_restore_payload,
+    snapshot_row_raw,
+)
 from uwazi_admin_agent.domain.relationship_restore import (
     InboundRef,
     remap_metadata_refs,
@@ -59,8 +79,8 @@ from uwazi_admin_agent.domain.revert import (
 )
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError, decide_revert_gate
 from uwazi_admin_agent.domain.review_refresh import restored_value
-from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
-from uwazi_admin_agent.domain.suggestion import SuggestionStatus, is_revertable_merge
+from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
+from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, SuggestionStatus, is_revertable_merge
 from uwazi_admin_agent.domain.suggestion_scoring import compare_values
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -147,6 +167,15 @@ class RevertRunUseCase:
             self._emit_run(AuditOutcome.FAILURE, run_id)
             logger.error("revert failed run={} at={} error={}", run_id, op_kind, exc)
             raise
+
+        # A merge's file move is NOT entity state: it re-uploads the sources'
+        # files onto the target, and the restore of a (possibly property-scoped)
+        # target snapshot cannot drop those file rows. Remove the copies now,
+        # after the ordered restores/re-creates, so their sources' bytes are
+        # still available to verify each copy before deleting it. Best-effort:
+        # a cleanup failure leaves the copy visible, never fails the revert.
+        for merge_target, merge_sources in self._run_merge_pairs(run_id):
+            await self._discard_merge_copies(run_id, merge_target, merge_sources, manifest)
 
         # Persist any restored_shared_id mappings recorded during re-creates so
         manifest.last_executed_at = datetime.now(timezone.utc)
@@ -241,7 +270,10 @@ class RevertRunUseCase:
             )
         self._emit(run_id, "restore_entity", [shared_id])
         logger.info("revert entity: run={} sharedId={} languages={}", run_id, shared_id, [r.language for r in snapshot.rows])
+        manifest.mark_reverted([shared_id])
+        self._backup_store.save_manifest(run_id, manifest)
         self._flip_rows_reverted(run_id, [shared_id])
+        self._finalize_partial_revert(run_id, manifest)
         return snapshot
 
     def _merge_sources(self, run_id: str, shared_id: str) -> list[str]:
@@ -252,6 +284,12 @@ class RevertRunUseCase:
         :func:`~uwazi_admin_agent.domain.suggestion_scoring.merge_operations`),
         so the APPLIED rows of this entity are the record of which entities the
         merge deleted.
+
+        A merge row that is already REVERTED is read too: its source re-create
+        is checkpointed on the manifest (so re-running is safe), and the file
+        cleanup may be the half an older build's partial revert missed. That is
+        what lets a second click on the row finish the undo instead of
+        reporting "no backup".
 
         Only ``update_and_delete`` is handled here. A ``create_and_delete``
         target's review row carries the ``dry-created-N`` placeholder, not the
@@ -265,6 +303,13 @@ class RevertRunUseCase:
         except Exception as exc:  # noqa: BLE001 — no rows is not an error: the plain undo still works
             logger.warning("revert: could not read the review rows of {}: {}", shared_id, exc)
             return []
+        if not any(is_revertable_merge(row) for row in rows):
+            try:
+                reverted_rows = self._suggestion_store.get_entity(run_id, shared_id)
+            except Exception as exc:  # noqa: BLE001 — wording/finish path only; the plain undo still works
+                logger.warning("revert: could not read the reverted rows of {}: {}", shared_id, exc)
+                return []
+            rows = [row for row in reverted_rows if row.status in {SuggestionStatus.APPLIED, SuggestionStatus.REVERTED}]
         sources: list[str] = []
         for row in rows:
             if not is_revertable_merge(row):
@@ -273,6 +318,37 @@ class RevertRunUseCase:
                 if source and source != shared_id and source not in sources:
                     sources.append(source)
         return sources
+
+    def _run_merge_pairs(self, run_id: str) -> list[tuple[str, list[str]]]:
+        """The run's ``(target, sources)`` merge pairs, from its APPLIED review rows.
+
+        The manifest records the target's write and the sources' deletes, but
+        not that they were ONE merge — the review row does (``update_and_delete``
+        carries ``merge_source_ids``). A script-run merge whose target was never
+        written has no target snapshot at all, so this row is the only record
+        that the copies on the target belong to the run. Empty without a store or
+        a file repository (nothing to pair/delete) or on a store failure: the
+        ordinary revert still runs.
+        """
+        if self._suggestion_store is None or self._file_repository is None:
+            return []
+        try:
+            rows = self._suggestion_store.applied_rows_for(run_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort; the entity restores still run
+            logger.warning("revert: could not read the merge rows of run {}: {}", run_id, exc)
+            return []
+        order: list[str] = []
+        sources_by_target: dict[str, list[str]] = {}
+        for row in rows:
+            if not is_revertable_merge(row):
+                continue
+            if row.shared_id not in sources_by_target:
+                sources_by_target[row.shared_id] = []
+                order.append(row.shared_id)
+            for source in row.merge_source_ids:
+                if source and source != row.shared_id and source not in sources_by_target[row.shared_id]:
+                    sources_by_target[row.shared_id].append(source)
+        return [(target, sources_by_target[target]) for target in order if sources_by_target[target]]
 
     async def _revert_merge(self, run_id: str, target: str, sources: list[str], manifest: Any) -> EntitySnapshot | None:
         """Undo ONE merge row: restore the target AND re-create the sources it absorbed.
@@ -284,9 +360,11 @@ class RevertRunUseCase:
         its own snapshot (new sharedId, files re-uploaded), and the relationship
         refs the delete cascade stripped, re-applied once both endpoints exist.
 
-        Residual, and the UI says so: a file the merge COPIED onto the target
-        stays there — Uwazi's raw restore cannot remove file rows, the same
-        limit the run-level revert has.
+        The merge ALSO copied the sources' files onto the target, and that copy
+        is not entity state: Uwazi joins the files collection into every raw, so
+        the target's (often property-scoped) snapshot cannot drop the appended
+        rows. After the restores, :meth:`_discard_merge_copies` deletes each
+        copy whose bytes it can trace back to an absorbed source.
         """
         scope = {target, *sources}
         actions = build_revert_actions(
@@ -297,11 +375,16 @@ class RevertRunUseCase:
         )
         for action in actions:
             await self._execute_action(action, run_id, manifest)
+        await self._discard_merge_copies(run_id, target, sources, manifest)
         # The re-creates checkpointed their new sharedIds as they went; persist
-        # the manifest once more so the run's record matches what landed.
+        # the manifest once more so the run's record matches what landed. The
+        # whole merge scope (target + re-created sources) is outstanding no
+        # more, so the table's counts drop all of them.
+        manifest.mark_reverted([target, *sources])
         self._backup_store.save_manifest(run_id, manifest)
         logger.info("revert merge: run={} target={} sources={}", run_id, target, sources)
         self._flip_rows_reverted(run_id, [target, *sources])
+        self._finalize_partial_revert(run_id, manifest)
         # The undo covered several entities, so report any snapshot it restored.
         # The target comes first (a target write is the usual case), but a
         # file-only merge writes NOTHING to its target — the review row is the
@@ -314,6 +397,202 @@ class RevertRunUseCase:
             except FileNotFoundError:
                 continue
         return None
+
+    async def _discard_merge_copies(self, run_id: str, target: str, sources: list[str], manifest: Any) -> None:
+        """Delete the files a merge copied onto ``target``, verified byte-for-byte (best-effort).
+
+        Why this cannot ride the snapshot: a merge's file move re-uploads each
+        source's document/uploaded attachment to the target, and Uwazi's
+        ``documents``/``attachments`` are a join over the separate files
+        collection, not entity-row fields. A raw restore (``save_raw``) cannot
+        remove a row it never listed, and the property-scoped target snapshot
+        used by the review-path merge does not record files at all — that is
+        exactly how a revert left the append behind.
+
+        Safety is layered so an operator's unrelated upload is never destroyed:
+
+        1. candidates come from :func:`merge_copy_candidates` — same
+           ``(kind, originalname, size)`` as an absorbed source file, not a file
+           the target's own snapshot recorded, and created inside the run
+           window when no before-state exists;
+        2. each candidate's LIVE bytes must hash to the same sha256 as one of
+           the source's backed-up bytes (missing bytes = keep, never guess);
+        3. only then is ``delete_file`` called. Uwazi tears the row's derived
+           thumbnail down with its document (``FilesService.delete``).
+
+        Every failure — no file repository, a missing source snapshot/bytes, an
+        unreadable target raw, a rejected delete — is logged/audited and leaves
+        the file in place; the revert itself is never failed by this step.
+        """
+        if self._file_repository is None:
+            return
+        try:
+            deleted_ids = {entry.shared_id for entry in manifest.deleted}
+            source_snapshots = []
+            for source in sources:
+                if source not in deleted_ids:
+                    # The merge row named a source this run did not delete: no
+                    # snapshot, no authoritative before-bytes → nothing to match.
+                    continue
+                try:
+                    source_snapshots.append(self._backup_store.load_snapshot(run_id, source))
+                except FileNotFoundError:
+                    continue
+            if not source_snapshots:
+                return
+
+            source_files = [ref for snap in source_snapshots for ref in self._snapshot_file_refs(snap)]
+            source_digests = self._source_file_digests(run_id, source_snapshots)
+            if not source_digests:
+                logger.warning(
+                    "revert merge: run={} target={} copied files kept (no source bytes backed up)",
+                    run_id,
+                    target,
+                )
+                return
+
+            try:
+                target_snapshot: EntitySnapshot | None = self._backup_store.load_snapshot(run_id, target)
+            except FileNotFoundError:
+                target_snapshot = None
+
+            try:
+                live_raw = await self._entity_repository.get_raw_by_shared_id(
+                    target, self._snapshot_language(target_snapshot)
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup; the revert already landed
+                logger.warning("revert merge: could not read target {} to remove copied files: {}", target, exc)
+                return
+
+            starts = [
+                value
+                for value in (
+                    self._epoch_ms(getattr(manifest, "created_at", None)),
+                    self._epoch_ms(target_snapshot.captured_at) if target_snapshot is not None else None,
+                )
+                if value is not None
+            ]
+            ends = [value for value in (self._epoch_ms(snap.captured_at) for snap in source_snapshots) if value]
+            candidates = merge_copy_candidates(
+                live_raw,
+                source_files=source_files,
+                before_file_ids=self._snapshot_file_ids(target_snapshot),
+                created_after_ms=max(starts) if starts else None,
+                created_before_ms=max(ends) if ends else None,
+            )
+            removed = 0
+            for candidate in candidates:
+                try:
+                    data = await self._file_repository.get_file_bytes(candidate.filename)
+                except Exception as exc:  # noqa: BLE001 — keep the file; verification reports it
+                    self._emit_merge_copy(run_id, target, failed=True, detail=f"fetch {candidate.originalname}: {exc}")
+                    continue
+                if data is None or file_digest(data) not in source_digests:
+                    logger.warning(
+                        "revert merge: kept target file {} ({}) — its bytes match no absorbed-source file",
+                        candidate.file_id,
+                        candidate.originalname,
+                    )
+                    continue
+                if await self._file_repository.delete_file(candidate.file_id):
+                    removed += 1
+                    self._emit_merge_copy(run_id, target, failed=False, detail=candidate.originalname)
+                    logger.info(
+                        "revert merge: removed copied file sharedId={} fileId={} originalname={}",
+                        target,
+                        candidate.file_id,
+                        candidate.originalname,
+                    )
+                else:
+                    self._emit_merge_copy(run_id, target, failed=True, detail=candidate.originalname)
+                    logger.warning(
+                        "revert merge: could not remove copied file sharedId={} fileId={}", target, candidate.file_id
+                    )
+            if removed:
+                # The file join changed; drop the target's cached raw.
+                self._invalidate([target])
+        except Exception as exc:  # noqa: BLE001 — cleanup must never fail the revert
+            logger.warning("revert merge: copied-file cleanup failed target={}: {}", target, exc)
+
+    def _snapshot_file_refs(self, snapshot: EntitySnapshot) -> list[FileRef]:
+        """The uploaded files a snapshot recorded, falling back to its raw."""
+        refs = list(snapshot.files or [])
+        if refs:
+            return refs
+        raw = snapshot.raw if isinstance(snapshot.raw, dict) else {}
+        return extract_file_refs(raw)
+
+    @staticmethod
+    def _snapshot_file_ids(snapshot: EntitySnapshot | None) -> set[str] | None:
+        """The target's file ids BEFORE the run, or None when it never recorded them.
+
+        A whole-entity snapshot carries them in ``files`` and/or in the raw's
+        joined ``documents``/``attachments``; an empty set there is authoritative
+        ("the entity had no files"). A property-scoped snapshot's MINIMAL raw has
+        no file fields and its ``files`` is None, so it cannot say what existed
+        before the merge — None, and the caller falls back to the time window.
+        """
+        if snapshot is None:
+            return None
+        ids: set[str] = {ref.file_id for ref in (snapshot.files or [])}
+        raw = snapshot.raw if isinstance(snapshot.raw, dict) else {}
+        for key in ("documents", "attachments"):
+            entries = raw.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                file_id = entry.get("_id")
+                if isinstance(file_id, str) and file_id:
+                    ids.add(file_id)
+        if ids:
+            return ids
+        return None if snapshot.scope == "property" else set()
+
+    def _source_file_digests(self, run_id: str, source_snapshots: list[EntitySnapshot]) -> set[str]:
+        """The sha256 of every absorbed source file whose bytes the backup holds."""
+        digests: set[str] = set()
+        for snapshot in source_snapshots:
+            for ref in self._snapshot_file_refs(snapshot):
+                try:
+                    data = self._backup_store.load_file_bytes(run_id, snapshot.shared_id, ref.file_id)
+                except Exception as exc:  # noqa: BLE001 — an uncaptured file cannot verify a delete
+                    logger.debug(
+                        "revert merge: source file bytes missing run={} sharedId={} fileId={}: {}",
+                        run_id,
+                        snapshot.shared_id,
+                        ref.file_id,
+                        exc,
+                    )
+                    continue
+                digests.add(file_digest(data))
+        return digests
+
+    @staticmethod
+    def _epoch_ms(value: Any) -> int | None:
+        """A datetime/Uwazi epoch value as integer epoch milliseconds (None when absent)."""
+        if isinstance(value, datetime):
+            return int(value.timestamp() * 1000)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
+    def _emit_merge_copy(self, run_id: str, target: str, *, failed: bool, detail: str | None = None) -> None:
+        """Append one merge-copy cleanup audit record (no-op if no audit log)."""
+        if self._audit_log is None:
+            return
+        self._audit_log.append(
+            run_id,
+            make_audit_record(
+                run_id=run_id,
+                step=AuditStep.REVERT,
+                op_kind="delete_merge_copy_failed" if failed else "delete_merge_copy",
+                shared_ids=[target],
+                outcome=AuditOutcome.FAILURE if failed else AuditOutcome.SUCCESS,
+                detail=detail,
+            ),
+        )
 
     def _flip_rows_reverted(self, run_id: str, shared_ids: list[str]) -> None:
         """Mark the run's APPLIED review rows of ``shared_ids`` REVERTED (best-effort).
@@ -353,6 +632,10 @@ class RevertRunUseCase:
         re-create), exactly like the per-entity path. Only property rows are
         offered by the UI; a whole-entity op has no single key to put back.
 
+        ``language=None`` (a title, a select, a date — a row with no language of
+        its own) targets the row the Run actually wrote: the backup's primary
+        language (see :func:`~uwazi_admin_agent.domain.property_restore.restore_row_language`).
+
         Returns the language row written. When ``suggestion_id`` is given, that
         one row is flipped to REVERTED (the others keep their status: their
         writes are still in Uwazi).
@@ -370,13 +653,18 @@ class RevertRunUseCase:
             snapshot = self._backup_store.load_snapshot(run_id, shared_id)
         except FileNotFoundError as exc:
             raise RevertRefusedError("this entity has no backup — the run has not written to it") from exc
-        snapshot_raw = snapshot_row_raw(snapshot, language)
+        # A language-independent suboperation (a title, a select, a date) has no
+        # language of its own; the Run wrote it to the default row, and that is
+        # the row the backup captured. Resolve it BEFORE the lookup, or the
+        # backup looks for a language-less row Uwazi never stores and refuses
+        # the undo outright.
+        row_language = restore_row_language(snapshot, language)
+        snapshot_raw = snapshot_row_raw(snapshot, row_language)
         if snapshot_raw is None:
             raise RevertRefusedError(
-                f"the backup has no {language or 'language-independent'} row for this entity, "
-                "so there is nothing to restore in this language"
+                f"the backup has no {row_language} row for this entity, so there is nothing to restore in this language"
             )
-        row_language = language or snapshot.language or "en"
+        self._require_property_covered(snapshot, row_language, property_name)
         try:
             live_raw = await self._entity_repository.get_raw_by_shared_id(shared_id, row_language)
         except RuntimeError as exc:
@@ -402,7 +690,45 @@ class RevertRunUseCase:
                 )
             except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
                 logger.warning("could not mark suboperation {} reverted: {}", suggestion_id, exc)
+        # The entity is outstanding again only while another of its writes is
+        # still APPLIED. A single-property undo that leaves siblings applied
+        # must keep the entity in the table's Modified count.
+        if self._suggestion_store is not None:
+            try:
+                remaining = self._suggestion_store.applied_rows_for(run_id, [shared_id])
+            except Exception as exc:  # noqa: BLE001 — the restore landed; counts stay best-effort
+                logger.warning("could not read the remaining applied rows of {}: {}", shared_id, exc)
+            else:
+                if not remaining:
+                    manifest.mark_reverted([shared_id])
+                    self._backup_store.save_manifest(run_id, manifest)
+        self._finalize_partial_revert(run_id, manifest)
         return row_language
+
+    def _finalize_partial_revert(self, run_id: str, manifest: Any) -> None:
+        """Flip a partially reverted run to REVERTED once no APPLIED row remains.
+
+        A per-entity (or per-property) revert can undo the last outstanding write
+        of a run. The manifest status is what the runs table's badge and counts
+        read, so leaving it EXECUTED made a fully undone run still look executed.
+        When the suggestion store is unwired (a script-only run) or unreadable,
+        the status is left alone — there is no row state to prove the run empty.
+        """
+        if self._suggestion_store is None:
+            return
+        try:
+            remaining = self._suggestion_store.applied_rows_for(run_id)
+        except Exception as exc:  # noqa: BLE001 — a store read must not fail the restore
+            logger.warning("could not read the remaining applied rows of run {}: {}", run_id, exc)
+            return
+        if remaining:
+            return
+        manifest.status = RunStatus.REVERTED
+        manifest.error = None
+        manifest.error_step = None
+        self._backup_store.save_manifest(run_id, manifest)
+        self._emit_run(AuditOutcome.SUCCESS, run_id)
+        logger.info("partial revert completed run={} — no applied rows remain", run_id)
 
     def _mark_rows_reverted(self, run_id: str) -> int:
         """Move the run's APPLIED review rows to REVERTED (best-effort, never fails a revert).
@@ -448,10 +774,11 @@ class RevertRunUseCase:
             snapshot = snapshots[row.shared_id]
             if snapshot is None:
                 continue
-            snapshot_raw = snapshot_row_raw(snapshot, row.language)
+            row_language = restore_row_language(snapshot, row.language)
+            snapshot_raw = snapshot_row_raw(snapshot, row_language)
             if snapshot_raw is None:
                 continue
-            current = restored_value(snapshot_raw, row.property_name, row.language)
+            current = restored_value(snapshot_raw, row.property_name, row_language)
             updates.append((row.id, current, compare_values(row.proposed_value, current)))
         return updates
 
@@ -490,6 +817,14 @@ class RevertRunUseCase:
         snapshot (no ``rows``, captured by an older build) falls back to the
         single ``raw`` — the previous behavior.
 
+        A **property-scoped** snapshot takes a different path on purpose: its
+        rows are MINIMAL raws (identity + title + the touched keys only), so
+        writing them through the whole-row save would clear every property the
+        minimal raw omits. Each row is instead restored with
+        :meth:`EntityRepositoryPort.save_raw_properties`, which posts exactly the
+        captured key set (``[]`` for a property the run created) and leaves the
+        rest of the entity alone. That is both surgical and one request per row.
+
         A row that no longer exists is skipped ONLY when another row of the same
         entity still exists. "Not found" used to be swallowed unconditionally,
         which is how a delete whose revert tried to UPDATE the dead sharedId
@@ -509,6 +844,9 @@ class RevertRunUseCase:
                     raw=snapshot.raw,
                 )
             ]
+        if snapshot.scope == "property":
+            await self._restore_property_rows(snapshot, rows)
+            return
         for row in rows:
             raw = row.raw
             row_lang = row.language or snapshot.language or "en"
@@ -530,6 +868,63 @@ class RevertRunUseCase:
                     f"exists (every language row is gone), so an in-place restore is impossible"
                 ) from exc
             logger.debug("revert: restored row sharedId={} language={}", snapshot.shared_id, row_lang)
+
+    def _require_property_covered(self, snapshot: EntitySnapshot, language: str | None, property_name: str) -> None:
+        """Refuse a suboperation undo the property-scoped snapshot does not cover.
+
+        A property-scoped snapshot captures ONLY the keys the run wrote, and the
+        single-property undo treats "absent from the backup" as "did not exist
+        before" — i.e. it REMOVES the key. That is right for a key the run
+        wrote and wrong for every other key, so a row the snapshot does not
+        cover must be refused instead of silently deleting a live value.
+        """
+        if snapshot.scope != "property":
+            return
+        row = row_snapshot_for_language(snapshot, language)
+        if row is None:
+            return
+        if property_name == TITLE_PROPERTY or property_name in row.touched_properties:
+            return
+        raise RevertRefusedError(
+            f"this backup covers only the properties the run wrote; {property_name!r} was not one of them "
+            "(revert the entity instead)"
+        )
+
+    async def _restore_property_rows(self, snapshot: EntitySnapshot, rows: list[EntityRowSnapshot]) -> None:
+        """Put back only the properties a property-scoped snapshot captured.
+
+        One ``POST /api/entities`` per captured row, carrying the exact key set
+        the run wrote (see :func:`snapshot_restore_payload`). No explicit-clears
+        pass, no index wait — the payload IS the restore set, so every property
+        the run never touched is left exactly as it is. The repository reads the
+        live row to echo its ``documents``/``attachments`` back (Uwazi deletes
+        every file the update body does not re-list), which keeps the restore
+        surgical AND non-destructive.
+
+        A row whose entity is gone is fatal, like the whole-row path: a
+        property restore cannot resurrect a deleted entity, and reporting
+        success over one is how a run flipped to REVERTED while the entity
+        stayed gone.
+        """
+        for row in rows:
+            payload = snapshot_restore_payload(snapshot.shared_id, row)
+            try:
+                await self._entity_repository.save_raw_properties(payload)
+            except NotImplementedError as exc:
+                # There is no safe fallback: the whole-row save clears every
+                # property the payload omits, and this payload omits every
+                # property the run never touched. Refusing is the only honest
+                # outcome.
+                raise RuntimeError(
+                    f"revert cannot restore the property-scoped snapshot of {snapshot.shared_id!r}: "
+                    "the wired entity repository does not support property-scoped saves"
+                ) from exc
+            logger.debug(
+                "revert: restored {} propert(ies) sharedId={} language={}",
+                len(row.touched_properties),
+                snapshot.shared_id,
+                row.language,
+            )
 
     async def _entity_has_any_row(self, snapshot: EntitySnapshot, rows: list[EntityRowSnapshot]) -> bool:
         """True when at least one language row of ``snapshot``'s entity is readable.
@@ -920,6 +1315,17 @@ class RevertRunUseCase:
                     "revert: file bytes missing run={} old={} fileId={}: {}", run_id, old_shared_id, act.file_id, exc
                 )
                 continue
+            if await self._file_already_present(new_shared_id, act, data):
+                # A resumed/older revert (or a crash between upload and checkpoint)
+                # may already have put this file on the re-created entity. Re-uploading
+                # would mint a duplicate, so treat it as restored.
+                self._mark_file_restored(run_id, snapshot, act.file_id)
+                logger.info(
+                    "revert: file already present on re-created sharedId={} originalname={}",
+                    new_shared_id,
+                    act.originalname,
+                )
+                continue
             ok = await self._upload_one(act, data, new_shared_id)
             if ok:
                 self._mark_file_restored(run_id, snapshot, act.file_id)
@@ -933,17 +1339,55 @@ class RevertRunUseCase:
         # under the fresh sharedId, but uploads alone would leave a stale entry).
         self._invalidate([new_shared_id])
 
+    async def _file_already_present(self, shared_id: str, action: Any, data: bytes) -> bool:
+        """True when the re-created entity already joins this exact content.
+
+        The revert checkpoint marks each successful upload, but a crash between
+        the upload and the checkpoint (and snapshots written by older builds)
+        can leave a file on the entity with ``restored=False``. Blindly
+        re-uploading would duplicate it, so the live raw is checked by identity
+        (kind/originalname/size) and then by sha256 — the same no-loss test the
+        merge mover uses. A read/fetch failure reads as "absent" (upload).
+        """
+        assert self._file_repository is not None  # guarded by _restore_files
+        kind = "document" if action.kind == "upload_document" else "attachment"
+        try:
+            raw = await self._entity_repository.get_raw_by_shared_id(shared_id, None)
+        except Exception:  # noqa: BLE001 — cannot prove it is present; the upload proceeds
+            return False
+        digest = file_digest(data)
+        for ref in extract_file_refs(raw):
+            if ref.kind != kind or ref.originalname != action.originalname:
+                continue
+            if ref.size is not None and ref.size != len(data):
+                continue
+            try:
+                existing = await self._file_repository.get_file_bytes(ref.filename)
+            except Exception:  # noqa: BLE001 — unreadable candidate is not a confirmed duplicate
+                continue
+            if existing is not None and file_digest(existing) == digest:
+                return True
+        return False
+
     def _mark_file_restored(self, run_id: str, snapshot: Any, file_id: str) -> None:
         """Checkpoint one successfully re-uploaded file back into the snapshot.
 
         Marks the matching :class:`FileRef` ``restored`` and re-saves the snapshot
         so a resumed revert skips it (``_restore_files`` filters on ``restored``).
+        Re-reads the persisted snapshot first: one revert marks SEVERAL files in
+        turn, and saving the action-time copy each time would overwrite the
+        previous flags (a resumed revert then re-uploads and duplicates them).
         Only the additive ``files`` metadata list is touched — the snapshot's
         ``raw`` is never mutated (raw fidelity).
         """
-        files = snapshot.files or []
+        latest = snapshot
+        try:
+            latest = self._backup_store.load_snapshot(run_id, snapshot.shared_id)
+        except FileNotFoundError:
+            pass
+        files = latest.files or []
         updated = [ref.model_copy(update={"restored": True}) if ref.file_id == file_id else ref for ref in files]
-        self._backup_store.save_snapshot(run_id, snapshot.model_copy(update={"files": updated}))
+        self._backup_store.save_snapshot(run_id, latest.model_copy(update={"files": updated}))
 
     async def _upload_one(self, action: Any, data: bytes, new_shared_id: str) -> bool:
         """Dispatch one file-restore action to the file repository."""

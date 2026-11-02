@@ -134,6 +134,17 @@ class MigrationManifest(BaseModel):
             "snapshot parsing. Empty for runs executed before this field existed."
         ),
     )
+    reverted_shared_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Entities whose writes a PER-ENTITY or PER-PROPERTY revert already undid. "
+            "The touch-set lists above stay intact (they are the run's audit/verification "
+            "record), so the table's counts subtract this set: a partial revert must "
+            "lower 'Modified' without erasing the backup that a later run-level revert "
+            "still uses. Cleared for an entity when a later Run writes it again, and "
+            "cleared wholesale by reset_touch_set() on re-execute after a full revert."
+        ),
+    )
     status: RunStatus = Field(default=RunStatus.PLANNED, description="Current run status.")
     last_executed_at: datetime | None = Field(
         default=None,
@@ -174,4 +185,49 @@ class MigrationManifest(BaseModel):
         self.deleted = []
         self.deleted_files = []
         self.applied_writes = []
+        self.reverted_shared_ids = []
         self.result = None
+
+    def touch_counts(self) -> tuple[int, int, int, int]:
+        """``(modified, deleted, created, rewired)`` still outstanding, for the table.
+
+        A fully reverted run has no live changes, so every count is zero. A
+        PARTIAL revert keeps the manifest's touch set (revert/verification still
+        need it) but records the restored entities in ``reverted_shared_ids``;
+        those are subtracted here so the table reflects the writes that are
+        still in Uwazi, not the ones the run ever made.
+        """
+        if self.status == RunStatus.REVERTED:
+            return 0, 0, 0, 0
+        reverted = set(self.reverted_shared_ids)
+        return (
+            sum(1 for entry in self.modified if entry.shared_id not in reverted),
+            sum(1 for entry in self.deleted if entry.shared_id not in reverted),
+            sum(1 for entry in self.created if entry.shared_id not in reverted),
+            sum(1 for entry in self.rewired if entry.entity.shared_id not in reverted),
+        )
+
+    def mark_reverted(self, shared_ids: list[str]) -> None:
+        """Record entities whose writes a partial revert has already undone.
+
+        Idempotent and order-preserving. The touch-set lists are NOT touched —
+        they remain the record a later run-level revert and post-revert
+        verification read.
+        """
+        known = set(self.reverted_shared_ids)
+        for shared_id in shared_ids:
+            if shared_id and shared_id not in known:
+                self.reverted_shared_ids.append(shared_id)
+                known.add(shared_id)
+
+    def mark_written(self, shared_ids: list[str]) -> None:
+        """Drop entities a new Run wrote again from the reverted set.
+
+        An entity re-written after a partial revert is outstanding again, so it
+        must count in the table even though the earlier restore already marked
+        it reverted.
+        """
+        written = set(shared_ids)
+        if not written:
+            return
+        self.reverted_shared_ids = [shared_id for shared_id in self.reverted_shared_ids if shared_id not in written]

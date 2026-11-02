@@ -15,6 +15,8 @@ exactly what the operator sees.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +25,16 @@ from uwazi_admin_agent.domain.manifest import AppliedWrite
 
 # Display truncation, matching ``_format_value`` in the web driver.
 MAX_VALUE_CHARS: int = 200
+
+# Uwazi property types whose stored value is a numeric timestamp (seconds).
+DATE_PROPERTY_TYPES: frozenset[str] = frozenset({"date", "daterange", "multidate", "multidaterange"})
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A value at/above this magnitude is milliseconds rather than seconds. Uwazi
+# stores date metadata in SECONDS (its UI multiplies by 1000), but accepting
+# milliseconds too keeps a stray legacy/imported value readable instead of
+# printing a 1970 date.
+_MILLISECONDS_THRESHOLD = 100_000_000_000
 
 
 class PropertyChange(BaseModel):
@@ -46,6 +58,80 @@ def render_metadata_value(value: Any) -> str:
     paragraph instead of one clipped line.
     """
     return _render(value)
+
+
+def render_property_value(value: Any, property_type: str | None = None) -> str:
+    """Render one property value for display, using its template TYPE (pure).
+
+    Date properties are stored as numeric timestamps (Uwazi's own UI formats
+    them as calendar dates), so rendering them through the generic
+    :func:`render_metadata_value` leaks a raw epoch number into the review
+    table. The type decides: date/daterange/multidate/multidaterange values
+    become ``YYYY-MM-DD`` text; every other type keeps the generic rendering.
+    """
+    if property_type in DATE_PROPERTY_TYPES:
+        return _render_dates(value)
+    return _render(value)
+
+
+def format_property_value(value: Any, property_type: str | None = None) -> str:
+    """Single-line, truncated :func:`render_property_value` (pure)."""
+    text = render_property_value(value, property_type)
+    return text if len(text) <= MAX_VALUE_CHARS else text[:MAX_VALUE_CHARS] + "…"
+
+
+def _render_dates(value: Any) -> str:
+    """Render a date-typed value (its Uwazi list/dict shape) as calendar text."""
+    if value is None:
+        return "—"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_render_dates(item) for item in value)
+    if isinstance(value, dict):
+        if "from" in value or "to" in value:
+            start = _format_timestamp(value.get("from"))
+            end = _format_timestamp(value.get("to"))
+            return f"{start} → {end}"
+        if "value" in value:
+            return _render_dates(value["value"])
+        if value.get("label") is not None:
+            return str(value["label"])
+        return str(value)
+    return _format_timestamp(value)
+
+
+def _format_timestamp(value: Any) -> str:
+    """Format one Uwazi timestamp (seconds since epoch) as ``YYYY-MM-DD`` (pure).
+
+    Values that are already ISO date strings pass through unchanged; numeric
+    strings and millisecond timestamps are accepted too. Anything unparseable
+    is rendered verbatim rather than hidden, so a bad value stays diagnosable.
+    """
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return _timestamp_to_date(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return "—"
+        if _ISO_DATE.match(text):
+            return text
+        try:
+            return _timestamp_to_date(float(text))
+        except ValueError:
+            return text
+    return str(value)
+
+
+def _timestamp_to_date(value: float) -> str:
+    """Convert a seconds (or milliseconds) epoch value to a UTC calendar date."""
+    seconds = value / 1000 if abs(value) >= _MILLISECONDS_THRESHOLD else value
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return str(value)
 
 
 def format_metadata_value(value: Any) -> str:
@@ -116,9 +202,12 @@ def build_property_changes(write: AppliedWrite) -> list[PropertyChange]:
 
 
 __all__ = [
+    "DATE_PROPERTY_TYPES",
     "MAX_VALUE_CHARS",
     "PropertyChange",
     "build_property_changes",
     "format_metadata_value",
+    "format_property_value",
     "render_metadata_value",
+    "render_property_value",
 ]

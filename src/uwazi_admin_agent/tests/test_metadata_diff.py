@@ -6,7 +6,13 @@ No I/O, no mocks: :func:`build_property_changes` and
 """
 
 from uwazi_admin_agent.domain.manifest import AppliedWrite, MigrationManifest
-from uwazi_admin_agent.domain.metadata_diff import build_property_changes, format_metadata_value, render_metadata_value
+from uwazi_admin_agent.domain.metadata_diff import (
+    build_property_changes,
+    format_metadata_value,
+    format_property_value,
+    render_metadata_value,
+    render_property_value,
+)
 
 
 def _write(**kwargs: object) -> AppliedWrite:
@@ -87,6 +93,40 @@ def test_render_metadata_value_keeps_the_whole_paragraph() -> None:
     assert render_metadata_value(paragraph) == paragraph
     assert render_metadata_value([{"value": paragraph}]) == paragraph
     assert render_metadata_value(None) == "—"
+
+
+def test_render_property_value_formats_a_date_timestamp_in_seconds() -> None:
+    """Uwazi stores date metadata in seconds; the table shows a calendar date."""
+    assert render_property_value([{"value": 1700000000}], "date") == "2023-11-14"
+    assert format_property_value(1700000000, "date") == "2023-11-14"
+
+
+def test_render_property_value_accepts_millisecond_timestamps() -> None:
+    assert render_property_value(1700000000000, "date") == "2023-11-14"
+    assert render_property_value([{"value": 1700000000000}], "multidate") == "2023-11-14"
+
+
+def test_render_property_value_formats_a_daterange() -> None:
+    value = [{"value": {"from": 1700000000, "to": 1700086400}}]
+
+    assert render_property_value(value, "daterange") == "2023-11-14 → 2023-11-15"
+
+
+def test_render_property_value_formats_multiple_dates() -> None:
+    value = [{"value": 1700000000}, {"value": 1700086400}]
+
+    assert render_property_value(value, "multidate") == "2023-11-14, 2023-11-15"
+
+
+def test_render_property_value_passes_iso_dates_through() -> None:
+    assert render_property_value("2023-11-14", "date") == "2023-11-14"
+    assert render_property_value([{"value": "2023-11-14"}], "date") == "2023-11-14"
+
+
+def test_render_property_value_leaves_non_date_properties_unchanged() -> None:
+    """A numeric property is a number, not an epoch: the type decides."""
+    assert render_property_value(1700000000, "numeric") == "1700000000"
+    assert render_property_value(1700000000, None) == "1700000000"
 
 
 def test_manifest_legacy_load_defaults_applied_writes() -> None:

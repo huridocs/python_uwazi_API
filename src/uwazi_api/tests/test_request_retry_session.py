@@ -1,5 +1,6 @@
 """Isolated tests for the retry session policy and default timeout (no I/O)."""
 
+from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.adapters.request_retry import (
     DEFAULT_TIMEOUT,
     LOGIN_TIMEOUT,
@@ -20,6 +21,43 @@ def test_default_session_keeps_the_maintenance_retry_policy() -> None:
         assert session.get_adapter("https://uwazi.example").max_retries.total == RETRY_TOTAL
     finally:
         session.close()
+
+
+def test_zero_retry_session_answers_the_first_refused_status() -> None:
+    """The no-retry twin the bulk ``multipleupdate`` call rides.
+
+    Its refusal is deterministic — a payload Uwazi's validator crashes on is a
+    500 every time — so riding the maintenance backoff once turned one refused
+    bulk write into ~10 minutes of silent retries before the per-entity
+    fallback could even start. Zero retries keeps the timeout guarantee while
+    the refusal comes back in one round trip.
+    """
+    session = requests_retry_session(retries=0)
+    try:
+        assert isinstance(session, TimeoutSession)
+        retries = session.get_adapter("https://uwazi.example").max_retries
+        # urllib3 leaves the auxiliary counters None when total is 0: the
+        # TOTAL budget is what the retry policy consults.
+        assert retries.total == 0
+    finally:
+        session.close()
+
+
+def test_post_json_routes_retries_per_call() -> None:
+    """The HTTP client carries BOTH sessions; ``post_json`` picks one per call.
+
+    Default requests ride the maintenance-retry adapter; ``retries=False``
+    rides the zero-retry twin (the bulk ``multipleupdate`` write's opt-out).
+    """
+    client = HttpClientAdapter(url="http://localhost:3000")
+    try:
+        fast = client.fast_adapter.get_adapter("https://uwazi.example").max_retries
+        slow = client.request_adapter.get_adapter("https://uwazi.example").max_retries
+        assert fast.total == 0
+        assert slow.total == RETRY_TOTAL
+    finally:
+        client.fast_adapter.close()
+        client.request_adapter.close()
 
 
 def test_default_timeout_is_injected_when_the_caller_sets_none() -> None:

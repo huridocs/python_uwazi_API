@@ -7,17 +7,14 @@ from pathlib import Path
 ROOT_PATH: Path = Path(__file__).parent.parent.parent.resolve()
 DATA_DIR: Path = ROOT_PATH / "data"
 
-# Run mechanism (mirrors ``browser_agent``): ``active_run.yaml`` names the
-# active run; its prompt YAML lives in ``data/prompts/<name>.yaml``; per-run
-# artifacts (prompt snapshot, generated script, manifest, snapshots) live under
-# ``data/runs/<name>/``.
-RUNS_FILE: Path = DATA_DIR / "active_run.yaml"
-PROMPTS_PATH: Path = DATA_DIR / "prompts"
-RUNS_PATH: Path = DATA_DIR / "runs"
-
-# The backup store (``FilesystemBackupStore``) is rooted at ``RUNS_PATH`` so one
-# run = one folder holding prompt snapshot + script + manifest + snapshots
-# (resolved in Phase 5; the Phase-1 ``DEFAULT_STORE_DIR`` placeholder is removed).
+# Per-instance data root. ``UWAZI_URL`` may name ONE instance or a
+# comma-separated LIST of them; every instance gets its own tree under
+# ``data/instances/<slug>/`` (see ``domain/instance_paths.py``):
+# ``active_run.yaml`` names the active run, its prompt YAML lives in
+# ``prompts/<name>.yaml``, per-run artifacts (prompt snapshot, generated
+# script, manifest, snapshots) live under ``runs/<name>/``, tasks in
+# ``tasks/<task_id>.yaml`` and the suggestions in ``suggestions.db``.
+INSTANCE_IDS_DIR: Path = DATA_DIR / "instances"
 
 # Hard cap on LLM requests per script-generation run (passed to pydantic-ai's
 # ``UsageLimits``). Mirrors ``browser_agent``'s ``MAX_LLM_CALLS``; generous because
@@ -143,19 +140,24 @@ SCRIPT_DEFAULT_MAX_REQUESTS: int = 0
 # Rows per page in the review table (server-side pagination over 10k+ rows).
 REVIEW_PAGE_SIZE: int = 25
 
-# The single SQLite file holding every run's predictions (suggestions) and
-# prediction-attempt rows. One DB (not per-run files) because the review grid
-# needs SQL-side filtering/pagination/aggregation over ~10k rows.
-SUGGESTIONS_DB_PATH: Path = DATA_DIR / "suggestions.db"
-
-# Multistep tasks: one YAML per task under this directory.
-TASKS_PATH: Path = DATA_DIR / "tasks"
+# The per-instance SQLite file holding every run's predictions (suggestions)
+# and prediction-attempt rows lives under the instance's own tree
+# (``data/instances/<slug>/suggestions.db``) — one DB (not per-run files)
+# because the review grid needs SQL-side filtering/pagination/aggregation over
+# ~10k rows. Multistep tasks: one YAML per task under the instance's
+# ``tasks/`` directory.
 
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 10000
 
 # Number of entities to apply per batch during execute. Consumed in Phase 5.
 EXECUTE_BATCH_SIZE: int = 50
+
+# Ids per ``POST /api/entities/multipleupdate`` call. Uwazi rejects more than
+# 1000 ("You must provide at most 1000 entity ids for multiple update"), and the
+# endpoint is all-or-nothing per call, so the review table's homogeneous
+# property writes are chunked at this size and fall back per entity on refusal.
+BULK_UPDATE_MAX_IDS: int = 1000
 
 # Default on-error policy for the execute step (Phase 6). Parsed into
 # ``OnErrorPolicy`` by the CLI. "stop" leaves the partial run for the operator

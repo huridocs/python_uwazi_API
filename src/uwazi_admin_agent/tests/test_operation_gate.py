@@ -13,6 +13,7 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
     busy_text,
     progress_text,
     release,
+    set_note,
     set_progress,
     snapshot,
     try_acquire,
@@ -84,6 +85,56 @@ def test_set_progress_is_visible_in_the_snapshot_and_ignored_when_idle() -> None
         _reset_gate()
 
 
+def test_set_progress_note_phases() -> None:
+    _reset_gate()
+    try:
+        try_acquire("run", "r1")
+        # Naming a phase: the note rides the snapshot and the fraction stays
+        # indeterminate (no total yet).
+        set_progress(0, 0, "verifying the selection against Uwazi")
+        busy = snapshot()
+        assert busy is not None
+        assert (busy.done, busy.total) == (0, 0)
+        assert busy.note == "verifying the selection against Uwazi"
+        # A plain fraction tick (no note argument) KEEPS the phase note: the
+        # batch accounting must not wipe what the pass is telling the operator.
+        set_progress(1, 1)
+        busy = snapshot()
+        assert busy is not None
+        assert (busy.done, busy.total) == (1, 1)
+        assert busy.note == "verifying the selection against Uwazi"
+        # The interceptor's note broadcast keeps the fraction and swaps the text.
+        set_progress(1, 1, "bulk write refused — applying per entity")
+        busy = snapshot()
+        assert busy is not None
+        assert busy.note == "bulk write refused — applying per entity"
+        # An empty note clears the phase: the pass is over (or past it).
+        set_progress(1, 1, "")
+        busy = snapshot()
+        assert busy is not None
+        assert busy.note == ""
+    finally:
+        _reset_gate()
+
+
+def test_set_note_publishes_without_moving_the_fraction() -> None:
+    _reset_gate()
+    try:
+        try_acquire("run", "r1")
+        set_progress(7, 9)
+        set_note("bulk write refused — applying per entity")
+        busy = snapshot()
+        assert busy is not None
+        assert (busy.done, busy.total) == (7, 9)
+        assert busy.note == "bulk write refused — applying per entity"
+        # Idle notes are dropped like idle progress.
+        _reset_gate()
+        set_note("orphan")
+        assert snapshot() is None
+    finally:
+        _reset_gate()
+
+
 # --- pure display helpers ----------------------------------------------------
 
 
@@ -107,6 +158,31 @@ def test_active_text_names_the_operation_and_its_units() -> None:
     creating = GateState(kind="creating", run_id="new-task", done=0, total=0, started_at=None)  # type: ignore[arg-type]
     assert active_text(creating) == "Generating…"
     assert active_text(None) == "Uwazi operation in progress…"
+
+
+def test_active_text_appends_the_holder_note() -> None:
+    stated = GateState(
+        kind="run",
+        run_id="migration-7",
+        done=0,
+        total=0,
+        started_at=None,  # type: ignore[arg-type]
+        note="verifying the selection against Uwazi",
+    )
+    text = active_text(stated)
+    assert "Running" in text
+    assert "verifying the selection against Uwazi" in text
+    refused = GateState(
+        kind="run",
+        run_id="migration-7",
+        done=1,
+        total=2,
+        started_at=None,  # type: ignore[arg-type]
+        note="bulk write refused — applying per entity",
+    )
+    text = active_text(refused)
+    assert "1/2 suboperations" in text
+    assert "bulk write refused — applying per entity" in text
 
 
 def test_busy_text_names_the_holder_and_its_live_count() -> None:

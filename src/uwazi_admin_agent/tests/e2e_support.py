@@ -34,7 +34,9 @@ import pytest
 from dotenv import load_dotenv
 from loguru import logger
 
-from uwazi_admin_agent.configuration import RUNS_PATH, TASKS_PATH
+from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+from uwazi_admin_agent.domain.instance import parse_instance_urls
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter
@@ -62,12 +64,22 @@ from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
-UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+# The E2E suite targets ONE instance: the FIRST configured one. The list
+# format is admin-agent-only, so the guard still refuses a non-loopback first
+# instance exactly as before.
+_CONFIGURED = parse_instance_urls(os.getenv("UWAZI_URL", "http://localhost:3000"))
+UWAZI_URL = _CONFIGURED[0] if _CONFIGURED else "http://localhost:3000"
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
 
 DEFAULT_PROPERTY = "notes"
 SECOND_PROPERTY = "summary"
+SELECT_PROPERTY = "keywords"
+
+
+def _paths() -> Any:
+    """The on-disk paths of the instance the E2E suite exercises."""
+    return instance_paths(UWAZI_URL, INSTANCE_IDS_DIR)
 
 
 # --- pure helpers -------------------------------------------------------------
@@ -275,6 +287,8 @@ class AdminE2EWorkspace:
 
         self.client = UwaziClient(user=UWAZI_USER, password=UWAZI_PASSWORD, url=UWAZI_URL)
         self.languages = LanguageProfile.from_client(self.client)
+        self.thesaurus_id: str | None = None
+        self.multiselect_property: str = SELECT_PROPERTY
         self._create_template()
         for index in range(entity_count):
             self.create_entity(index=index)
@@ -288,15 +302,42 @@ class AdminE2EWorkspace:
 
     def _create_template(self) -> None:
         assert self.client is not None
+        # The thesaurus must exist BEFORE the template references it.
+        created_thesaurus = self.client.thesauris.create(
+            name=f"{self.namespace}_thesaurus",
+            values=[{"label": "Alpha"}, {"label": "Beta"}, {"label": "Gamma"}],
+            language=self.languages.default,
+        )
+        self.thesaurus_id = created_thesaurus["_id"]
         template = Template(
             name=self.namespace,
             properties=[
                 PropertySchema(name=DEFAULT_PROPERTY, label="Notes", type=PropertyType.TEXT),
                 PropertySchema(name=SECOND_PROPERTY, label="Summary", type=PropertyType.TEXT),
+                PropertySchema(
+                    name=SELECT_PROPERTY,
+                    # The label is what Uwazi turns into the property NAME
+                    # ("Keywords" sanitises to the globally-unique "keywords"
+                    # and collides with any existing template using it), so it
+                    # is namespaced per workspace and the stored name is read
+                    # back below.
+                    label=f"Keywords {self.namespace}",
+                    type=PropertyType.MULTI_SELECT,
+                    content=self.thesaurus_id,
+                ),
             ],
         )
         created = self.client.templates.set(self.languages.default, template)
         self.template_id = created["_id"]
+        # Uwazi may rename or suffix the property; use whatever the server stored.
+        self.client.templates.clear_cache()
+        stored = self.client.templates.get_by_id(self.template_id)
+        actual_prop = next(
+            (p for p in (stored.properties if stored else []) if p.content == self.thesaurus_id),
+            None,
+        )
+        assert actual_prop is not None, "created template lost its multiselect property"
+        self.multiselect_property = actual_prop.name
 
     def create_entity(self, index: int | None = None) -> str:
         """Create one entity under this workspace's template and wait for search."""
@@ -513,7 +554,7 @@ class AdminE2EWorkspace:
     ) -> ReconciliationSummary:
         """Persist the script + manifest and await the real automatic planning scan."""
         self.run_ids.append(run_id)
-        run_path = RUNS_PATH / run_id
+        run_path = _paths().runs_path / run_id
         run_path.mkdir(parents=True, exist_ok=False)
         script_path = run_path / "script.py"
         script_path.write_text(script, encoding="utf-8")
@@ -525,8 +566,8 @@ class AdminE2EWorkspace:
             status=RunStatus.PLANNED,
             snapshot_dir=str(run_path),
         )
-        build_backup_store().save_manifest(run_id, manifest)
-        return await run_auto_scan(run_id, UWAZI_USER, UWAZI_PASSWORD)
+        build_backup_store(UWAZI_URL).save_manifest(run_id, manifest)
+        return await run_auto_scan(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD)
 
     def seed_run(self, run_id: str, script: str, prompt: str = "deterministic E2E planning pass") -> ReconciliationSummary:
         """Synchronous wrapper for standalone (non-task) seeded runs."""
@@ -538,7 +579,7 @@ class AdminE2EWorkspace:
         return run_id
 
     def manifest(self, run_id: str) -> MigrationManifest:
-        return build_backup_store().load_manifest(run_id)
+        return build_backup_store(UWAZI_URL).load_manifest(run_id)
 
     def status(self, run_id: str) -> RunStatus:
         return self.manifest(run_id).status
@@ -551,7 +592,7 @@ class AdminE2EWorkspace:
         property_name: str | None = None,
         language: str | None = None,
     ) -> list[Suggestion]:
-        rows, _total = build_suggestion_store().query(
+        rows, _total = build_suggestion_store(UWAZI_URL).query(
             run_id,
             SuggestionFilter(limit=1000, include_obsolete=include_obsolete),
         )
@@ -568,24 +609,24 @@ class AdminE2EWorkspace:
     def apply(self, run_id: str, rows: list[Suggestion] | None = None, row_ids: list[int] | None = None) -> list[str]:
         selection = self.selection(run_id, rows)
         assert selection, f"run {run_id} has no runnable rows"
-        return asyncio.run(apply_outcomes(run_id, UWAZI_USER, UWAZI_PASSWORD, selection, row_ids))
+        return asyncio.run(apply_outcomes(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD, selection, row_ids))
 
     def revert(self, run_id: str) -> None:
-        asyncio.run(revert_run(run_id, UWAZI_USER, UWAZI_PASSWORD))
+        asyncio.run(revert_run(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
     def revert_selection(self, run_id: str, selection: list[tuple[str, str | None]]) -> Any:
-        return asyncio.run(revert_entities_selection(run_id, selection, UWAZI_USER, UWAZI_PASSWORD))
+        return asyncio.run(revert_entities_selection(UWAZI_URL, run_id, selection, UWAZI_USER, UWAZI_PASSWORD))
 
     def update_table(self, run_id: str) -> Any:
-        return asyncio.run(update_table_from_uwazi(run_id, UWAZI_USER, UWAZI_PASSWORD))
+        return asyncio.run(update_table_from_uwazi(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
     def preflight(self, run_id: str, rows: list[Suggestion] | None = None) -> Any:
         chosen = self.suggestions(run_id) if rows is None else rows
         ids = [row.id for row in chosen if row.id is not None]
-        return preflight_selection(run_id, ids, UWAZI_USER, UWAZI_PASSWORD)
+        return preflight_selection(UWAZI_URL, run_id, ids, UWAZI_USER, UWAZI_PASSWORD)
 
     def table_update_time(self, run_id: str) -> datetime | None:
-        return get_table_update_time(run_id)
+        return get_table_update_time(UWAZI_URL, run_id)
 
     # --- tasks ---------------------------------------------------------------
 
@@ -598,9 +639,9 @@ class AdminE2EWorkspace:
 
     def _task_use_case(self) -> TaskUseCase:
         return TaskUseCase(
-            task_store=build_task_store(),
-            backup_store=build_backup_store(),
-            revert_run=revert_run,
+            task_store=build_task_store(UWAZI_URL),
+            backup_store=build_backup_store(UWAZI_URL),
+            revert_run=lambda run_id, user, password: revert_run(UWAZI_URL, run_id, user, password),
             create_run=self._seeded_create_run,
         )
 
@@ -646,6 +687,8 @@ class AdminE2EWorkspace:
             known_entities = self._known_entity_ids()
             self._delete_template_entities(problems)
             self._delete_template(problems)
+            if self.thesaurus_id is not None:
+                self._delete_thesaurus(problems)
             for shared_id in sorted(known_entities):
                 for language in self.languages.keys:
                     if self.raw(shared_id, language) is not None:
@@ -653,21 +696,21 @@ class AdminE2EWorkspace:
 
         for task_id in dict.fromkeys(self.task_ids):
             try:
-                build_task_store().delete_task(task_id)
+                build_task_store(UWAZI_URL).delete_task(task_id)
             except Exception as exc:  # noqa: BLE001 - report, never abort remaining cleanup
                 problems.append(f"task {task_id}: {exc!r}")
-            if (TASKS_PATH / f"{task_id}.yaml").exists():
-                problems.append(f"task file still exists: {TASKS_PATH / f'{task_id}.yaml'}")
+            if (_paths().tasks_path / f"{task_id}.yaml").exists():
+                problems.append(f"task file still exists: {_paths().tasks_path / f'{task_id}.yaml'}")
 
         for run_id in dict.fromkeys(self.run_ids):
             try:
-                delete_run(run_id)
+                delete_run(UWAZI_URL, run_id)
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"run {run_id}: {exc!r}")
-            if (RUNS_PATH / run_id).exists():
-                problems.append(f"run folder still exists: {RUNS_PATH / run_id}")
+            if (_paths().runs_path / run_id).exists():
+                problems.append(f"run folder still exists: {_paths().runs_path / run_id}")
             with contextlib.suppress(Exception):
-                if build_suggestion_store().get_pass(run_id):
+                if build_suggestion_store(UWAZI_URL).get_pass(run_id):
                     problems.append(f"suggestion rows still exist for run {run_id}")
 
         if problems:
@@ -678,7 +721,7 @@ class AdminE2EWorkspace:
         ids: set[str] = set()
         for run_id in self.run_ids:
             try:
-                manifest = build_backup_store().load_manifest(run_id)
+                manifest = build_backup_store(UWAZI_URL).load_manifest(run_id)
             except Exception:  # noqa: BLE001 - a never-created step has no manifest
                 continue
             for entry in [*manifest.created, *manifest.deleted]:
@@ -708,6 +751,22 @@ class AdminE2EWorkspace:
                 if "404" not in message and "not found" not in message:
                     problems.append(f"entity {shared_id}: {exc!r}")
 
+    def _delete_thesaurus(self, problems: list[str]) -> None:
+        assert self.client is not None
+        assert self.thesaurus_id is not None
+        try:
+            self.client.thesauris.delete_unassigned(self.thesaurus_id, self.languages.default)
+        except Exception as exc:  # noqa: BLE001 - a 404 is already gone
+            message = str(exc).lower()
+            if "404" not in message and "not found" not in message:
+                problems.append(f"thesaurus {self.thesaurus_id}: {exc!r}")
+        try:
+            self.client.thesauris.clear_cache(self.languages.default)
+            if any(t.id == self.thesaurus_id for t in self.client.thesauris.get(self.languages.default)):
+                problems.append(f"thesaurus {self.thesaurus_id} still exists")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"thesaurus verification failed: {exc!r}")
+
     def _delete_template(self, problems: list[str]) -> None:
         assert self.client is not None
         assert self.template_id is not None
@@ -732,6 +791,7 @@ class AdminE2EWorkspace:
 __all__ = [
     "AdminE2EWorkspace",
     "DEFAULT_PROPERTY",
+    "SELECT_PROPERTY",
     "LanguageProfile",
     "SECOND_PROPERTY",
     "UWAZI_PASSWORD",

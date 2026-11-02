@@ -1,0 +1,319 @@
+.slidev-layout {
+  --shot-border: rgba(255, 255, 255, 0.14);
+}
+
+.hero-shot {
+  display: block;
+  width: 80%;
+  max-height: 200px;
+  object-fit: contain;
+  object-position: top left;
+  margin: 1.6rem auto 0;
+  border-radius: 10px;
+  border: 1px solid var(--shot-border);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+}
+
+.shot {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: cover;
+  object-position: top left;
+  border-radius: 10px;
+  border: 1px solid var(--shot-border);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+}
+
+.shot.wide {
+  max-height: 370px;
+}
+
+.caption {
+  margin-top: 0.75rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  opacity: 0.7;
+}
+
+.two-up {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.two-up figure {
+  margin: 0;
+}
+
+.two-up img {
+  width: 100%;
+  height: 300px;
+  object-fit: cover;
+  object-position: top left;
+  border-radius: 10px;
+  border: 1px solid var(--shot-border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+
+.two-up figcaption {
+  margin-top: 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  opacity: 0.72;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.metric {
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--shot-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.metric-number {
+  font-size: 2.3rem;
+  font-weight: 800;
+  line-height: 1;
+  color: #6ee7b7;
+}
+
+.metric-label {
+  margin-top: 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+}
+
+.metric.small .metric-number {
+  font-size: 1.8rem;
+}
+
+.callout {
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+  border-left: 3px solid #6ee7b7;
+  background: rgba(110, 231, 183, 0.08);
+  border-radius: 0 8px 8px 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.quote-line {
+  margin-top: 1.2rem;
+  font-size: 1.05rem;
+  font-style: italic;
+  opacity: 0.8;
+  border-left: 3px solid #fbbf24;
+  padding-left: 0.9rem;
+}
+
+.pipeline {
+  display: flex;
+  align-items: stretch;
+  gap: 0.7rem;
+  margin-top: 1.2rem;
+}
+
+.pipe-step {
+  flex: 1;
+  padding: 0.9rem;
+  border: 1px solid var(--shot-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.pipe-icon {
+  font-size: 1.5rem;
+}
+
+.pipe-title {
+  margin-top: 0.3rem;
+  font-weight: 700;
+}
+
+.pipe-text {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  opacity: 0.75;
+}
+
+.pipe-arrow {
+  align-self: center;
+  font-size: 1.4rem;
+  opacity: 0.45;
+}
+
+.prompt-card {
+  margin-top: 0.5rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--shot-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.card {
+  padding: 1rem;
+  border: 1px solid var(--shot-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.card h3 {
+  margin: 0.25rem 0 0.4rem;
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.card p {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  opacity: 0.78;
+}
+
+.card-kicker {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #6ee7b7;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+}
+
+.feature {
+  padding: 0.75rem;
+  border: 1px solid var(--shot-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.feature span {
+  display: block;
+  font-size: 1.2rem;
+  margin-bottom: 0.2rem;
+}
+
+.feature strong {
+  color: #bfdbfe;
+}
+
+.big-list {
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.big-list li {
+  margin-bottom: 0.55rem;
+}
+/* The Mokkapps theme adds its author's social footer. Hide it for this deck. */
+footer {
+  display: none !important;
+}
+
+/* Readability overrides for the dark theme. */
+.card h3 {
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 1;
+  color: #dbeafe;
+}
+
+p > code,
+li > code,
+td > code {
+  background: rgba(148, 163, 184, 0.16) !important;
+  color: #dbeafe !important;
+}
+
+.card h3 {
+  color: #dbeafe !important;
+  opacity: 1 !important;
+}
+
+/* Full-bleed screenshot slides for the practical example. */
+.shot.contain {
+  object-fit: contain;
+  max-height: 300px;
+  background: #0b0f14;
+}
+
+.step-shot {
+  position: absolute;
+  inset: 0;
+  background: #0b0f14;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-shot img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.step-label {
+  position: absolute;
+  bottom: 20px;
+  left: 26px;
+  z-index: 10;
+  padding: 0.45rem 0.8rem;
+  background: rgba(10, 13, 18, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.step-label span {
+  color: #6ee7b7;
+  margin-right: 0.5rem;
+}
+
+.step-note {
+  font-size: 0.85rem;
+  letter-spacing: 0.03em;
+  opacity: 0.7;
+}
+
+.feature-grid.tall {
+  grid-auto-rows: 1fr;
+  height: 330px;
+}
+
+.feature-grid.tall .feature {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  font-size: 0.9rem;
+}
+
+.feature-grid.tall .feature span {
+  font-size: 1.6rem;
+}

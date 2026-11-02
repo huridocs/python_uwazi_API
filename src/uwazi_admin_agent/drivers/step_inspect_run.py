@@ -15,9 +15,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from uwazi_admin_agent.adapters.script_emitter import SCRIPT_FILENAME
-from uwazi_admin_agent.configuration import RUNS_PATH
+from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.domain.manifest import MigrationManifest
-from uwazi_admin_agent.drivers.runtime import build_backup_store
+from uwazi_admin_agent.drivers.runtime import build_backup_store, default_instance_url
 
 
 def run_inspect_run(run_name: str) -> int:
@@ -29,7 +30,7 @@ def run_inspect_run(run_name: str) -> int:
         print(f"error: no manifest for run {run_name!r} (run `generate` first)", flush=True)
         return 2
 
-    script_path = RUNS_PATH / run_name / SCRIPT_FILENAME
+    script_path = instance_paths(default_instance_url(), INSTANCE_IDS_DIR).runs_path / run_name / SCRIPT_FILENAME
     print(render_manifest_summary(manifest, run_name, script_path))
     return 0
 

@@ -19,6 +19,13 @@ This module holds the **pure** pieces:
   raw (documents + uploaded attachments; URL attachments skipped).
 - :func:`build_file_restore_actions` — order the upload plan (documents first so
   the primary PDF is in place, then attachments; within-kind order preserved).
+- :class:`LiveFileRef` + :func:`extract_live_file_refs` — the SAME metadata read
+  from a *live* raw, for the merge-revert cleanup.
+- :func:`merge_copy_candidates` — pick the file rows a merge appended to its
+  target. A merge re-uploads each source file (minting a NEW file id), so a raw
+  restore cannot remove them: the file collection is a runtime join, not entity
+  state. The candidates are selected by source identity + the run's time window;
+  the caller confirms content by digest before deleting anything.
 
 No I/O here — the backup intercept fetches + persists the bytes at backup time
 (via :class:`FileRepositoryPort` + :class:`BackupStorePort`); the revert use
@@ -205,3 +212,143 @@ def _to_action(ref: FileRef, *, kind: Literal["upload_document", "upload_attachm
         language=ref.language,
         content_type=ref.content_type,
     )
+
+
+# The merge file-move and the revert run share one clock (both run against the
+# same instance from the same deployment), so this only forgives a few minutes of
+# clock drift when deciding "this row was created during the run". It never
+# widens the window enough to excuse an old file.
+_MERGE_CLOCK_SKEW_MS: int = 5 * 60 * 1000
+
+
+class LiveFileRef(BaseModel):
+    """One content file row a LIVE raw currently joins (a merge-copy candidate).
+
+    Mirrors :class:`FileRef` for the live side of a merge revert: the row's
+    ``_id`` is the file to delete, ``filename`` is what
+    :meth:`FileRepositoryPort.get_file_bytes` fetches, and
+    ``creation_date_ms`` is Uwazi's server-side ``creationDate`` (epoch ms),
+    the signal that tells a copy the merge just uploaded apart from a file
+    that was already there.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    file_id: str
+    kind: Literal["document", "attachment"]
+    filename: str
+    originalname: str
+    size: int | None = None
+    creation_date_ms: int | None = None
+
+
+def _live_ref(entry: Any, *, kind: Literal["document", "attachment"]) -> LiveFileRef | None:
+    """Build a :class:`LiveFileRef` from one documents/attachments entry, or None."""
+    if not isinstance(entry, dict):
+        return None
+    file_id = _file_id_of(entry)
+    originalname = entry.get("originalname")
+    filename = entry.get("filename")
+    if file_id is None or not isinstance(originalname, str) or not originalname:
+        return None
+    if not isinstance(filename, str) or not filename:
+        return None
+    size = entry.get("size")
+    creation_date = entry.get("creationDate")
+    creation_date_ms = creation_date if isinstance(creation_date, int) and not isinstance(creation_date, bool) else None
+    return LiveFileRef(
+        file_id=file_id,
+        kind=kind,
+        filename=filename,
+        originalname=originalname,
+        size=size if isinstance(size, int) and not isinstance(size, bool) else None,
+        creation_date_ms=creation_date_ms,
+    )
+
+
+def extract_live_file_refs(raw: dict[str, Any]) -> list[LiveFileRef]:
+    """Pull :class:`LiveFileRef` for the content files a live raw joins.
+
+    Same scope as :func:`extract_file_refs` — ``documents`` plus uploaded
+    ``attachments`` (an attachment with a ``url`` stores no bytes and cannot be
+    a merge copy) — but reads the *live* entries, whose ``_id``/``filename`` are
+    the ones the merge minted and whose ``creationDate`` dates the upload.
+    Pure: returns a new list; ``raw`` is not mutated.
+    """
+    refs: list[LiveFileRef] = []
+    documents = raw.get("documents") if isinstance(raw.get("documents"), list) else []
+    for doc in documents:
+        ref = _live_ref(doc, kind="document")
+        if ref is not None:
+            refs.append(ref)
+    attachments = raw.get("attachments") if isinstance(raw.get("attachments"), list) else []
+    for att in attachments:
+        if isinstance(att, dict) and att.get("url"):
+            continue
+        ref = _live_ref(att, kind="attachment")
+        if ref is not None:
+            refs.append(ref)
+    return refs
+
+
+def merge_copy_candidates(
+    live_raw: dict[str, Any],
+    *,
+    source_files: list[FileRef],
+    before_file_ids: set[str] | None,
+    created_after_ms: int | None,
+    created_before_ms: int | None,
+) -> list[LiveFileRef]:
+    """The live file rows a merge likely appended to its target (pure).
+
+    A merge's file move re-uploads each source's primary document/uploaded
+    attachment to the target, so the copy keeps the source's kind, originalname
+    and size but gets a NEW file id/filename. This selects the rows worth
+    byte-verifying; the caller must still confirm the content digest against
+    the source's backed-up bytes before deleting anything (a same-named,
+    same-sized file can differ).
+
+    The no-loss rules:
+
+    - a file id recorded on the target's ``before_file_ids`` (a whole-entity
+      snapshot's own documents/attachments and captured file refs) is NEVER a
+      candidate — it existed before the run;
+    - with no before-set (``None``: a property-scoped snapshot has no file
+      list, and a file-only merge target has no snapshot at all), the row must
+      carry a ``creationDate`` inside the run window. Anything older (an
+      operator's pre-existing file) or newer (an upload after the sources were
+      deleted) is kept;
+    - the identity must match a source file's ``(kind, originalname, size)``;
+      a missing size on either side only loosens that check, never the digest
+      check the caller performs.
+
+    Pure: no I/O. ``created_after_ms``/``created_before_ms`` are epoch ms; a
+    ``None`` bound is unbounded. The clock-skew margin is only applied to the
+    bounds, never to identity.
+    """
+    sizes_by_name: dict[tuple[str, str], set[int | None]] = {}
+    for ref in source_files:
+        sizes_by_name.setdefault((ref.kind, ref.originalname), set()).add(ref.size)
+
+    candidates: list[LiveFileRef] = []
+    for ref in extract_live_file_refs(live_raw):
+        if before_file_ids is not None and ref.file_id in before_file_ids:
+            continue
+        known_sizes = sizes_by_name.get((ref.kind, ref.originalname))
+        if not known_sizes:
+            continue
+        if ref.size is not None and None not in known_sizes and ref.size not in known_sizes:
+            continue
+        if ref.creation_date_ms is None:
+            # Without a timestamp, only a recorded before-set can prove the id
+            # is new. No before-set means an unverifiable row: keep it.
+            if before_file_ids is None:
+                continue
+            candidates.append(ref)
+            continue
+        if created_after_ms is not None and ref.creation_date_ms < created_after_ms - _MERGE_CLOCK_SKEW_MS:
+            continue
+        if created_before_ms is not None and ref.creation_date_ms > created_before_ms + _MERGE_CLOCK_SKEW_MS:
+            continue
+        candidates.append(ref)
+    return candidates

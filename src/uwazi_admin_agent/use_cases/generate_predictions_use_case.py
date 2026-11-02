@@ -32,7 +32,6 @@ from typing import Any
 
 from loguru import logger
 
-from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmUsage
 from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
@@ -59,6 +58,7 @@ from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
 from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
+from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -85,7 +85,7 @@ def _fetch_raws(
     entity_repository: EntityRepositoryPort,
     pairs: set[tuple[str, str]],
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Fetch each ``(sharedId, language)`` raw once, batched, through the cached repository.
+    """Fetch each ``(sharedId, language)`` raw once, concurrently, through the cached repository.
 
     A row must read ITS OWN language: Uwazi picks the entity-language row with
     the ``locale`` cookie, so fetching every entity with the default language
@@ -95,21 +95,31 @@ def _fetch_raws(
     A failed entity/language is skipped (logged), never fatal: hydration is
     display and comparison context, and a row without it still records and
     still runs.
+
+    This read runs on EVERY Run (preflight) and once per planning pass
+    (hydration), so it is fanned out through the same bounded, 429-aware pool
+    the script helpers use — one worker per task, each with its own loop, since
+    the raw repositories are async by signature but block inside.
     """
     raws: dict[tuple[str, str], dict[str, Any]] = {}
     ordered = sorted(pairs)
-    loop = asyncio.new_event_loop()
-    try:
-        for offset in range(0, len(ordered), EXECUTE_BATCH_SIZE):
-            for shared_id, language in ordered[offset : offset + EXECUTE_BATCH_SIZE]:
-                try:
-                    raws[(shared_id, language)] = loop.run_until_complete(
-                        entity_repository.get_raw_by_shared_id(shared_id, language)
-                    )
-                except Exception as exc:  # noqa: BLE001 — a missing entity is not fatal here
-                    logger.warning("prediction hydration failed for shared_id={} language={}: {}", shared_id, language, exc)
-    finally:
-        loop.close()
+    if not ordered:
+        return raws
+
+    def _task(shared_id: str, language: str):
+        def _run() -> dict[str, Any]:
+            return asyncio.run(entity_repository.get_raw_by_shared_id(shared_id, language))
+
+        return _run
+
+    values, errors = ParallelExecutor(ThrottleController()).run(
+        [_task(shared_id, language) for shared_id, language in ordered]
+    )
+    for pair, value, error in zip(ordered, values, errors):
+        if error is not None:
+            logger.warning("raw fetch failed for shared_id={} language={}: {}", pair[0], pair[1], error)
+            continue
+        raws[pair] = value
     return raws
 
 

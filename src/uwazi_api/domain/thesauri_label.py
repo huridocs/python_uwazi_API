@@ -30,3 +30,26 @@ def split_label(label: str) -> tuple[str | None, str]:
         group, _, child = label.partition(THESAURUS_GROUP_SEPARATOR)
         return group, child
     return None, label
+
+
+def label_id_map(values: list) -> dict[str, str]:
+    """``{label: id}`` over a thesaurus value tree, including the qualified
+    ``"Group: Child"`` keys built with ``qualify_label``. Groups are headings,
+    not selectable."""
+    label_map: dict[str, str] = {}
+    _build_label_map(values, label_map)
+    return label_map
+
+
+def _build_label_map(values: list, label_map: dict[str, str], parent_label: str | None = None) -> None:
+    for v in values:
+        if v.values:
+            # A group: its children are the selectable options. Recurse with the
+            # group name as the parent so each child also gets a qualified
+            # "Group: Child" key (the bare child label alone is ambiguous when
+            # two groups share a child label).
+            _build_label_map(v.values, label_map, v.label)
+        else:
+            label_map[v.label] = v.id
+            if parent_label:
+                label_map[qualify_label(parent_label, v.label)] = v.id

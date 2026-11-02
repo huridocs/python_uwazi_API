@@ -15,7 +15,11 @@ from __future__ import annotations
 from typing import Any
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
-from uwazi_admin_agent.domain.metadata_diff import format_metadata_value, render_metadata_value
+from uwazi_admin_agent.domain.metadata_diff import (
+    format_metadata_value,
+    format_property_value,
+    render_property_value,
+)
 from uwazi_admin_agent.domain.suggestion import (
     FILE_OPS,
     PROPERTY_OPS,
@@ -60,7 +64,7 @@ MATCH_COLORS: dict[str, str] = {"exact": "green", "mismatch": "red", "new": "gre
 # 'discarded' red, the state an operation the operator refused to execute ends
 # up in.
 RUN_STATUS_COLORS: dict[str, str] = {
-    "runned": "blue",
+    "applied": "blue",
     "reverted": "indigo",
     "pending": "grey",
     "discarded": "red",
@@ -119,9 +123,9 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
         title = f"{title} ({', '.join(languages)})"
     phrases = [RUN_OP_PHRASES[op] for op in ops or [] if op in RUN_OP_PHRASES]
     action = " + ".join(dict.fromkeys(phrases)) or "Write"
-    # A file copy adds bytes to the target; Revert restores entity snapshots and
-    # has no way to remove an uploaded file the source still owns, so the one
-    # thing the dialog must warn about is that those bytes stay behind.
+    # A standalone file copy adds bytes to the target; Revert restores entity
+    # snapshots and cannot trace those bytes back to a source this run deleted,
+    # so the one thing the dialog must warn about is that they stay behind.
     if FILE_OPS.intersection(ops or []):
         return title, f"{action} {count} {entities} in Uwazi now. The copied files stay on the target."
     return title, f"{action} {count} {entities} in Uwazi now."
@@ -138,8 +142,8 @@ def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = 
     ``merge`` (an ``update_and_delete`` row) makes the undo bigger than this
     entity's own backup: the sources the merge absorbed are re-created from
     their backups with NEW sharedIds, and the files the merge copied onto the
-    target cannot be taken off it again — so the message spells both out
-    instead of promising a clean rollback.
+    target are removed again (verified byte-for-byte against the sources'
+    backups) — so the message spells both out.
     """
     when = f" made {tooltip.removeprefix('entity backup creation ')}" if tooltip else ""
     restored = f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup)."
@@ -149,7 +153,7 @@ def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = 
         "Revert merge",
         restored
         + " The source entities this merge absorbed are re-created from their backups"
-        + " (with new sharedIds). Files it copied onto the target stay on it.",
+        + " (with new sharedIds). The files it copied onto the target are removed again.",
     )
 
 
@@ -191,7 +195,7 @@ def discard_confirmation(count: int) -> tuple[str, str]:
     rows = "operation" if count == 1 else "operations"
     return (
         f"Discard {count} {rows}",
-        f"Mark {count} checked {rows} as discarded. They will NOT be executed by a Run, and the reason is stored with them.",
+        f"Mark {count} checked {rows} as discarded. They will NOT be applied by a Run, and the reason is stored with them.",
     )
 
 
@@ -255,13 +259,17 @@ def prune_selection(selected: list[Any], rows: list[dict[str, Any]]) -> list[dic
     return [row for row in selected if isinstance(row, dict) and str(row.get("row_key")) in visible]
 
 
-def truncate(value: Any, limit: int = 80) -> str:
-    """Render any value as one display line, truncated with an ellipsis (pure)."""
-    text = format_metadata_value(value)
+def truncate(value: Any, limit: int = 80, property_type: str | None = None) -> str:
+    """Render any value as one display line, truncated with an ellipsis (pure).
+
+    ``property_type`` (the template's ``date``/``multidate``/...) makes date
+    values render as calendar dates instead of raw epoch timestamps.
+    """
+    text = format_property_value(value, property_type) if property_type else format_metadata_value(value)
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def full_value(value: Any) -> str:
+def full_value(value: Any, property_type: str | None = None) -> str:
     """Render any value in FULL, newlines preserved (pure; the entity window).
 
     The review TABLE truncates (its cells are one line), but the entity detail
@@ -269,7 +277,7 @@ def full_value(value: Any) -> str:
     values after 200 characters. Rendering is untruncated; the caller wraps the
     label with ``white-space: pre-wrap`` so line breaks survive.
     """
-    return render_metadata_value(value)
+    return render_property_value(value, property_type)
 
 
 # How much of an entity title the review table prints before the ellipsis. The
@@ -434,7 +442,7 @@ def entity_is_discarded(item: EntityReviewRow) -> bool:
 def run_status(item: EntityReviewRow) -> tuple[str, str]:
     """The entity's Run state as ``(label, color)`` — the table's Status column (pure).
 
-    ``runned`` once EVERY recorded row of the entity is APPLIED (written to
+    ``applied`` once EVERY recorded row of the entity is APPLIED (written to
     Uwazi); ``reverted`` once every row is REVERTED — a revert undid the writes,
     so the operator can run the entity again, row by row or whole. ``discarded``
     once every row is DISCARDED — the operator refused to execute this
@@ -443,7 +451,7 @@ def run_status(item: EntityReviewRow) -> tuple[str, str]:
     remains.
     """
     if item.applied >= item.proposal_count:
-        label = "runned"
+        label = "applied"
     elif item.reverted >= item.proposal_count:
         label = "reverted"
     elif entity_is_discarded(item):
@@ -479,7 +487,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     checkbox-selection surface the bulk Run action reads), aggregated from the
     entity's suggestion rows by the store. Columns: Entity (the sharedId and
     the title, with the open-in-Uwazi icon at its end), Template, Language,
-    Ops, Status (runned/pending), and the Run/Edit/Revert row actions — no
+    Ops, Status (applied/pending), and the Run/Edit/Revert row actions — no
     separate sharedId column, no change-count columns, and no separate Uwazi
     column.
 
@@ -508,10 +516,11 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     # Per-entity revert is an IN-PLACE restore of the live row. It is offered for
     # entities the run merely MODIFIED and for an `update_and_delete` merge,
     # whose row owns the target's write AND the source deletes — its undo
-    # restores the target and re-creates the absorbed sources. Everything in
-    # RUN_LEVEL_ONLY_OPS is undone by the run-level Revert instead, and a file
-    # copy appends bytes an entity snapshot cannot remove.
-    in_place_revertable = status_label in ("runned", "reverted") and not any(
+    # restores the target, re-creates the absorbed sources and removes the files
+    # it copied onto the target. Everything in RUN_LEVEL_ONLY_OPS is undone by the
+    # run-level Revert instead, and a standalone file copy still appends bytes
+    # the revert cannot trace back to a source this run deleted.
+    in_place_revertable = status_label in ("applied", "reverted") and not any(
         op in RUN_LEVEL_ONLY_OPS or op in FILE_OPS for op in item.ops
     )
     title = item.entity_title or item.shared_id
@@ -568,6 +577,21 @@ def cost_card_value(spent: float, budget: float) -> str:
     return f"{format_cost(spent)} / {format_cost(budget)}"
 
 
+def pending_suboperation_count(counts: dict[str, int]) -> int:
+    """The header's Pending card: every part still waiting to be written (pure).
+
+    The suboperation badges map PENDING/ACCEPTED/EDITED to the one word
+    "pending" (see ``operations_view.SUB_STATUS_LABELS``), so the card must sum
+    the same three states. Reading only ``subs_pending`` made a Run whose write
+    was refused (rows left ACCEPTED) read "Pending 0" above rows labelled
+    "pending".
+    """
+    return sum(
+        int(counts.get(f"subs_{status}", 0))
+        for status in (SuggestionStatus.PENDING.value, SuggestionStatus.ACCEPTED.value, SuggestionStatus.EDITED.value)
+    )
+
+
 # --- drift banner ------------------------------------------------------------
 
 DRIFT_STATUS_COLORS: dict[str, str] = {
@@ -619,13 +643,13 @@ def section_toggle_label(section: str, visible: bool) -> str:
 
 
 def table_update_label(updated_at: Any) -> str:
-    """The last-table-update label shown beside the update button (pure)."""
+    """When the table was last synced with Uwazi, beside the sync action (pure)."""
     if updated_at is None:
-        return "Table never refreshed"
+        return "Never synced with Uwazi"
     try:
-        return f"Table updated {updated_at:%Y-%m-%d %H:%M} UTC"
+        return f"Synced with Uwazi {updated_at:%Y-%m-%d %H:%M} UTC"
     except (ValueError, TypeError):
-        return "Table updated"
+        return "Synced with Uwazi"
 
 
 __all__ = [
@@ -662,6 +686,7 @@ __all__ = [
     "property_caption",
     "bulk_revert_label",
     "property_heading",
+    "pending_suboperation_count",
     "prune_selection",
     "revert_entity_confirmation",
     "rows_excluding_keys",

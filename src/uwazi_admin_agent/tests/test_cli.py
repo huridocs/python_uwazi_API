@@ -26,6 +26,10 @@ from uwazi_admin_agent.drivers.runtime import build_backup_store
 from uwazi_admin_agent.drivers.step_inspect_run import render_manifest_summary
 from uwazi_admin_agent.drivers.step_list_runs import run_list_runs
 
+# The instance the CLI targets by default (the FIRST configured url). It is
+# only a namespace here: every test below uses a tmp runs root.
+_CLI_INSTANCE_URL = "http://localhost:3000"
+
 # --- parser shape -----------------------------------------------------------
 
 
@@ -120,7 +124,7 @@ def test_main_list_runs_returns_zero_and_passthrough_store_contents(capsys) -> N
     # .list_runs()`` and exits 0 — whether or not the package runs root has runs
     # (manual runs populate it). The empty-root guarantee is covered by the
     # ``build_backup_store`` tests below; here we assert the driver wiring.
-    expected = build_backup_store().list_runs()
+    expected = build_backup_store(_CLI_INSTANCE_URL).list_runs()
 
     exit_code = main(["list-runs"])
 
@@ -130,7 +134,7 @@ def test_main_list_runs_returns_zero_and_passthrough_store_contents(capsys) -> N
 
 
 def test_run_list_runs_returns_zero_and_passthrough_store_contents(capsys) -> None:
-    expected = build_backup_store().list_runs()
+    expected = build_backup_store(_CLI_INSTANCE_URL).list_runs()
 
     exit_code = run_list_runs()
 
@@ -142,7 +146,7 @@ def test_run_list_runs_returns_zero_and_passthrough_store_contents(capsys) -> No
 
 
 def test_build_backup_store_lists_manifest_runs_sorted(tmp_path: Path) -> None:
-    store = build_backup_store(tmp_path)
+    store = build_backup_store(_CLI_INSTANCE_URL, tmp_path)
     for name in ("zeta", "alpha", "mid"):
         store.save_manifest(name, _minimal_manifest(name))
 
@@ -151,11 +155,11 @@ def test_build_backup_store_lists_manifest_runs_sorted(tmp_path: Path) -> None:
 
 def test_build_backup_store_empty_root_lists_nothing(tmp_path: Path) -> None:
     # A root that does not exist yet (fresh tmp_path has no runs/ subdir).
-    assert build_backup_store(tmp_path / "runs").list_runs() == []
+    assert build_backup_store(_CLI_INSTANCE_URL, tmp_path / "runs").list_runs() == []
 
 
 def test_build_backup_store_ignores_folders_without_manifest(tmp_path: Path) -> None:
-    store = build_backup_store(tmp_path)
+    store = build_backup_store(_CLI_INSTANCE_URL, tmp_path)
     store.save_manifest("real", _minimal_manifest("real"))
     (tmp_path / "partial").mkdir()
     (tmp_path / "partial" / "script.py").write_text("pass", encoding="utf-8")

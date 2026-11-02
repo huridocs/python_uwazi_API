@@ -7,7 +7,6 @@ rebuilt on login so credentials are always the validated session's.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +27,7 @@ from uwazi_property_filler.configuration import (
     LABEL_RELATIONSHIP_TYPE,
     LABEL_WEBHOOK_URLS,
     PROPERTY_TEMPLATE,
+    UWAZI_URL,
 )
 from uwazi_property_filler.domain.document_cache import DocumentCache
 from uwazi_property_filler.domain.extension_category import ExtensionCategory
@@ -515,7 +515,7 @@ _service: PropertyFillerService | None = None
 
 def build_service(user: str, password: str) -> PropertyFillerService:
     """Composition root: one adapter + store + cache per validated login."""
-    url = os.environ["UWAZI_URL"]
+    url = UWAZI_URL
     uwazi = UwaziClientAdapter(user=user, password=password, url=url)
     store = PostgresStore(DATABASE_URL)
     cache = PdfCacheStore()

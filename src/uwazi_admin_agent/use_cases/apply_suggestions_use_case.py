@@ -49,35 +49,46 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
 from uwazi_admin_agent.configuration import EXECUTE_BATCH_SIZE, MAX_ENTITIES_PER_RUN
+from uwazi_admin_agent.domain.date_values import coerce_date_property_value, is_date_property_type
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
+from uwazi_admin_agent.domain.select_values import (
+    SELECT_TYPES,
+    UnknownThesaurusValue,
+    labels_of,
+    select_value_envelope,
+)
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
     FILE_OPS,
     INFO_OP,
     MERGE_OPS,
     MOVE_OP,
-    PROPERTY_OPS,
+    PUBLISH_OPS,
     TITLE_PROPERTY,
     UPDATE_OPS,
     Suggestion,
     SuggestionFilter,
     SuggestionStatus,
 )
-from uwazi_admin_agent.domain.suggestion_scoring import compare_values, value_languages
+from uwazi_admin_agent.domain.suggestion_scoring import value_languages
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.cache_invalidation_port import CacheInvalidationPort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
+from uwazi_admin_agent.ports.property_type_port import PropertyTypeLookupPort
 from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_admin_agent.ports.suggestion_store_port import SuggestionStorePort
+from uwazi_admin_agent.ports.thesaurus_value_port import ThesaurusValueLookupPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
 from uwazi_admin_agent.use_cases.file_transfer import move_files_for_target
+from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.script_exec_namespace import _build_sync_crud_functions
+from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.tool_call_cache import ToolCallCache
@@ -129,15 +140,30 @@ class ApplyWriteError(RuntimeError):
         super().__init__(format_write_failures(failures))
 
 
+def accepted_value(value: Any, rejected: list[str]) -> Any:
+    """The proposal minus the operator's rejected labels (pure).
+
+    Untouched unless ``value`` is a non-empty list and ``rejected`` is
+    non-empty; only str entries are ever filtered, so dates/links/relationship
+    lists cannot be altered.
+    """
+    if not isinstance(value, (list, tuple)) or not value or not rejected:
+        return value
+    dropped = set(rejected)
+    if not any(isinstance(entry, str) for entry in value):
+        return value
+    return [entry for entry in value if not (isinstance(entry, str) and entry in dropped)]
+
+
 def effective_value(suggestion: Suggestion) -> object:
     """The value a Run writes for one row: the edit when present, else the proposal.
 
-    An ``EDITED`` row always uses ``edited_value``; every other pushable row uses
-    its proposal.
+    An ``EDITED`` row always uses ``edited_value``; every other pushable row
+    uses its proposal MINUS the multiselect labels the operator rejected.
     """
     if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
         return _decode_edited(suggestion.edited_value)
-    return suggestion.proposed_value
+    return accepted_value(suggestion.proposed_value, suggestion.rejected_values)
 
 
 def _decode_edited(text: str) -> object:
@@ -209,6 +235,21 @@ def language_scoped_value(value: Any, language: str | None) -> Any:
     matching = [entry for entry in entries if language is not None and entry.get("language") == language]
     chosen = matching or entries
     return [chosen[0]] if chosen else value
+
+
+def metadata_value(value: Any, language: str | None) -> Any:
+    """The value Uwazi actually stores for one metadata KEY (pure).
+
+    Every metadata key is an ARRAY in Uwazi's schema: a select is ``["label"]``,
+    a date ``[timestamp]``, a text ``[{"value", "language"}]``. A recorded
+    ``None`` means "clear this value" (the planner's way to empty a date), and
+    sending the literal ``null`` is refused — ``422 Expected array, received
+    null`` on the per-entity write, and a 500 (which the HTTP layer then retried
+    for minutes) on the bulk endpoint. An EMPTY ARRAY is how the same clear is
+    expressed, so that is what this boundary sends.
+    """
+    scoped = language_scoped_value(value, language)
+    return [] if scoped is None else scoped
 
 
 def stamp_language(value: Any, language: str | None) -> Any:
@@ -526,6 +567,8 @@ def build_apply_updates(
     suggestions: list[Suggestion],
     selection: EntitySelection | None = None,
     row_ids: list[int] | None = None,
+    property_types: dict[str, str] | None = None,
+    select_value_ids: dict[tuple[str, str], dict[str, str]] | None = None,
 ) -> list[dict]:
     """Group pushable property suggestions into per-entity-LANGUAGE update payloads (pure).
 
@@ -566,7 +609,31 @@ def build_apply_updates(
         if suggestion.property_name == TITLE_PROPERTY:
             payload["title"] = value
         else:
-            payload["metadata"][suggestion.property_name] = language_scoped_value(value, suggestion.language)
+            # DATE-typed values are coerced to Uwazi's shape here, at the
+            # payload boundary — this metadata is POSTed raw by the
+            # property-scoped write path (see this docstring).
+            prop_type = (property_types or {}).get(suggestion.property_name or "")
+            if prop_type in SELECT_TYPES:
+                # Uwazi's raw update path resolves select values by THESAURUS
+                # ID (``getValueById``): a label either fails validation or is
+                # silently dropped, so the accepted labels must become the
+                # thesaurus value UUIDs here.
+                key = (suggestion.template_name or "", suggestion.property_name or "")
+                ids_by_label = (select_value_ids or {}).get(key)
+                if not ids_by_label:
+                    raise ApplyRefusedError(
+                        f"cannot write {suggestion.property_name!r} of {suggestion.shared_id!r}: its thesaurus "
+                        "values could not be resolved on the instance, so the labels cannot become thesaurus ids"
+                    )
+                try:
+                    payload["metadata"][suggestion.property_name] = select_value_envelope(
+                        labels_of(value), ids_by_label, suggestion.property_name
+                    )
+                except UnknownThesaurusValue as exc:
+                    raise ApplyRefusedError(str(exc)) from exc
+            else:
+                raw_value = coerce_date_property_value(value, prop_type if is_date_property_type(prop_type) else None)
+                payload["metadata"][suggestion.property_name] = metadata_value(raw_value, suggestion.language)
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     updates: list[dict] = []
@@ -619,7 +686,7 @@ def build_apply_creates(
         if suggestion.property_name == TITLE_PROPERTY:
             payload["title"] = value
         elif suggestion.property_name is not None:
-            payload["metadata"][suggestion.property_name] = language_scoped_value(value, suggestion.language)
+            payload["metadata"][suggestion.property_name] = metadata_value(value, suggestion.language)
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     creates: list[dict] = []
@@ -637,6 +704,42 @@ def build_apply_creates(
         }
         creates.append(entry)
     return creates
+
+
+def property_scope_ids(
+    updates: list[dict],
+    whole_entity_rows: list[Suggestion],
+    merges: list[tuple[str, list[str]]] | None = None,
+) -> set[str]:
+    """The entities whose ONLY writes in this Run are property updates (pure).
+
+    Those are the ones a property-scoped snapshot is CORRECT for: nothing else
+    in the Run can touch a field outside the touched property set, so backing up
+    just those keys is enough to undo the write — and it is ~30× smaller than a
+    whole-entity snapshot.
+
+    Everything else keeps the whole-entity snapshot, because those writes change
+    parts of the entity a property restore cannot reach: a delete (the row is
+    gone), a publish/unpublish or permission change (a separate collection), a
+    merge's target (its sources' files move onto it) and its sources (they are
+    deleted), and BOTH endpoints of a relationship row (Uwazi denormalizes the
+    hub onto each entity's raw).
+    """
+    touched_elsewhere: set[str] = set()
+    for row in whole_entity_rows:
+        if row.op == "create_relationships":
+            rel = row.proposed_value if isinstance(row.proposed_value, dict) else {}
+            for key in ("from_entity_shared_id", "to_entity_shared_id"):
+                value = rel.get(key)
+                if isinstance(value, str) and value:
+                    touched_elsewhere.add(value)
+            continue
+        if row.shared_id:
+            touched_elsewhere.add(row.shared_id)
+    for target, sources in merges or []:
+        touched_elsewhere.add(target)
+        touched_elsewhere.update(sources)
+    return {payload["shared_id"] for payload in updates} - touched_elsewhere
 
 
 class ApplySuggestionsUseCase:
@@ -657,6 +760,8 @@ class ApplySuggestionsUseCase:
         cap: int = MAX_ENTITIES_PER_RUN,
         default_language: str = "en",
         publish_state: PublishStatePort | None = None,
+        property_types: PropertyTypeLookupPort | None = None,
+        thesaurus_values: ThesaurusValueLookupPort | None = None,
     ) -> None:
         self._entity_api = entity_api
         self._relationship_api = relationship_api
@@ -671,6 +776,16 @@ class ApplySuggestionsUseCase:
         self._cap = cap
         self._default_language = default_language
         self._publish_state: PublishStatePort | None = publish_state
+        # The template property-TYPE lookup: what lets a DATE-typed row's
+        # recorded value be coerced to Uwazi's shape at the write boundary.
+        # None → the write sends the value as recorded (the whole-entity path
+        # still coerces through the mapper; the raw property-scoped path does
+        # not, which is exactly what bit the extract-date task).
+        self._property_types = property_types
+        # The {label: uuid} thesaurus lookup for select/multiselect writes (None
+        # = unwired; a select row then refuses to apply rather than writing
+        # labels the instance would silently drop).
+        self._thesaurus_values = thesaurus_values
         # Set by _build_crud: the event loop the sync CRUD helpers ride.
         self._crud_loop = None
 
@@ -719,18 +834,27 @@ class ApplySuggestionsUseCase:
         rows = self._all_accepted(run_id)
         to_push = pushable_rows(rows, selection, row_ids)
         _, whole_entity_rows = partition_for_apply(rows, selection, row_ids)
+        types = self._property_types_for_rows(rows)
+        select_ids = self._select_value_ids(rows, types)
+
         # Disjoint by construction: the update payloads hold real sharedIds
         # only, the creates the ``dry-created-N`` placeholders. A create
         # reaching ``updates`` would be enriched from a raw that does not
         # exist, so the two payloads are built from their own row sets.
-        updates = self._enrich(build_apply_updates(rows, selection, row_ids))
-        creates = (
-            build_apply_creates(rows, selection, row_ids) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
-        )
+        updates = build_apply_updates(rows, selection, row_ids, property_types=types, select_value_ids=select_ids)
         # Merge rows write the target above and, in this SAME Run, delete their
         # sources — the part that makes a merge one action instead of a target
         # row plus N delete rows.
         merges = merge_deletions(to_push)
+        # The entities nothing but a property write touches: they get the cheap
+        # property-scoped snapshot and a direct raw write (no template read, no
+        # client-side merge, no index wait). Computed BEFORE enrichment so the
+        # scoped payloads skip the template read they do not need.
+        scoped_ids = property_scope_ids(updates, whole_entity_rows, merges)
+        updates = self._enrich(updates, skip=scoped_ids)
+        creates = (
+            build_apply_creates(rows, selection, row_ids) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
+        )
         # A standalone move_files row copies its sources' files onto the target
         # and leaves the source entities untouched.
         file_moves = file_move_targets(to_push)
@@ -757,7 +881,9 @@ class ApplySuggestionsUseCase:
         # exactly the way _write counts them up as its batches land — so the
         # toast's fraction can never pass 1.0 by construction.
         units_total = apply_units_total(updates, creates, whole_entity_rows, merges, file_moves)
-        self._report_progress(progress, 0, units_total)
+        # Starting the write pass ends the preflight phase: clear the gate
+        # toast's note (the fraction takes over).
+        self._report_progress(progress, 0, units_total, "")
         failures = self._write(
             run_id,
             manifest,
@@ -769,10 +895,13 @@ class ApplySuggestionsUseCase:
             file_moves=file_moves,
             progress=progress,
             units_total=units_total,
+            property_scope=scoped_ids,
+            capture_publish_state=any(row.op in PUBLISH_OPS for row in whole_entity_rows),
         )
         # The writes are over (landed or refused): fill the fraction so the
-        # toast ends at its total whatever the per-batch accounting left it at.
-        self._report_progress(progress, units_total, units_total)
+        # toast ends at its total whatever the per-batch accounting left it at,
+        # and clear the phase note — the pass is done whatever it said.
+        self._report_progress(progress, units_total, units_total, "")
         # A refused write changed nothing, so its rows must NOT read as applied:
         # they stay ACCEPTED and the operator can run them again. Every refusal
         # carries an identity the rows share (a real sharedId, or a create's
@@ -781,16 +910,14 @@ class ApplySuggestionsUseCase:
         refused = {failure["shared_id"] for failure in failures if failure["shared_id"]}
         written = [row for row in to_push if row.shared_id not in refused]
         self._store.set_status([row.id for row in written if row.id is not None], SuggestionStatus.APPLIED)
-        # The write just landed, so the table's "current" column must show the
-        # value Uwazi now holds — otherwise the next preflight reads the stale
-        # pre-run value and blocks a perfectly valid second Run.
-        current_updates: list[tuple[int, object, bool | None]] = []
-        for row in written:
-            if row.id is None or row.property_name is None or row.op not in PROPERTY_OPS:
-                continue
-            value = effective_value(row)
-            current_updates.append((row.id, value, compare_values(row.proposed_value, value)))
-        self._store.set_current_values(current_updates)
+        # ``current_value`` is NOT refreshed here on purpose. It is the row's
+        # BEFORE state — the value the run is about to overwrite — and it is what
+        # the review table's "Value" column and the entity window show, and what
+        # the Revert puts back. Overwriting it with the value just written made
+        # both surfaces display the post-run value ("before == proposed", match
+        # "exact"), so the operator could no longer see what a revert restores.
+        # A sync ("Sync with Uwazi") is the only thing that re-reads
+        # live values, and the preflight still guards a Run against a stale row.
         logger.info(
             "run={} pushed {} update payload(s), {} create(s), {} whole-entity row(s), {} merge(s); {} write(s) refused",
             run_id,
@@ -821,7 +948,14 @@ class ApplySuggestionsUseCase:
         )
 
     def _build_intercept(
-        self, run_id: str, manifest: MigrationManifest, loop, affected_languages: set[str] | None = None
+        self,
+        run_id: str,
+        manifest: MigrationManifest,
+        loop,
+        affected_languages: set[str] | None = None,
+        property_scope: set[str] | None = None,
+        capture_publish_state: bool = True,
+        note: Callable[[str], None] | None = None,
     ) -> BackupIntercept:
         """Build the accumulating run's intercept, seeding the already-touched set.
 
@@ -832,6 +966,12 @@ class ApplySuggestionsUseCase:
         snapshot covers EVERY configured language's row of each entity (the
         intercept fetches all of them), so a revert restores the entity in
         every language — not just the first-touched row's.
+
+        ``property_scope`` is the set whose only writes are property updates;
+        those take the cheap property-scoped snapshot instead (see
+        :func:`property_scope_ids`). ``capture_publish_state`` is off unless the
+        run contains a publish/unpublish row: the grants are a separate
+        collection, so a pure property edit never needs the read.
         """
         return BackupIntercept(
             entity_repository=self._entity_repository,
@@ -848,6 +988,9 @@ class ApplySuggestionsUseCase:
             settings_languages=self._configured_languages(),
             affected_languages=affected_languages,
             publish_state=self._publish_state,
+            property_scope_ids=property_scope,
+            capture_publish_state=capture_publish_state,
+            note=note,
         )
 
     def _configured_languages(self) -> list[str]:
@@ -879,8 +1022,8 @@ class ApplySuggestionsUseCase:
             | {e.shared_id for e in manifest.created}
         )
 
-    def _enrich(self, updates: list[dict]) -> list[dict]:
-        """Fill in the fields the write port requires, in the payload's OWN language (pure-ish).
+    def _enrich(self, updates: list[dict], skip: set[str] | None = None) -> list[dict]:
+        """Fill in the fields the whole-entity write port requires (pure-ish).
 
         Reviews only carry property values, but ``AgentEntity`` requires the
         entity's template, and a partial update must also carry the row locale.
@@ -897,33 +1040,66 @@ class ApplySuggestionsUseCase:
         only by accident). A payload whose language row does not exist fails
         here, loudly, rather than writing the text onto another language.
 
+        ``skip`` is the property-scoped set: those payloads are written straight
+        through the raw repository, which needs no template, so reading their
+        rows here would be a wasted round-trip (the intercept reads them for the
+        snapshot anyway, and reads them FRESH). The reads that do happen run
+        through the run's bounded pool instead of one at a time.
+
         Nothing is merged into the values: the reviewed value is the row's own
         single value, and Uwazi merges at the PROPERTY level server-side, so a
         property this Run does not touch keeps what the row already holds.
         """
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            enriched: list[dict] = []
-            for update in updates:
-                shared_id = update["shared_id"]
-                language = str(update.get("language") or self._default_language)
-                raw = loop.run_until_complete(self._entity_repository.get_raw_by_shared_id(shared_id, language))
-                template_name = update.get("template_name") or raw.get("template") or raw.get("template_name")
-                if not template_name:
-                    raise ApplyRefusedError(f"cannot resolve a template for {shared_id!r}; nothing was applied to it")
-                entry = {
-                    "shared_id": shared_id,
-                    "template_name": template_name,
-                    "metadata": dict(update["metadata"]),
-                    "language": raw.get("language") or language,
-                }
-                if "title" in update:
-                    entry["title"] = update["title"]
-                enriched.append(entry)
-            return enriched
-        finally:
-            loop.close()
+        skip = skip or set()
+        pending = [(index, update) for index, update in enumerate(updates) if update["shared_id"] not in skip]
+        if not pending:
+            return list(updates)
+        raws = self._fetch_raws_parallel(
+            [(update["shared_id"], str(update.get("language") or self._default_language)) for _, update in pending]
+        )
+        enriched = list(updates)
+        for index, update in pending:
+            shared_id = update["shared_id"]
+            language = str(update.get("language") or self._default_language)
+            raw = raws[(shared_id, language)]
+            template_name = update.get("template_name") or raw.get("template") or raw.get("template_name")
+            if not template_name:
+                raise ApplyRefusedError(f"cannot resolve a template for {shared_id!r}; nothing was applied to it")
+            entry = {
+                "shared_id": shared_id,
+                "template_name": template_name,
+                "metadata": dict(update["metadata"]),
+                "language": raw.get("language") or language,
+            }
+            if "title" in update:
+                entry["title"] = update["title"]
+            enriched[index] = entry
+        return enriched
+
+    def _fetch_raws_parallel(self, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+        """Read each ``(sharedId, language)`` raw once, fresh, through the bounded pool.
+
+        The cache is dropped first for the ids being read: this read decides
+        whether the write can happen at all, so it must see the live row rather
+        than a TTL window (the same reason the snapshot path invalidates).
+        """
+        unique = list(dict.fromkeys(pairs))
+        if self._cache_control is not None and unique:
+            self._cache_control.invalidate_entities(sorted({shared_id for shared_id, _ in unique}))
+
+        def _task(shared_id: str, language: str):
+            def _run() -> dict[str, Any]:
+                return asyncio.run(self._entity_repository.get_raw_by_shared_id(shared_id, language))
+
+            return _run
+
+        values, errors = ParallelExecutor(ThrottleController()).run([_task(sid, lang) for sid, lang in unique])
+        raws: dict[tuple[str, str], dict[str, Any]] = {}
+        for pair, value, error in zip(unique, values, errors):
+            if error is not None:
+                raise error
+            raws[pair] = value
+        return raws
 
     def _accept_pending(
         self,
@@ -1001,6 +1177,14 @@ class ApplySuggestionsUseCase:
                 status=RunStatus.PLANNED,
             )
         else:
+            if existing.status == RunStatus.REVERTED:
+                # A fully reverted run starts a NEW execution: the old touch
+                # set is history, not outstanding work, and its snapshots were
+                # captured against a state that may have changed since. Clear
+                # both so the table counts describe only this execution and a
+                # fresh first-touch snapshot is taken.
+                existing.reset_touch_set()
+                self._backup_store.clear_run(run_id)
             manifest = existing.model_copy(update={"status": RunStatus.PLANNED, "error": None, "error_step": None})
         self._backup_store.save_manifest(run_id, manifest)
         return manifest
@@ -1056,14 +1240,76 @@ class ApplySuggestionsUseCase:
                 totals["failed"],
             )
 
-    def _report_progress(self, progress: ProgressCallback | None, done: int, total: int) -> None:
+    def _report_progress(
+        self,
+        progress: ProgressCallback | None,
+        done: int,
+        total: int,
+        note: str | None = None,
+    ) -> None:
         """Emit one progress tick (best-effort: the write never fails over it)."""
         if progress is None:
             return
         try:
-            progress(done, total)
+            if note is None:
+                progress(done, total)
+            else:
+                progress(done, total, note)
         except Exception as exc:  # noqa: BLE001 — progress is display state, never an error state
             logger.warning("could not report apply progress ({} of {}): {}", done, total, exc)
+
+    def _property_types_for_rows(self, rows: list[Suggestion]) -> dict[str, str]:
+        """``{property_name: type}`` for the templates these rows touch (best-effort).
+
+        One lookup per distinct ``template_name`` the recorded rows carry (the
+        review table's Template column shows what the recording knew). The
+        lookup rides the cached ``/api/templates`` read the label lookup
+        already performed, so it costs no extra request. No lookup wired, an
+        unresolvable template, or a lookup failure contributes nothing: those
+        rows keep their recorded value and Uwazi's own validation gets the
+        last word.
+        """
+        if self._property_types is None:
+            return {}
+        templates: list[str] = []
+        for row in rows:
+            if row.template_name and row.template_name not in templates:
+                templates.append(row.template_name)
+        types: dict[str, str] = {}
+        for template in templates:
+            try:
+                types.update(self._property_types.property_types(template))
+            except Exception as exc:  # noqa: BLE001 — a types read must never block a write pass
+                logger.warning("apply: could not read property types for template {!r}: {}", template, exc)
+        return types
+
+    def _select_value_ids(self, rows: list[Suggestion], types: dict[str, str]) -> dict[tuple[str, str], dict[str, str]]:
+        """``{(template, property): {label: uuid}}`` for the select/multiselect rows (best-effort).
+
+        One lookup per distinct (template, property) pair; exceptions are
+        logged and treated as an empty map, which makes the write refuse that
+        property instead of guessing ids.
+        """
+        if self._thesaurus_values is None or not types:
+            return {}
+        pairs: list[tuple[str, str]] = []
+        for row in rows:
+            if row.op not in (UPDATE_OPS | CREATE_OPS) or not row.property_name:
+                continue
+            prop_type = types.get(row.property_name)
+            if prop_type is None or prop_type not in SELECT_TYPES:
+                continue
+            key = (row.template_name or "", row.property_name)
+            if key not in pairs:
+                pairs.append(key)
+        ids: dict[tuple[str, str], dict[str, str]] = {}
+        for template, prop in pairs:
+            try:
+                ids[(template, prop)] = self._thesaurus_values.value_ids(template, prop)
+            except Exception as exc:  # noqa: BLE001 — a thesaurus read must never block a write pass
+                logger.warning("apply: could not read thesaurus values for {}/{}: {}", template, prop, exc)
+                ids[(template, prop)] = {}
+        return ids
 
     def _write(
         self,
@@ -1077,6 +1323,8 @@ class ApplySuggestionsUseCase:
         file_moves: list[tuple[str, list[str]]] | None = None,
         progress: ProgressCallback | None = None,
         units_total: int = 0,
+        property_scope: set[str] | None = None,
+        capture_publish_state: bool = True,
     ) -> list[dict[str, str]]:
         """Execute every row kind through ONE intercepted CRUD set, batched.
 
@@ -1112,7 +1360,50 @@ class ApplySuggestionsUseCase:
         """
         crud = self._build_crud()
         loop = self._crud_loop
-        intercept = self._build_intercept(run_id, manifest, loop, affected_languages)
+        # The successful writes THIS pass appends are the entities that become
+        # outstanding again (a re-run after a partial revert). Recorded here so
+        # the manifest's reverted set can be pruned without guessing from the
+        # per-batch refusal list (one entity can have both landed and refused
+        # property writes).
+        applied_before = len(manifest.applied_writes)
+        # A progress callback gets a wrapper that remembers the latest tick, so
+        # the interceptor's NOTE broadcasts (a bulk write refusing, say) carry
+        # the live fraction instead of resetting it.
+        units_so_far = [0]
+
+        def _tracked_progress(done: int, total: int, note: str | None = None) -> None:
+            units_so_far[0] = done
+            if progress is None:
+                return
+            if note is None:
+                progress(done, total)  # a fraction tick keeps the current phase note
+            else:
+                progress(done, total, note)
+
+        def _note(text: str) -> None:
+            if progress is None:
+                return
+            try:
+                progress(units_so_far[0], units_total, text)
+            except Exception as exc:  # noqa: BLE001 — a note must never fail the write pass
+                logger.warning("could not publish the gate note ({} of {}): {}", units_so_far[0], units_total, exc)
+
+        _tracked_progress(0, units_total, "")
+        # All subsequent tick sites go through the tracked wrapper.
+        progress = _tracked_progress  # type: ignore[assignment]
+        intercept = self._build_intercept(
+            run_id,
+            manifest,
+            loop,
+            affected_languages,
+            property_scope=property_scope,
+            capture_publish_state=capture_publish_state,
+            note=_note,
+        )
+        # One bounded, 429-aware pool for the whole pass (the same controller the
+        # script helpers use): property writes fan out up to its allowance
+        # instead of going out strictly one at a time.
+        executor = ParallelExecutor(ThrottleController())
         failures: list[dict[str, str]] = []
         failed_targets: set[str] = set()
         done_units = 0
@@ -1121,7 +1412,6 @@ class ApplySuggestionsUseCase:
         created_ids: dict[str, str] = {}
         try:
             decorated = intercept.decorate(crud)
-            update_entities = decorated["update_entities"]
             create_entities = decorated["create_entities"]
             delete_entities = decorated["delete_entities"]
             set_publish_status = decorated["set_publish_status"]
@@ -1130,11 +1420,20 @@ class ApplySuggestionsUseCase:
             for language, group in language_groups(updates, self._default_language):
                 for offset in range(0, len(group), EXECUTE_BATCH_SIZE):
                     batch = group[offset : offset + EXECUTE_BATCH_SIZE]
-                    batch_failures = write_failures(update_entities(batch, language))
+                    # Property-scoped entities go straight through the raw
+                    # repository (snapshot of the touched keys + one POST, no
+                    # template read / client-side merge / index wait); the rest
+                    # keep the whole-entity snapshot and the CRUD helper.
+                    batch_failures = write_failures(intercept.write_property_updates(batch, language, executor))
                     failures.extend(batch_failures)
                     failed_targets.update(failure["shared_id"] for failure in batch_failures)
                     done_units += sum(payload_units(update) for update in batch)
                     self._report_progress(progress, done_units, units_total)
+                    # Checkpoint after EVERY batch: a crash mid-Run then loses at
+                    # most one batch's manifest entries instead of the whole
+                    # touch set (the snapshot files are already on disk, so the
+                    # manifest is what makes them revertable).
+                    self._backup_store.save_manifest(run_id, intercept.manifest)
             for language, group in language_groups(creates, self._default_language):
                 placeholders = [str(payload.get("source_shared_id") or "") for payload in group]
                 for offset in range(0, len(group), EXECUTE_BATCH_SIZE):
@@ -1234,6 +1533,25 @@ class ApplySuggestionsUseCase:
         # revertable), but the manifest must carry WHY it looks incomplete.
         final.error = format_write_failures(failures) if failures else None
         final.error_step = "execute" if failures else None
+        # Every entity this pass wrote is outstanding again, so it leaves the
+        # partial-revert set. Derive it from the successful writes (not the
+        # refusal list): one entity may have landed one property and refused
+        # another, and it is still modified.
+        written_ids = {write.shared_id for write in final.applied_writes[applied_before:]}
+        refused_ids = {failure["shared_id"] for failure in failures if failure["shared_id"]}
+        written_ids.update(shared_id for shared_id in delete_ids if shared_id not in refused_ids)
+        for target, sources in merges or []:
+            if target in failed_targets:
+                continue
+            written_ids.add(target)
+            written_ids.update(source for source in sources if source not in refused_ids)
+        written_ids.update(target for target, _sources in (file_moves or []) if target not in failed_targets)
+        written_ids.update(
+            row.shared_id
+            for row in whole_entity_rows
+            if row.op == "create_relationships" and row.shared_id not in refused_ids
+        )
+        final.mark_written(sorted(written_ids))
         self._backup_store.save_manifest(run_id, final)
         return failures
 
@@ -1252,10 +1570,12 @@ __all__ = [
     "format_write_failures",
     "language_groups",
     "language_scoped_value",
+    "metadata_value",
     "merge_deletions",
     "merge_moves",
     "partition_for_apply",
     "payload_units",
+    "property_scope_ids",
     "pushable_rows",
     "stamp_language",
     "write_failures",

@@ -37,6 +37,9 @@ services:
     network_mode: host
     environment:
       - UWAZI_URL=${UWAZI_URL}
+      # The filler is single-instance. ``UWAZI_URL`` may be a list (for the
+      # admin agent); when this is set, the filler targets that one instance.
+      - PROPERTY_FILLER_UWAZI_URL=${PROPERTY_FILLER_UWAZI_URL:-}
       - PROPERTY_FILLER_DATABASE_URL=postgresql://property_filler:property_filler@localhost:5433/property_filler
       # `.env` is dockerignored, so these are injected by compose interpolation
       # (docker compose auto-loads the project `.env` for ${VAR} substitution).

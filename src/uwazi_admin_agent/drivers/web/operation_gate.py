@@ -13,9 +13,10 @@ when its owner finishes (an ownership match guards the release).
 Progress: the owner reports ``(done, total)`` ticks from the worker thread that
 performs the writes (``set_progress`` is thread-safe; the unit is the gate's
 KIND — suboperations for a Run, entities for a Revert). Pages poll
-``snapshot`` with a fast timer and reissue ONE grouped Quasar toast —
+``snapshot`` with a fast timer and UPDATE one persistent toast —
 "Running — 13/1230 suboperations…" with a filling bar — so an operator sees a
-live fraction instead of a silent minute of work.
+live fraction instead of a silent minute of work. One element, not one
+notification per tick: Quasar groups would grow a badge counting every emission.
 
 No NiceGUI imports: the registry, the gate itself and the display helpers are
 pure and unit-testable offline (see ``tests/test_operation_gate.py``).
@@ -41,6 +42,9 @@ class GateState:
     done: int
     total: int
     started_at: datetime
+    note: str = ""
+    """Operator-facing phase text ('verifying the selection…', 'bulk write
+    refused — applying per entity'). Empty → the verb/fraction alone."""
 
 
 # The gated kinds, with the operator-facing words each one is shown as.
@@ -77,9 +81,8 @@ def active_text(state: GateState | None) -> str:
     verb = KIND_VERBS.get(state.kind, state.kind)
     unit = KIND_UNITS.get(state.kind, "")
     progress = progress_text(state.done, state.total)
-    if unit:
-        return f"{verb} — {progress} {unit}…"
-    return f"{verb}…"
+    line = f"{verb} — {progress} {unit}…" if unit else f"{verb}…"
+    return f"{line} {state.note.strip()}" if state.note else line
 
 
 def busy_text(state: GateState | None) -> str:
@@ -139,13 +142,35 @@ def snapshot() -> GateState | None:
         return _state
 
 
-def set_progress(done: int, total: int) -> None:
+def set_progress(done: int, total: int, note: str | None = None) -> None:
     """Record one progress tick (thread-safe; called from worker threads).
 
     ``total`` 0 means the unit count is still unknown (an indeterminate pass):
     the toast then shows '…' and an infinite bar. Ints carry the fraction; a
     holder-less write (a late report from a released op) is ignored.
+
+    ``note`` names the PHASE the pass is in. ``None`` (the default from the
+    two-argument reports) KEEPS the current note so a batch's fraction tick
+    never wipes a phase message; ``""`` clears it (the phase is over); a
+    non-empty string replaces it.
     """
+    global _state
+    with _LOCK:
+        if _state is None:
+            return
+        current_note = _state.note if note is None else note
+        _state = GateState(
+            kind=_state.kind,
+            run_id=_state.run_id,
+            done=int(done),
+            total=int(total),
+            started_at=_state.started_at,
+            note=current_note,
+        )
+
+
+def set_note(note: str) -> None:
+    """Publish one operator-facing phase note, keeping done/total (thread-safe)."""
     global _state
     with _LOCK:
         if _state is None:
@@ -153,9 +178,10 @@ def set_progress(done: int, total: int) -> None:
         _state = GateState(
             kind=_state.kind,
             run_id=_state.run_id,
-            done=int(done),
-            total=int(total),
+            done=_state.done,
+            total=_state.total,
             started_at=_state.started_at,
+            note=note,
         )
 
 
@@ -167,6 +193,7 @@ __all__ = [
     "busy_text",
     "progress_text",
     "release",
+    "set_note",
     "set_progress",
     "snapshot",
     "try_acquire",

@@ -83,25 +83,27 @@ def test_load_active_raises_when_prompt_yaml_missing(tmp_path) -> None:
         _make_loader(tmp_path).load_active()
 
 
-def test_default_loader_is_wired_to_configuration_paths() -> None:
-    from uwazi_admin_agent import configuration
+def test_default_loader_is_wired_to_the_instance_paths() -> None:
+    from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+    from uwazi_admin_agent.domain.instance_paths import instance_paths
 
-    loader = RunsConfigLoader.default()
+    url = "http://localhost:3000"
+    paths = instance_paths(url, INSTANCE_IDS_DIR)
+    loader = RunsConfigLoader.default(url)
 
-    assert loader._runs_file == configuration.RUNS_FILE
-    assert loader._prompts_path == configuration.PROMPTS_PATH
-    assert loader._runs_path == configuration.RUNS_PATH
+    assert loader._runs_file == paths.runs_file
+    assert loader._prompts_path == paths.prompts_path
+    assert loader._runs_path == paths.runs_path
 
 
 def test_default_paths_are_package_scoped_under_uwazi_admin_agent_data() -> None:
     from uwazi_admin_agent import configuration
 
     # The runtime data tree lives inside the package, not at the repo root,
-    # so it cannot collide with uwazi_agent / uwazi_api data.
+    # so it cannot collide with uwazi_agent / uwazi_api data. Every instance
+    # gets its own tree under ``data/instances/<slug>/``.
     package_data = configuration.ROOT_PATH / "data"
 
     assert configuration.DATA_DIR == package_data
-    assert configuration.RUNS_FILE == package_data / "active_run.yaml"
-    assert configuration.PROMPTS_PATH == package_data / "prompts"
-    assert configuration.RUNS_PATH == package_data / "runs"
+    assert configuration.INSTANCE_IDS_DIR == package_data / "instances"
     assert configuration.ROOT_PATH.name == "python_uwazi_API"

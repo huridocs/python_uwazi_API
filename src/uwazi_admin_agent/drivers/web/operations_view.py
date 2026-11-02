@@ -11,7 +11,7 @@ The rules are enforced here, once:
 * a suboperation is independently checkable only when a Run can execute it
   ALONE (a property value, a link). A delete/publish/merge part is not: its
   write is the whole operation, so it is listed with a lock and the reason;
-* the operation's own state is DERIVED from its parts (all run → runned, all
+* the operation's own state is DERIVED from its parts (all applied → applied, all
   discarded → discarded, anything else → pending), so the two levels can never
   contradict each other;
 * the LANGUAGE belongs to the SUBOPERATION: an entity appears once in the
@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
+from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, value_decisions
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     MERGE_OPS,
@@ -86,14 +87,21 @@ LOCKED_SUB_OPS: dict[str, str] = {
 }
 
 # Suboperation status labels. The store keeps the review lifecycle
-# (pending/accepted/edited/discarded/applied/reverted); the table speaks the
-# same words for every state the operator can actually see, with "applied" read
-# as "runned" (written to Uwazi) — the word the operation badge uses.
+# (pending/accepted/edited/discarded/applied/reverted), but the operator only
+# ever acts on three states, so those are the three words the UI speaks:
+#   pending  — still to be written. A newly recorded row is stored ACCEPTED and
+#              an operator edit EDITED; both are just "waiting to run" here, so
+#              they read as pending instead of leaking the old accept/edit
+#              workflow into the badge.
+#   applied  — APPLIED, i.e. written to Uwazi.
+#   reverted — its write was undone, so it can be run again.
+# DISCARDED/OBSOLETE stay distinct: the operator refused them (Restore exists)
+# and a stale row must not look runnable.
 SUB_STATUS_LABELS: dict[str, str] = {
     SuggestionStatus.PENDING.value: "pending",
-    SuggestionStatus.ACCEPTED.value: "accepted",
-    SuggestionStatus.EDITED.value: "edited",
-    SuggestionStatus.APPLIED.value: "runned",
+    SuggestionStatus.ACCEPTED.value: "pending",
+    SuggestionStatus.EDITED.value: "pending",
+    SuggestionStatus.APPLIED.value: "applied",
     SuggestionStatus.REVERTED.value: "reverted",
     SuggestionStatus.DISCARDED.value: "discarded",
     SuggestionStatus.OBSOLETE.value: "obsolete",
@@ -101,8 +109,29 @@ SUB_STATUS_LABELS: dict[str, str] = {
 
 SUB_STATUS_COLORS: dict[str, str] = {
     **STATUS_COLORS,
-    "runned": RUN_STATUS_COLORS["runned"],
+    "applied": RUN_STATUS_COLORS["applied"],
 }
+
+# The suboperation states a Run may write again. ``applied`` is already in
+# Uwazi, ``discarded`` was refused (Restore is its undo), and ``obsolete`` no
+# longer describes the script's work — none of them may enter a selection, or
+# the Run/Discard counters would include parts the action cannot write.
+_RUNNABLE_SUB_STATUSES: frozenset[str] = frozenset({"pending", "reverted"})
+
+
+def is_runnable_status(status_label: str) -> bool:
+    """Whether a suboperation in this display state can be written by a Run (pure)."""
+    return status_label in _RUNNABLE_SUB_STATUSES
+
+
+def non_runnable_note(status_label: str) -> str:
+    """Why a suboperation cannot be selected, when it is not locked by its op (pure)."""
+    return {
+        "applied": "already applied — revert it first",
+        "discarded": "discarded — restore it first",
+        "obsolete": "obsolete — refresh the table",
+    }.get(status_label, "not independently runnable")
+
 
 # Ops whose OPERATION-level undo is not an in-place restore of one live entity:
 # a create's undo is a deletion, a delete's is a re-create, a create-merge's
@@ -175,12 +204,14 @@ def _relationship_proposed(sub: Suggestion) -> str:
     return f"{text} ({kind})" if kind else text
 
 
-def sub_values(sub: Suggestion) -> tuple[str, str]:
+def sub_values(sub: Suggestion, types: dict[str, str] | None = None) -> tuple[str, str]:
     """One suboperation's ``(current, proposed)`` display pair (pure).
 
     The values are Uwazi's stored shapes rendered for a one-line cell — the
     same rendering the entity window uses. A whole-entity op has no current
     value to show (publishing/deleting is not a property), so it reads "—".
+    ``types`` maps property names to their template type so a date property
+    renders as a calendar date instead of its raw epoch timestamp.
     """
     if sub.op == INFO_OP:
         return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
@@ -196,7 +227,8 @@ def sub_values(sub: Suggestion) -> tuple[str, str]:
         return "—", RUN_OP_PHRASES.get(sub.op, sub.op)
     if sub.op == MOVE_OP:
         return "—", _move_files_summary(sub)
-    return truncate(sub.current_value, 120), truncate(sub.proposed_value, 120)
+    property_type = (types or {}).get(sub.property_name or "")
+    return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
 
 
 def _move_files_summary(sub: Suggestion) -> str:
@@ -248,12 +280,17 @@ def suboperation_row(
     checked: bool,
     in_place: bool,
     labels: dict[str, str] | None = None,
+    types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One suboperation's table payload (pure). Colors are resolved here, not in Vue."""
     status_label = sub_status_label(sub.status)
-    current, proposed = sub_values(sub)
+    current, proposed = sub_values(sub, types)
     match = sub_match(sub)
-    selectable = is_selectable(sub.op)
+    runnable = is_runnable_status(status_label)
+    selectable = is_selectable(sub.op) and runnable
+    note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
+    select_type = "multiselect" if (types or {}).get(sub.property_name or "") == MULTISELECT_TYPE else None
+    decisions = value_decisions(sub.proposed_value, sub.rejected_values) if select_type else []
     return {
         "id": sub.id,
         "key": f"sub-{sub.id}",
@@ -268,15 +305,28 @@ def suboperation_row(
         "match_color": MATCH_COLORS.get(match, "grey-4"),
         "status": status_label,
         "status_color": sub_status_color(sub.status),
+        # A part is selectable only while a Run can still write it. APPLIED,
+        # DISCARDED and OBSOLETE parts stay visible (and revertable/restorable)
+        # but must not inflate Run (N) / Discard (N).
+        "runnable": runnable,
         "selectable": selectable,
+        # Whether the part's op can be acted on alone (a property/link). The
+        # status decides whether it is RUNNABLE now; this decides whether it is
+        # ever addressed by its own checkbox/Run/Discard/Restore.
+        "independent": is_selectable(sub.op),
         "checked": bool(checked) and selectable,
-        "note": lock_note(sub.op),
+        "note": note,
         "revertable": sub_revertable(sub, in_place=in_place),
         "shared_id": sub.shared_id,
         "op": sub.op,
         "property_name": sub.property_name,
         "is_info": sub.op == INFO_OP,
         "structural": False,
+        # Multiselect value-level decisions ([] for every other row, so
+        # existing payload consumers are unaffected).
+        "values": decisions,
+        "has_rejected": any(not decision["accepted"] for decision in decisions),
+        "select_type": select_type,
     }
 
 
@@ -324,7 +374,9 @@ def _structural_row(
         "match_color": MATCH_COLORS.get("n/a", "grey-4"),
         "status": status,
         "status_color": status_color,
+        "runnable": is_runnable_status(status),
         "selectable": False,
+        "independent": False,
         "checked": False,
         "note": lock_note(op) or "part of the operation — select the operation",
         "revertable": False,
@@ -518,13 +570,16 @@ def file_move_detail_rows(subs: Iterable[Suggestion]) -> list[dict[str, Any]]:
 def operation_status(subs: Iterable[dict[str, Any]]) -> str:
     """The operation's own state, DERIVED from its parts (pure).
 
-    ``runned`` once every part is written, ``discarded`` once every part is
-    refused, anything else ``pending`` — work remains. The words are the parts'
-    own, so the two levels cannot contradict each other.
+    ``applied`` once every part is written, ``reverted`` once every part's write
+    was undone (runnable again), ``discarded`` once every part is refused,
+    anything else ``pending`` — work remains. The words are the parts' own, so
+    the two levels cannot contradict each other.
     """
     states = {sub["status"] for sub in subs}
-    if states == {"runned"}:
-        return "runned"
+    if states == {"applied"}:
+        return "applied"
+    if states == {"reverted"}:
+        return "reverted"
     if states == {"discarded"}:
         return "discarded"
     if states == {"obsolete"}:
@@ -574,6 +629,7 @@ def operation_row(
     checked_ids: Iterable[int] = (),
     uwazi_url: str | None = None,
     labels: dict[str, str] | None = None,
+    types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One operation's table payload, with its suboperations (pure).
 
@@ -603,7 +659,17 @@ def operation_row(
     else:
         submodels = list(item.subs)
     rendered = [
-        (sub, suboperation_row(sub, checked=sub.id in checked, in_place=sub_in_place, labels=labels)) for sub in submodels
+        (
+            sub,
+            suboperation_row(
+                sub,
+                checked=sub.id in checked,
+                in_place=sub_in_place,
+                labels=labels,
+                types=types,
+            ),
+        )
+        for sub in submodels
     ]
     # The all-no-op merge anchor and a standalone file-copy row write no
     # property value of their own: their structural file/delete parts carry the
@@ -636,6 +702,7 @@ def operation_row(
             "validated_color": "grey-4",
             "has_validated": False,
             "has_checkable": False,
+            "has_runnable": False,
             "border_color": OP_BORDER_COLORS.get(INFO_OP, DEFAULT_BORDER_COLOR),
             "in_place": False,
             "revertable": False,
@@ -660,6 +727,7 @@ def operation_row(
         "validated_color": color,
         "has_validated": validated_counts(subs)[1] > 0,
         "has_checkable": any(sub["selectable"] for sub in subs),
+        "has_runnable": any(sub.get("runnable") for sub in subs),
         "border_color": OP_BORDER_COLORS.get(item.ops[0] if item.ops else "", DEFAULT_BORDER_COLOR),
         "in_place": in_place,
         "revertable": in_place and item.applied > 0,
@@ -834,9 +902,11 @@ __all__ = [
     "ids_of_refs",
     "is_file_move_row",
     "is_merge_anchor",
+    "is_runnable_status",
     "is_selectable",
     "languages_of_refs",
     "lock_note",
+    "non_runnable_note",
     "merge_detail_rows",
     "operation_open_url",
     "operation_row",

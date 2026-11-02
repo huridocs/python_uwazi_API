@@ -13,7 +13,8 @@ import asyncio
 
 import pytest
 
-from uwazi_admin_agent.configuration import RUNS_PATH
+from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.domain.suggestion import SuggestionFilter, SuggestionStatus
 from uwazi_admin_agent.drivers.web.run_service import (
     build_suggestion_store,
@@ -50,10 +51,10 @@ def test_a_replan_merges_into_the_same_live_table(workspace: AdminE2EWorkspace) 
     # Re-plan the SAME run with a different value: the script is replaced (as
     # the chat's regeneration does) and the pass runs again over the same run.
     script = update_script(ws.template_name, list(ws.entity_ids), ws.languages.default, ws.value("second"))
-    (RUNS_PATH / run_id / "script.py").write_text(script, encoding="utf-8")
-    asyncio.run(run_auto_scan(run_id, UWAZI_USER, UWAZI_PASSWORD))
+    (instance_paths(UWAZI_URL, INSTANCE_IDS_DIR).runs_path / run_id / "script.py").write_text(script, encoding="utf-8")
+    asyncio.run(run_auto_scan(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
-    store = build_suggestion_store()
+    store = build_suggestion_store(UWAZI_URL)
     rows, total = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=100))
     assert total == len(ws.entity_ids)  # no duplicates, no second table
     # The rows kept their identity — the same row ids, not new ones.
@@ -63,7 +64,7 @@ def test_a_replan_merges_into_the_same_live_table(workspace: AdminE2EWorkspace) 
     assert all(row.status is SuggestionStatus.PENDING for row in rows)
 
     # ONE pass row for the run.
-    pass_row = current_pass(run_id)
+    pass_row = current_pass(UWAZI_URL, run_id)
     assert pass_row is not None
     assert pass_row.status.value == "completed"
     assert pass_row.entities_total == len(ws.entity_ids)
@@ -79,10 +80,10 @@ def test_a_row_the_new_script_drops_becomes_obsolete(workspace: AdminE2EWorkspac
 
     # The regenerated script covers only ONE of the two entities.
     script = update_script(ws.template_name, [keep], ws.languages.default, ws.value("second"))
-    (RUNS_PATH / run_id / "script.py").write_text(script, encoding="utf-8")
-    asyncio.run(run_auto_scan(run_id, UWAZI_USER, UWAZI_PASSWORD))
+    (instance_paths(UWAZI_URL, INSTANCE_IDS_DIR).runs_path / run_id / "script.py").write_text(script, encoding="utf-8")
+    asyncio.run(run_auto_scan(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
-    store = build_suggestion_store()
+    store = build_suggestion_store(UWAZI_URL)
     visible, visible_total = store.query(run_id, SuggestionFilter(limit=100))
     all_rows, all_total = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=100))
     assert visible_total == 1

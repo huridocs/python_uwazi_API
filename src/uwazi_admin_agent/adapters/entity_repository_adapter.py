@@ -16,6 +16,7 @@ from typing import Any, override
 from loguru import logger
 
 from uwazi_admin_agent.domain.create_payload import to_create_payload
+from uwazi_admin_agent.domain.property_restore import keep_file_entries
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_api.client import UwaziClient
 
@@ -81,6 +82,89 @@ class UwaziEntityRepository(EntityRepositoryPort):
             body = response.content.decode("utf-8", errors="replace")
             raise RuntimeError(f"save_raw failed ({response.status_code}): {body}")
         logger.debug("raw saved sharedId={}", raw.get("sharedId"))
+
+    @override
+    async def save_raw_properties(self, payload: dict[str, Any]) -> None:
+        """POST a property-scoped payload without clearing the properties it omits.
+
+        Deliberately NOT routed through :meth:`save_raw`: that path sends ``[]``
+        for every property the payload omits, which is exactly right for a
+        whole-raw snapshot and catastrophic for a minimal one (it would blank
+        every property the run never touched). Here the payload's metadata IS
+        the restore set — the caller already turned "did not exist before" into
+        an explicit ``[]``.
+
+        FILES ARE THE OTHER HALF OF THE CONTRACT: Uwazi's update branch keeps
+        only the files whose id appears in the body's ``documents``/
+        ``attachments`` and DELETES every other stored file, so a metadata-only
+        body would strip the entity of its documents, attachments and preview.
+        The live row is read first and its file lists echoed back verbatim — the
+        same preservation the old ``update_partially`` path got from its
+        read-merge-write. A failed read refuses the write instead of risking the
+        files.
+        """
+        language = payload.get("language") or "en"
+        shared_id = payload.get("sharedId")
+        body = dict(payload)
+        try:
+            live = await self.get_raw_by_shared_id(shared_id, language)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"save_raw_properties refused sharedId={shared_id} language={language}: the current "
+                f"row could not be read, so its files cannot be preserved ({exc})"
+            ) from exc
+        body.update(keep_file_entries(live))
+        response = self._client.http.post_json(
+            url=f"{self._client.http.url}/api/entities",
+            json=body,
+            cookies={"locale": language},
+        )
+        if response.status_code != 200:
+            response_body = response.content.decode("utf-8", errors="replace")
+            raise RuntimeError(f"save_raw_properties failed ({response.status_code}): {response_body}")
+        logger.debug("raw properties saved sharedId={} language={}", shared_id, language)
+
+    @override
+    async def update_many_properties(
+        self,
+        shared_ids: list[str],
+        metadata: dict[str, Any],
+        language: str,
+    ) -> list[str]:
+        """Bulk-apply one metadata payload to many entities (one HTTP call).
+
+        ``POST /api/entities/multipleupdate`` applies the SAME ``values.metadata``
+        to up to 1000 ids in the locale the cookie selects, and answers with the
+        updated entities. Uwazi persists inside a transaction, so a refusal
+        leaves the whole batch untouched — callers retry per entity to get
+        per-entity attribution instead of guessing which id broke it.
+
+        The call is issued WITHOUT the maintenance-grade retry package
+        (``retries=False``): a refusal here is almost always the payload
+        itself — Uwazi's bulk endpoint turns a value its validator cannot shape
+        (a date sent as a string, say) into a deterministic 500, and three
+        layers of exponential backoff over it once kept an interactive Run
+        spinning for ~10 minutes before the real 422 on the per-entity
+        fallback surfaced. The per-entity fallback retries like every other
+        write.
+        """
+        response = self._client.http.post_json(
+            url=f"{self._client.http.url}/api/entities/multipleupdate",
+            json={"ids": list(shared_ids), "values": {"metadata": metadata}},
+            cookies={"locale": language},
+            retries=False,
+        )
+        if response.status_code != 200:
+            body = response.content.decode("utf-8", errors="replace")
+            raise RuntimeError(f"update_many_properties failed ({response.status_code}): {body}")
+        try:
+            updated = json.loads(response.content)
+        except ValueError as exc:
+            raise RuntimeError(f"update_many_properties returned a non-JSON body: {exc}") from exc
+        rows = updated if isinstance(updated, list) else updated.get("rows") or []
+        ids = [str(row.get("sharedId")) for row in rows if isinstance(row, dict) and row.get("sharedId")]
+        logger.debug("bulk properties saved ids={} language={}", len(ids), language)
+        return ids
 
     async def _with_explicit_clears(self, raw: dict[str, Any], language: str) -> dict[str, Any]:
         """Add empty-list entries for keys live now but not in the snapshot raw.

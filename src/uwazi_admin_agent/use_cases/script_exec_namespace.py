@@ -654,12 +654,13 @@ def _build_move_files_real_helper(
 
     Best-effort, like delete-revert file restore: a failed fetch/upload is
     counted as ``failed`` but does NOT raise - the merge still deletes the sources
-    and the target keeps whatever files were moved. Revert does NOT remove
-    moved files: they are file-collection rows joined by ``sharedId``, not
-    fields on the entity row a raw restore can rewrite - after revert the
-    target still carries the moved copies (orphaned in storage semantics is
-    moot; they stay fully visible). The sources ARE re-created with their
-    files (the delete-revert path captured their bytes before the delete).
+    and the target keeps whatever files were moved. Revert removes the moved
+    copies again: they are file-collection rows joined by ``sharedId``, not
+    fields on the entity row a raw restore can rewrite, so the revert path
+    matches each target row against the sources' backed-up bytes and deletes
+    only the copies it can verify (see ``RevertRunUseCase._discard_merge_copies``).
+    The sources ARE re-created with their files (the delete-revert path captured
+    their bytes before the delete).
 
     If either port is None (e.g. tests with no file repository wired), returns a
     stub that raises a clear ``RuntimeError`` when the script actually calls it -
@@ -1362,10 +1363,14 @@ def build_real_exec_namespace(
       intercept module.
     - ``move_files_to_entity`` (merge support) is the real mover over
       ``entity_repository`` + ``file_repository``; it is NOT intercept-decorated -
-      a merge's target is already snapshotted as ``modified`` by ``update_entities``
-      and the sources as ``deleted`` (their files captured) by ``delete_entities``,
-      so the moved files are covered by the existing snapshots on revert. If
-      either port is None a stub is bound that raises when the script calls it.
+      a merge's target is snapshotted as ``modified`` by ``update_entities`` when
+      the script writes it, and the sources as ``deleted`` (their files captured)
+      by ``delete_entities``. A file-only merge writes nothing to its target, so
+      there is no target snapshot at all; either way the moved copies are
+      removed by the revert's merge-copy cleanup (verified against the sources'
+      captured bytes), which is why the copies do not need to ride a snapshot.
+      If either port is None a stub is bound that raises when the script calls
+      it.
       Its ``move_files_to_entity_parallel`` sibling (one task per TARGET, the
       same shared executor/throttle) is not intercept-decorated either, and
       refuses a duplicated ``to_shared_id`` up front — the same-row race that

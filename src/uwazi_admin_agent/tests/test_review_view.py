@@ -18,6 +18,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     format_cost,
     full_value,
     match_label,
+    pending_suboperation_count,
     property_caption,
     property_heading,
     run_confirmation,
@@ -436,8 +437,8 @@ def test_run_status_is_pending_for_an_unreviewed_entity() -> None:
     assert run_status(_entity_row(pending=2, applied=0)) == ("pending", "grey")
 
 
-def test_run_status_is_runned_once_every_row_is_applied() -> None:
-    assert run_status(_entity_row(pending=0, applied=2)) == ("runned", "blue")
+def test_run_status_is_applied_when_every_row_is_applied() -> None:
+    assert run_status(_entity_row(pending=0, applied=2)) == ("applied", "blue")
 
 
 def test_run_status_is_reverted_once_a_revert_undid_the_writes() -> None:
@@ -445,8 +446,26 @@ def test_run_status_is_reverted_once_a_revert_undid_the_writes() -> None:
 
 
 def test_run_status_stays_pending_on_a_partial_state() -> None:
-    # One applied + one reverted: work remains, and it is not fully runned.
+    # One applied + one reverted: work remains, and it is not fully applied.
     assert run_status(_entity_row(pending=0, applied=1, reverted=1)) == ("pending", "grey")
+
+
+def test_pending_card_counts_every_state_the_row_badge_calls_pending() -> None:
+    """ACCEPTED/EDITED rows read "pending" in the table, so the card sums them."""
+    counts = {
+        "subs_pending": 2,
+        "subs_accepted": 3,
+        "subs_edited": 1,
+        "subs_applied": 4,
+        "subs_reverted": 5,
+        "subs_discarded": 6,
+    }
+
+    assert pending_suboperation_count(counts) == 6
+
+
+def test_pending_card_is_zero_for_an_empty_set() -> None:
+    assert pending_suboperation_count({}) == 0
 
 
 def test_filter_from_controls_passes_shared_ids_through() -> None:
@@ -458,15 +477,15 @@ def test_filter_from_controls_passes_shared_ids_through() -> None:
 # --- table refresh label -----------------------------------------------------
 
 
-def test_table_update_label_names_a_never_refreshed_table() -> None:
-    assert table_update_label(None) == "Table never refreshed"
+def test_table_update_label_names_a_never_synced_table() -> None:
+    assert table_update_label(None) == "Never synced with Uwazi"
 
 
 def test_table_update_label_shows_date_and_time() -> None:
     from datetime import datetime
 
-    assert table_update_label(datetime(2026, 10, 22, 14, 5)) == "Table updated 2026-10-22 14:05 UTC"
+    assert table_update_label(datetime(2026, 10, 22, 14, 5)) == "Synced with Uwazi 2026-10-22 14:05 UTC"
 
 
 def test_table_update_label_tolerates_an_unexpected_value() -> None:
-    assert table_update_label(object()) == "Table updated"
+    assert table_update_label(object()) == "Synced with Uwazi"

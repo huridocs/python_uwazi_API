@@ -12,6 +12,7 @@ import pytest
 
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore, build_where
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, LlmUsage
+from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
     PredictionAttemptStatus,
     PredictionPass,
@@ -332,6 +333,36 @@ def test_shared_ids_projection_honors_the_filter_and_ignores_paging(store: Sqlit
     assert len(only_three) == 60  # paging is ignored: this is a projection
 
 
+def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: SqliteSuggestionStore) -> None:
+    """Whole-result selection may only include parts a Run can still write."""
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="pending", status=SuggestionStatus.PENDING),
+            _suggestion(shared_id="accepted", status=SuggestionStatus.ACCEPTED),
+            _suggestion(shared_id="edited", status=SuggestionStatus.EDITED),
+            _suggestion(shared_id="reverted", status=SuggestionStatus.REVERTED),
+            _suggestion(shared_id="applied", status=SuggestionStatus.APPLIED),
+            _suggestion(shared_id="discarded", status=SuggestionStatus.DISCARDED),
+            _suggestion(shared_id="obsolete", status=SuggestionStatus.OBSOLETE),
+            _suggestion(shared_id="info", op="info", property_name=None),
+        ]
+    )
+
+    every = store.selection_rows("run1", SuggestionFilter(include_obsolete=True))
+    runnable = store.selection_rows("run1", SuggestionFilter(include_obsolete=True), runnable_only=True)
+
+    assert {ref[1] for ref in every} == {
+        "pending",
+        "accepted",
+        "edited",
+        "reverted",
+        "applied",
+        "discarded",
+        "obsolete",
+    }
+    assert {ref[1] for ref in runnable} == {"pending", "accepted", "edited", "reverted"}
+
+
 def test_shared_ids_filters_by_property(store: SqliteSuggestionStore) -> None:
     store.add_suggestions(
         [
@@ -583,3 +614,130 @@ def test_ensure_schema_is_idempotent_on_a_migrated_database(tmp_path) -> None:
         assert store.query("run1", SuggestionFilter())[1] == 1
     finally:
         store.close()
+
+
+# --- multiselect rejected_values ---------------------------------------------
+
+
+def _multiselect(
+    *,
+    proposed: list[str] | None = None,
+    **kwargs: object,
+) -> Suggestion:
+    kwargs.setdefault("property_name", "keywords")
+    return _suggestion(proposed=proposed or ["A", "B"], **kwargs)  # type: ignore[arg-type]
+
+
+def _row_of(store: SqliteSuggestionStore, run_id: str = "run1") -> Suggestion:
+    rows, _total = store.query(run_id, SuggestionFilter(include_obsolete=True))
+    assert rows, "expected one row"
+    return rows[0]
+
+
+def test_set_rejected_values_persists_labels_and_status(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect()])
+    store.set_rejected_values(1, ["B"], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    row = _row_of(store)
+    assert row.rejected_values == ["B"]
+    assert row.status is SuggestionStatus.DISCARDED
+    assert row.discard_reason == ALL_VALUES_REJECTED_REASON
+
+
+def test_set_rejected_values_keeps_status_when_none(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect()])
+    store.set_rejected_values(1, ["B"], None, None)
+    row = _row_of(store)
+    assert row.rejected_values == ["B"]
+    assert row.status is SuggestionStatus.PENDING
+    assert row.discard_reason is None
+
+
+def test_set_status_edit_clears_rejections_but_apply_keeps_them(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(), _multiselect(shared_id="s2", property_name="other", proposed=["C"])])
+    rows, _total = store.query("run1", SuggestionFilter())
+    ids = [row.id for row in rows]
+    store.set_rejected_values(ids[1], ["B"])
+    store.set_status([ids[0]], SuggestionStatus.EDITED, edited_value="fix")
+    store.set_status([ids[1]], SuggestionStatus.ACCEPTED)
+    fresh, _total = store.query("run1", SuggestionFilter())
+    by_id = {row.id: row for row in fresh}
+    assert by_id[ids[0]].rejected_values == []
+    assert by_id[ids[1]].rejected_values == ["B"]
+
+
+def test_restore_by_filter_clears_only_sentinel_rejections(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions(
+        [
+            _multiselect(shared_id="sentinel"),
+            _multiselect(shared_id="manual", property_name="other", proposed=["C"]),
+        ]
+    )
+    rows, _total = store.query("run1", SuggestionFilter())
+    by_id = {row.shared_id: row for row in rows}
+    store.set_rejected_values(by_id["sentinel"].id or 1, ["B"], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    store.set_rejected_values(by_id["manual"].id or 2, [], SuggestionStatus.DISCARDED, "the operator refused this whole row")
+    store.restore_by_filter("run1", SuggestionFilter())
+    fresh, _total = store.query("run1", SuggestionFilter())
+    after = {row.shared_id: row for row in fresh}
+    assert after["sentinel"].rejected_values == []
+    assert after["sentinel"].status is SuggestionStatus.PENDING
+    # An explicit operator discard keeps the value-level choices the operator made.
+    assert after["manual"].rejected_values == []
+    assert after["manual"].status is SuggestionStatus.PENDING
+
+
+def test_reset_statuses_clears_only_sentinel_rejections(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(shared_id="sentinel"), _multiselect(shared_id="manual")])
+    rows, _total = store.query("run1", SuggestionFilter())
+    by_id = {row.shared_id: row for row in rows}
+    store.set_rejected_values(by_id["sentinel"].id or 1, ["B"], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    store.set_rejected_values(
+        by_id["manual"].id or 2, ["A"], SuggestionStatus.DISCARDED, "the operator refused this whole row"
+    )
+    store.reset_statuses("run1", [by_id["sentinel"].id or 1, by_id["manual"].id or 2])
+    fresh, _total = store.query("run1", SuggestionFilter())
+    after = {row.shared_id: row for row in fresh}
+    assert after["sentinel"].rejected_values == []
+    assert after["manual"].rejected_values == ["A"]
+
+
+def test_reconcile_keeps_rejections_for_a_same_proposal(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_rejected_values(1, ["B"])
+    summary = store.reconcile_suggestions("run1", [_multiselect(proposed=["A", "B"])])
+    row = _row_of(store)
+    assert row.rejected_values == ["B"]
+    assert summary.refreshed == 0
+
+
+def test_reconcile_clears_rejections_and_resets_sentinel_discard_on_a_changed_proposal(
+    store: SqliteSuggestionStore,
+) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_rejected_values(1, ["A", "B"], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    summary = store.reconcile_suggestions("run1", [_multiselect(proposed=["A", "C"])])
+    row = _row_of(store)
+    assert row.rejected_values == []
+    # The synthetic discard only meant "nothing left to keep": the new proposal
+    # goes back into review.
+    assert row.status is SuggestionStatus.PENDING
+    assert row.discard_reason is None
+    assert summary.refreshed == 1
+
+
+def test_reconcile_keeps_a_real_discard_on_a_changed_proposal(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_rejected_values(1, ["A", "B"], SuggestionStatus.DISCARDED, "the operator refused this whole row")
+    store.reconcile_suggestions("run1", [_multiselect(proposed=["A", "C"])])
+    row = _row_of(store)
+    assert row.rejected_values == []
+    assert row.status is SuggestionStatus.DISCARDED
+    assert row.discard_reason == "the operator refused this whole row"
+
+
+def test_add_suggestions_over_existing_identity_keeps_stored_rejections(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_rejected_values(1, ["B"])
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    row = _row_of(store)
+    assert row.rejected_values == ["B"]

@@ -66,14 +66,11 @@ def test_change_summary_truncates_with_remainder_count() -> None:
 
 
 def test_entity_url_omits_language_default_and_unknown_instance() -> None:
-    from uwazi_admin_agent.drivers.web import app as web
-
-    if web._CONTROLLED_UWAZI_URL == "not configured":  # pragma: no cover — env-dependent
-        assert _entity_url("S1", "es") is None
-        return
-    base = web._CONTROLLED_UWAZI_URL.rstrip("/")
-    assert _entity_url("S1", None) == f"{base}/en/entity/S1"
-    assert _entity_url("S1", "es") == f"{base}/es/entity/S1"
+    # The base url is the SESSION's instance: no instance means no link.
+    assert _entity_url("S1", None, None) is None
+    assert _entity_url("S1", None, "") is None
+    assert _entity_url("S1", None, "http://x.io") == "http://x.io/en/entity/S1"
+    assert _entity_url("S1", "es", "http://x.io/") == "http://x.io/es/entity/S1"
 
 
 def test_row_language_prefers_identity_then_write() -> None:

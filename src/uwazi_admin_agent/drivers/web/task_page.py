@@ -22,6 +22,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     revert_run,
     task_view,
 )
+from uwazi_admin_agent.drivers.web.session import session_instance_url
 
 _STEP_COLORS: dict[str, str] = {
     "planned": "grey",
@@ -46,7 +47,7 @@ def task_page(task_id: str) -> None:
 
 def _build_page(task_id: str) -> None:
     try:
-        view = task_view(task_id)
+        view = task_view(session_instance_url(), task_id)
     except Exception as exc:  # noqa: BLE001 — a missing task shows an error, never a crash
         with ui.column().classes("w-full items-center justify-center min-h-screen"):
             ui.label(f"Cannot open task {task_id!r}: {exc}").classes("text-body1 text-negative")
@@ -158,7 +159,7 @@ async def _run_revert_task(state: dict[str, Any]) -> None:
     done: list[str] = []
     try:
         for kind, run_id in view.revert_targets:
-            await revert_run(run_id, user, password)
+            await revert_run(session_instance_url(), run_id, user, password)
             done.append(f"{kind} {run_id}")
         ui.notify(f"Task reverted ({len(done)} run(s))", type="positive")
     except Exception as exc:  # noqa: BLE001 — leave the remainder visible for retry
@@ -176,7 +177,7 @@ async def _run_revert_task(state: dict[str, Any]) -> None:
 def _reload(state: dict[str, Any]) -> None:
     """Re-read the task view and re-render the step cards."""
     try:
-        state["view"] = task_view(state["task_id"])
+        state["view"] = task_view(session_instance_url(), state["task_id"])
         _render_steps(state)
     except Exception:  # noqa: BLE001 — a refresh failure must not break the page
         logger.exception("task refresh failed")

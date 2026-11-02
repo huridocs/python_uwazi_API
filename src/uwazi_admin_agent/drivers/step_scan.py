@@ -14,9 +14,10 @@ import asyncio
 from loguru import logger
 
 from uwazi_admin_agent.adapters.script_emitter import SCRIPT_FILENAME
-from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, RUNS_PATH
+from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, INSTANCE_IDS_DIR
 from uwazi_admin_agent.domain.file_cache import format_cache_stats
-from uwazi_admin_agent.drivers.runtime import build_runtime
+from uwazi_admin_agent.domain.instance_paths import instance_paths
+from uwazi_admin_agent.drivers.runtime import build_runtime, default_instance_url
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunScriptUseCase
 
 _MAX_PRINTED_RECORDS = 10
@@ -28,7 +29,7 @@ def run_scan(run_name: str) -> int:
 
 
 async def _run_scan_async(run_name: str) -> int:
-    script_path = RUNS_PATH / run_name / SCRIPT_FILENAME
+    script_path = instance_paths(default_instance_url(), INSTANCE_IDS_DIR).runs_path / run_name / SCRIPT_FILENAME
     if not script_path.is_file():
         print(f"error: no generated script at {script_path} (run `generate` first)", flush=True)
         return 2

@@ -50,6 +50,39 @@ def test_single_run_revert_restores_every_language_row(workspace: AdminE2EWorksp
     assert {row.status.value for row in ws.suggestions(run_id)} == {"reverted"}
 
 
+def test_a_run_keeps_the_value_the_revert_will_restore(workspace: AdminE2EWorkspace) -> None:
+    """The row's Value stays the PRE-run value after a Run, so Revert stays legible.
+
+    The review table's "Value" column and the entity window both read
+    ``current_value``. Rewriting it with the value the Run just wrote made both
+    surfaces show "before == proposed", leaving the operator unable to see what a
+    Revert puts back (and flipping the Match verdict to ``exact``).
+    """
+    ws = workspace
+    shared_id = ws.entity_ids[0]
+    language = ws.languages.default
+    original = ws.text(shared_id, language)
+    run_id = ws.new_run(update_script(ws.template_name, [shared_id], language, ws.value("kept")))
+
+    planned = ws.suggestions(run_id)
+    assert len(planned) == 1
+    assert planned[0].match is False
+
+    ws.apply(run_id)
+    assert ws.status(run_id) == RunStatus.EXECUTED
+    assert ws.text(shared_id, language) == ws.value("kept")
+
+    applied = ws.suggestions(run_id)
+    assert len(applied) == 1
+    row = applied[0]
+    assert row.status.value == "applied"
+    assert row.current_value == planned[0].current_value
+    assert row.proposed_value == planned[0].proposed_value
+    assert row.current_value != row.proposed_value
+    assert row.match is False
+    assert original in str(row.current_value)
+
+
 def test_execute_revert_execute_revert_is_stable(workspace: AdminE2EWorkspace) -> None:
     """The working cycle can run twice and lands on the same baseline each time."""
     ws = workspace

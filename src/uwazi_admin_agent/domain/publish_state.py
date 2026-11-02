@@ -26,7 +26,7 @@ class PublishState(BaseModel):
 
     ``permissions`` are Uwazi's raw permission rows
     (``{"refId", "type": "user"|"group"|"public", "level": "read"|"write"}``),
-    captured from ``GET /api/entities?include=permissions``. A ``public`` entry
+    captured from ``GET /api/entities?include[]=permissions``. A ``public`` entry
     means the entity was published; its absence means it was not.
     """
 

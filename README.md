@@ -79,6 +79,48 @@ OLLAMA_API_KEY=<api-key>
   which can grow up to 4 GiB under `src/uwazi_admin_agent/data/file_cache/`)
   are all optional.
 
+#### Several Uwazi instances
+
+`UWAZI_URL` may hold **one URL or a comma-separated list**:
+
+```
+UWAZI_URL=http://localhost:3000,https://uwazi.example.org
+```
+
+- The login screen shows an **"Uwazi instance" dropdown** when more than one
+  URL is configured (a single instance needs no choice). The operator picks the
+  instance at login; the choice is bound to the session.
+- **Every task and run belongs to the instance that created it.** Switching
+  instances shows an empty task table, because a run's shared ids only make
+  sense on their own instance. To switch, log out and pick the other instance.
+- The credentials (`UWAZI_USER`/`UWAZI_PASSWORD`) are **shared** by all listed
+  instances — there is no per-instance credential model.
+- Each instance gets its own on-disk tree, so nothing bleeds across them:
+
+  ```
+  src/uwazi_admin_agent/data/instances/<slug>/
+    active_run.yaml      # the active run
+    prompts/<name>.yaml  # the prompt source of truth
+    runs/<run_id>/       # manifest, snapshots, script.py, audit.jsonl
+    tasks/<task_id>.yaml
+    suggestions.db
+  ```
+
+  The slug is the instance URL's host (plus port) with a short digest suffix.
+  The old flat `data/` layout is **not** migrated — it is simply no longer
+  read.
+- The CLI (`uwazi-admin-agent …`) is single-instance: it targets the **first**
+  configured URL.
+- The **property filler** is single-instance too: it targets
+  `PROPERTY_FILLER_UWAZI_URL` when set, otherwise the **first** URL (with a
+  startup warning). Set `PROPERTY_FILLER_UWAZI_URL=https://one.instance` when
+  running the filler alongside the admin agent and it should administer a
+  different instance than the first one.
+- `docker-compose.yml` passes `UWAZI_URL=${UWAZI_URL}` through unchanged, so a
+  comma-separated value reaches the admin agent as-is; the property filler also
+  receives `PROPERTY_FILLER_UWAZI_URL` (empty by default) to override which
+  single instance it targets.
+
 ### Linux
 
 ```bash
@@ -144,7 +186,10 @@ On the review page:
   BEFORE any of its writes (all its languages share one backup). A written
   property suboperation also offers its own **Revert**, which puts back just
   that property and leaves the run's other writes in place. **Revert task** (or
-  the apply run's own revert) undoes everything in one action;
+  the apply run's own revert) undoes everything in one action. The **Value**
+  column (and the entity window's `Value:` line) keeps the PRE-run value after a
+  Run — it is the before-state the Revert restores, and running a row does not
+  rewrite it; only **Sync with Uwazi** re-reads values from Uwazi;
 - the entity window (click the title, or a suboperation's **Edit** icon) shows
   the primary PDF beside the entity's property rows; opening it from a
   suboperation highlights that property;

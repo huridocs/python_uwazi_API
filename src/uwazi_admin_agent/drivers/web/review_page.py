@@ -39,13 +39,16 @@ row: the apply path issues one write per language, narrowed by the selected
 row id.
 
 A part is independently checkable only when a Run can execute it alone (a
-property value, a link). A delete/publish/merge part is listed with a lock and
-the reason: its write is the whole operation, so it runs with the operation's
-checkbox.
+property value, a link) AND it is still runnable (pending or reverted). An
+applied part is visible but not selectable until it is reverted, and a
+discarded part must be restored first; a delete/publish/merge part is listed
+with a lock and the reason (its write is the whole operation, so it runs with
+the operation's checkbox).
 
-The operation's **Status** is DERIVED from its parts: "runned" once every part
-is written, "discarded" once every part is refused, "pending" while work
-remains. The counter beside it reads checked/checkable parts.
+The operation's **Status** is DERIVED from its parts: "applied" once every part
+is written, "reverted" once every write was undone, "discarded" once every part
+is refused, "pending" while work remains. The counter beside it reads
+checked/checkable parts, so applied/discarded parts no longer inflate it.
 
 The **Target** column carries the open-in-Uwazi link as an icon beside the
 (trimmed, ellipsised) title rather than as a column of its own: a plain anchor
@@ -97,7 +100,7 @@ store at click time, so page flips never truncate the selection).
 Operation gate: Run, Revert, refresh and the app's generation are serialized by
 :mod:`uwazi_admin_agent.drivers.web.operation_gate` — ONE Uwazi-write pass at a
 time, process-wide. A second attempt is refused with the holder's live count,
-and while the gate is held a fast timer keeps one grouped toast on screen
+and while the gate is held a fast timer keeps one live toast on screen
 naming the holder by its SUBOPERATION fraction ("Running — 13/1230
 suboperations…") until the finishing action replaces it with the outcome.
 """
@@ -105,7 +108,6 @@ suboperations…") until the finishing action replaces it with the outcome.
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 from urllib.parse import quote
 
@@ -114,6 +116,14 @@ from nicegui import app, background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE, REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
+from uwazi_admin_agent.domain.select_values import (
+    ALL_VALUES_REJECTED_REASON,
+    MULTISELECT_TYPE,
+    accepted_values,
+    rejected_after_toggle,
+    unpredicted_values,
+    value_decisions,
+)
 from uwazi_admin_agent.domain.suggestion import (
     FILE_OPS,
     MERGE_OPS,
@@ -145,6 +155,7 @@ from uwazi_admin_agent.drivers.web.operations_view import (
     is_selectable,
     languages_of_refs,
     merge_detail_rows,
+    operation_open_url,
     operation_row,
     operation_status,
     ops_of_refs,
@@ -176,6 +187,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     filter_from_controls,
     full_value,
     match_label,
+    pending_suboperation_count,
     property_caption,
     property_heading,
     revert_entity_confirmation,
@@ -188,7 +200,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
 from uwazi_admin_agent.drivers.web.run_service import (
     apply_outcomes,
     build_backup_store,
-    build_suggestion_store,
     check_drift,
     current_pass,
     discard_ids,
@@ -206,15 +217,17 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_templates,
     preflight_selection,
     property_labels_for,
+    property_types_for,
     refresh_baseline_after_run,
     resolve_entity_document,
     restore_ids,
     revert_entities_selection,
     revert_entity_rows,
     revert_suboperation,
+    set_rejected_values,
     update_table_from_uwazi,
-    uwazi_base_url,
 )
+from uwazi_admin_agent.drivers.web.session import session_instance_url
 from uwazi_admin_agent.drivers.web.task_dialogs import script_dialog
 
 # The suboperation statuses a Run may write. ``applied`` is already in Uwazi,
@@ -228,13 +241,6 @@ _RUNNABLE_STATUSES: frozenset[str] = frozenset(
         SuggestionStatus.REVERTED.value,
     }
 )
-
-# Quasar notify's ``group`` key for the operation-progress toast: every
-# emission with this key REPLACES the previous one instead of stacking, which
-# is what makes one toast read "13/1230 … 47/1230" while the operation runs.
-# The completion/failure toasts of the gated actions reuse the key so they
-# replace the last live progress fraction instead of leaving it hanging.
-GATE_TOAST_GROUP: str = "uwazi-operation"
 
 
 def _claim_gate(kind: str, run_id: str, client: Any) -> bool:
@@ -254,34 +260,49 @@ def _claim_gate(kind: str, run_id: str, client: Any) -> bool:
 
 
 def _poll_gate_toast(state: dict[str, Any]) -> None:
-    """Keep ONE grouped toast alive naming the in-flight Uwazi operation.
+    """Keep ONE live toast naming the in-flight Uwazi operation.
 
-    The gate's snapshot is polled at 0.8 s: every change (or every ~2s, to keep
-    the toast alive when progress stalls in a long indeterminate phase) reissues
-    the grouped notification with the fresh fraction and its filling bar
-    (``progress``), so Quasar replaces it in place instead of stacking. A final
-    toast from the finishing action reuses the group and replaces this one with
-    the outcome; when the gate goes idle the last fraction toast simply expires
-    (finite ``timeout``), never lingering on a closed operation.
+    The gate's snapshot is polled at 0.8 s and the SAME notification element is
+    updated in place with the fresh fraction and its filling bar. It is
+    deliberately not a Quasar *group*: grouped notifications accumulate a badge
+    counting every emission, so a run of a few thousand rows ended up showing a
+    "44" bubble — noise, not progress. One persistent element means exactly one
+    toast for the whole pass, dismissed as soon as the gate goes idle.
     """
     active = snapshot()
+    note = state.get("_gate_notification")
     if active is None:
         state["_gate_signature"] = None
-        return  # nothing running; the last grouped toast expires on its own
-    signature = (active.kind, active.run_id, active.done, active.total)
-    now = time.monotonic()
-    if signature == state.get("_gate_signature") and now - float(state.get("_gate_emitted") or 0.0) < 2.0:
+        if note is not None:
+            state["_gate_notification"] = None
+            if not note.is_deleted:
+                try:
+                    note.dismiss()
+                except Exception:  # noqa: BLE001 — a gone client cannot dismiss a toast
+                    logger.debug("could not dismiss the gate toast")
+        return  # nothing running; the live toast is gone
+    signature = (active.kind, active.run_id, active.done, active.total, active.note)
+    if signature == state.get("_gate_signature") and note is not None and not note.is_deleted:
         return
     state["_gate_signature"] = signature
-    state["_gate_emitted"] = now
-    ui.notify(
-        active_text(active),
-        type="ongoing",
-        group=GATE_TOAST_GROUP,
-        progress=(active.done / active.total) if active.total > 0 else True,
-        timeout=8_000,
-        multi_line=True,
-    )
+    text = active_text(active)
+    progress = (active.done / active.total) if active.total > 0 else True
+    if note is None or note.is_deleted:
+        note = ui.notification(
+            text,
+            type="ongoing",
+            spinner=True,
+            timeout=0,
+            multi_line=True,
+            progress=progress,
+        )
+        state["_gate_notification"] = note
+        return
+    note.message = text
+    # ``Notification`` exposes message/type/spinner setters but no progress
+    # setter; its options dict IS the Quasar payload the component updates with.
+    note._props["options"]["progress"] = progress
+    note.update()
 
 
 def _modal_header(dialog: Any, title: str) -> None:
@@ -289,11 +310,6 @@ def _modal_header(dialog: Any, title: str) -> None:
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         ui.label(title).classes("text-h6")
         ui.button("Close", icon="close", on_click=dialog.close).props("flat")
-
-
-def _store() -> Any:
-    """The shared suggestion store (SQL-side status writes for row actions)."""
-    return build_suggestion_store()
 
 
 @ui.page("/review/{run_id}")
@@ -308,7 +324,7 @@ def review_page(run_id: str) -> None:
 
 def _build_page(run_id: str) -> None:
     try:
-        detail = get_run(run_id)
+        detail = get_run(session_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001 — a missing run shows an error, never a crash
         with ui.column().classes("w-full items-center justify-center min-h-screen"):
             ui.label(f"Cannot open review for {run_id!r}: {exc}").classes("text-body1 text-negative")
@@ -379,12 +395,12 @@ def _build_page(run_id: str) -> None:
         with ui.row().classes("items-center"):
             ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
             ui.label(f"Review — {detail.run_id}").classes("text-h6 q-ml-sm")
-            ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
+            state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
         with ui.row().classes("items-center"):
             # The controlled instance this run writes to — the same header link
             # the runs table carries, so the operator always knows which instance
             # the rows they are about to write belong to.
-            instance_url = uwazi_base_url()
+            instance_url = session_instance_url()
             if instance_url:
                 ui.icon("link", color="secondary").classes("q-mr-xs")
                 ui.link(instance_url, instance_url, new_tab=True).classes("text-white")
@@ -426,7 +442,7 @@ def _build_page(run_id: str) -> None:
             state["_stats_section"].set_visibility(False)
             state["_filters_section"].set_visibility(False)
 
-    if current_pass(run_id) is None:
+    if current_pass(session_instance_url(), run_id) is None:
         ui.notify(
             "No scan recorded yet — the automatic scan right after generation may still be running",
             type="info",
@@ -434,7 +450,7 @@ def _build_page(run_id: str) -> None:
 
     ui.timer(3.0, lambda: _poll_progress(state))
     # The operation gate's fast poller: while a Run/Revert/refresh is held, this
-    # keeps the grouped progress toast alive with the live fraction ("Running —
+    # keeps the live progress toast alive with the live fraction ("Running —
     # 13/1230 suboperations…"); idle, it does nothing.
     ui.timer(0.8, lambda: _poll_gate_toast(state))
 
@@ -473,7 +489,7 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 "sync", "Check drift", lambda: background_tasks.create(_check_drift_now(state, client=context.client))
             )
             state["_update_table_item"], state["_update_table_menu_label"] = _menu_item(
-                "cloud_sync", "Update table", lambda: _update_table_clicked(state)
+                "cloud_sync", "Sync with Uwazi", lambda: _update_table_clicked(state)
             )
             ui.separator()
             _menu_item(
@@ -514,7 +530,7 @@ def _toggle_section(state: dict[str, Any], section: str) -> None:
 
 
 def _update_table_clicked(state: dict[str, Any]) -> None:
-    """Start the table refresh from the menu, with the menu item disabled while it runs."""
+    """Start the Uwazi sync from the menu, with the menu item disabled while it runs."""
     item = state.get("_update_table_item")
     if item is not None and not item.is_deleted:
         item.disable()
@@ -534,8 +550,8 @@ def _render_summary(state: dict[str, Any]) -> None:
     holder = state.get("_summary")
     if holder is None or holder.is_deleted:
         return
-    counts = get_suggestion_counts(state["run_id"])
-    pass_row = current_pass(state["run_id"])
+    counts = get_suggestion_counts(session_instance_url(), state["run_id"])
+    pass_row = current_pass(session_instance_url(), state["run_id"])
     holder.clear()
     with holder:
         # ONE card for the operations and their suboperations: the Operations
@@ -548,7 +564,7 @@ def _render_summary(state: dict[str, Any]) -> None:
             f"{counts.get('subs_total', 0):,}",
             caption=f"{counts.get('operations_total', 0):,} entities",
         )
-        _card("Pending", f"{counts.get('subs_pending', 0):,}", "grey")
+        _card("Pending", f"{pending_suboperation_count(counts):,}", "grey")
         _card("Discarded", f"{counts.get('subs_discarded', 0):,}", "red")
         # Applied reads as a fraction so the operator sees how much of the task
         # is written without counting rows: applied suboperations / all of them.
@@ -621,10 +637,15 @@ def _filter_bar(state: dict[str, Any]) -> None:
             # picking one narrows the table to the suboperations writing that
             # property). Each option carries its own accuracy, and "any
             # property" carries the average of the properties that HAVE one.
-            scores = get_property_scores(state["run_id"])
+            scores = get_property_scores(session_instance_url(), state["run_id"])
             labels_by_template = _template_labels(state["run_id"])
             state["_template_labels"] = labels_by_template
             state["_labels"] = _merged_labels(labels_by_template)
+            # Types ride along with labels so date values render as calendar
+            # dates in the table and in the entity window.
+            types_by_template = _template_types(state["run_id"])
+            state["_template_types"] = types_by_template
+            state["_types"] = _merged_types(types_by_template)
             state["_property_select"] = (
                 ui.select(
                     {"": any_property_option(scores), **property_options(scores, state["_labels"])},
@@ -660,7 +681,10 @@ def _filter_bar(state: dict[str, Any]) -> None:
             # so the language has to be selectable below the row.
             state["_language_select"] = (
                 ui.select(
-                    {"": "any language", **{lang: lang for lang in get_suggestion_languages(state["run_id"])}},
+                    {
+                        "": "any language",
+                        **{lang: lang for lang in get_suggestion_languages(session_instance_url(), state["run_id"])},
+                    },
                     value=state["language"],
                     label="Language",
                     on_change=lambda e: _set_filter(state, "language", e.value or ""),
@@ -876,6 +900,7 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
     try:
         try:
             outcome = await revert_entities_selection(
+                session_instance_url(),
                 state["run_id"],
                 [(sid, None) for sid in entities],
                 user,
@@ -887,7 +912,6 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
                     f"Revert done — {outcome.summary()}",
                     type="positive" if not outcome.failures else "warning",
                     multi_line=True,
-                    group=GATE_TOAST_GROUP,
                 )
         except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
             logger.exception("bulk revert failed")
@@ -896,7 +920,6 @@ async def _revert_selected(state: dict[str, Any], entities: list[str], client: A
                     f"Revert failed: {exc}",
                     type="negative",
                     multi_line=True,
-                    group=GATE_TOAST_GROUP,
                 )
     finally:
         release("revert", state["run_id"])
@@ -934,12 +957,12 @@ def _discard_from_state(state: dict[str, Any]) -> None:
 
     noun = "suboperation" if len(ids) == 1 else "suboperations"
     _reason_dialog(
-        f"Mark {len(ids)} checked {noun} as discarded. They will NOT be executed by a Run, "
+        f"Mark {len(ids)} checked {noun} as discarded. They will NOT be applied by a Run, "
         "and the reason is stored with them.",
         _submit,
         title=f"Discard {len(ids)} {noun}",
         confirm_label="Discard",
-        reason_label="Reason (optional — why the end user does not want these executed)",
+        reason_label="Reason (optional — why the end user does not want these applied)",
     )
 
 
@@ -962,11 +985,11 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
         background_tasks.create(_discard_ids(state, ids, reason, client), name=f"discard {row_key}")
 
     _reason_dialog(
-        "Mark this operation as discarded? It will NOT be executed by a Run. The reason is stored with it.",
+        "Mark this operation as discarded? A Run will not apply it. The reason is stored with it.",
         _submit,
         title="Discard operation",
         confirm_label="Discard",
-        reason_label="Reason (optional — why the end user does not want this executed)",
+        reason_label="Reason (optional — why the end user does not want this applied)",
     )
 
 
@@ -1021,10 +1044,46 @@ async def _restore_ids(state: dict[str, Any], ids: list[int], client: Any) -> No
             _refresh_all(state)
 
 
+async def _set_rejections(state: dict[str, Any], row_id: int, rejected: list[str], client: Any) -> None:
+    """Persist one multiselect row's rejected labels, then refresh page + window."""
+    try:
+        await asyncio.to_thread(
+            set_rejected_values,
+            session_instance_url(),
+            state["run_id"],
+            row_id,
+            rejected,
+        )
+    except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
+        logger.exception("multiselect value update failed")
+        with client:
+            ui.notify(f"Could not update the value selection: {exc}", type="negative", multi_line=True)
+        return
+    with client:
+        _refresh_entity_window(state)
+        _refresh_all(state)
+
+
+def _toggle_value(state: dict[str, Any], suggestion: Suggestion, label: str, accepted: bool) -> None:
+    """Apply ONE checkbox's decision for a multiselect row (thin wrapper).
+
+    The ``rejected`` list is built from the suggestion object the checkbox was
+    built with: the window re-renders after every write, so the widget's row and
+    the stored row agree.
+    """
+    if suggestion.id is None:
+        return
+    rejected = rejected_after_toggle(suggestion.rejected_values, label, accepted)
+    background_tasks.create(
+        _set_rejections(state, suggestion.id, rejected, context.client),
+        name=f"toggle value {suggestion.id}",
+    )
+
+
 # --- per-row revert ----------------------------------------------------------
 
 
-def _backup_dates_for(rows: list[Any], run_id: str) -> dict[str, Any]:
+def _backup_dates_for(rows: list[Any], run_id: str, url: str) -> dict[str, Any]:
     """``sharedId -> backup captured_at`` for the page's entities (local files only).
 
     One read attempt per entity (best-effort): an absent snapshot file means
@@ -1032,7 +1091,7 @@ def _backup_dates_for(rows: list[Any], run_id: str) -> dict[str, Any]:
     never raised — a missing date must not break the table render.
     """
     dates: dict[str, Any] = {}
-    store = build_backup_store()
+    store = build_backup_store(url)
     for item in rows:
         try:
             snapshot = store.load_snapshot(run_id, item.shared_id)
@@ -1059,7 +1118,11 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
         client = context.client
         background_tasks.create(_revert_entity_rows(state, shared_id, client), name=f"revert {shared_id}")
 
-    title, message = revert_entity_confirmation(shared_id, tooltip_text, merge=entity_is_merge(state["run_id"], shared_id))
+    title, message = revert_entity_confirmation(
+        shared_id,
+        tooltip_text,
+        merge=entity_is_merge(session_instance_url(), state["run_id"], shared_id),
+    )
     _simple_confirm(title, message, _confirm)
 
 
@@ -1122,13 +1185,19 @@ async def _revert_suboperation(
     try:
         try:
             row_language = await revert_suboperation(
-                state["run_id"], shared_id, language, property_name, suggestion_id, user, password
+                session_instance_url(),
+                state["run_id"],
+                shared_id,
+                language,
+                property_name,
+                suggestion_id,
+                user,
+                password,
             )
             with client:
                 ui.notify(
                     f"Reverted {property_name} ({row_language}) to its backup value",
                     type="positive",
-                    group=GATE_TOAST_GROUP,
                 )
         except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
             logger.exception("suboperation revert failed")
@@ -1137,7 +1206,6 @@ async def _revert_suboperation(
                     f"Revert failed: {exc}",
                     type="negative",
                     multi_line=True,
-                    group=GATE_TOAST_GROUP,
                 )
     finally:
         release("revert", state["run_id"])
@@ -1160,14 +1228,13 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
     set_progress(0, 1)
     try:
         try:
-            info = await revert_entity_rows(state["run_id"], shared_id, user, password)
+            info = await revert_entity_rows(session_instance_url(), state["run_id"], shared_id, user, password)
             set_progress(1, 1)
             with client:
                 ui.notify(
                     f"Reverted {shared_id} to its backup"
                     + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
                     type="positive",
-                    group=GATE_TOAST_GROUP,
                 )
         except Exception as exc:  # noqa: BLE001 — the toast reports, the page never crashes
             logger.exception("per-entity revert failed")
@@ -1176,7 +1243,6 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
                     f"Revert failed: {exc}",
                     type="negative",
                     multi_line=True,
-                    group=GATE_TOAST_GROUP,
                 )
     finally:
         release("revert", state["run_id"])
@@ -1195,21 +1261,21 @@ def _drift_banner(state: dict[str, Any]) -> None:
     It sits BELOW the action bar, just above the table — the state of the data
     the table shows. Renders the STORED verdict (or "not checked yet"); the
     open-page auto-check and the manual button update it. One row: an icon +
-    the text + (right) the check-drift and update-table buttons.
+    the text + (right) the check-drift and sync buttons.
     """
     with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
         state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
         state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
             "text-body2 text-grey-7 grow"
         )
-        state["_table_update_label"] = ui.label(table_update_label(get_table_update_time(state["run_id"]))).classes(
-            "text-caption text-grey-6"
-        )
+        state["_table_update_label"] = ui.label(
+            table_update_label(get_table_update_time(session_instance_url(), state["run_id"]))
+        ).classes("text-caption text-grey-6")
 
     # The verdict's text is stored per run: apply it immediately, then let the
     # open-page auto-check refresh it (a fresh page should not show a stale
     # 'valid' while Uwazi moved — the check replaces the text in place).
-    stored = get_drift_state(state["run_id"])
+    stored = get_drift_state(session_instance_url(), state["run_id"])
     _apply_drift_state(state, stored, checking=stored is None)
     if stored is None or stored.status is DriftStatus.UNKNOWN or stored.checked_by == "sync":
         background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
@@ -1220,7 +1286,7 @@ def _drift_banner(state: dict[str, Any]) -> None:
 
 
 async def _update_table_now(state: dict[str, Any], client: Any) -> None:
-    """Refresh the table in place, then repaint the label, drift badge and grid."""
+    """Sync the table in place with Uwazi, then repaint the label, drift badge and grid."""
     user = app.storage.user.get("user")
     password = app.storage.user.get("password")
     if not user or not password:
@@ -1238,24 +1304,23 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
         if item is not None and not item.is_deleted:
             item.disable()
         if label is not None and not label.is_deleted:
-            label.text = "Updating table…"
+            label.text = "Syncing with Uwazi…"
     try:
-        result = await update_table_from_uwazi(state["run_id"], user, password)
-        updated = get_drift_state(state["run_id"])
+        result = await update_table_from_uwazi(session_instance_url(), state["run_id"], user, password)
+        updated = get_drift_state(session_instance_url(), state["run_id"])
         with client:
             _apply_drift_state(state, updated)
             if label is not None and not label.is_deleted:
-                label.text = table_update_label(get_table_update_time(state["run_id"]))
-            ui.notify(result.message(), type="positive", multi_line=True, group=GATE_TOAST_GROUP)
+                label.text = table_update_label(get_table_update_time(session_instance_url(), state["run_id"]))
+            ui.notify(result.message(), type="positive", multi_line=True)
             _refresh_all(state)
     except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
-        logger.exception("table update failed")
+        logger.exception("sync with Uwazi failed")
         with client:
             ui.notify(
-                f"Table update failed: {exc}",
+                f"Sync with Uwazi failed: {exc}",
                 type="negative",
                 multi_line=True,
-                group=GATE_TOAST_GROUP,
             )
     finally:
         release("refresh", state["run_id"])
@@ -1328,6 +1393,7 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
         # "object DriftStateRow can't be used in 'await' expression".
         updated = await asyncio.to_thread(
             check_drift,
+            session_instance_url(),
             state["run_id"],
             user,
             password,
@@ -1387,7 +1453,8 @@ def _sync_selection(state: dict[str, Any]) -> None:
         for sub in subs:
             if isinstance(sub, dict):
                 sub["checked"] = bool(sub.get("selectable")) and sub.get("id") in checked
-        if subs and all(sub.get("id") in checked for sub in subs if isinstance(sub, dict)):
+        runnable_subs = [sub for sub in subs if isinstance(sub, dict) and sub.get("runnable")]
+        if runnable_subs and all(sub.get("id") in checked for sub in runnable_subs):
             selected.append(row)
     table.selected = selected
     table.update()
@@ -1430,8 +1497,15 @@ def _toggle_select_all(state: dict[str, Any]) -> None:
     if int(state.get("total") or 0) <= 0:
         return
     # The projection is a row-id list, not a page: selection_rows ignores
-    # limit/offset, so this covers every operation the filter matches.
-    refs = get_selection_rows(state["run_id"], _current_filter(state))
+    # limit/offset, so this covers every operation the filter matches. Only
+    # runnable rows are selected: applied/discarded/obsolete parts cannot be
+    # written by a Run and must not inflate the action counts.
+    refs = get_selection_rows(
+        session_instance_url(),
+        state["run_id"],
+        _current_filter(state),
+        runnable_only=True,
+    )
     state["_global_refs"] = {ref[0]: ref for ref in refs}
     state["_checked"] = {ref[0] for ref in refs}
     state["_select_all"] = True
@@ -1470,7 +1544,15 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
     """
     if row.get("is_info"):
         return
-    ids = [int(sub["id"]) for sub in (row.get("subs") or []) if isinstance(sub, dict) and isinstance(sub.get("id"), int)]
+    # Only parts a Run can still write enter the selection. An applied part
+    # (already in Uwazi), a discarded one (restore first) or an obsolete one
+    # must never inflate Run (N) / Discard (N); locked parts of a RUNNABLE
+    # operation still ride their operation's tick.
+    ids = [
+        int(sub["id"])
+        for sub in (row.get("subs") or [])
+        if isinstance(sub, dict) and sub.get("runnable") and isinstance(sub.get("id"), int)
+    ]
     _apply_checked(state, ids, checked)
 
 
@@ -1634,10 +1716,16 @@ async def _run_rows(
     # or refresh — this page's or any other's — is refused with its live count.
     if not _claim_gate("run", state["run_id"], client):
         return
+    # The preflight (a fresh read of the selected rows) runs BEFORE any
+    # progress unit exists: name the phase on the live toast so the operator
+    # sees the Run thinking instead of a bare indeterminate spinner (a
+    # highlight of what the extract-date task's slow bulk refusal once wore).
+    set_progress(0, 0, "verifying the selection against Uwazi")
     try:
         try:
             preflight = await asyncio.to_thread(
                 preflight_selection,
+                session_instance_url(),
                 state["run_id"],
                 ids,
                 user,
@@ -1653,7 +1741,15 @@ async def _run_rows(
                 ui.notify(preflight.message(), type="warning", multi_line=True)
             return
         try:
-            await apply_outcomes(state["run_id"], user, password, pairs, ids, progress=set_progress)
+            await apply_outcomes(
+                session_instance_url(),
+                state["run_id"],
+                user,
+                password,
+                pairs,
+                ids,
+                progress=set_progress,
+            )
             # The writes have landed: say so NOW, before any bookkeeping, so the
             # operator can read the outcome and move on to the next row while the
             # run finishes its tail.
@@ -1663,17 +1759,15 @@ async def _run_rows(
                     # them, so do not point the operator at a Revert that
                     # cannot undo this part.
                     ui.notify(
-                        "Executed — the files were copied onto the target and stay there",
+                        "Applied — the files were copied onto the target and stay there",
                         type="positive",
                         multi_line=True,
-                        group=GATE_TOAST_GROUP,
                     )
                 else:
                     ui.notify(
-                        f"Executed — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
+                        f"Applied — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
                         type="positive",
                         multi_line=True,
-                        group=GATE_TOAST_GROUP,
                     )
             # The writes bumped Uwazi editDates: re-sync the baseline so the run's
             # own writes are the new reference, not drift. That is a PAGED
@@ -1682,7 +1776,13 @@ async def _run_rows(
             # scan — the same reason the table refresh threads it. Bookkeeping
             # never turns a landed Run into a failure.
             try:
-                await asyncio.to_thread(refresh_baseline_after_run, state["run_id"], user, password)
+                await asyncio.to_thread(
+                    refresh_baseline_after_run,
+                    session_instance_url(),
+                    state["run_id"],
+                    user,
+                    password,
+                )
             except Exception as exc:  # noqa: BLE001 — the writes landed; the baseline is best-effort
                 logger.warning("post-run baseline sync failed for {}: {}", state["run_id"], exc)
         except Exception as exc:  # noqa: BLE001
@@ -1692,7 +1792,6 @@ async def _run_rows(
                     f"Run failed: {exc}",
                     type="negative",
                     multi_line=True,
-                    group=GATE_TOAST_GROUP,
                 )
     finally:
         release("run", state["run_id"])
@@ -1769,7 +1868,8 @@ def _change_table(state: dict[str, Any]) -> None:
         """
         <q-tr :props="props">
           <q-td auto-width>
-            <q-checkbox v-if="!props.row.is_info" v-model="props.selected" dense />
+            <q-checkbox v-if="!props.row.is_info" v-model="props.selected" dense
+                        :disable="!props.row.has_runnable" />
           </q-td>
           <q-td key="expand" :props="props" class="text-center">
             <q-btn v-if="!props.row.is_info || props.row.has_subs" dense flat size="sm"
@@ -1809,6 +1909,7 @@ def _change_table(state: dict[str, Any]) -> None:
           <q-td key="actions" :props="props" class="text-no-wrap">
             <template v-if="!props.row.is_info">
               <q-btn dense flat icon="play_arrow" color="primary"
+                     :disable="!props.row.has_runnable"
                      title="Run this operation: the ticked suboperations (all of them when none is ticked)"
                      @click.stop="$parent.$emit('run_op', props.row)" />
               <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
@@ -1817,7 +1918,7 @@ def _change_table(state: dict[str, Any]) -> None:
               <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
                      title="Undo the discard — these suboperations go back to the review queue"
                      @click.stop="$parent.$emit('restore_op', props.row)" />
-              <q-btn v-else-if="props.row.run_status !== 'runned'" dense flat icon="block" color="negative"
+              <q-btn v-else-if="props.row.run_status !== 'applied'" dense flat icon="block" color="negative"
                      title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
                      @click.stop="$parent.$emit('discard_op', props.row)" />
               <q-btn dense flat icon="edit" color="teal"
@@ -1879,24 +1980,37 @@ def _change_table(state: dict[str, Any]) -> None:
                           <span v-else class="text-grey-6">—</span>
                         </td>
                         <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
-                        <td class="q-pa-xs"><div class="text-body2">{{ sub.proposed }}</div></td>
+                        <td class="q-pa-xs">
+                          <template v-if="sub.select_type === 'multiselect'">
+                            <div class="row items-center q-gutter-xs">
+                              <q-chip v-for="v in sub.values" :key="v.label" dense
+                                      :color="v.accepted ? 'green-2' : 'red-2'"
+                                      :text-color="v.accepted ? 'green-10' : 'red-10'"
+                                      :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
+                            </div>
+                            <div class="text-caption text-grey-6">{{ sub.values.filter(v => v.accepted).length }} / {{ sub.values.length }} values</div>
+                          </template>
+                          <div v-else class="text-body2">{{ sub.proposed }}</div>
+                        </td>
                         <td class="q-pa-xs"><q-badge :color="sub.match_color">{{ sub.match }}</q-badge></td>
                         <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
                         <td class="q-pa-xs subs-actions">
-                          <template v-if="sub.selectable">
-                            <q-btn dense flat icon="play_arrow" color="primary"
-                                   title="Run this suboperation (only this property)"
-                                   @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-if="sub.status === 'discarded'" dense flat icon="restore" color="orange"
-                                   title="Undo the discard — this suboperation goes back to the review queue"
-                                   @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-else-if="sub.status !== 'runned'" dense flat icon="block" color="negative"
-                                   title="Discard this suboperation — a Run will not execute it"
-                                   @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
-                                   title="Revert this one property to its backup value"
-                                   @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
-                          </template>
+                          <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
+                                 title="Run this suboperation (only this property)"
+                                 @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-if="sub.has_rejected" dense flat icon="done_all" color="positive"
+                                 title="Accept every predicted value again"
+                                 @click.stop="$parent.$emit('accept_values', props.row.row_key, sub.id)" />
+                          <q-btn v-if="sub.independent && sub.status === 'discarded'"
+                                 dense flat icon="restore" color="orange"
+                                 title="Undo the discard — this suboperation goes back to the review queue"
+                                 @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-else-if="sub.selectable" dense flat icon="block" color="negative"
+                                 title="Discard this suboperation — a Run will not execute it"
+                                 @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
+                          <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
+                                 title="Revert this one property to its backup value"
+                                 @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
                           <q-btn v-if="!sub.structural" dense flat icon="edit" color="teal"
                                  title="Open the entity window at this language"
                                  @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
@@ -1922,6 +2036,7 @@ def _change_table(state: dict[str, Any]) -> None:
     table.on("restore_sub", lambda e: _restore_sub_clicked(state, getattr(e, "args", None)))
     table.on("revert_sub", lambda e: _revert_sub_clicked(state, getattr(e, "args", None)))
     table.on("edit_sub", lambda e: _edit_sub_clicked(state, getattr(e, "args", None)))
+    table.on("accept_values", lambda e: _accept_values_clicked(state, getattr(e, "args", None)))
     # The RAW selection event carries WHICH rows were added/removed, which is
     # what the cascade to the suboperations needs (``on_select`` only carries
     # the selection itself).
@@ -2028,6 +2143,17 @@ def _edit_sub_clicked(state: dict[str, Any], args: Any) -> None:
     )
 
 
+def _accept_values_clicked(state: dict[str, Any], args: Any) -> None:
+    """Accept every predicted value of ONE multiselect suboperation back."""
+    _row, sub = _sub_of(state, args)
+    if sub is None or sub.get("is_info") or not isinstance(sub.get("id"), int):
+        return
+    background_tasks.create(
+        _set_rejections(state, int(sub["id"]), [], context.client),
+        name=f"accept values {sub['id']}",
+    )
+
+
 def _toggle_expand_all(state: dict[str, Any]) -> None:
     """Expand every operation — or collapse them all when they all are expanded."""
     table = state.get("_table")
@@ -2097,22 +2223,24 @@ def _reload_table(state: dict[str, Any]) -> None:
         return
     state["loading"] = True
     try:
-        rows, total = get_operation_rows(state["run_id"], _current_filter(state))
+        rows, total = get_operation_rows(session_instance_url(), state["run_id"], _current_filter(state))
         state["total"] = total
-        base_url = uwazi_base_url()
+        base_url = session_instance_url()
         # Per-row Revert tooltip: each page reads its entities' backup dates (a
         # local file read per entity — no HTTP). Entities without a backup
         # (never written) carry None and their Revert tooltip falls back to the
         # generic text.
-        tooltips = _backup_dates_for(rows, state["run_id"])
+        tooltips = _backup_dates_for(rows, state["run_id"], session_instance_url())
         state["_backup_dates"] = tooltips
         labels_by_template = state.get("_template_labels") or {}
+        types_by_template = state.get("_template_types") or {}
         payloads = [
             operation_row(
                 item,
                 checked_ids=state.get("_checked") or (),
                 uwazi_url=base_url,
                 labels=_labels_for_operation(item, labels_by_template, state.get("_labels") or {}),
+                types=_types_for_operation(item, types_by_template, state.get("_types") or {}),
             )
             for item in rows
         ]
@@ -2131,7 +2259,7 @@ def _reload_table(state: dict[str, Any]) -> None:
                     int(sub["id"])
                     for payload in payloads
                     for sub in payload.get("subs") or []
-                    if isinstance(sub.get("id"), int)
+                    if isinstance(sub.get("id"), int) and sub.get("runnable")
                 }
                 state["_checked"] = {sub_id for sub_id in (state.get("_checked") or ()) if sub_id in visible}
             _sync_selection(state)
@@ -2179,9 +2307,38 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
         select_button.set_enabled(all_selected or total > 0)
 
 
-def _refresh_all(state: dict[str, Any]) -> None:
-    """Re-render the summary, the selection buttons, and the current page."""
+_RUN_STATUS_BADGE_COLORS: dict[str, str] = {
+    "planned": "grey",
+    "snapshotted": "orange",
+    "executed": "green",
+    "verified": "blue",
+    "reverted": "indigo",
+    "failed": "red",
+    "generation_failed": "deep-orange",
+}
+
+
+def _refresh_run_badge(state: dict[str, Any]) -> None:
+    """Keep the header's run-status badge honest after a partial/full revert.
+
+    A per-entity or per-property revert can flip the run to REVERTED; the badge
+    used to be rendered once at page load and kept saying "executed".
+    """
+    badge = state.get("_status_badge")
+    if badge is None or badge.is_deleted:
+        return
     try:
+        detail = get_run(session_instance_url(), state["run_id"])
+    except Exception:  # noqa: BLE001 — a badge refresh must not break the page
+        return
+    badge.text = detail.status.value
+    badge.props(f"color={_RUN_STATUS_BADGE_COLORS.get(detail.status.value, 'grey-7')}")
+
+
+def _refresh_all(state: dict[str, Any]) -> None:
+    """Re-render the run badge, the summary, the selection buttons, and the page."""
+    try:
+        _refresh_run_badge(state)
         _render_summary(state)
         if state["offset"] >= state["total"] and state["offset"] > 0:
             state["offset"] = max(state["total"] - REVIEW_PAGE_SIZE, 0)
@@ -2192,7 +2349,7 @@ def _refresh_all(state: dict[str, Any]) -> None:
 
 def _poll_progress(state: dict[str, Any]) -> None:
     """Refresh the header while a pass is RUNNING (progress + spend)."""
-    pass_row = current_pass(state["run_id"])
+    pass_row = current_pass(session_instance_url(), state["run_id"])
     if pass_row is None or pass_row.status != PredictionAttemptStatus.RUNNING:
         return
     _render_summary(state)
@@ -2320,7 +2477,6 @@ def _open_entity_window(
                         icon="chevron_right",
                         on_click=lambda: _navigate_entity(state, shared_id, language, 1),
                     ).props("flat dense")
-                    ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat")
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
                     details_host = ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto")
@@ -2336,7 +2492,7 @@ def _open_entity_window(
 
 def _entity_rows(state: dict[str, Any], shared_id: str, language: str | None) -> list[Suggestion]:
     """The entity's rows in one language group, narrowed by the table's filter."""
-    return get_entity_suggestions(state["run_id"], shared_id, language, _current_filter(state))
+    return get_entity_suggestions(session_instance_url(), state["run_id"], shared_id, language, _current_filter(state))
 
 
 def _render_entity_header(
@@ -2376,7 +2532,13 @@ def _render_entity_details(
         if not suggestions:
             ui.label("No properties of this entity match the current filter.").classes("text-body2 text-grey-7 q-pa-sm")
             return
-        _entity_suggestions(state, suggestions, _property_labels(suggestions), focus_property=focus_property)
+        _entity_suggestions(
+            state,
+            suggestions,
+            _property_labels(suggestions),
+            focus_property=focus_property,
+            types=_property_types_for_suggestions(suggestions),
+        )
 
 
 def _refresh_entity_window(state: dict[str, Any]) -> None:
@@ -2411,7 +2573,7 @@ def _entity_is_revertable(
     ``update_and_delete`` merge IS revertable here: its undo restores the target
     and re-creates the sources it deleted.
     """
-    rows = get_entity_suggestions(state["run_id"], shared_id, language) or suggestions
+    rows = get_entity_suggestions(session_instance_url(), state["run_id"], shared_id, language) or suggestions
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in rows)
     # The table's own rule: an in-place entity with at least one applied row.
     # That covers a whole-entity op (publish/unpublish) whose undo the snapshot
@@ -2456,7 +2618,7 @@ async def _load_document(state: dict[str, Any], shared_id: str, language: str | 
         _render_pane_message(pane, "Not logged in to Uwazi — cannot show the document.")
         return
     try:
-        document = await resolve_entity_document(user, password, shared_id, language)
+        document = await resolve_entity_document(session_instance_url(), user, password, shared_id, language)
     except Exception as exc:  # noqa: BLE001 — no document info is not an error state
         logger.info("no primary document for {} ({}): {}", shared_id, language, exc)
         document = None
@@ -2478,13 +2640,18 @@ def _viewer_src(state: dict[str, Any], shared_id: str, language: str) -> str:
     The document route is passed whole through the viewer's ``src`` parameter,
     URL-encoded: an inner ``&`` would otherwise split into the OUTER query
     string and the viewer would fetch an entity-less URL.
+
+    ``v`` busts the browser cache of the viewer's static files (they are served
+    with ``max-age=3600``): without it, an operator who already opened the
+    window keeps the previous viewer for an hour. Bump it in lockstep with the
+    ``?v=`` on the script tag in ``review_viewer.html``.
     """
     document_url = (
         f"/review-pdf?run={quote(str(state['run_id']), safe='')}"
         f"&sid={quote(shared_id, safe='')}"
         f"&lang={quote(language, safe='')}"
     )
-    return f"/static/pdfjs/review_viewer.html?src={quote(document_url, safe='')}"
+    return f"/static/pdfjs/review_viewer.html?src={quote(document_url, safe='')}&v=2"
 
 
 async def _render_segmentation_fallback(
@@ -2492,7 +2659,13 @@ async def _render_segmentation_fallback(
 ) -> None:
     """Show the entity's document TEXT when there is no uploaded primary document."""
     try:
-        segmentation = await get_entity_segmentation(user, password, shared_id, language or DUMMY_LANGUAGE)
+        segmentation = await get_entity_segmentation(
+            session_instance_url(),
+            user,
+            password,
+            shared_id,
+            language or DUMMY_LANGUAGE,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade to a message, never a blank pane
         _render_pane_message(pane, f"No primary document, and no readable document text ({exc}).")
         return
@@ -2531,8 +2704,26 @@ def _entity_header(
     rows = suggestions or []
     refs = [(s.id, s.shared_id, s.language, s.op) for s in rows if s.id is not None and _suggestion_is_runnable(s)]
     revertable = _entity_is_revertable(state, shared_id, language, rows)
+    # The same open-in-Uwazi rule the review table uses: only a row that points
+    # at a REAL entity page (not a dry-created placeholder, not a publish-only
+    # change) gets the link, so the icon never opens a 404.
+    open_url = operation_open_url(
+        shared_id,
+        [s.op for s in rows],
+        [language] if language else [],
+        session_instance_url(),
+    )
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
-        ui.label(label).classes("text-h6")
+        with ui.row().classes("items-center no-wrap").style("min-width: 0"):
+            ui.label(label).classes("text-h6")
+            if open_url:
+                with (
+                    ui.link("", open_url, new_tab=True)
+                    .classes("q-ml-sm")
+                    .props("rel=noopener")
+                    .tooltip("Open this entity in Uwazi")
+                ):
+                    ui.icon("open_in_new", color="primary").classes("text-subtitle1")
         with ui.row().classes("items-center no-wrap"):
             if discarded:
                 ui.badge("discarded").props("color=negative").classes("q-mr-sm")
@@ -2564,7 +2755,8 @@ def _template_labels(run_id: str) -> dict[str, dict[str, str]]:
     """
     user = app.storage.user.get("user") or ""
     password = app.storage.user.get("password") or ""
-    return {name: property_labels_for(name, user, password) for name in get_templates(run_id)}
+    url = session_instance_url()
+    return {name: property_labels_for(url, name, user, password) for name in get_templates(url, run_id)}
 
 
 def _merged_labels(by_template: dict[str, dict[str, str]]) -> dict[str, str]:
@@ -2608,7 +2800,75 @@ def _property_labels(suggestions: list[Suggestion]) -> dict[str, str]:
     template_name = next((s.template_name for s in suggestions if s.template_name), None)
     if not template_name:
         return {}
-    return property_labels_for(template_name, app.storage.user.get("user") or "", app.storage.user.get("password") or "")
+    return property_labels_for(
+        session_instance_url(),
+        template_name,
+        app.storage.user.get("user") or "",
+        app.storage.user.get("password") or "",
+    )
+
+
+def _template_types(run_id: str) -> dict[str, dict[str, str]]:
+    """``{template_name: {property_name: type}}`` for every template the run writes.
+
+    The review table needs a property's TYPE to render its value correctly: a
+    ``date``/``daterange``/``multidate`` family value is a numeric timestamp,
+    and printing it raw shows an epoch number instead of a calendar date. Types
+    belong to a template, so they are resolved per template and cached behind
+    :func:`property_types_for`; an unreachable instance yields ``{}`` and the
+    generic value rendering is used.
+    """
+    user = app.storage.user.get("user") or ""
+    password = app.storage.user.get("password") or ""
+    url = session_instance_url()
+    return {name: property_types_for(url, name, user, password) for name in get_templates(url, run_id)}
+
+
+def _merged_types(by_template: dict[str, dict[str, str]]) -> dict[str, str]:
+    """One ``{property_name: type}`` map over every template of a run (pure)."""
+    merged: dict[str, str] = {}
+    for types in by_template.values():
+        merged.update(types)
+    return merged
+
+
+def _types_for_operation(
+    item: OperationReviewRow,
+    by_template: dict[str, dict[str, str]],
+    fallback: dict[str, str],
+) -> dict[str, str]:
+    """The property types of the templates an operation belongs to (pure).
+
+    Mirrors :func:`_labels_for_operation`: an operation can span templates, so
+    its own template names win over the run-wide fallback, and a property name
+    that means different things in two templates is typed by the template the
+    row actually writes.
+    """
+    if not item.template_names:
+        return fallback
+    merged: dict[str, str] = {}
+    for name in item.template_names:
+        merged.update(by_template.get(name) or {})
+    return merged or fallback
+
+
+def _property_types_for_suggestions(suggestions: list[Suggestion]) -> dict[str, str]:
+    """The entity's template property types for the window's value rendering.
+
+    Cached per (account, template) behind :func:`property_types_for`, so it costs
+    one ``/api/templates`` read the first time a template's entity is opened and
+    nothing after. An unreachable instance yields ``{}`` and the values render
+    through the generic path.
+    """
+    template_name = next((s.template_name for s in suggestions if s.template_name), None)
+    if not template_name:
+        return {}
+    return property_types_for(
+        session_instance_url(),
+        template_name,
+        app.storage.user.get("user") or "",
+        app.storage.user.get("password") or "",
+    )
 
 
 def _entity_value_label(text: str, classes: str) -> None:
@@ -2632,6 +2892,7 @@ def _entity_suggestions(
     suggestions: list[Suggestion],
     labels: dict[str, str] | None = None,
     focus_property: str | None = None,
+    types: dict[str, str] | None = None,
 ) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
@@ -2648,8 +2909,11 @@ def _entity_suggestions(
 
     ``focus_property`` highlights the property the window was opened from (a
     suboperation's Edit icon) without hiding the entity's other rows.
+    ``types`` maps property names to their template type so a date value reads
+    as a calendar date rather than a raw epoch timestamp.
     """
     resolved = labels or {}
+    property_types = types or {}
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in suggestions)
     merge_rows = [s for s in suggestions if s.op in MERGE_OPS]
     # A merge's PARTS are never revertable on their own: putting one target
@@ -2700,8 +2964,46 @@ def _entity_suggestions(
                             ),
                         ).props("flat dense color=indigo").tooltip("Revert this property to its backup value")
             if suggestion.op in PROPERTY_OPS:
-                _entity_value_label(f"Value: {full_value(suggestion.current_value)}", "text-body2 text-grey-7")
-                _entity_value_label(f"Proposed: {full_value(suggestion.proposed_value)}", "text-body2")
+                property_type = property_types.get(suggestion.property_name or "")
+                _entity_value_label(
+                    f"Value: {full_value(suggestion.current_value, property_type)}", "text-body2 text-grey-7"
+                )
+                if property_type == MULTISELECT_TYPE:
+                    decisions = value_decisions(suggestion.proposed_value, suggestion.rejected_values)
+                    # A row discarded BY the value mechanism stays toggleable
+                    # (rejecting more, or accepting one back, is exactly the
+                    # review loop); every other non-runnable state, and an
+                    # EDITED row (its edit wins over the proposal), is
+                    # read-only.
+                    toggling = (
+                        _suggestion_is_runnable(suggestion) or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON
+                    ) and suggestion.status is not SuggestionStatus.EDITED
+                    for decision in decisions:
+                        box = ui.checkbox(
+                            decision["label"],
+                            value=decision["accepted"],
+                            on_change=lambda e, s=suggestion, label=decision["label"]: _toggle_value(
+                                state, s, label, bool(e.value)
+                            ),
+                        ).props("dense")
+                        if not toggling:
+                            box.disable()
+                    unpredicted = unpredicted_values(suggestion.current_value, suggestion.proposed_value)
+                    if unpredicted:
+                        _entity_value_label(
+                            f"Not predicted, will be removed by this Run: {', '.join(unpredicted)}",
+                            "text-body2 text-orange-9",
+                        )
+                    accepted_now = accepted_values(suggestion.proposed_value, suggestion.rejected_values)
+                    _entity_value_label(
+                        f"Will write: {', '.join(accepted_now) or '— (nothing: the row is discarded)'}",
+                        "text-body2 text-teal",
+                    )
+                else:
+                    _entity_value_label(
+                        f"Proposed: {full_value(suggestion.proposed_value, property_type)}",
+                        "text-body2",
+                    )
             if suggestion.edited_value is not None:
                 _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
     if merge_rows:
@@ -2739,7 +3041,9 @@ def _navigate_entity(state: dict[str, Any], current: str, language: str | None, 
     so several parts of one group collapse to one pair).
     """
     pairs: list[tuple[str, str | None]] = []
-    for _id, shared_id, row_language, _op in get_selection_rows(state["run_id"], _current_filter(state)):
+    for _id, shared_id, row_language, _op in get_selection_rows(
+        session_instance_url(), state["run_id"], _current_filter(state)
+    ):
         pair = (shared_id, row_language)
         if pair not in pairs:
             pairs.append(pair)

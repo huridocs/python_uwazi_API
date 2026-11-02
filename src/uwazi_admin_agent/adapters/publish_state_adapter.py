@@ -1,6 +1,6 @@
 """``UwaziClient``-backed publish/permission state (see :mod:`ports.publish_state_port`).
 
-Reads ``GET /api/entities?include=permissions`` (Uwazi only returns the
+Reads ``GET /api/entities?include[]=permissions`` (Uwazi only returns the
 ``permissions`` array when the caller is authenticated and asks for it), and
 writes ``POST /api/entities/permissions`` — the endpoint Uwazi's own publish
 flow uses. ``published`` is derived from the presence of the ``public`` grant,
@@ -22,6 +22,22 @@ from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_api.client import UwaziClient
 
 
+def read_params(shared_id: str) -> list[tuple[str, Any]]:
+    """The ``/api/entities`` query for one entity's publish state (pure).
+
+    ``include`` is an ARRAY in the endpoint's query schema: sending it as a
+    scalar string is rejected with ``/query/include must be array`` (400), which
+    used to leave every backup snapshot without a publish state. The repeated
+    ``include[]`` key is the encoding Express's ``qs`` parses into
+    ``["permissions"]``.
+    """
+    return [
+        ("sharedId", shared_id),
+        ("include[]", "permissions"),
+        ("omitRelationships", "true"),
+    ]
+
+
 class UwaziPublishStateRepository(PublishStatePort):
     """Publish/permission grants over a :class:`UwaziClient`."""
 
@@ -30,7 +46,7 @@ class UwaziPublishStateRepository(PublishStatePort):
 
     @override
     async def read(self, shared_id: str, language: str | None = None) -> PublishState:
-        params: dict[str, Any] = {"sharedId": shared_id, "include": "permissions", "omitRelationships": "true"}
+        params = read_params(shared_id)
         cookies = {"locale": language} if language else {}
         response = self._client.http.request_adapter.get(
             url=f"{self._client.http.url}/api/entities",

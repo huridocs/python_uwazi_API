@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from uwazi_admin_agent.domain.property_restore import (
     property_restore_payload,
+    restore_row_language,
     row_snapshot_for_language,
     snapshot_row_raw,
 )
@@ -70,3 +71,35 @@ def test_legacy_snapshot_stands_in_for_its_own_language_only() -> None:
     legacy = _snapshot(language="es", raw={"title": "Legacy"})
     assert snapshot_row_raw(legacy, "es") == {"title": "Legacy"}
     assert snapshot_row_raw(legacy, "en") is None
+
+
+def test_language_independent_restore_targets_the_backup_row() -> None:
+    """A title/select/date row has no language of its own.
+
+    The Run wrote it to the default row, which is the row the backup captured;
+    the undo must target that row instead of a language-less one Uwazi never
+    stores (that mismatch refused every language-independent revert).
+    """
+    snapshot = _snapshot(
+        EntityRowSnapshot(language="es", raw={"title": "Español"}),
+        EntityRowSnapshot(language="en", raw={"title": "English"}),
+        language="en",
+    )
+
+    resolved = restore_row_language(snapshot, None)
+
+    assert resolved == "en"
+    assert snapshot_row_raw(snapshot, resolved) == {"title": "English"}
+
+
+def test_restore_row_language_prefers_the_suboperations_own_language() -> None:
+    snapshot = _snapshot(EntityRowSnapshot(language="en", raw={}), language="en")
+
+    assert restore_row_language(snapshot, "es") == "es"
+
+
+def test_restore_row_language_falls_back_to_the_default_row() -> None:
+    legacy = _snapshot(language=None, raw={})
+
+    assert restore_row_language(legacy, None) == "en"
+    assert restore_row_language(legacy, "") == "en"

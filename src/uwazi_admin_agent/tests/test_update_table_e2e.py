@@ -1,4 +1,4 @@
-"""Live E2E: "Update table from Uwazi" through the service layer (no UI)."""
+"""Live E2E: "Sync with Uwazi" through the service layer (no UI)."""
 
 from __future__ import annotations
 

@@ -69,10 +69,11 @@ from typing import Any
 
 from loguru import logger
 
-from uwazi_admin_agent.configuration import PROMPTS_PATH, RUNS_FILE, TASKS_PATH
+from uwazi_admin_agent.configuration import INSTANCE_IDS_DIR
+from uwazi_admin_agent.domain.instance_paths import instance_paths
 from uwazi_admin_agent.domain.manifest import RunStatus
 from uwazi_admin_agent.domain.suggestion import SuggestionFilter
-from uwazi_admin_agent.drivers.runtime import build_backup_store
+from uwazi_admin_agent.drivers.runtime import build_backup_store, default_instance_url
 from uwazi_admin_agent.drivers.web.run_service import (
     apply_outcomes,
     build_suggestion_store,
@@ -153,13 +154,16 @@ class TaskReport:
 # --- live instance access -----------------------------------------------------
 
 
+def _paths() -> Any:
+    """The on-disk paths of the instance this driver exercises."""
+    return instance_paths(default_instance_url(), INSTANCE_IDS_DIR)
+
+
 def _client(user: str, password: str) -> Any:
     """A logged-in ``UwaziClient`` against the configured instance."""
     from uwazi_api.client import UwaziClient
 
-    url = os.environ.get("UWAZI_URL")
-    if not url:
-        raise RuntimeError("UWAZI_URL is not set — point it at the instance to exercise")
+    url = default_instance_url()
     return UwaziClient(user=user, password=password, url=url)
 
 
@@ -285,7 +289,7 @@ def _run_id(task_no: int, suffix: str = "") -> str:
 
 
 def _task_id(task_no: int) -> str:
-    """The task id (also the task YAML's filename under ``TASKS_PATH``)."""
+    """The task id (also the task YAML's filename under the instance's ``tasks/``)."""
     return f"tpe2e-task-{task_no}"
 
 
@@ -294,13 +298,13 @@ def _clear_previous(run_id: str, task_id: str) -> None:
     from uwazi_admin_agent.drivers.web.run_service import delete_run
 
     try:
-        delete_run(run_id)
+        delete_run(default_instance_url(), run_id)
     except FileNotFoundError:
         pass
-    prompt_file = PROMPTS_PATH / f"{run_id}.yaml"
+    prompt_file = _paths().prompts_path / f"{run_id}.yaml"
     if prompt_file.is_file():
         prompt_file.unlink()
-    task_file = TASKS_PATH / f"{task_id}.yaml"
+    task_file = _paths().tasks_path / f"{task_id}.yaml"
     if task_file.is_file():
         task_file.unlink()
 
@@ -381,7 +385,7 @@ class _Runner:
 
     async def create(self, run_id: str, prompt: str) -> None:
         """The wizard's "Generate": persist the prompt, generate, plan."""
-        await create_and_generate(run_id, prompt, self.user, self.password)
+        await create_and_generate(default_instance_url(), run_id, prompt, self.user, self.password)
 
     def planned_rows(self, run_id: str) -> list[tuple[str, str | None, str | None]]:
         """The review table's (sharedId, language, property) rows of the live table.
@@ -389,23 +393,23 @@ class _Runner:
         Read through the SAME store the review page reads, so what the driver
         checks is what the operator saw.
         """
-        pass_row = current_pass(run_id)
+        pass_row = current_pass(default_instance_url(), run_id)
         if pass_row is None:
             return []
-        store = build_suggestion_store()
+        store = build_suggestion_store(default_instance_url())
         rows, _total = store.query(run_id, SuggestionFilter(limit=1000))
         return [(row.shared_id, row.language, row.property_name) for row in rows]
 
     async def run_rows(self, run_id: str, selection: list[tuple[str, str | None]]) -> None:
         """The review page's "Run": push the checked (sharedId, language) rows."""
-        await apply_outcomes(run_id, self.user, self.password, selection)
+        await apply_outcomes(default_instance_url(), run_id, self.user, self.password, selection)
 
     def manifest_status(self, run_id: str) -> RunStatus | None:
         """The run's manifest status (the runs table's Status column)."""
         from uwazi_admin_agent.drivers.web.run_service import get_run
 
         try:
-            return get_run(run_id).status
+            return get_run(default_instance_url(), run_id).status
         except FileNotFoundError:
             return None
 
@@ -436,11 +440,12 @@ def _task_use_case() -> TaskUseCase:
     """
     from uwazi_admin_agent.adapters.tasks_store import YamlTaskStore
 
+    url = default_instance_url()
     return TaskUseCase(
-        task_store=YamlTaskStore(TASKS_PATH),
-        backup_store=build_backup_store(),
-        revert_run=revert_run,
-        create_run=create_and_generate,
+        task_store=YamlTaskStore(_paths().tasks_path),
+        backup_store=build_backup_store(url),
+        revert_run=lambda run_id, user, password: revert_run(url, run_id, user, password),
+        create_run=lambda name, prompt, user, password: create_and_generate(url, name, prompt, user, password),
     )
 
 
@@ -861,19 +866,21 @@ async def _revert_task(
 
 def _active_run_snapshot() -> str | None:
     """The current ``active_run.yaml`` content (restored at the end)."""
-    if not RUNS_FILE.is_file():
+    runs_file = _paths().runs_file
+    if not runs_file.is_file():
         return None
-    return RUNS_FILE.read_text(encoding="utf-8")
+    return runs_file.read_text(encoding="utf-8")
 
 
 def _restore_active_run(content: str | None) -> None:
     """Put ``active_run.yaml`` back (the driver must not move the operator's pointer)."""
+    runs_file = _paths().runs_file
     if content is None:
-        if RUNS_FILE.is_file():
-            RUNS_FILE.unlink()
+        if runs_file.is_file():
+            runs_file.unlink()
         return
-    RUNS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RUNS_FILE.write_text(content, encoding="utf-8")
+    runs_file.parent.mkdir(parents=True, exist_ok=True)
+    runs_file.write_text(content, encoding="utf-8")
 
 
 async def run_text_property_e2e(
@@ -890,7 +897,7 @@ async def run_text_property_e2e(
     property, so the driver follows the INSTANCE's schema instead of a
     hard-coded one.
     """
-    require_local_e2e_target()
+    require_local_e2e_target(default_instance_url())
     client = _client(user, password)
     templates = [t.name for t in client.templates.get()]
     if template_name not in templates:
@@ -918,7 +925,7 @@ async def run_text_property_e2e(
         print(f"error: {exc}", flush=True)
         return 2
 
-    print(f"instance: {os.environ.get('UWAZI_URL')} (user {user})", flush=True)
+    print(f"instance: {default_instance_url()} (user {user})", flush=True)
     print(f"template: {template_name!r}  text property: {resolved_property!r}", flush=True)
     print(f"target entities: {len(pool)} ({', '.join(pool)})", flush=True)
     print("", flush=True)

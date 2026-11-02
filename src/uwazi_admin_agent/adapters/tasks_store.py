@@ -1,8 +1,8 @@
 """YAML persistence for multistep task definitions (one file per task).
 
-Mirrors the repo's existing YAML conventions (``data/prompts/<name>.yaml``,
-``data/active_run.yaml``): a task is one small YAML file under ``TASKS_PATH``,
-human-readable and diffable. Nothing about a task's runtime STATE lives here —
+Mirrors the repo's existing YAML conventions: a task is one small YAML file
+under the instance's ``tasks/`` dir, human-readable and diffable. Nothing
+about a task's runtime STATE lives here —
 step statuses come from the runs' own manifests, so this store only defines
 what the task IS (its ordered steps).
 """

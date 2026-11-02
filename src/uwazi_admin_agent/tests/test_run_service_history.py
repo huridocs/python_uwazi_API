@@ -94,7 +94,7 @@ def test_get_execution_history_newest_first_and_maps_fields(tmp_path) -> None:
         ),
     )
 
-    events = get_execution_history("r1", audit_log=log)
+    events = get_execution_history("http://localhost:3000", "r1", audit_log=log)
 
     # newest first: the failed execute (t_new) precedes the revert (t_old)
     assert [(e.type, e.outcome) for e in events] == [("execute", "failure"), ("revert", "success")]
@@ -105,4 +105,4 @@ def test_get_execution_history_newest_first_and_maps_fields(tmp_path) -> None:
 
 def test_get_execution_history_missing_run_empty(tmp_path) -> None:
     log = JsonlAuditLog(tmp_path)
-    assert get_execution_history("never-written", audit_log=log) == []
+    assert get_execution_history("http://localhost:3000", "never-written", audit_log=log) == []

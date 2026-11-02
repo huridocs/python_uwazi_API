@@ -92,6 +92,14 @@ class EntityRowSnapshot(BaseModel):
     so a revert that restores just one row's raw leaves the other languages
     modified (the partial-revert bug). A snapshot therefore captures EVERY
     configured language's row, and a revert restores each in turn.
+
+    On a **property-scoped** snapshot (:attr:`EntitySnapshot.scope`) ``raw`` is
+    a MINIMAL raw, not the whole row: identity (``_id``/``sharedId``/
+    ``language``), the ``title`` (Uwazi's update schema requires one), and only
+    the ``metadata`` keys the run actually wrote. ``touched_properties`` names
+    those keys — including the ones that did NOT exist before, which a restore
+    must clear with ``[]``. A minimal raw must never be written through the
+    whole-row save path: that path clears every key the payload omits.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,6 +107,14 @@ class EntityRowSnapshot(BaseModel):
     language: str = Field(description="The row's locale (ISO 639-1, e.g. 'en'); '' when unknown.")
     internal_id: str | None = Field(default=None, description="The row's Uwazi _id, when known.")
     raw: dict[str, Any] = Field(description="The exact raw entity JSON Uwazi returned for this row.")
+    touched_properties: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Property-scoped snapshots only: every metadata key the run wrote on this row "
+            "(whether or not it existed before). Drives the restore payload's key set, so a "
+            "property the run CREATED is cleared with [] instead of left live."
+        ),
+    )
 
 
 class EntitySnapshot(BaseModel):
@@ -117,6 +133,17 @@ class EntitySnapshot(BaseModel):
     language: str | None = Field(default=None, description="The row locale, when known.")
     raw: dict[str, Any] = Field(description="The exact raw entity JSON Uwazi returned.")
     captured_at: datetime = Field(description="When the snapshot was captured.")
+    scope: Literal["full", "property"] = Field(
+        default="full",
+        description=(
+            "How much of the entity this snapshot covers. ``full`` (the default, and every "
+            "snapshot a script run or a legacy build wrote) captures every language row so a "
+            "revert restores the entity whole. ``property`` captures ONLY the properties the "
+            "review table wrote on the rows it wrote them on — the cheap shape for a bulk "
+            "property edit, restored through ``save_raw_properties`` (never the whole-row "
+            "save, which would clear every property the minimal raw omits)."
+        ),
+    )
     files: list[FileRef] | None = Field(
         default=None,
         description=(

@@ -28,6 +28,8 @@ from uwazi_property_filler.configuration import (
     PROPERTY_NAME,
     PROPERTY_TEMPLATE,
     TEMPLATE_NAME,
+    UWAZI_URL,
+    parse_instance_urls,
 )
 from uwazi_property_filler.domain.extension_category import ExtensionCategory
 from uwazi_property_filler.domain.extension_kind import ExtensionKind
@@ -42,7 +44,13 @@ _STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 # In-memory ring buffer of recent log lines (mirrors container stderr output).
 _LOG_BUFFER: deque[str] = deque(maxlen=2000)
 
-_CONTROLLED_UWAZI_URL = os.environ.get("UWAZI_URL", "not configured")
+_CONTROLLED_UWAZI_URL = UWAZI_URL
+if len(parse_instance_urls(os.environ.get("UWAZI_URL"))) > 1 and not os.environ.get("PROPERTY_FILLER_UWAZI_URL", "").strip():
+    logger.warning(
+        "UWAZI_URL lists several instances; the property filler uses the first ({}). "
+        "Set PROPERTY_FILLER_UWAZI_URL to target another instance.",
+        UWAZI_URL,
+    )
 
 # Fillable property types (skip preview/nested/generatedid/image/media + title).
 _SKIP_TYPES = {"preview", "nested", "generatedid", "image", "media"}
@@ -245,9 +253,7 @@ def _login_page() -> None:
     with ui.column().classes("w-full items-center justify-center min-h-screen"):
         with ui.card().classes("w-full max-w-sm"):
             ui.label("Uwazi Property Filler").classes("text-h6")
-            ui.label("Log in with a Uwazi account. The page stays locked until the credentials are validated.").classes(
-                "text-body1 q-mt-sm"
-            )
+            ui.label("Log in with a Uwazi account.").classes("text-body1 q-mt-sm")
             user_input = ui.input("Username").classes("w-full text-h6")
             password_input = ui.input("Password", password=True).classes("w-full text-h6")
             error_label = ui.label().classes("text-negative text-body2")
