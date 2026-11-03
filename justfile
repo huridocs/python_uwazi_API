@@ -6,18 +6,17 @@ lint:
 
 tag:
 	#!/bin/bash
+	set -euo pipefail
 	CURRENT_DATE=$(date +%Y.%-m.%-d)
-	LATEST_TAG=$(git tag --list "${CURRENT_DATE}.*" --sort=-version:refname | head -n1)
-	if [ -z "$LATEST_TAG" ]; then
-		REVISION=1
-	else
-		REVISION=$(echo $LATEST_TAG | cut -d. -f4)
+	REVISION=1
+	while git rev-parse -q --verify "refs/tags/${CURRENT_DATE}.${REVISION}" >/dev/null \
+		|| git ls-remote --exit-code --tags origin "refs/tags/${CURRENT_DATE}.${REVISION}" >/dev/null 2>&1; do
 		REVISION=$((REVISION + 1))
-	fi
+	done
 	NEW_TAG="${CURRENT_DATE}.${REVISION}"
 	echo "Creating new tag: $NEW_TAG"
-	git tag $NEW_TAG
-	git push --tag
+	git tag "$NEW_TAG"
+	git push origin "refs/tags/${NEW_TAG}"
 	sed -i "s|pip install git+https://github.com/huridocs/python_uwazi_API@.*|pip install git+https://github.com/huridocs/python_uwazi_API@${NEW_TAG}|" README.md
 	git add README.md
 	git commit -m "update version to ${NEW_TAG}"
