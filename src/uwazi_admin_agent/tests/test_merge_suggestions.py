@@ -652,7 +652,9 @@ def test_a_move_operation_without_recorded_files_shows_one_fallback_row() -> Non
 def test_update_merge_row_is_an_update_payload_not_a_create() -> None:
     rows = [_suggestion(op="update_and_delete", property_name="excerpt", proposed="merged")]
 
-    assert build_apply_updates(rows) == [{"shared_id": "s1", "language": None, "metadata": {"excerpt": "merged"}}]
+    assert build_apply_updates(rows) == [
+        {"shared_id": "s1", "language": None, "metadata": {"excerpt": [{"value": "merged"}]}}
+    ]
     assert build_apply_creates(rows) == []
 
 
@@ -672,7 +674,7 @@ def test_create_merge_row_is_a_create_payload_not_an_update() -> None:
         {
             "title": "",
             "template_name": "Case",
-            "metadata": {"excerpt": "new"},
+            "metadata": {"excerpt": [{"value": "new"}]},
             "language": None,
             "source_shared_id": "dry-created-0",
         }

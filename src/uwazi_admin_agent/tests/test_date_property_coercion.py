@@ -6,7 +6,7 @@ The extraction tasks cooked this up the hard way: a published date recorded as
 ``"2026-10-30"``, pushed raw by the property-scoped write path, was a guaranteed
 500 on ``POST /api/entities/multipleupdate`` (and a ``422 Expected array,
 received string`` on the per-entity fallback). The value must reach Uwazi as
-``[seconds]`` — while the review table renders that shape back as
+``[{"value": <seconds>}]`` — while the review table renders that shape back as
 ``YYYY-MM-DD`` (see ``uwazi_admin_agent.domain.metadata_diff``, whose
 ``_timestamp_to_date`` accepts the same seconds and numbers this module
 coerces TO).
@@ -185,7 +185,7 @@ def test_apply_payload_coerces_a_legacy_recorded_date_string() -> None:
         {
             "shared_id": "s4fcs3o0ewp",
             "language": None,
-            "metadata": {"date_published": [_epoch("2026-10-30")]},
+            "metadata": {"date_published": [{"value": _epoch("2026-10-30")}]},
         }
     ]
 
@@ -201,7 +201,38 @@ def test_apply_payload_without_types_keeps_the_recorded_value() -> None:
         status=SuggestionStatus.ACCEPTED,
     )
     updates = build_apply_updates([row])
-    assert updates[0]["metadata"]["mystery_prop"] == "2026-10-30"
+    assert updates[0]["metadata"]["mystery_prop"] == [{"value": "2026-10-30"}]
+
+
+def test_apply_payload_wraps_a_multidate_list_in_envelopes() -> None:
+    row = Suggestion(
+        run_id="run1",
+        shared_id="s1",
+        language=None,
+        op="update",  # type: ignore[arg-type]
+        property_name="dates",
+        proposed_value=["2020-01-01", "2021-06-15"],
+        status=SuggestionStatus.ACCEPTED,
+    )
+    updates = build_apply_updates([row], property_types={"dates": "multidate"})
+    assert updates[0]["metadata"]["dates"] == [
+        {"value": _epoch("2020-01-01")},
+        {"value": _epoch("2021-06-15")},
+    ]
+
+
+def test_apply_payload_wraps_a_daterange_dict_in_an_envelope() -> None:
+    row = Suggestion(
+        run_id="run1",
+        shared_id="s1",
+        language=None,
+        op="update",  # type: ignore[arg-type]
+        property_name="period",
+        proposed_value={"from": "2020-01-01", "to": "2020-12-31"},
+        status=SuggestionStatus.ACCEPTED,
+    )
+    updates = build_apply_updates([row], property_types={"period": "daterange"})
+    assert updates[0]["metadata"]["period"] == [{"value": {"from": _epoch("2020-01-01"), "to": _epoch("2020-12-31")}}]
 
 
 def test_apply_payload_coerces_an_operator_edit_for_a_date_property() -> None:
@@ -218,4 +249,4 @@ def test_apply_payload_coerces_an_operator_edit_for_a_date_property() -> None:
         status=SuggestionStatus.EDITED,
     )
     updates = build_apply_updates([row], property_types={"date_published": "date"})
-    assert updates[0]["metadata"]["date_published"] == [_epoch("2020-06-01")]
+    assert updates[0]["metadata"]["date_published"] == [{"value": _epoch("2020-06-01")}]

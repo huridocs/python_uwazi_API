@@ -123,11 +123,10 @@ def test_edited_status_without_a_value_falls_back_to_the_proposal() -> None:
 
 
 def test_groups_rows_by_shared_id_into_one_payload() -> None:
-    """Values are applied VERBATIM: the recorder's shapes are what the mapper coerces.
+    """Scalar proposals become the array envelope; list proposals keep their shape.
 
-    Re-wrapping a proposal (e.g. into ``[{"value": ...}]``) would hand the entity
-    mapper a list where a ``select`` expects a scalar label, and Uwazi rejects it
-    — so the reviewed value is passed through unchanged.
+    The raw partial-update path bypasses the entity mapper, so a bare scalar has
+    to be wrapped here or Uwazi answers ``422 Expected array, received string``.
     """
     updates = build_apply_updates(
         [
@@ -137,8 +136,8 @@ def test_groups_rows_by_shared_id_into_one_payload() -> None:
         ]
     )
     assert updates == [
-        {"shared_id": "s1", "language": None, "metadata": {"excerpt": "e", "topic": ["t"]}},
-        {"shared_id": "s2", "language": None, "metadata": {"excerpt": "other"}},
+        {"shared_id": "s1", "language": None, "metadata": {"excerpt": [{"value": "e"}], "topic": ["t"]}},
+        {"shared_id": "s2", "language": None, "metadata": {"excerpt": [{"value": "other"}]}},
     ]
 
 
@@ -160,7 +159,9 @@ def test_title_row_becomes_a_top_level_title_field() -> None:
             _s(shared_id="s1", property_name="excerpt", proposed="e"),
         ]
     )
-    assert updates == [{"shared_id": "s1", "language": None, "metadata": {"excerpt": "e"}, "title": "New Title"}]
+    assert updates == [
+        {"shared_id": "s1", "language": None, "metadata": {"excerpt": [{"value": "e"}]}, "title": "New Title"}
+    ]
 
 
 def test_no_title_key_when_there_is_no_title_row() -> None:
@@ -181,7 +182,7 @@ def test_edited_overrides_proposed_for_the_same_key() -> None:
             ),
         ]
     )
-    assert updates[0]["metadata"]["excerpt"] == "edited"
+    assert updates[0]["metadata"]["excerpt"] == [{"value": "edited"}]
 
 
 def test_subset_restricts_the_payload() -> None:
@@ -275,11 +276,37 @@ def test_list_values_pass_through_unchanged() -> None:
     assert updates[0]["metadata"]["topic"] == payload
 
 
-def test_dict_value_passes_through_unchanged() -> None:
-    """A link/geolocation dict reaches the mapper in the shape the script contract set."""
+def test_dict_value_is_wrapped_in_the_value_envelope() -> None:
+    """A link dict is one value, so the raw payload carries it inside ``[{"value": ...}]``."""
     payload = {"label": "Source", "url": "https://example.org"}
     updates = build_apply_updates([_s(property_name="source_page_url", proposed=payload)])
-    assert updates[0]["metadata"]["source_page_url"] == payload
+    assert updates[0]["metadata"]["source_page_url"] == [{"value": payload}]
+
+
+def test_a_relationship_list_becomes_value_entries() -> None:
+    """The raw row stores related ids in ``{"value": <sharedId>}`` entries."""
+    updates = build_apply_updates(
+        [_s(property_name="related", proposed=["shared-1", "shared-2"])],
+        property_types={"related": "relationship"},
+    )
+    assert updates[0]["metadata"]["related"] == [{"value": "shared-1"}, {"value": "shared-2"}]
+
+
+def test_a_relationship_read_shape_keeps_only_the_shared_id() -> None:
+    payload = [{"shared_id": "shared-1", "title": "One"}]
+    updates = build_apply_updates(
+        [_s(property_name="related", proposed=payload)],
+        property_types={"related": "relationship"},
+    )
+    assert updates[0]["metadata"]["related"] == [{"value": "shared-1"}]
+
+
+def test_a_geolocation_pair_becomes_a_value_envelope() -> None:
+    updates = build_apply_updates(
+        [_s(property_name="location", proposed=[40.7, -74.0])],
+        property_types={"location": "geolocation"},
+    )
+    assert updates[0]["metadata"]["location"] == [{"value": {"lat": 40.7, "lon": -74.0, "label": ""}}]
 
 
 def test_a_clear_proposal_becomes_an_empty_array() -> None:
@@ -293,15 +320,26 @@ def test_a_clear_proposal_becomes_an_empty_array() -> None:
     assert updates[0]["metadata"]["date_published"] == []
 
 
-def test_metadata_value_normalizes_none_and_keeps_every_other_shape() -> None:
+def test_metadata_value_always_returns_uwazis_array_shape() -> None:
     assert metadata_value(None, None) == []
     assert metadata_value(None, "es") == []
-    assert metadata_value("Published", None) == "Published"
-    assert metadata_value(0, None) == 0
+    assert metadata_value("Published", None) == [{"value": "Published"}]
+    assert metadata_value(0, None) == [{"value": 0}]
+    assert metadata_value({"label": "S", "url": "u"}, None) == [{"value": {"label": "S", "url": "u"}}]
     assert metadata_value([], "es") == []
     assert metadata_value([{"label": "T1", "value": "t1"}], "es") == [{"label": "T1", "value": "t1"}]
     assert metadata_value([{"value": "hola", "language": "es"}], "es") == [{"value": "hola", "language": "es"}]
     assert metadata_value("hola", "es") == [{"value": "hola", "language": "es"}]
+
+
+def test_a_text_value_without_a_language_is_still_wrapped_in_an_array() -> None:
+    """The regression: a text row filed under the language-agnostic group.
+
+    The row language is optional, but the array envelope is not: Uwazi refuses
+    a bare string with ``422 Expected array, received string``.
+    """
+    updates = build_apply_updates([_s(property_name="summary", proposed="A paragraph")])
+    assert updates[0]["metadata"]["summary"] == [{"value": "A paragraph"}]
 
 
 def test_a_created_entities_clear_proposal_also_becomes_an_empty_array() -> None:
@@ -370,14 +408,14 @@ def test_create_rows_never_become_update_payloads() -> None:
         {
             "title": "Created",
             "template_name": "DOCUMENT",
-            "metadata": {"excerpt": "e"},
+            "metadata": {"excerpt": [{"value": "e"}]},
             "language": None,
             "source_shared_id": "dry-created-0",
         },
         {
             "title": "",
             "template_name": "DOCUMENT",
-            "metadata": {"excerpt": "f"},
+            "metadata": {"excerpt": [{"value": "f"}]},
             "language": None,
             "source_shared_id": "dry-created-1",
         },
@@ -402,7 +440,7 @@ def test_update_and_create_rows_group_into_disjoint_payload_sets() -> None:
         {
             "title": "Created",
             "template_name": "DOCUMENT",
-            "metadata": {"excerpt": "new value"},
+            "metadata": {"excerpt": [{"value": "new value"}]},
             "language": None,
             "source_shared_id": "dry-created-0",
         }
@@ -466,20 +504,20 @@ def test_a_value_that_names_its_own_language_is_not_restamped() -> None:
     assert build_apply_updates(rows)[0]["metadata"]["excerpt"] == [{"value": "hola", "language": "es"}]
 
 
-def test_a_language_agnostic_row_writes_its_value_untouched() -> None:
-    """A select/date/link has no language: the payload is exactly what was reviewed."""
+def test_a_language_agnostic_row_is_wrapped_without_a_language_tag() -> None:
+    """A select/date/link has no language, but it still needs the array envelope."""
     updates = build_apply_updates([_s(property_name="document_status", proposed="Published")])
-    assert updates[0]["metadata"]["document_status"] == "Published"
+    assert updates[0]["metadata"]["document_status"] == [{"value": "Published"}]
 
 
 def test_a_non_string_value_is_never_stamped() -> None:
     updates = build_apply_updates([_s(property_name="pages", proposed=42, language="es")])
-    assert updates[0]["metadata"]["pages"] == 42
+    assert updates[0]["metadata"]["pages"] == [{"value": 42}]
 
 
 def test_a_language_agnostic_value_is_never_stamped() -> None:
     assert stamp_language(None, "es") is None
-    assert stamp_language("x", None) == "x"
+    assert stamp_language("x", None) == [{"value": "x"}]
     assert stamp_language(["a", "b"], "es") == ["a", "b"]
     assert stamp_language({"label": "t", "url": "u"}, "es") == {"label": "t", "url": "u"}
 

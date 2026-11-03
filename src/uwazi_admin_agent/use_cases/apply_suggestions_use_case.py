@@ -237,19 +237,125 @@ def language_scoped_value(value: Any, language: str | None) -> Any:
     return [chosen[0]] if chosen else value
 
 
-def metadata_value(value: Any, language: str | None) -> Any:
+_DATE_PROPERTY_TYPES: frozenset[str] = frozenset({"date", "multidate", "daterange", "multidaterange"})
+_RELATIONSHIP_PROPERTY_TYPE = "relationship"
+_GEOLOCATION_PROPERTY_TYPE = "geolocation"
+
+
+def _value_entries(value: Any) -> list[Any]:
+    """Wrap every scalar of a value in Uwazi's ``{"value": ...}`` envelope (pure).
+
+    A value already carrying an envelope entry is left alone; a date list is a
+    list of NUMBERS, which are still wrapped because the on-disk shape is
+    ``[{"value": <timestamp>}]`` (the same shape the mapper and the raw read
+    use). ``{"from", "to"}`` range dicts are wrapped as one entry.
+    """
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    return [item if isinstance(item, dict) and "value" in item else {"value": item} for item in items]
+
+
+def _relationship_entries(value: Any) -> list[dict[str, str]]:
+    """A relationship value as Uwazi's ``[{"value": <sharedId>}]`` (pure).
+
+    The write contract hands the agent related entities by ``shared_id`` (a
+    string or a list of them); the raw metadata row stores the id in a
+    ``{"value": ...}`` entry, exactly like the mapper's coercion. A read-shape
+    entry (``{"shared_id", "title"}``) is accepted when an operator echoes it
+    back, but only the id is written.
+    """
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    entries: list[dict[str, str]] = []
+    for item in items:
+        target = item
+        if isinstance(item, dict):
+            target = item.get("shared_id") or item.get("sharedId") or item.get("value")
+        if isinstance(target, str) and target.strip():
+            entries.append({"value": target.strip()})
+    return entries
+
+
+def _geolocation_entries(value: Any) -> list[dict[str, Any]]:
+    """A geolocation value as Uwazi's ``[{"value": {"lat", "lon", "label"}}]`` (pure).
+
+    Accepts the write contract's ``[lat, lon]`` pair, a ``{"lat", "lon"}`` dict,
+    and the on-disk envelope (or a list of them) an operator may echo back.
+    Anything unrecognised is left for Uwazi to refuse rather than being
+    silently mangled.
+    """
+
+    def entry(mapping: dict[str, Any]) -> dict[str, Any] | None:
+        if "lat" not in mapping or "lon" not in mapping:
+            return None
+        return {
+            "value": {
+                "lat": float(mapping["lat"]),
+                "lon": float(mapping["lon"]),
+                "label": str(mapping.get("label", "")),
+            }
+        }
+
+    if isinstance(value, (list, tuple)) and len(value) >= 2 and not isinstance(value[0], (dict, list, tuple)):
+        try:
+            return [{"value": {"lat": float(value[0]), "lon": float(value[1]), "label": ""}}]
+        except (TypeError, ValueError):
+            pass
+
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    entries: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            inner = item.get("value") if isinstance(item.get("value"), dict) else item
+            found = entry(inner)
+            if found is not None:
+                entries.append(found)
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            try:
+                entries.append({"value": {"lat": float(item[0]), "lon": float(item[1]), "label": ""}})
+            except (TypeError, ValueError):
+                continue
+    return entries or _value_entries(value)
+
+
+def metadata_value(value: Any, language: str | None, property_type: str | None = None) -> Any:
     """The value Uwazi actually stores for one metadata KEY (pure).
 
-    Every metadata key is an ARRAY in Uwazi's schema: a select is ``["label"]``,
-    a date ``[timestamp]``, a text ``[{"value", "language"}]``. A recorded
+    Every metadata key is an ARRAY of ``{"value": ...}`` entries in Uwazi's
+    schema: a select is ``[{"value": <uuid>}]``, a date
+    ``[{"value": <timestamp>}]``, a text ``[{"value", "language"}]``. A recorded
     ``None`` means "clear this value" (the planner's way to empty a date), and
     sending the literal ``null`` is refused — ``422 Expected array, received
     null`` on the per-entity write, and a 500 (which the HTTP layer then retried
     for minutes) on the bulk endpoint. An EMPTY ARRAY is how the same clear is
     expressed, so that is what this boundary sends.
+
+    A recorded SCALAR is wrapped in the same envelope for the same reason: the
+    raw partial-update path bypasses the entity mapper's coercion, so a bare
+    ``"A/HRC/37/NGO/92 ES"`` (or a link dict, or a number) reaches Uwazi as-is
+    and is refused with ``422 Expected array, received string``. Per-language
+    values are already a ``[{"value", "language"}]`` list from
+    :func:`stamp_language`; a language-independent value keeps its shape and is
+    wrapped as ``[{"value": ...}]`` exactly as the mapper would have done.
+
+    Date-family values are special: their list is ALREADY an array but holds
+    raw numbers/range dicts, so each entry still needs the envelope — the
+    on-disk row is ``[{"value": <timestamp>}]``, not ``[<timestamp>]``.
     """
     scoped = language_scoped_value(value, language)
-    return [] if scoped is None else scoped
+    if scoped is None:
+        return []
+    if property_type in _DATE_PROPERTY_TYPES:
+        return _value_entries(scoped)
+    if property_type == _RELATIONSHIP_PROPERTY_TYPE:
+        return _relationship_entries(scoped)
+    if property_type == _GEOLOCATION_PROPERTY_TYPE:
+        return _geolocation_entries(scoped)
+    if isinstance(scoped, tuple):
+        return list(scoped)
+    if isinstance(scoped, list):
+        return scoped
+    if isinstance(scoped, dict) and "value" in scoped:
+        return [scoped]
+    return [{"value": scoped}]
 
 
 def stamp_language(value: Any, language: str | None) -> Any:
@@ -262,16 +368,21 @@ def stamp_language(value: Any, language: str | None) -> Any:
     value — the Spanish row would overwrite the property instead of joining it,
     and it would not read back as the Spanish text the operator approved.
 
-    Only a plain string is stamped, and only when the row names a language: a
-    value that already carries its own languages keeps them (they are the more
-    specific statement), and a language-independent value (a select label, a
-    date, a link) is left exactly as the script wrote it. A stray ``language`` on
-    such a property is dropped by the write adapter's coercion, not by guessing
-    here.
+    Only a plain string is stamped. A row with NO language still gets the
+    required array envelope (``[{"value": "..."}]``) — the raw update path does
+    not run the entity mapper, so leaving the bare string made Uwazi refuse the
+    write with ``422 Expected array, received string``. A value that already
+    carries its own languages keeps them (they are the more specific
+    statement), and a language-independent value (a select label, a date, a
+    link) is left exactly as the script wrote it. A stray ``language`` on such a
+    property is dropped by the write adapter's coercion, not by guessing here.
     """
-    if language is None or not isinstance(value, str):
+    if not isinstance(value, str):
         return value
-    return [{"value": value, "language": language}]
+    entry: dict[str, Any] = {"value": value}
+    if language is not None:
+        entry["language"] = language
+    return [entry]
 
 
 def write_failures(results: Any, source_ids: list[str] | None = None) -> list[dict[str, str]]:
@@ -331,6 +442,32 @@ def _failure_entry(entry: dict[str, Any]) -> dict[str, str]:
         "shared_id": str(entry.get("shared_id") or entry.get("id") or ""),
         "error": error if len(error) <= _MAX_ERROR_CHARS else error[:_MAX_ERROR_CHARS] + "…",
     }
+
+
+def track_progress(progress: ProgressCallback | None, units_so_far: list[int]) -> ProgressCallback:
+    """Wrap a progress callback while recording the latest fraction (pure).
+
+    The wrapper is what :meth:`_write` installs as its ``progress`` for the rest
+    of the pass. It MUST call the ORIGINAL callback, never the name it is
+    installed under: the previous version closed over ``progress`` after that
+    name was rebound to the wrapper itself, so every tick (and every gate note)
+    recursed until ``maximum recursion depth exceeded`` — the operator's real
+    progress callback was never called.
+
+    ``units_so_far`` is the one-element list the gate-note publisher reads so a
+    note carries the live fraction rather than resetting it.
+    """
+
+    def _tracked(done: int, total: int, note: str | None = None) -> None:
+        units_so_far[0] = done
+        if progress is None:
+            return
+        if note is None:
+            progress(done, total)  # a fraction tick keeps the current phase note
+        else:
+            progress(done, total, note)
+
+    return _tracked
 
 
 def format_write_failures(failures: list[dict[str, str]], limit: int = 3) -> str:
@@ -633,7 +770,7 @@ def build_apply_updates(
                     raise ApplyRefusedError(str(exc)) from exc
             else:
                 raw_value = coerce_date_property_value(value, prop_type if is_date_property_type(prop_type) else None)
-                payload["metadata"][suggestion.property_name] = metadata_value(raw_value, suggestion.language)
+                payload["metadata"][suggestion.property_name] = metadata_value(raw_value, suggestion.language, prop_type)
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     updates: list[dict] = []
@@ -1370,15 +1507,10 @@ class ApplySuggestionsUseCase:
         # the interceptor's NOTE broadcasts (a bulk write refusing, say) carry
         # the live fraction instead of resetting it.
         units_so_far = [0]
-
-        def _tracked_progress(done: int, total: int, note: str | None = None) -> None:
-            units_so_far[0] = done
-            if progress is None:
-                return
-            if note is None:
-                progress(done, total)  # a fraction tick keeps the current phase note
-            else:
-                progress(done, total, note)
+        # Keep the CALLER's callback separate from the wrapper: :func:`track_progress`
+        # captures it, so rebinding ``progress`` below never makes the wrapper
+        # call itself (see that helper's docstring for the recursion it fixes).
+        _tracked_progress = track_progress(progress, units_so_far)
 
         def _note(text: str) -> None:
             if progress is None:
@@ -1578,5 +1710,6 @@ __all__ = [
     "property_scope_ids",
     "pushable_rows",
     "stamp_language",
+    "track_progress",
     "write_failures",
 ]

@@ -1,19 +1,21 @@
 """Coerce DATE-typed property values into the API shape Uwazi accepts (pure).
 
-Uwazi stores a date property's metadata value as an ARRAY of numeric
-timestamps in SECONDS (its UI multiplies by 1000; its validation refuses a
-bare string with ``422: metadata.date_published — Expected array, received
-string``, and crashes the bulk ``/api/entities/multipleupdate`` with a 500 for
-the same payload). The write contract lets the script pass a friendlier shape
-("Dates may be given as ISO strings"), which the whole-entity write path
-coerces through ``uwazi_agent.adapters.uwazi_api.entity_mapper`` — but the
-review table's property-scoped writes go raw, so the coercion has to happen
-BEFORE the payload is built, at the OUR side of the write boundaries:
+Uwazi stores a date property's metadata value as an ARRAY of
+``{"value": <seconds>}`` entries (its UI multiplies by 1000; its validation
+refuses a bare string with ``422: metadata.date_published — Expected array,
+received string``, and crashes the bulk ``/api/entities/multipleupdate`` with
+a 500 for the same payload). The write contract lets the script pass a
+friendlier shape ("Dates may be given as ISO strings"), which the whole-entity
+write path coerces through ``uwazi_agent.adapters.uwazi_api.entity_mapper`` —
+but the review table's property-scoped writes go raw, so the coercion has to
+happen BEFORE the payload is built, at the OUR side of the write boundaries:
 
 - :func:`coerce_date_property_value` is that boundary helper: given a value and
-  its template property TYPE, return the shape Uwazi accepts, or the value
-  unchanged when it is already valid or cannot be parsed (a bad value must
-  fail loudly at the write, not be silently mangled here).
+  its template property TYPE, return the numeric shape Uwazi accepts, or the
+  value unchanged when it is already valid or cannot be parsed (a bad value
+  must fail loudly at the write, not be silently mangled here). The
+  ``{"value": ...}`` envelope is added by
+  :func:`uwazi_admin_agent.use_cases.apply_suggestions_use_case.metadata_value`.
 
 Accepts exactly what :mod:`metadata_diff` renders on read: a bare ISO string,
 a numeric timestamp (seconds or milliseconds), a ``datetime``/``date``, or a
@@ -56,7 +58,9 @@ def coerce_date_property_value(value: Any, prop_type: str | None) -> Any:
     ``daterange`` → ``{"from": seconds, "to": seconds}``, ``multidaterange`` →
     a list of ranges. Non-date types (or ``prop_type`` unknown) return the
     value untouched: this helper must not reshape a text or select value. A
-    value already in the target shape returns as-is.
+    value already in the target shape returns as-is. The caller that builds the
+    raw metadata payload wraps each entry in Uwazi's ``{"value": ...}``
+    envelope; this helper only produces the numeric values.
     """
     if prop_type in DATE_TYPES:
         return _coerce_dates(value)
