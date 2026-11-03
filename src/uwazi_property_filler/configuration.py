@@ -14,6 +14,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from uwazi_api.instance_urls import first_instance_url
+from uwazi_api.instance_urls import parse_instance_urls as parse_instance_urls
+
 ROOT_PATH: Path = Path(__file__).parent.parent.parent.resolve()
 DATA_DIR: Path = ROOT_PATH / "data"
 
@@ -33,51 +36,26 @@ def instance_key(url: str) -> str:
     return hashlib.sha1(url.rstrip("/").encode("utf-8")).hexdigest()[:16]
 
 
-def parse_instance_urls(raw: str | None) -> list[str]:
-    """The instance URLs in a configured value, in order, de-duplicated.
-
-    The admin agent accepts ``UWAZI_URL`` as a comma-separated list; the
-    property filler administers exactly one instance, so this helper lets it
-    pick one without crashing on the shared value. Splits on commas, strips
-    whitespace, drops empties, and de-duplicates preserving first occurrence.
-    """
-    if not raw:
-        return []
-    seen: set[str] = set()
-    urls: list[str] = []
-    for part in raw.split(","):
-        url = part.strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        urls.append(url)
-    return urls
-
-
 def select_instance_url(raw: str | None, override: str | None = None) -> str:
     """The single Uwazi URL this process administers.
 
     ``PROPERTY_FILLER_UWAZI_URL`` (``override``) wins when set, so the filler
-    can target a specific instance while ``UWAZI_URL`` lists several. Otherwise
-    the FIRST configured URL is used — the same convention as the admin CLI.
-    Raises ``RuntimeError`` when neither yields a URL, or when the override
-    itself holds a list.
+    can target a specific instance while ``UWAZI_URL`` lists several. Both
+    settings accept one URL OR a comma-separated list (the shared format); the
+    FIRST entry wins either way — the same convention as the CLIs. Raises
+    ``RuntimeError`` only when neither yields a URL.
     """
-    explicit = (override or "").strip()
-    if explicit:
-        if "," in explicit:
-            raise RuntimeError(
-                "PROPERTY_FILLER_UWAZI_URL holds a list of instances; the property filler "
-                "needs a single URL. Set it to one instance."
-            )
-        return explicit
-    urls = parse_instance_urls(raw)
-    if not urls:
-        raise RuntimeError(
-            "UWAZI_URL is not set — point it at the instance to administer, or set "
-            "PROPERTY_FILLER_UWAZI_URL to the one instance the filler should use."
-        )
-    return urls[0]
+    # The override accepts the same shape as ``UWAZI_URL`` — one URL or a
+    # comma-separated list — and resolves to its first entry, so no caller has
+    # to know which of the two settings is a list.
+    for candidate in (override, raw):
+        url = first_instance_url(candidate)
+        if url:
+            return url
+    raise RuntimeError(
+        "UWAZI_URL is not set — point it at the instance to administer, or set "
+        "PROPERTY_FILLER_UWAZI_URL to the one instance the filler should use."
+    )
 
 
 UWAZI_URL: str = select_instance_url(

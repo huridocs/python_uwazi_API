@@ -41,10 +41,35 @@ def test_loopback_targets_are_accepted(url: str) -> None:
         "http://127.0.0.1.nip.io:3000",
         "http://10.0.0.5:3000",
         "",
+        "http://localhost:3000,https://production.uwazi.io",
+        "https://production.uwazi.io,http://localhost:3000",
     ],
 )
 def test_non_loopback_targets_are_refused(url: str) -> None:
     assert is_local_e2e_target(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:3000,https://localhost:3000",
+        "http://127.0.0.1:3000,http://[::1]:3000",
+    ],
+)
+def test_an_all_local_list_is_accepted(url: str) -> None:
+    assert is_local_e2e_target(url) is True
+
+
+def test_require_resolves_a_list_to_its_first_entry() -> None:
+    """A list must never leave the guard and reach a client as a URL."""
+    assert require_local_e2e_target("http://localhost:3000,https://localhost:3000") == "http://localhost:3000"
+
+
+def test_require_refuses_a_list_with_any_remote_entry() -> None:
+    with pytest.raises(LocalE2ETargetError) as excinfo:
+        require_local_e2e_target("http://localhost:3000,https://production.uwazi.io")
+
+    assert "https://production.uwazi.io" in str(excinfo.value)
 
 
 def test_require_returns_the_local_target_verbatim() -> None:

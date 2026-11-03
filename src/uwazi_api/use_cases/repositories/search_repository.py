@@ -10,7 +10,7 @@ from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
 from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
-from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository, existing_template_scope
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 
 _MAX_RESULT_WINDOW = 10_000  # Elasticsearch index.max_result_window default
@@ -79,6 +79,10 @@ class SearchRepository:
             if template_name:
                 template_id = self._resolve_template_id(template_name)
                 params["types"] = f'["{template_id}"]'
+            else:
+                types_scope = existing_template_scope(self._template_repo)
+                if types_scope:
+                    params["types"] = types_scope
             params["includeUnpublished"] = "false" if published else "true"
 
             response = self.http.request_adapter.get(
@@ -237,6 +241,10 @@ class SearchRepository:
         return params
 
     def _execute_search(self, params: dict, language: str) -> list[Entity]:
+        if "types" not in params:
+            types_scope = existing_template_scope(self._template_repo)
+            if types_scope:
+                params["types"] = types_scope
         response = self.http.request_adapter.get(
             f"{self.http.url}/api/search",
             headers=self.http.headers,

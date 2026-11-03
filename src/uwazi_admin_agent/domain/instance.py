@@ -2,8 +2,8 @@
 
 Pure domain logic — no I/O, no environment reads. The admin agent can be
 pointed at ONE Uwazi instance or at a COMMA-SEPARATED LIST of them; the list
-is understood here and nowhere else, so every other module works with a
-single instance URL.
+is understood by ``uwazi_api.instance_urls`` and nowhere else, so every other
+module works with a single instance URL.
 
 The instance KEY is the stable namespace of an instance (the same shape and
 algorithm as ``uwazi_property_filler.configuration.instance_key``); the SLUG
@@ -16,32 +16,17 @@ import hashlib
 import re
 from urllib.parse import urlsplit
 
+# The ONE parser for a configured ``UWAZI_URL`` (one URL or a comma-separated
+# list); shared by every package so the format cannot drift between them.
+# Re-exported: the admin agent's callers have always imported it from here.
+from uwazi_api.instance_urls import parse_instance_urls as parse_instance_urls
+
 # Characters allowed in a slug: everything outside is replaced by ``_``.
 _UNSAFE_SLUG_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 # The slug's readable part is truncated to this many characters; the digest
 # suffix keeps the name unique.
 _SLUG_STEM_LIMIT = 48
-
-
-def parse_instance_urls(raw: str | None) -> list[str]:
-    """The configured instance URLs, in order, de-duplicated.
-
-    Splits on commas, strips whitespace, drops empties, and de-duplicates
-    while preserving the first occurrence's order. An empty/None raw yields
-    an empty list.
-    """
-    if not raw:
-        return []
-    seen: set[str] = set()
-    urls: list[str] = []
-    for part in raw.split(","):
-        url = part.strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        urls.append(url)
-    return urls
 
 
 def _normalized(url: str) -> str:

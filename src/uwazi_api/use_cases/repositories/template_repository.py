@@ -8,6 +8,22 @@ from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.template import Template
 
 
+def existing_template_scope(template_repo: Optional["TemplateRepository"]) -> Optional[str]:
+    """A JSON ``types`` parameter naming every template that currently exists.
+
+    Uwazi rejects an entire search page with ``400 Templates not found`` when
+    the search index still holds an entity whose template was deleted (index
+    drift). Scoping searches to the templates that exist now keeps those
+    orphaned index documents out of the page instead of failing the query.
+    Returns ``None`` when the scope is unknown or the instance has no
+    templates, so callers can leave the parameter unset.
+    """
+    if template_repo is None:
+        return None
+    template_ids = [str(template.id) for template in template_repo.get() if template.id]
+    return json.dumps(template_ids) if template_ids else None
+
+
 class TemplateRepository:
     def __init__(self, http_client: HttpClientAdapter):
         self.http = http_client

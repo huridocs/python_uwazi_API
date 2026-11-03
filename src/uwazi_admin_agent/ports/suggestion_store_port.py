@@ -130,6 +130,8 @@ class SuggestionStorePort(ABC):
         suboperation filter (``property_name``/``match``/``op``/``status``/
         ``languages`` narrow the parts), so an operation with no matching part is
         absent from both the page and ``total``. ``total`` ignores limit/offset.
+        ``sort_by``/``sort_desc`` order the WHOLE filtered set before the page
+        window, so the review table's sort holds across page flips.
         """
         ...
 

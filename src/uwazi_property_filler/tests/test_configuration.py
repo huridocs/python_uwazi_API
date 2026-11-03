@@ -28,9 +28,9 @@ def test_select_instance_url_override_wins_over_the_list() -> None:
     assert select_instance_url("https://a.example,https://b.example", "https://b.example") == "https://b.example"
 
 
-def test_select_instance_url_rejects_a_list_as_override() -> None:
-    with pytest.raises(RuntimeError, match="PROPERTY_FILLER_UWAZI_URL holds a list"):
-        select_instance_url("https://a.example", "https://a.example,https://b.example")
+def test_select_instance_url_resolves_a_list_override_to_its_first_entry() -> None:
+    """``PROPERTY_FILLER_UWAZI_URL`` accepts the same list shape as ``UWAZI_URL``."""
+    assert select_instance_url("https://a.example", "https://b.example,https://c.example") == "https://b.example"
 
 
 def test_select_instance_url_requires_a_url() -> None:

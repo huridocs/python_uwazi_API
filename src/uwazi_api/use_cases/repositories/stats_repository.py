@@ -5,7 +5,7 @@ from uwazi_api.adapters.http_client_adapter import HttpClientAdapter
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.property_type import PropertyType
 from uwazi_api.domain.stats import SearchStats, TemplateStat, ThesaurusValueStat
-from uwazi_api.use_cases.repositories.template_repository import TemplateRepository
+from uwazi_api.use_cases.repositories.template_repository import TemplateRepository, existing_template_scope
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
 
 
@@ -34,6 +34,9 @@ class StatsRepository:
             "aggregatePermissionsByUsers": "true",
             "include": '["permissions"]',
         }
+        types_scope = existing_template_scope(self._template_repo)
+        if types_scope:
+            params["types"] = types_scope
 
         response = self.http.request_adapter.get(
             f"{self.http.url}/api/search",

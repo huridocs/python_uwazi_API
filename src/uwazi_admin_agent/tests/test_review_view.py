@@ -4,6 +4,8 @@ No NiceGUI import, no I/O: the helpers are pure transforms of domain objects and
 control values, so they are testable directly.
 """
 
+from datetime import datetime, timezone
+
 from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, EntityReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
     SHARED_ID_CSS,
@@ -18,12 +20,14 @@ from uwazi_admin_agent.drivers.web.review_view import (
     format_cost,
     full_value,
     match_label,
+    modified_label,
     pending_suboperation_count,
     property_caption,
     property_heading,
     run_confirmation,
     run_status,
     section_toggle_label,
+    sort_direction_label,
     suggestion_to_row,
     table_update_label,
     truncate,
@@ -489,3 +493,31 @@ def test_table_update_label_shows_date_and_time() -> None:
 
 def test_table_update_label_tolerates_an_unexpected_value() -> None:
     assert table_update_label(object()) == "Synced with Uwazi"
+
+
+# --- modified column + sort control ------------------------------------------
+
+
+def test_modified_label_formats_a_timestamp() -> None:
+    value = datetime(2026, 11, 3, 9, 45, tzinfo=timezone.utc)
+    assert modified_label(value) == "2026-11-03 09:45"
+
+
+def test_modified_label_reads_a_dash_for_no_timestamp() -> None:
+    assert modified_label(None) == "—"
+    assert modified_label(object()) == "—"
+
+
+def test_sort_direction_label_speaks_the_modified_order() -> None:
+    assert sort_direction_label("modified", True) == "Newest first"
+    assert sort_direction_label("modified", False) == "Oldest first"
+    assert sort_direction_label("recorded", False) == "First recorded first"
+    assert sort_direction_label("recorded", True) == "Last recorded first"
+    assert sort_direction_label("title", False) == "A → Z"
+    assert sort_direction_label("title", True) == "Z → A"
+
+
+def test_filter_from_controls_passes_the_sort_through() -> None:
+    f = filter_from_controls(sort_by="modified", sort_desc=True)
+    assert (f.sort_by, f.sort_desc) == ("modified", True)
+    assert (filter_from_controls().sort_by, filter_from_controls().sort_desc) == ("recorded", False)

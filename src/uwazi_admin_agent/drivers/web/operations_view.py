@@ -28,6 +28,7 @@ from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     MERGE_OPS,
     MOVE_OP,
+    REVERT_RECREATES_OPS,
     TITLE_PROPERTY,
     OperationReviewRow,
     Suggestion,
@@ -42,6 +43,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     STATUS_COLORS,
     TITLE_CELL_CHARS,
     match_label,
+    modified_label,
     property_caption,
     property_heading,
     truncate,
@@ -131,6 +133,37 @@ def non_runnable_note(status_label: str) -> str:
         "discarded": "discarded — restore it first",
         "obsolete": "obsolete — refresh the table",
     }.get(status_label, "not independently runnable")
+
+
+def rerun_blocked_reason(op: str) -> str:
+    """Why a reverted row of ``op`` cannot be run again (empty when it can) (pure).
+
+    A delete's undo is a re-create and a merge's undo re-creates the sources it
+    absorbed, both with FRESH sharedIds. The recorded row still names the old
+    entities, so executing it again would write to an id that no longer exists
+    (or, for a merge, copy from dead sources). Re-pointing the row automatically
+    is not safe: the old→new mapping is per entity and the related row values
+    would need the same remap. The row therefore stays visible and reverted, but
+    its Run is refused, with this text as the explanation. A later Sync with
+    Uwazi re-reads the operation from live state and resets it to PENDING (see
+    :func:`uwazi_admin_agent.domain.review_refresh.reconciled_status`).
+    """
+    if op == "delete":
+        return (
+            "the revert re-created this entity with a new sharedId; this recorded delete still points "
+            "at the old id, so it cannot be run again"
+        )
+    if op in MERGE_OPS:
+        return (
+            "the revert re-created the entities this merge absorbed with new sharedIds; this recorded "
+            "merge still points at the old ids, so it cannot be run again"
+        )
+    return ""
+
+
+def rerun_blocked(op: str, status_label: str) -> bool:
+    """Whether this reverted row's op can no longer be executed (pure)."""
+    return status_label == "reverted" and op in REVERT_RECREATES_OPS
 
 
 # Ops whose OPERATION-level undo is not an in-place restore of one live entity:
@@ -286,9 +319,13 @@ def suboperation_row(
     status_label = sub_status_label(sub.status)
     current, proposed = sub_values(sub, types)
     match = sub_match(sub)
-    runnable = is_runnable_status(status_label)
+    blocked = rerun_blocked(sub.op, status_label)
+    runnable = is_runnable_status(status_label) and not blocked
     selectable = is_selectable(sub.op) and runnable
-    note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
+    if blocked:
+        note = rerun_blocked_reason(sub.op)
+    else:
+        note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
     select_type = "multiselect" if (types or {}).get(sub.property_name or "") == MULTISELECT_TYPE else None
     decisions = value_decisions(sub.proposed_value, sub.rejected_values) if select_type else []
     return {
@@ -307,8 +344,11 @@ def suboperation_row(
         "status_color": sub_status_color(sub.status),
         # A part is selectable only while a Run can still write it. APPLIED,
         # DISCARDED and OBSOLETE parts stay visible (and revertable/restorable)
-        # but must not inflate Run (N) / Discard (N).
+        # but must not inflate Run (N) / Discard (N). A REVERTED delete/merge is
+        # visible too, but its old sharedId cannot be written again.
         "runnable": runnable,
+        "rerun_blocked": blocked,
+        "rerun_blocked_reason": rerun_blocked_reason(sub.op) if blocked else "",
         "selectable": selectable,
         # Whether the part's op can be acted on alone (a property/link). The
         # status decides whether it is RUNNABLE now; this decides whether it is
@@ -360,6 +400,7 @@ def _structural_row(
     Run/Discard/Restore still reach it, but they are never selectable
     individually, and the table hides their Edit action.
     """
+    blocked = rerun_blocked(op, status)
     return {
         "id": row_id,
         "key": key,
@@ -374,11 +415,13 @@ def _structural_row(
         "match_color": MATCH_COLORS.get("n/a", "grey-4"),
         "status": status,
         "status_color": status_color,
-        "runnable": is_runnable_status(status),
+        "runnable": is_runnable_status(status) and not blocked,
+        "rerun_blocked": blocked,
+        "rerun_blocked_reason": rerun_blocked_reason(op) if blocked else "",
         "selectable": False,
         "independent": False,
         "checked": False,
-        "note": lock_note(op) or "part of the operation — select the operation",
+        "note": rerun_blocked_reason(op) if blocked else (lock_note(op) or "part of the operation — select the operation"),
         "revertable": False,
         "shared_id": shared_id,
         "op": op,
@@ -681,6 +724,9 @@ def operation_row(
     if not is_info:
         subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey")))
         subs.extend(file_move_detail_rows(item.subs))
+    blocked_sub = next((sub for sub in subs if sub.get("rerun_blocked")), None)
+    rerun_blocked = blocked_sub is not None
+    rerun_reason = str(blocked_sub.get("rerun_blocked_reason") or "") if blocked_sub is not None else ""
     title = item.entity_title or item.shared_id
     if is_info:
         # Display-only: full text (the Target cell wraps it), no link, no
@@ -696,6 +742,10 @@ def operation_row(
             "ops": INFO_OP,
             "op_colors": [OP_COLORS.get(INFO_OP, "grey")],
             "url": None,
+            "modified": modified_label(item.modified_at),
+            "rerun_blocked": False,
+            "rerun_blocked_reason": "",
+            "run_title": "Info rows are display-only",
             "run_status": "info",
             "run_status_color": RUN_STATUS_COLORS.get("info", "grey"),
             "validated": "n/a",
@@ -721,13 +771,17 @@ def operation_row(
         "ops": ", ".join(item.ops),
         "op_colors": [OP_COLORS.get(op, "grey") for op in item.ops],
         "url": operation_open_url(item.shared_id, item.ops, item.languages, uwazi_url),
+        "modified": modified_label(item.modified_at),
+        "rerun_blocked": rerun_blocked,
+        "rerun_blocked_reason": rerun_reason,
+        "run_title": rerun_reason or "Run this operation: the ticked suboperations (all of them when none is ticked)",
         "run_status": status,
         "run_status_color": RUN_STATUS_COLORS.get(status, "grey"),
         "validated": text,
         "validated_color": color,
         "has_validated": validated_counts(subs)[1] > 0,
-        "has_checkable": any(sub["selectable"] for sub in subs),
-        "has_runnable": any(sub.get("runnable") for sub in subs),
+        "has_checkable": any(sub["selectable"] for sub in subs) and not rerun_blocked,
+        "has_runnable": any(sub.get("runnable") for sub in subs) and not rerun_blocked,
         "border_color": OP_BORDER_COLORS.get(item.ops[0] if item.ops else "", DEFAULT_BORDER_COLOR),
         "in_place": in_place,
         "revertable": in_place and item.applied > 0,
@@ -915,6 +969,8 @@ __all__ = [
     "pairs_of_refs",
     "property_accuracy",
     "property_options",
+    "rerun_blocked",
+    "rerun_blocked_reason",
     "selected_subs",
     "sub_caption",
     "sub_label",

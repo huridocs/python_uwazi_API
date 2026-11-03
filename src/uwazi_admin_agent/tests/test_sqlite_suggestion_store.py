@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore, build_where
+from uwazi_admin_agent.adapters.sqlite_suggestion_store import (
+    SqliteSuggestionStore,
+    build_where,
+    latest_review_activity,
+    operation_order_by,
+)
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, LlmUsage
 from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
@@ -241,6 +246,69 @@ def test_query_reports_rows_with_match_verdicts(store: SqliteSuggestionStore) ->
     assert verdicts == {"s1excerpt": False, "s2z": None}
 
 
+# --- operations: modified column + sorting -----------------------------------
+
+
+def test_operation_order_by_whitelists_the_sort_and_ties_on_first_id() -> None:
+    assert operation_order_by("modified", True) == "modified_sort IS NULL, modified_sort DESC, first_id ASC"
+    assert operation_order_by("title", False) == "title_sort ASC, first_id ASC"
+    assert operation_order_by("unknown", False) == "first_id ASC"
+    assert operation_order_by("recorded", True) == "first_id DESC"
+
+
+def test_latest_review_activity_prefers_a_review_over_the_recording_time() -> None:
+    recorded = _suggestion().model_copy(update={"created_at": datetime(2026, 1, 1, 10, tzinfo=timezone.utc)})
+    reviewed = _suggestion().model_copy(
+        update={
+            "created_at": datetime(2026, 1, 1, 9, tzinfo=timezone.utc),
+            "reviewed_at": datetime(2026, 1, 1, 11, tzinfo=timezone.utc),
+        }
+    )
+    unreviewed = _suggestion().model_copy(update={"created_at": datetime(2026, 1, 1, 12, tzinfo=timezone.utc)})
+
+    assert latest_review_activity([recorded, reviewed, unreviewed]) == unreviewed.created_at
+    assert latest_review_activity([reviewed]) == reviewed.reviewed_at
+    assert latest_review_activity([recorded]) == recorded.created_at
+    assert latest_review_activity([]) is None
+
+
+def test_operations_orders_by_modified_newest_first(store: SqliteSuggestionStore) -> None:
+    older = _suggestion(shared_id="older").model_copy(
+        update={"created_at": datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)}
+    )
+    newer = _suggestion(shared_id="newer").model_copy(
+        update={"created_at": datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)}
+    )
+    reviewed = _suggestion(shared_id="reviewed").model_copy(
+        update={
+            "created_at": datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc),
+            "reviewed_at": datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+        }
+    )
+    store.add_suggestions([older, newer, reviewed])
+
+    newest, total = store.operations("run1", SuggestionFilter(sort_by="modified", sort_desc=True))
+    oldest, _ = store.operations("run1", SuggestionFilter(sort_by="modified", sort_desc=False))
+
+    assert total == 3
+    assert [row.shared_id for row in newest] == ["reviewed", "newer", "older"]
+    assert [row.shared_id for row in oldest] == ["older", "newer", "reviewed"]
+    assert newest[0].modified_at == datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def test_operations_orders_by_title_over_the_whole_set(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="b", title="Beta"),
+            _suggestion(shared_id="a", title="Alpha"),
+        ]
+    )
+
+    rows, _ = store.operations("run1", SuggestionFilter(sort_by="title", sort_desc=False))
+
+    assert [row.shared_id for row in rows] == ["a", "b"]
+
+
 def test_get_entity_returns_only_that_entity(store: SqliteSuggestionStore) -> None:
     store.add_suggestions(
         [
@@ -361,6 +429,79 @@ def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: Sqli
         "obsolete",
     }
     assert {ref[1] for ref in runnable} == {"pending", "accepted", "edited", "reverted"}
+
+
+def test_selection_rows_runnable_only_skips_a_reverted_recreating_op(store: SqliteSuggestionStore) -> None:
+    """A reverted delete/merge names an old sharedId its undo re-created."""
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="update-reverted", status=SuggestionStatus.REVERTED),
+            _suggestion(
+                shared_id="delete-reverted",
+                op="delete",
+                property_name=None,
+                status=SuggestionStatus.REVERTED,
+            ),
+            _suggestion(
+                shared_id="merge-reverted",
+                op="update_and_delete",
+                property_name=None,
+                status=SuggestionStatus.REVERTED,
+            ),
+            _suggestion(shared_id="delete-pending", op="delete", property_name=None),
+        ]
+    )
+
+    runnable = store.selection_rows("run1", SuggestionFilter(), runnable_only=True)
+
+    assert {ref[1] for ref in runnable} == {"update-reverted", "delete-pending"}
+
+
+def test_sync_retires_a_reverted_delete_and_inserts_the_recreated_entity(store: SqliteSuggestionStore) -> None:
+    """A recreated entity arrives under its NEW sharedId; the old row is retired."""
+    old = _suggestion(
+        shared_id="OLD",
+        op="delete",
+        property_name=None,
+        status=SuggestionStatus.REVERTED,
+    )
+    store.add_suggestions([old])
+
+    store.reconcile_suggestions(
+        "run1",
+        [_suggestion(shared_id="NEW", op="delete", property_name=None)],
+    )
+
+    rows = store.query("run1", SuggestionFilter(include_obsolete=True))[0]
+    assert {(row.shared_id, row.status) for row in rows} == {
+        ("OLD", SuggestionStatus.OBSOLETE),
+        ("NEW", SuggestionStatus.PENDING),
+    }
+
+
+def test_sync_returns_a_reverted_merge_to_pending_with_fresh_sources(store: SqliteSuggestionStore) -> None:
+    """Syncing re-reads a reverted merge from Uwazi, so it may run again."""
+    old = _suggestion(
+        shared_id="T",
+        op="update_and_delete",
+        property_name="a",
+        proposed="same",
+        status=SuggestionStatus.REVERTED,
+    ).model_copy(update={"merge_source_ids": ["OLD-SOURCE"]})
+    store.add_suggestions([old])
+
+    store.reconcile_suggestions(
+        "run1",
+        [
+            _suggestion(shared_id="T", op="update_and_delete", property_name="a", proposed="same").model_copy(
+                update={"merge_source_ids": ["NEW-SOURCE"]}
+            )
+        ],
+    )
+
+    row = store.get_entity("run1", "T")[0]
+    assert row.status is SuggestionStatus.PENDING
+    assert row.merge_source_ids == ["NEW-SOURCE"]
 
 
 def test_shared_ids_filters_by_property(store: SqliteSuggestionStore) -> None:

@@ -1,0 +1,117 @@
+# Narration script for slides.md.
+#
+# One entry per slide, keyed by slide number (1-based, in deck order).
+# Every slide must have text; run `uv run scripts/narrate.py --check` to verify.
+#
+# Build the narrated video with `bun run video` (see README.md).
+
+voice: af_heart        # Kokoro voice (af_heart, am_michael, bm_george, ...)
+speed: 1.0             # 0.9 is slower and more deliberate, 1.1 is brisker
+sentence_pause: 0.34   # silence between sentences, seconds
+clause_pause: 0.12     # silence after commas and other clause breaks
+lead: 0.5              # silence before the first word of a slide
+tail: 1.0              # silence after the last word of a slide
+continuous: true       # keep prosody across sentence joins (needs a timed model)
+
+# Applied to the text before synthesis only, never rendered on screen.
+# espeak reads a leading "u" as "yoo"; "Oowazi" yields oo-WAH-zee.
+pronunciations:
+  Uwazi: Oowazi
+
+slides:
+  1: |
+    Welcome. This is Uwazi Admin Agent, a web interface for the kind of bulk
+    administration that usually means clicking through Uwazi one record at a
+    time. The idea is simple: you write the task in plain language, you review
+    the plan before anything happens, and every change can be undone.
+
+  2: |
+    The flow has three stages. First, connect to an Uwazi instance. Then
+    describe the job you want done, in your own words. And finally, review the
+    proposed changes and decide whether to run them. Nothing is written to your
+    instance until you press that last button, and the whole session stays
+    reversible.
+
+  3: |
+    Behind the interface there are four steps. You write a prompt. A language
+    model turns it into a structured plan: which entities, which property,
+    which value. You review that plan row by row, and only then do you run it.
+    And if the result is not what you expected, the same plan can be reverted.
+    The model proposes, you approve.
+
+  4: |
+    The agent covers the work that usually eats an afternoon. Editing metadata,
+    merging duplicate entities, attaching files, creating new entities,
+    deleting or publishing records, linking relationships, managing
+    translations across languages, and keeping spreadsheet tables in sync with
+    the catalog. Each one is a task type with its own review screen.
+
+  5: |
+    A lot of this work starts with a document. The agent can read the first
+    page of a PDF and extract the fields you care about: titles, dates,
+    summaries, classifications. You give it page one, and it gives you a
+    proposed value you can check against the source, right next to it.
+
+  6: |
+    Let's walk through a real example, from beginning to end: extracting a
+    title from the first page of a document.
+
+  7: |
+    Step one: create a task. You pick the template you want to work on, and
+    then describe the job in plain language. Something like: read page one, and
+    propose a title for every entity that is missing one. There is no syntax to
+    learn.
+
+  8: |
+    Step two is the review table. Every entity that matches your instruction
+    appears as a row, with its current value and the value the agent proposes.
+    This is the moment to scan the list: does the proposal make sense for all
+    of them, or only for some?
+
+  9: |
+    You can open any row to see the full detail: the old value, the new value,
+    and the reasoning behind the suggestion. Rows you disagree with can be
+    excluded before anything is applied, so a single bad guess does not affect
+    the rest.
+
+  10: |
+    And here is the evidence. The panel shows the first page the agent actually
+    read, so you can verify the extracted title against the source in seconds.
+    There is no black box: every proposal points back to the document it came
+    from.
+
+  11: |
+    When the table looks right, you run the task. The confirmation spells out
+    exactly how many entities will change, and nothing is written until you
+    confirm. That extra click is deliberate: it is the difference between
+    reviewing a plan and applying one.
+
+  12: |
+    After the run, the table shows what was applied. Every row is marked, the
+    old and new values are recorded, and the change is now live in your
+    instance.
+
+  13: |
+    In Uwazi itself, the title field on the entity is filled in. What used to
+    be a manual copy and paste is now a reviewed, traceable change. The entity
+    looks exactly as if a careful editor had done it by hand.
+
+  14: |
+    But suppose you change your mind, or the extraction was wrong. You go back
+    to the task and revert it. As with running, the interface tells you exactly
+    what will be undone before it does anything.
+
+  15: |
+    The revert is recorded the same way the run was. The table returns to its
+    original state, and the history is preserved, so you can see what changed,
+    when, and how it was undone.
+
+  16: |
+    And the entity in Uwazi is back to its original value. That round trip, run
+    and revert, is the core of the tool. You can afford to try things because
+    nothing is permanent.
+
+  17: |
+    Write, review, run, revert. That is the whole product: a web UI for Uwazi
+    administration, where the model does the reading and the typing, and you
+    keep the judgement. Thanks for watching.

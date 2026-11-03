@@ -625,11 +625,7 @@ def _refresh_rows_client() -> None:
     new_task = getattr(context.client, "_new_task_button", None)
     if new_task is not None and not new_task.is_deleted:
         new_task.set_enabled(not _is_busy())
-    # The bulk Delete button is live only with a selection and an idle bus.
-    delete_btn = getattr(context.client, "_delete_selected_button", None)
-    if delete_btn is not None and not delete_btn.is_deleted:
-        selection = getattr(context.client, "_task_selection", [])
-        delete_btn.set_enabled(bool(selection) and not _is_busy())
+    _sync_bulk_delete_button()
 
 
 def _broadcast_rows() -> None:
@@ -637,6 +633,21 @@ def _broadcast_rows() -> None:
     for client in app.clients():
         with client:
             _refresh_rows_client()
+
+
+def _sync_bulk_delete_button() -> None:
+    """Enable the bulk Delete button iff rows are checked and no op is in flight.
+
+    Called by BOTH the selection handler and the 5s refresh. The handler used to
+    only record the ids, so the button stayed Quasar-disabled — a disabled
+    ``q-btn`` swallows clicks — until the next timer tick, which is why Delete
+    felt unclickable for up to 5s after checking a row.
+    """
+    delete_btn = getattr(context.client, "_delete_selected_button", None)
+    if delete_btn is None or delete_btn.is_deleted:
+        return
+    selection = getattr(context.client, "_task_selection", [])
+    delete_btn.set_enabled(bool(selection) and not _is_busy())
 
 
 def _on_select(e: Any) -> None:
@@ -655,6 +666,9 @@ def _on_select(e: Any) -> None:
         selection = getattr(e, "selection", None) or []
     visible = {row["id"] for row in _run_rows()}
     context.client._task_selection = [row["id"] for row in selection if isinstance(row, dict) and row.get("id") in visible]
+    # Enable/disable NOW, not on the next 5s refresh: the button is
+    # Quasar-disabled until this runs, and a disabled q-btn silently eats clicks.
+    _sync_bulk_delete_button()
 
 
 def _selection_toolbar() -> None:

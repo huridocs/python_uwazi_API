@@ -297,6 +297,21 @@ LANGUAGE_COLUMN: str = "width: 84px"
 TEMPLATE_COLUMN: str = "width: 170px"
 OPS_COLUMN: str = "width: 190px"
 STATUS_COLUMN: str = "width: 110px"
+# The Modified column writes "YYYY-MM-DD HH:MM": one fixed-width slot keeps the
+# dates lined up down the column and stops them from squeezing the Target cell.
+MODIFIED_COLUMN: str = "width: 142px"
+
+# The review table's always-visible sort control: the value is the
+# ``SuggestionFilter.sort_by`` field, the label is what the operator reads.
+OPERATION_SORT_OPTIONS: dict[str, str] = {
+    "recorded": "Recorded order",
+    "modified": "Modified",
+    "title": "Target",
+    "template": "Template",
+    "ops": "Ops",
+    "status": "Status",
+}
+
 # Four flat icon buttons (Discard/Undo, Revert, Run, Edit) at ~32px each.
 ACTIONS_COLUMN: str = "width: 150px"
 # The Target column takes the remainder: ``max-width: 0`` is what lets the column
@@ -403,6 +418,8 @@ def filter_from_controls(
     limit: int = 25,
     accepted_only: bool = False,
     shared_ids: list[str] | None = None,
+    sort_by: str = "recorded",
+    sort_desc: bool = False,
 ) -> SuggestionFilter:
     """Build the server-side filter from the page's raw control values (pure).
 
@@ -411,7 +428,9 @@ def filter_from_controls(
     trivial. ``language`` narrows the SUBOPERATIONS to one written language (the
     language-independent rows are their own group and are not matched).
     ``shared_ids`` is the table's checkbox selection passed through verbatim
-    (``None`` = no constraint, ``[]`` = match nothing).
+    (``None`` = no constraint, ``[]`` = match nothing). ``sort_by``/``sort_desc``
+    are the always-visible sort control's state; the store orders the WHOLE
+    filtered set, so the order holds across pages.
     """
     return SuggestionFilter(
         status=SuggestionStatus(status) if status else None,
@@ -424,6 +443,8 @@ def filter_from_controls(
         shared_ids=shared_ids,
         limit=limit,
         offset=offset,
+        sort_by=sort_by,  # type: ignore[arg-type] — validated by the pydantic Literal
+        sort_desc=sort_desc,
     )
 
 
@@ -652,13 +673,43 @@ def table_update_label(updated_at: Any) -> str:
         return "Synced with Uwazi"
 
 
+def modified_label(value: Any) -> str:
+    """One operation's last review activity, as the review table writes it (pure).
+
+    A row that has never been reviewed still has a modified date — the moment it
+    was recorded — so the column is never blank for a visible operation. Only a
+    legacy row with neither timestamp reads ``—``.
+    """
+    if value is None:
+        return "—"
+    try:
+        return f"{value:%Y-%m-%d %H:%M}"
+    except (ValueError, TypeError):
+        return "—"
+
+
+def sort_direction_label(sort_by: str, sort_desc: bool) -> str:
+    """The text of the sort-direction toggle (pure).
+
+    It names the order the operator is looking at, not the click: "Newest first"
+    on a Modified sort says the top row is the most recently touched one.
+    """
+    if sort_by == "modified":
+        return "Newest first" if sort_desc else "Oldest first"
+    if sort_by == "recorded":
+        return "Last recorded first" if sort_desc else "First recorded first"
+    return "Z → A" if sort_desc else "A → Z"
+
+
 __all__ = [
     "DRIFT_STATUS_COLORS",
     "ACTIONS_COLUMN",
     "CURRENCY_SYMBOL",
     "MATCH_COLORS",
+    "MODIFIED_COLUMN",
     "OPENABLE_OPS",
     "OP_COLORS",
+    "OPERATION_SORT_OPTIONS",
     "OPS_COLUMN",
     "RUN_OP_PHRASES",
     "RUN_STATUS_COLORS",
@@ -683,6 +734,7 @@ __all__ = [
     "filter_from_controls",
     "format_cost",
     "match_label",
+    "modified_label",
     "property_caption",
     "bulk_revert_label",
     "property_heading",
@@ -697,6 +749,7 @@ __all__ = [
     "section_toggle_label",
     "select_all_label",
     "selection_count",
+    "sort_direction_label",
     "suggestion_to_row",
     "table_update_label",
     "truncate",

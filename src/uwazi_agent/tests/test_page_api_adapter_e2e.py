@@ -11,13 +11,16 @@ from uwazi_agent.domain.agent_page import AgentPage
 from uwazi_agent.domain.agent_page_create import AgentPageCreate
 from uwazi_agent.domain.agent_page_summary import AgentPageSummary
 from uwazi_agent.domain.agent_page_update import AgentPageUpdate
+from uwazi_api.instance_urls import first_instance_url
 from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
-UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+# ``UWAZI_URL`` may be a comma-separated list of instances; E2E targets its
+# first entry, resolved (and localhost-checked) in ``setup_class``.
+UWAZI_URL = first_instance_url(os.getenv("UWAZI_URL")) or "http://localhost:3000"
 
 pytestmark = pytest.mark.e2e
 

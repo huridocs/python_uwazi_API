@@ -64,9 +64,9 @@ from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
-# The E2E suite targets ONE instance: the FIRST configured one. The list
-# format is admin-agent-only, so the guard still refuses a non-loopback first
-# instance exactly as before.
+# The E2E suite targets ONE instance: the FIRST configured one (``UWAZI_URL``
+# may be a single URL or a comma-separated list). The guard then refuses a
+# non-loopback target, and refuses a list when ANY entry is non-loopback.
 _CONFIGURED = parse_instance_urls(os.getenv("UWAZI_URL", "http://localhost:3000"))
 UWAZI_URL = _CONFIGURED[0] if _CONFIGURED else "http://localhost:3000"
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
@@ -238,6 +238,64 @@ def delete_entities_script(shared_ids: list[str]) -> str:
         f"targets = {_as_repr(shared_ids)}\n"
         f"deleted = delete_entities(targets)\n"
         f"result = f'deleted {{len(deleted)}} entity/entities'\n"
+    )
+
+
+def delete_template_script(template_name: str, title_prefix: str, language: str) -> str:
+    """A planning script that deletes the template entities matching a title.
+
+    Discovery is by TITLE on every pass, so a sync after a revert finds the
+    re-created entity under its new sharedId instead of the dead old one.
+    """
+    return (
+        f"rows = query_entities_full(mode='by_template', template_name={_as_repr(template_name)}, "
+        f"language={_as_repr(language)})\n"
+        f"targets = [\n"
+        f"    row['shared_id']\n"
+        f"    for row in rows\n"
+        f"    if str(row.get('title', '')).startswith({_as_repr(title_prefix)})\n"
+        f"]\n"
+        f"deleted = delete_entities(targets)\n"
+        f"result = f'deleted {{len(deleted)}} entity/entities'\n"
+    )
+
+
+def merge_entities_script(
+    template_name: str,
+    target_title: str,
+    source_title: str,
+    language: str,
+    value: str,
+    property_name: str = DEFAULT_PROPERTY,
+) -> str:
+    """A planning script that merges one source into one target.
+
+    The entities are discovered by TITLE on every pass, not hardcoded: after a
+    revert the source is re-created with the same title but a NEW sharedId, and
+    a sync must find that new id (that is the point of the revert/sync E2E).
+    The file move is what turns the source delete into a merge record; no file
+    content is needed for the merge semantics themselves.
+    """
+    return (
+        f"rows = query_entities_full(mode='by_template', template_name={_as_repr(template_name)}, "
+        f"language={_as_repr(language)})\n"
+        f"by_title = {{str(row.get('title', '')): row['shared_id'] for row in rows}}\n"
+        f"target = by_title[{_as_repr(target_title)}]\n"
+        f"source = by_title[{_as_repr(source_title)}]\n"
+        f"update_entities(\n"
+        f"    [\n"
+        f"        {{\n"
+        f"            'shared_id': target,\n"
+        f"            'template_name': {_as_repr(template_name)},\n"
+        f"            'language': {_as_repr(language)},\n"
+        f"            'metadata': {{{_as_repr(property_name)}: {_as_repr(value)}}},\n"
+        f"        }}\n"
+        f"    ],\n"
+        f"    language={_as_repr(language)},\n"
+        f")\n"
+        f"move_files_to_entity([source], target, language={_as_repr(language)})\n"
+        f"delete_entities([source])\n"
+        f"result = 'merged one source into its target'\n"
     )
 
 

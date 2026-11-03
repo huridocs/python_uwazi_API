@@ -59,6 +59,11 @@ PROPERTY_OPS: frozenset[str] = UPDATE_OPS | CREATE_OPS
 # A merge is ONE review row that writes a target (new or existing) and removes
 # every source in the same Run; the sources are never separate table rows.
 MERGE_OPS: frozenset[str] = frozenset({"update_and_delete", "create_and_delete"})
+# Ops whose undo RE-CREATES an entity with a fresh sharedId: a delete's undo
+# re-creates the deleted entity, and a merge's undo re-creates the sources it
+# absorbed. The recorded rows keep the OLD sharedId, so their work cannot be
+# executed a second time without first re-pointing the row at the new entity.
+REVERT_RECREATES_OPS: frozenset[str] = frozenset({"delete", *MERGE_OPS})
 # The merge whose row the per-row Revert can undo: its target is an entity that
 # already exists in Uwazi (so its sharedId is real and its backup restorable) and
 # its undo restores that target while re-creating the sources it deleted.
@@ -319,6 +324,14 @@ class OperationReviewRow(BaseModel):
             "'Generate outcomes' pass has filled the stored value this entity would receive."
         ),
     )
+    modified_at: datetime | None = Field(
+        default=None,
+        description=(
+            "The newest review activity among the operation's rows: the last status change "
+            "(``reviewed_at``) or, for a row nobody has reviewed yet, when it was recorded "
+            "(``created_at``). Drives the review table's Modified column and its sort."
+        ),
+    )
     subs: list[Suggestion] = Field(
         default_factory=list,
         description=(
@@ -402,6 +415,18 @@ class SuggestionFilter(BaseModel):
     )
     limit: int = Field(default=25, ge=1, description="Page size (ignored by aggregate/projection queries).")
     offset: int = Field(default=0, ge=0, description="Page offset (ignored by aggregate/projection queries).")
+    sort_by: Literal["recorded", "modified", "title", "template", "ops", "status"] = Field(
+        default="recorded",
+        description=(
+            "How the OPERATIONS page is ordered. 'recorded' preserves the script's own order "
+            "(the first suggestion id); the rest sort by the review table's columns, so the "
+            "order is global rather than limited to the loaded page."
+        ),
+    )
+    sort_desc: bool = Field(
+        default=False,
+        description="True for descending order. The review page turns it on for 'modified' so the latest rows read first.",
+    )
 
 
 class PredictionPass(BaseModel):
@@ -458,6 +483,7 @@ __all__ = [
     "PROPERTY_OPS",
     "PredictionAttemptStatus",
     "PredictionPass",
+    "REVERT_RECREATES_OPS",
     "Suggestion",
     "SuggestionFilter",
     "SuggestionOp",

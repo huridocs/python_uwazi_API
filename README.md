@@ -116,6 +116,11 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
   startup warning). Set `PROPERTY_FILLER_UWAZI_URL=https://one.instance` when
   running the filler alongside the admin agent and it should administer a
   different instance than the first one.
+- **Every consumer accepts either shape.** A one-instance consumer (the CLIs,
+  the property filler, the REST API, the E2E suites) resolves a comma-separated
+  `UWAZI_URL` to its **first** entry through
+  `uwazi_api.instance_urls.first_instance_url`, so a shared list value never
+  reaches a client as a URL. `PROPERTY_FILLER_UWAZI_URL` accepts the same shape.
 - `docker-compose.yml` passes `UWAZI_URL=${UWAZI_URL}` through unchanged, so a
   comma-separated value reaches the admin agent as-is; the property filler also
   receives `PROPERTY_FILLER_UWAZI_URL` (empty by default) to override which

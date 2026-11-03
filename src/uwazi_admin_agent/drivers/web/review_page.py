@@ -161,6 +161,7 @@ from uwazi_admin_agent.drivers.web.operations_view import (
     ops_of_refs,
     pairs_of_refs,
     property_options,
+    rerun_blocked,
     sub_label,
     sub_refs,
     sub_revertable,
@@ -172,7 +173,9 @@ from uwazi_admin_agent.drivers.web.review_view import (
     ACTIONS_COLUMN,
     DRIFT_STATUS_COLORS,
     MATCH_COLORS,
+    MODIFIED_COLUMN,
     OP_COLORS,
+    OPERATION_SORT_OPTIONS,
     OPS_COLUMN,
     RUN_STATUS_COLORS,
     SHARED_ID_CSS,
@@ -195,6 +198,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     run_confirmation,
     section_toggle_label,
     select_all_label,
+    sort_direction_label,
     table_update_label,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
@@ -369,7 +373,16 @@ def _build_page(run_id: str) -> None:
         "match": "",
         "language": "",
         "text": "",
+        # The table's always-visible sort. 'recorded' keeps the script's order;
+        # 'modified' (descending by default) puts the latest review activity on
+        # top. The store orders the WHOLE filtered set, not just this page.
+        "sort_by": "recorded",
+        "sort_desc": False,
         "loading": False,
+        # Set while the page control is rewritten programmatically: assigning a
+        # widget value fires its own change handler, and that must not reload
+        # the table in a loop.
+        "_suppress_page_events": False,
         # The SUBOPERATION selection: the suggestion rows the operator ticked,
         # held as row ids because that is the only identity finer than an
         # (entity, language) pair — "run this one property of this one
@@ -436,6 +449,7 @@ def _build_page(run_id: str) -> None:
             # It is NOT hidden: a stale table is a safety warning, not a
             # statistic.
             _drift_banner(state)
+            _sort_bar(state)
             _change_table(state)
             # Both sections start HIDDEN: the table is the page's content, and
             # the stats and the filters are read on demand.
@@ -767,6 +781,8 @@ def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> Su
         offset=state["offset"],
         limit=REVIEW_PAGE_SIZE,
         accepted_only=accepted_only,
+        sort_by=state["sort_by"],
+        sort_desc=state["sort_desc"],
     )
 
 
@@ -975,6 +991,9 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
     """
     row = _row_of_key(state, row_key)
     if row is None or row.get("is_info"):
+        return
+    if row.get("rerun_blocked"):
+        ui.notify(f"This operation cannot be run again — {row.get('rerun_blocked_reason')}", type="warning")
         return
     ids = ids_of_refs(_row_refs(row))
     if not ids:
@@ -1658,6 +1677,13 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
     # discard says NOT to execute it (Restore is its undo).
     covered = [sub for sub in covered if _runnable(sub)]
     if not covered:
+        blocked_reason = next(
+            (str(sub.get("rerun_blocked_reason")) for sub in subs if sub.get("rerun_blocked_reason")),
+            "",
+        )
+        if blocked_reason:
+            ui.notify(f"This operation cannot be run again — {blocked_reason}", type="warning", multi_line=True)
+            return
         ui.notify("Nothing left to run in this operation", type="warning")
         return
     _set_children_checked(state, row, True)
@@ -1666,8 +1692,14 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
 
 
 def _runnable(sub: dict[str, Any]) -> bool:
-    """Whether a suboperation payload is still waiting to be written (pure)."""
-    return str(sub.get("status") or "") in _RUNNABLE_STATUSES
+    """Whether a suboperation payload is still waiting to be written (pure).
+
+    A reverted delete/merge part is NOT runnable: its revert re-created an
+    entity with a fresh sharedId, so the recorded row still points at the old
+    one. The payload carries the flag; the status alone would wrongly say the
+    write can be repeated.
+    """
+    return str(sub.get("status") or "") in _RUNNABLE_STATUSES and not sub.get("rerun_blocked")
 
 
 def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
@@ -1685,6 +1717,10 @@ def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
     if sub is None or sub.get("is_info"):
         return
     if not _runnable(sub):
+        blocked_reason = str(sub.get("rerun_blocked_reason") or "")
+        if blocked_reason:
+            ui.notify(f"This row cannot be run again — {blocked_reason}", type="warning", multi_line=True)
+            return
         ui.notify(
             f"This suboperation is already {sub.get('status')} — nothing to run"
             + (" (Restore it first)" if sub.get("status") == "discarded" else ""),
@@ -1804,6 +1840,67 @@ async def _run_rows(
 # --- entity table ------------------------------------------------------------
 
 
+def _sort_bar(state: dict[str, Any]) -> None:
+    """The always-visible sort control above the review table.
+
+    It lives outside the collapsible filters: changing what the table READS
+    (the filters) is optional, but every operator needs to see the order and
+    change it — especially "Modified", which brings the last-touched rows to
+    the top. The direction toggle names the order it is showing.
+    """
+    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
+        ui.icon("sort").classes("text-grey-7")
+        state["_sort_select"] = (
+            ui.select(
+                OPERATION_SORT_OPTIONS,
+                value=state["sort_by"],
+                label="Sort by",
+                on_change=lambda e: _set_sort(state, e.value or "recorded"),
+            )
+            .props("dense outlined")
+            .classes("min-w-[180px]")
+        )
+        state["_sort_direction_button"] = ui.button(
+            icon="arrow_upward",
+            on_click=lambda: _toggle_sort_direction(state),
+        ).props("flat dense")
+        _refresh_sort_controls(state)
+
+
+def _set_sort(state: dict[str, Any], sort_by: str) -> None:
+    """Order the table by one column (server-side, across every page)."""
+    if sort_by not in OPERATION_SORT_OPTIONS:
+        sort_by = "recorded"
+    previous = state.get("sort_by") or "recorded"
+    state["sort_by"] = sort_by
+    # Modified reads naturally newest-first; the other columns start A→Z. The
+    # direction button still flips either.
+    if sort_by == "modified" and previous != "modified":
+        state["sort_desc"] = True
+    elif sort_by != "modified" and previous == "modified":
+        state["sort_desc"] = False
+    state["offset"] = 0
+    _reload_table(state)
+
+
+def _toggle_sort_direction(state: dict[str, Any]) -> None:
+    """Flip the current sort between ascending and descending."""
+    state["sort_desc"] = not bool(state.get("sort_desc"))
+    state["offset"] = 0
+    _reload_table(state)
+
+
+def _refresh_sort_controls(state: dict[str, Any]) -> None:
+    """Make the direction button say which order the table is in."""
+    button = state.get("_sort_direction_button")
+    if button is None or button.is_deleted:
+        return
+    sort_by = state.get("sort_by") or "recorded"
+    descending = bool(state.get("sort_desc"))
+    button.set_icon("arrow_downward" if descending else "arrow_upward")
+    button.text = sort_direction_label(sort_by, descending)
+
+
 def _change_table(state: dict[str, Any]) -> None:
     """The OPERATIONS table: one row per affected entity, each with suboperations.
 
@@ -1840,6 +1937,14 @@ def _change_table(state: dict[str, Any]) -> None:
             "style": STATUS_WITH_COUNT_COLUMN,
         },
         {
+            "name": "modified",
+            "label": "Modified",
+            "field": "modified",
+            "align": "left",
+            "sortable": False,
+            "style": MODIFIED_COLUMN,
+        },
+        {
             "name": "actions",
             "label": "Actions",
             "field": "actions",
@@ -1869,7 +1974,9 @@ def _change_table(state: dict[str, Any]) -> None:
         <q-tr :props="props">
           <q-td auto-width>
             <q-checkbox v-if="!props.row.is_info" v-model="props.selected" dense
-                        :disable="!props.row.has_runnable" />
+                        :disable="!props.row.has_runnable"
+                        :title="props.row.rerun_blocked ? props.row.rerun_blocked_reason
+                                : (props.row.has_runnable ? '' : 'No runnable suboperation')" />
           </q-td>
           <q-td key="expand" :props="props" class="text-center">
             <q-btn v-if="!props.row.is_info || props.row.has_subs" dense flat size="sm"
@@ -1905,12 +2012,15 @@ def _change_table(state: dict[str, Any]) -> None:
             <q-badge :color="props.row.run_status_color" class="q-mr-xs">{{ props.row.run_status }}</q-badge>
             <span v-if="props.row.has_validated" :class="'text-' + props.row.validated_color"
                   class="text-caption text-bold">{{ props.row.validated }}</span>
+            <q-icon v-if="props.row.rerun_blocked" name="sync_disabled" size="16px" color="orange-9"
+                    class="q-ml-xs" :title="props.row.rerun_blocked_reason" />
           </q-td>
+          <q-td key="modified" :props="props" class="text-no-wrap">{{ props.row.modified }}</q-td>
           <q-td key="actions" :props="props" class="text-no-wrap">
             <template v-if="!props.row.is_info">
               <q-btn dense flat icon="play_arrow" color="primary"
                      :disable="!props.row.has_runnable"
-                     title="Run this operation: the ticked suboperations (all of them when none is ticked)"
+                     :title="props.row.run_title"
                      @click.stop="$parent.$emit('run_op', props.row)" />
               <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
                      :title="props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'"
@@ -1918,7 +2028,8 @@ def _change_table(state: dict[str, Any]) -> None:
               <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
                      title="Undo the discard — these suboperations go back to the review queue"
                      @click.stop="$parent.$emit('restore_op', props.row)" />
-              <q-btn v-else-if="props.row.run_status !== 'applied'" dense flat icon="block" color="negative"
+              <q-btn v-else-if="props.row.run_status !== 'applied' && !props.row.rerun_blocked"
+                     dense flat icon="block" color="negative"
                      title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
                      @click.stop="$parent.$emit('discard_op', props.row)" />
               <q-btn dense flat icon="edit" color="teal"
@@ -2048,10 +2159,30 @@ def _change_table(state: dict[str, Any]) -> None:
 
     with ui.row().classes("w-full items-center justify-between"):
         state["_page_label"] = ui.label("").classes("text-body2 text-grey-7")
-        with ui.row().classes("items-center"):
+        with ui.row().classes("items-center gap-1"):
+            # First / previous / page readout / next / last. A run can have
+            # dozens of pages, so the two ends are one click away instead of a
+            # long run of chevrons.
+            ui.button(icon="first_page", on_click=lambda: _page_to(state, 1)).props("flat dense").tooltip("First page")
             ui.button(icon="chevron_left", on_click=lambda: _page(state, -1)).props("flat dense")
             state["_page_number"] = ui.label("").classes("text-body2 q-mx-sm")
             ui.button(icon="chevron_right", on_click=lambda: _page(state, 1)).props("flat dense")
+            ui.button(icon="last_page", on_click=lambda: _page_to(state, None)).props("flat dense").tooltip("Last page")
+            # A typed page number: the fastest way to jump into the middle of a
+            # 50-page table without stepping through every page.
+            ui.label("Go to").classes("text-body2 text-grey-7 q-ml-sm")
+            state["_page_input"] = (
+                ui.number(
+                    value=1,
+                    min=1,
+                    max=1,
+                    precision=0,
+                    on_change=lambda e: _page_from_input(state, e.value),
+                )
+                .props("dense outlined")
+                .classes("w-24")
+                .tooltip("Type a page number and press Enter")
+            )
     _reload_table(state)
 
 
@@ -2203,12 +2334,62 @@ def _refresh_expand_button(state: dict[str, Any]) -> None:
     button.set_icon("unfold_less" if all_expanded else "unfold_more")
 
 
+def _page_count(state: dict[str, Any]) -> int:
+    """How many pages the current result set has (at least one)."""
+    return max((int(state.get("total") or 0) + REVIEW_PAGE_SIZE - 1) // REVIEW_PAGE_SIZE, 1)
+
+
 def _page(state: dict[str, Any], direction: int) -> None:
-    new_offset = state["offset"] + direction * REVIEW_PAGE_SIZE
-    if new_offset < 0 or new_offset >= state["total"]:
+    """Step one page forward/backward, staying inside the result set."""
+    current = state["offset"] // REVIEW_PAGE_SIZE + 1
+    _page_to(state, current + direction)
+
+
+def _page_to(state: dict[str, Any], page: int | None) -> None:
+    """Jump to a page (``None`` = the last one), clamped to the result set."""
+    pages = _page_count(state)
+    target = pages if page is None else int(page)
+    target = max(1, min(target, pages))
+    new_offset = (target - 1) * REVIEW_PAGE_SIZE
+    if new_offset == state["offset"]:
+        _refresh_page_controls(state)
         return
     state["offset"] = new_offset
     _reload_table(state)
+
+
+def _page_from_input(state: dict[str, Any], value: Any) -> None:
+    """The typed page number's handler (ignores the programmatic rewrite)."""
+    if state.get("_suppress_page_events"):
+        return
+    if value is None:
+        _refresh_page_controls(state)
+        return
+    try:
+        page = int(float(value))
+    except (TypeError, ValueError):
+        _refresh_page_controls(state)
+        return
+    _page_to(state, page)
+
+
+def _refresh_page_controls(state: dict[str, Any]) -> None:
+    """Write the current page into the readout and the typed page input."""
+    pages = _page_count(state)
+    page = state["offset"] // REVIEW_PAGE_SIZE + 1
+    label = state.get("_page_number")
+    if label is not None and not label.is_deleted:
+        label.text = f"page {page} / {pages}"
+    page_input = state.get("_page_input")
+    if page_input is None or page_input.is_deleted:
+        return
+    state["_suppress_page_events"] = True
+    try:
+        page_input.min = 1
+        page_input.max = pages
+        page_input.value = page
+    finally:
+        state["_suppress_page_events"] = False
 
 
 def _reload_table(state: dict[str, Any]) -> None:
@@ -2268,10 +2449,8 @@ def _reload_table(state: dict[str, Any]) -> None:
             first = state["offset"] + 1 if total else 0
             last = min(state["offset"] + REVIEW_PAGE_SIZE, total)
             label.text = f"Showing {first:,}–{last:,} of {total:,} operations"
-        page_number = state.get("_page_number")
-        if page_number is not None and not page_number.is_deleted:
-            pages = max((total + REVIEW_PAGE_SIZE - 1) // REVIEW_PAGE_SIZE, 1)
-            page_number.text = f"page {state['offset'] // REVIEW_PAGE_SIZE + 1} / {pages}"
+        _refresh_page_controls(state)
+        _refresh_sort_controls(state)
         _refresh_expand_button(state)
     finally:
         state["loading"] = False
@@ -2341,7 +2520,7 @@ def _refresh_all(state: dict[str, Any]) -> None:
         _refresh_run_badge(state)
         _render_summary(state)
         if state["offset"] >= state["total"] and state["offset"] > 0:
-            state["offset"] = max(state["total"] - REVIEW_PAGE_SIZE, 0)
+            state["offset"] = (_page_count(state) - 1) * REVIEW_PAGE_SIZE
         _reload_table(state)
     except Exception:  # noqa: BLE001 — a refresh failure must not break the page
         logger.exception("review refresh failed")
@@ -2883,8 +3062,16 @@ def _entity_value_label(text: str, classes: str) -> None:
 
 
 def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
-    """Whether a Run can still write this row (pure)."""
-    return suggestion.id is not None and suggestion.status.value in _RUNNABLE_STATUSES
+    """Whether a Run can still write this row (pure).
+
+    A reverted delete/merge row cannot be executed again: its revert re-created
+    an entity with a new sharedId, and the row still names the old one.
+    """
+    return (
+        suggestion.id is not None
+        and suggestion.status.value in _RUNNABLE_STATUSES
+        and not rerun_blocked(suggestion.op, suggestion.status.value)
+    )
 
 
 def _entity_suggestions(

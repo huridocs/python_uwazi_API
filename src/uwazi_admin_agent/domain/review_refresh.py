@@ -87,10 +87,21 @@ def same_proposal(stored: Any, incoming: Any) -> bool:
     return stored == incoming
 
 
-def reconciled_status(current: SuggestionStatus, *, same: bool, reappearing: bool = False) -> SuggestionStatus:
+def reconciled_status(
+    current: SuggestionStatus,
+    *,
+    same: bool,
+    reappearing: bool = False,
+    rerun_after_refresh: bool = False,
+) -> SuggestionStatus:
     """The status an existing row keeps after a refresh (pure).
 
     - a row that reappears after being OBSOLETE becomes PENDING again;
+    - a REVERTED row whose undo re-created an entity (a delete/merge) becomes
+      PENDING again once the refresh still produces it: the refresh has just
+      re-read that row from live Uwazi, and a merge's source ids are replaced
+      with the live ones in the same pass, so the recorded old sharedIds are no
+      longer stale;
     - an unchanged proposal keeps the operator's status;
     - a changed proposal returns to PENDING, except that EDITED and DISCARDED
       are deliberate operator decisions and survive;
@@ -98,6 +109,8 @@ def reconciled_status(current: SuggestionStatus, *, same: bool, reappearing: boo
       longer describes the table, so the row must be reviewed again.
     """
     if current is SuggestionStatus.OBSOLETE or reappearing:
+        return SuggestionStatus.PENDING
+    if rerun_after_refresh and current is SuggestionStatus.REVERTED:
         return SuggestionStatus.PENDING
     if same:
         return current

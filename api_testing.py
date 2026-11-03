@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from uwazi_api.client import UwaziClient
+from uwazi_api.instance_urls import first_instance_url
 from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.entity_file_upload import EntityFileUpload
 from uwazi_api.domain.file_fieldname import FileFieldname
@@ -18,7 +19,8 @@ load_dotenv.load_dotenv()
 
 UWAZI_USER = os.getenv("UWAZI_USER", "admin")
 UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
-UWAZI_URL = os.getenv("UWAZI_URL", "http://localhost:3000")
+# ``UWAZI_URL`` may be a comma-separated list; these scripts target one.
+UWAZI_URL = first_instance_url(os.getenv("UWAZI_URL")) or "http://localhost:3000"
 UWAZI_TEMPLATE_ID = os.getenv("UWAZI_TEMPLATE_ID", "")
 
 

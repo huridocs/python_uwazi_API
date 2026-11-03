@@ -6,12 +6,21 @@ from requests.cookies import merge_cookies
 
 from uwazi_api.adapters.request_retry import requests_login_session, requests_retry_session
 from uwazi_api.domain.exceptions import AuthenticationError
+from uwazi_api.instance_urls import first_instance_url
 from uwazi_api.iso_639_choices import iso_639_choices
 from uwazi_api.ports.http_port import HttpClientPort
 
 
 class HttpClientAdapter(HttpClientPort):
     def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None):
+        if not url:
+            raise ValueError("URL is required and cannot be None or empty")
+        # ``UWAZI_URL`` may hold a comma-separated list of instances. This
+        # adapter speaks to ONE, so a list resolves to the first configured URL
+        # (the repo-wide single-instance convention) instead of being glued
+        # into a URL like ``http://a,https://b/api/login`` — which ``requests``
+        # rejects with ``InvalidURL``.
+        url = first_instance_url(url) or ""
         if not url:
             raise ValueError("URL is required and cannot be None or empty")
         url = url.rstrip("/")

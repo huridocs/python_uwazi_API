@@ -9,19 +9,17 @@ from uwazi_agent.adapters.llm.ollama_adapter import OllamaAdapter
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.logging_config import setup_logging
 from uwazi_agent.use_cases.run_agent_use_case import RunAgentUseCase
+from uwazi_api.instance_urls import first_instance_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env")
 
-UWAZI_URL = os.environ["UWAZI_URL"]
-if "," in UWAZI_URL:
-    # The admin agent accepts a COMMA-SEPARATED LIST of instances; this CLI
-    # does not — it targets exactly ONE. Refuse loudly instead of silently
-    # pointing the agent at the wrong instance.
-    raise RuntimeError(
-        "UWAZI_URL holds a list of instances; the agent CLI needs a single URL. "
-        "Point the agent at one instance (UWAZI_URL=<one url>)."
-    )
+# ``UWAZI_URL`` may be a comma-separated LIST (the admin agent accepts several
+# instances). This CLI targets exactly ONE — the first configured URL, the same
+# convention the admin CLI and the property filler use.
+UWAZI_URL = first_instance_url(os.environ.get("UWAZI_URL"))
+if not UWAZI_URL:
+    raise RuntimeError("UWAZI_URL is not set — point it at the instance to administer")
 UWAZI_USER = os.environ["UWAZI_USER"]
 UWAZI_PASSWORD = os.environ["UWAZI_PASSWORD"]
 

@@ -44,6 +44,7 @@ from uwazi_admin_agent.domain.review_refresh import (
 from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
+    REVERT_RECREATES_OPS,
     EntityReviewRow,
     OperationReviewRow,
     PredictionAttemptStatus,
@@ -144,6 +145,34 @@ RUNNABLE_STATUSES: tuple[str, ...] = (
 )
 
 
+_OPERATION_SORT_FIELDS: dict[str, str] = {
+    "recorded": "first_id",
+    "modified": "modified_sort",
+    "title": "title_sort",
+    "template": "template_sort",
+    "ops": "ops_sort",
+    "status": "status_sort",
+}
+
+
+def operation_order_by(sort_by: str, sort_desc: bool) -> str:
+    """The ORDER BY clause for one page of operations (pure; whitelisted fields).
+
+    The sort control orders the WHOLE filtered set in SQL, so page flips keep
+    the order rather than sorting one page at a time. Unknown values fall back
+    to the recorded order, and every non-recorded order ties on ``first_id`` so
+    two rows with the same title keep a stable page order. A row with no
+    timestamp sorts last in either direction.
+    """
+    if sort_by not in _OPERATION_SORT_FIELDS or sort_by == "recorded":
+        return f"first_id {'DESC' if sort_desc else 'ASC'}"
+    direction = "DESC" if sort_desc else "ASC"
+    field = _OPERATION_SORT_FIELDS[sort_by]
+    if sort_by == "modified":
+        return f"modified_sort IS NULL, modified_sort {direction}, first_id ASC"
+    return f"{field} {direction}, first_id ASC"
+
+
 def match_summary_of(verdicts: int, verdict_rows: int, has_mismatch: bool) -> str:
     """An entity group's match verdict label (pure).
 
@@ -159,6 +188,29 @@ def match_summary_of(verdicts: int, verdict_rows: int, has_mismatch: bool) -> st
     if verdicts == 1:
         return "mismatch" if has_mismatch else "exact"
     return "new" if verdict_rows else "n/a"
+
+
+def latest_review_activity(subs: list[Suggestion]) -> datetime | None:
+    """The newest timestamp among one operation's rows (pure).
+
+    A row's own "modified" moment is its last status change (``reviewed_at``)
+    or, before anyone reviewed it, when it was recorded (``created_at``). The
+    operation is the newest of its parts. The comparison is numeric
+    (``timestamp()``) so a legacy NAIVE timestamp and a timezone-aware one can
+    still be ordered together instead of raising ``TypeError``.
+    """
+    stamps = [sub.reviewed_at or sub.created_at for sub in subs]
+    present = [stamp for stamp in stamps if stamp is not None]
+    if not present:
+        return None
+
+    def _key(value: datetime) -> float:
+        try:
+            return value.timestamp()
+        except (ValueError, OSError, OverflowError):
+            return float("-inf")
+
+    return max(present, key=_key)
 
 
 def _entity_fields(subs: list[Suggestion]) -> dict[str, list[str]]:
@@ -674,6 +726,11 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 old_status,
                 same=same,
                 reappearing=old_status is SuggestionStatus.OBSOLETE,
+                # A delete/merge undo re-created an entity, so the reverted row
+                # could not be run again. The refresh has just re-read the
+                # operation from live Uwazi (and replaced a merge's source ids),
+                # so it is safe to put it back in the runnable queue.
+                rerun_after_refresh=str(old["op"]) in REVERT_RECREATES_OPS,
             )
             if old_status is SuggestionStatus.OBSOLETE:
                 reappeared += 1
@@ -994,11 +1051,22 @@ class SqliteSuggestionStore(SuggestionStorePort):
                 MAX(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS has_mismatch,
                 MAX(CASE WHEN op IN ('update','create','update_and_delete','create_and_delete')
                               AND proposed_value IS NOT NULL THEN 1 ELSE 0 END)
-                    AS has_outcome
+                    AS has_outcome,
+                LOWER(MAX(entity_title)) AS title_sort,
+                LOWER(MAX(template_name)) AS template_sort,
+                MIN(op) AS ops_sort,
+                CASE
+                    WHEN COUNT(*) = SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) THEN 'applied'
+                    WHEN COUNT(*) = SUM(CASE WHEN status = 'reverted' THEN 1 ELSE 0 END) THEN 'reverted'
+                    WHEN COUNT(*) = SUM(CASE WHEN status = 'discarded' THEN 1 ELSE 0 END) THEN 'discarded'
+                    WHEN COUNT(*) = SUM(CASE WHEN status = 'obsolete' THEN 1 ELSE 0 END) THEN 'obsolete'
+                    ELSE 'pending'
+                END AS status_sort,
+                MAX(julianday(COALESCE(reviewed_at, created_at))) AS modified_sort
             FROM suggestion
             WHERE {where}
             GROUP BY shared_id
-            ORDER BY first_id
+            ORDER BY {operation_order_by(f.sort_by, f.sort_desc)}
             LIMIT ? OFFSET ?
             """,
             [
@@ -1052,6 +1120,7 @@ class SqliteSuggestionStore(SuggestionStorePort):
                     edited=int(row["edited"] or 0),
                     match_summary=match_summary_of(verdicts, verdict_rows, bool(row["has_mismatch"])),
                     has_outcome=bool(row["has_outcome"]),
+                    modified_at=latest_review_activity(subs),
                     subs=subs,
                 )
             )
@@ -1133,6 +1202,13 @@ class SqliteSuggestionStore(SuggestionStorePort):
             placeholders = ", ".join("?" for _ in RUNNABLE_STATUSES)
             clause += f" AND status IN ({placeholders})"
             query_params.extend(RUNNABLE_STATUSES)
+            # A reverted delete/merge row is NOT runnable again: its revert
+            # re-created an entity with a fresh sharedId, so the recorded row's
+            # old id is dead. Keep it out of "select all results" too.
+            blocked_ops = sorted(REVERT_RECREATES_OPS)
+            blocked_placeholders = ", ".join("?" for _ in blocked_ops)
+            clause += f" AND NOT (status = ? AND op IN ({blocked_placeholders}))"
+            query_params.extend([SuggestionStatus.REVERTED.value, *blocked_ops])
         rows = self._query(f"SELECT id, shared_id, language, op FROM suggestion {clause} ORDER BY id", query_params)
         return [(int(row["id"]), str(row["shared_id"]), row["language"], str(row["op"])) for row in rows]
 

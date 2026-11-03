@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from uwazi_admin_agent.domain.suggestion import (
     OperationReviewRow,
     Suggestion,
@@ -354,3 +356,89 @@ def test_suboperation_row_multiselect_without_rejections_reads_all_accepted() ->
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
     assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": True}]
     assert row["has_rejected"] is False
+
+
+# --- modified column ---------------------------------------------------------
+
+
+def test_operation_row_carries_the_modified_label() -> None:
+    item = _operation([_sub(1)]).model_copy(update={"modified_at": datetime(2026, 11, 3, 9, 45)})
+
+    row = view.operation_row(item)
+
+    assert row["modified"] == "2026-11-03 09:45"
+
+
+def test_operation_row_reads_a_dash_when_no_timestamp_was_recorded() -> None:
+    assert view.operation_row(_operation([_sub(1)]))["modified"] == "—"
+
+
+# --- reverted rows whose undo re-created an entity ---------------------------
+
+
+def test_a_reverted_delete_cannot_be_run_again() -> None:
+    item = _operation(
+        [_sub(1, op="delete", property_name=None, language=None, status=SuggestionStatus.REVERTED)],
+        ops=["delete"],
+        languages=[],
+    )
+
+    row = view.operation_row(item)
+
+    assert row["run_status"] == "reverted"
+    assert row["rerun_blocked"] is True
+    assert row["has_runnable"] is False
+    assert "new sharedId" in row["rerun_blocked_reason"]
+    assert row["run_title"] == row["rerun_blocked_reason"]
+    assert row["subs"][0]["rerun_blocked"] is True
+    assert row["subs"][0]["runnable"] is False
+
+
+def test_a_reverted_merge_cannot_be_run_again() -> None:
+    item = _operation(
+        [
+            _sub(
+                1,
+                op="update_and_delete",
+                status=SuggestionStatus.REVERTED,
+            )
+        ],
+        ops=["update_and_delete"],
+    )
+
+    row = view.operation_row(item)
+
+    assert row["rerun_blocked"] is True
+    assert row["has_runnable"] is False
+    assert "new sharedIds" in row["rerun_blocked_reason"]
+
+
+def test_a_reverted_update_can_still_be_run_again() -> None:
+    item = _operation([_sub(1, status=SuggestionStatus.REVERTED)])
+
+    row = view.operation_row(item)
+
+    assert row["rerun_blocked"] is False
+    assert row["has_runnable"] is True
+
+
+def test_a_pending_delete_is_still_runnable() -> None:
+    item = _operation(
+        [_sub(1, op="delete", property_name=None, language=None, status=SuggestionStatus.PENDING)],
+        ops=["delete"],
+        languages=[],
+    )
+
+    row = view.operation_row(item)
+
+    assert row["rerun_blocked"] is False
+    assert row["has_runnable"] is True
+
+
+def test_rerun_blocked_only_matches_a_reverted_recreating_op() -> None:
+    assert view.rerun_blocked("delete", "reverted") is True
+    assert view.rerun_blocked("update_and_delete", "reverted") is True
+    assert view.rerun_blocked("create_and_delete", "reverted") is True
+    assert view.rerun_blocked("delete", "pending") is False
+    assert view.rerun_blocked("update", "reverted") is False
+    assert view.rerun_blocked("create", "reverted") is False

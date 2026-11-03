@@ -62,6 +62,16 @@ def test_returning_obsolete_row_becomes_pending() -> None:
     assert reconciled_status(SuggestionStatus.OBSOLETE, same=True) is SuggestionStatus.PENDING
 
 
+def test_a_refreshed_reverted_recreating_row_becomes_runnable_again() -> None:
+    """A delete/merge undo re-creates entities; a live refresh resolves them."""
+    assert reconciled_status(SuggestionStatus.REVERTED, same=True, rerun_after_refresh=True) is SuggestionStatus.PENDING
+    # Without the flag the reverted row keeps its state (e.g. an ordinary
+    # reverted update, which never needed the extra block).
+    assert reconciled_status(SuggestionStatus.REVERTED, same=True) is SuggestionStatus.REVERTED
+    # A discard is an operator decision and is never undone by a refresh.
+    assert reconciled_status(SuggestionStatus.DISCARDED, same=True, rerun_after_refresh=True) is SuggestionStatus.DISCARDED
+
+
 def test_missing_applied_row_is_kept_as_history() -> None:
     assert missing_status(SuggestionStatus.APPLIED) is SuggestionStatus.APPLIED
 
