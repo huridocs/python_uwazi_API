@@ -1,6 +1,6 @@
 # Uwazi Admin Agent deck
 
-Slidev source for the deck published from the repository's `docs/` folder.
+Slidev source for the Uwazi Admin Agent narrated deck.
 
 Requires [Bun](https://bun.sh/) (Slidev 53 also needs a Node.js 22.12+ runtime).
 
@@ -8,12 +8,7 @@ Requires [Bun](https://bun.sh/) (Slidev 53 also needs a Node.js 22.12+ runtime).
 cd slides
 bun install
 bun run dev      # local preview
-bun run build    # builds the static site into ../docs
 ```
-
-The build uses `--base /python_uwazi_API/`, matching the GitHub Pages project
-URL (`https://huridocs.github.io/python_uwazi_API/`). Change the base in
-`package.json` if the repository is renamed or served from a custom domain.
 
 Screenshots under `images/` were captured from:
 
