@@ -221,3 +221,26 @@ class UwaziClientAdapter(UwaziPort):
             return self._ensure_adapter().client.relationships.resolve_relation_type_id(name_or_id)
 
         return await asyncio.to_thread(_resolve)
+
+    async def get_document(self, shared_id: str, template_name: str, language: str) -> PdfItem | None:
+        def _fetch() -> PdfItem | None:
+            adapter = self._ensure_adapter()
+            try:
+                entity = adapter.client.entities.get_one(shared_id, language)
+            except Exception as exc:  # noqa: BLE001 — a vanished entity is not an error here
+                logger.warning("get_document: could not read {}: {}", shared_id, exc)
+                return None
+            file_language = LANGUAGE_TO_FILE_LANGUAGE.get(language)
+            docs = [d for d in entity.documents if d.language == file_language]
+            if not docs:
+                return None
+            return PdfItem(
+                shared_id=entity.shared_id or shared_id,
+                title=entity.title or "",
+                subtitle=metadata_text(metadata_value(entity.metadata or {}, SUBTITLE_PROPERTY)),
+                template_name=template_name,
+                filename=docs[0].filename,
+                language=language,
+            )
+
+        return await asyncio.to_thread(_fetch)

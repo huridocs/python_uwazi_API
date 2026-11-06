@@ -119,3 +119,78 @@ def test_from_json_rejects_wrong_shape() -> None:
         )
         is None
     )
+
+
+# --- merging the per-filter buckets into ALL ------------------------------
+# Every Uwazi search is capped at Elasticsearch's 10 000-hit window, so the
+# unfiltered ALL search alone can miss documents a per-value search reaches.
+
+
+def test_merge_adds_rows_the_all_bucket_missed() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a")]
+    cache.pending["v1"] = [_item("a"), _item("b")]
+    cache.pending["v2"] = [_item("c")]
+
+    gained = cache.merge_filter_buckets_into_all()
+
+    assert gained == 2
+    assert [i.shared_id for i in cache.pending[None]] == ["a", "b", "c"]
+
+
+def test_merge_does_not_duplicate_a_row_present_in_several_buckets() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a")]
+    cache.pending["v1"] = [_item("a")]
+    cache.validated["v2"] = [_item("a")]
+
+    assert cache.merge_filter_buckets_into_all() == 0
+    assert cache.count(None) == 1
+
+
+def test_merge_never_demotes_a_validated_row_back_to_pending() -> None:
+    """A row's status is per instance, not per bucket: the validated copy wins."""
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a")]
+    cache.pending["v1"] = [_item("a")]
+    cache.validated["v1"] = [_item("a")]
+
+    cache.merge_filter_buckets_into_all()
+
+    assert [i.shared_id for i in cache.pending[None]] == []
+    assert [i.shared_id for i in cache.validated[None]] == ["a"]
+
+
+def test_merge_keeps_the_all_bucket_order_and_appends_new_rows() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("b"), _item("a")]
+    cache.pending["v1"] = [_item("a"), _item("c")]
+
+    cache.merge_filter_buckets_into_all()
+
+    assert [i.shared_id for i in cache.pending[None]] == ["b", "a", "c"]
+
+
+def test_merge_counts_as_merged_for_the_refresh_report() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a")]
+    cache.pending["v1"] = [_item("b")]
+
+    cache.merge_filter_buckets_into_all()
+
+    assert cache.merged_count == 1
+
+
+def test_truncated_buckets_names_the_searches_that_filled_the_window() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a"), _item("b")]
+    cache.pending["v1"] = [_item("a"), _item("b"), _item("c")]
+
+    assert cache.truncated_buckets(3) == ["v1"]
+
+
+def test_truncated_buckets_is_empty_when_every_search_finished() -> None:
+    cache = DocumentCache(template="DOCUMENT", language="en")
+    cache.pending[None] = [_item("a")]
+
+    assert cache.truncated_buckets(10_000) == []

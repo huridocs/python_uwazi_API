@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from uwazi_api.domain.search_pages import MAX_RESULT_WINDOW
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
 from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_property_filler.adapters import document_cache_file
@@ -38,6 +39,7 @@ from uwazi_property_filler.domain.extension_record import ExtensionRecord
 from uwazi_property_filler.domain.extension_request import ExtensionContext
 from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.pdf_item import PdfItem
+from uwazi_property_filler.domain.refresh_result import RefreshResult
 from uwazi_property_filler.ports.extension_port import ExtensionPort
 from uwazi_property_filler.ports.label_notify_port import LabelNotifyPort
 from uwazi_property_filler.ports.suggestion_source_port import SuggestionSourcePort
@@ -161,24 +163,36 @@ class PropertyFillerService:
             return [], []
         return self._documents.split(filter_value)
 
-    async def refresh(self, template: str, language: str) -> int:
+    async def refresh(self, template: str, language: str) -> RefreshResult:
         """Fetch every filter bucket from Uwazi once and replace the cache.
 
-        Returns the total number of listed documents (the ALL bucket). This is
-        the whole of ``Connect & Refresh``: document metadata only. PDFs are
-        fetched lazily, the first time a document is opened
+        This is the whole of ``Connect & Refresh``: document metadata only. PDFs
+        are fetched lazily, the first time a document is opened
         (:meth:`get_pdf_bytes`), so connecting to the instance never waits on
         bulk downloads.
+
+        Returns what was listed *and* whether any search hit the 10 000-hit
+        window, so the UI can report a partial list instead of implying the
+        corpus is complete.
         """
         documents = await self._fetch_document_cache(template, language)
         async with self._documents_lock:
             self._documents = documents
         await self._persist_documents()
-        return documents.count(None)
+        return RefreshResult(
+            count=documents.count(None),
+            merged=documents.merged_count,
+            truncated_buckets=documents.truncated_buckets(MAX_RESULT_WINDOW),
+        )
 
     async def _fetch_document_cache(self, template: str, language: str) -> DocumentCache:
-        """One Uwazi result set per filter value (plus the ALL bucket), each
-        capped at the 10 000-hit search window, upserting statuses as before."""
+        """One Uwazi result set per filter value (plus the ALL bucket).
+
+        Each search is capped at the 10 000-hit window, so the ALL bucket alone
+        can miss documents a per-value search reaches. The per-value buckets are
+        unioned into ALL afterwards, which recovers as much of the corpus as one
+        refresh can see without extra requests.
+        """
         values = list(self._filter_values_sync(template, language).keys())
         documents = DocumentCache(template=template, language=language)
         for value in [None, *values]:
@@ -187,7 +201,57 @@ class PropertyFillerService:
             )
             documents.pending[value] = pending
             documents.validated[value] = validated
+        await self._include_suggested_documents(documents, template, language)
+        gained = documents.merge_filter_buckets_into_all()
+        if gained:
+            logger.info(
+                "Refresh merged {} documents from the filter buckets into the ALL bucket "
+                "(each search is capped at the {} hit window)",
+                gained,
+                MAX_RESULT_WINDOW,
+            )
+        for value in documents.truncated_buckets(MAX_RESULT_WINDOW):
+            logger.warning(
+                "Bucket {!r} reached the {}-hit search window; documents beyond it are not listed. "
+                "Narrow the filter (PROPERTY_FILLER_FILTER) or split the template to see the rest.",
+                value,
+                MAX_RESULT_WINDOW,
+            )
         return documents
+
+    async def _include_suggested_documents(self, documents: DocumentCache, template: str, language: str) -> None:
+        """Add every suggested document the searches did not reach.
+
+        The suggestion sources are small (a static file plus the extension
+        table), so each suggested shared id is read individually through
+        ``/api/entities``, which — unlike ``/api/search`` — is not limited by the
+        10 000-hit window. Without this, a suggestion for a document outside the
+        window is invisible: it cannot be listed and cannot be selected for
+        filling.
+        """
+        try:
+            suggested_ids = await self.suggested_shared_ids()
+        except Exception as exc:  # noqa: BLE001 — suggestions must never break a refresh
+            logger.warning("Could not read the suggested shared ids: {}", exc)
+            return
+        known = {item.shared_id for items in (*documents.pending.values(), *documents.validated.values()) for item in items}
+        missing = sorted(suggested_ids - known)
+        added = 0
+        for shared_id in missing:
+            item = await self.uwazi.get_document(shared_id, template, language)
+            if item is None:
+                continue
+            documents.pending.setdefault(None, []).append(item)
+            added += 1
+        if missing:
+            logger.info(
+                "Refresh added {} of {} suggested documents the searches could not reach "
+                "(outside the {} hit window or without a file in '{}')",
+                added,
+                len(missing),
+                MAX_RESULT_WINDOW,
+                language,
+            )
 
     async def get_entity_metadata(self, shared_id: str, template: str, language: str) -> dict[str, Any]:
         return await self.uwazi.get_entity_metadata(shared_id, template, language)

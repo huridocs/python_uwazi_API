@@ -184,6 +184,14 @@ def _log_sink(message: Any) -> None:
 logger.add(_log_sink, level="DEBUG", format="{time:HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}")
 
 
+def _notify_refresh_result(result: Any) -> None:
+    """Report the refresh outcome, flagging a partial list as partial."""
+    if getattr(result, "is_complete", True):
+        _notify(f"Refreshed: {result.count} documents", type="positive")
+        return
+    _notify(result.summary(), type="warning", timeout=0)
+
+
 def _notify(message: str, type: str = "positive", **kwargs: Any) -> None:  # noqa: A002
     """Notify connected clients; safe from background tasks.
 
@@ -629,14 +637,14 @@ def _build_page() -> None:
             return
         _start_ongoing(page_client, "refresh", "Fetching documents from the instance…")
         try:
-            count = await service.refresh(template, state["language"])
+            result = await service.refresh(template, state["language"])
         except Exception as exc:  # noqa: BLE001
             _notify(f"Refresh failed: {exc}", type="negative")
             return
         finally:
             _finish_ongoing(page_client, "refresh")
         await _reload_after_refresh()
-        _notify(f"Refreshed: {count} documents", type="positive")
+        _notify_refresh_result(result)
 
     async def _select_pdf(item: PdfItem) -> None:
         state["selected"] = item
@@ -690,9 +698,8 @@ def _build_page() -> None:
         form_container.clear()
         properties = await service.get_template_properties(state["template"])
         # Only the configured fill property is rendered (``.env`` PROPERTY_FILLER_PROPERTY).
-        state["properties"] = [
-            p for p in properties if p.type.value not in _SKIP_TYPES and p.name != "title" and p.name == PROPERTY_NAME
-        ]
+        fill_property = _resolve_fill_property(properties, PROPERTY_NAME)
+        state["properties"] = [fill_property] if fill_property is not None else []
         metadata = await service.get_entity_metadata(item.shared_id, state["template"], state["language"])
         state["metadata"] = metadata
         state["widgets"] = {}
@@ -715,7 +722,6 @@ def _build_page() -> None:
         # TOPIC — with the related template configured on a relationship
         # property as fallback) or, for select-like properties, the property's
         # thesaurus labels.
-        fill_property = state["properties"][0] if state["properties"] else None
         values_template = PROPERTY_TEMPLATE
         if not values_template and fill_property is not None and fill_property.type.value == "relationship":
             related_template = getattr(fill_property, "content", None)
@@ -862,7 +868,14 @@ def _build_page() -> None:
             """Suggested values grouped by source, for the fill property only."""
             groups: dict[str, list[str]] = {}
             for suggestion in state.get("suggestions", []):
-                if fill_property is not None and suggestion.property_name != fill_property.name:
+                # Compare name-or-label: a static suggestion row defaults its
+                # property to the configured setting ("Keywords"), while the
+                # resolved property carries the internal name ("keywords").
+                if (
+                    fill_property is not None
+                    and _key_form(suggestion.property_name) != _key_form(fill_property.name)
+                    and _key_form(suggestion.property_name) != _key_form(fill_property.label or "")
+                ):
                     continue
                 values = suggestion.value if isinstance(suggestion.value, list) else [suggestion.value]
                 source = suggestion.source_extension_id or "unknown"
@@ -965,6 +978,9 @@ def _build_page() -> None:
                 ui.label(item.title or item.shared_id).classes("text-subtitle1 text-weight-medium")
                 if item.subtitle:
                     ui.label(item.subtitle).classes("text-caption text-grey-7")
+                with ui.row().classes("items-center q-mt-xs"):
+                    ui.link("Open in Uwazi", _entity_url(item.shared_id)).props("target=_blank").classes("text-caption")
+                    ui.label(item.shared_id).classes("text-caption text-grey-6 q-ml-sm")
 
             # 1 — current PROPERTY_FILLER_PROPERTY value of the selected PDF:
             # every value shown as a checked box; unchecking removes it.
@@ -1243,14 +1259,14 @@ def _build_label_page() -> None:
             return
         _start_ongoing(page_client, "refresh", "Fetching documents from the instance…")
         try:
-            count = await service.refresh(template, state["language"])
+            result = await service.refresh(template, state["language"])
         except Exception as exc:  # noqa: BLE001
             _notify(f"Refresh failed: {exc}", type="negative")
             return
         finally:
             _finish_ongoing(page_client, "refresh")
         await _reload_label_after_refresh()
-        _notify(f"Refreshed: {count} documents", type="positive")
+        _notify_refresh_result(result)
 
     def _label_matches(item: PdfItem) -> bool:
         if state.get("only_with_suggestions") and item.shared_id not in state.get("suggested_ids", set()):
@@ -1524,6 +1540,36 @@ def _build_label_page() -> None:
     )
 
     background_tasks.create(_load_label_lists(select_first=True))
+
+
+def _resolve_fill_property(properties: list[Any], configured: str) -> Any | None:
+    """The template property named by ``PROPERTY_FILLER_PROPERTY``, or ``None``.
+
+    The setting accepts either the property's internal name (``keywords``) or
+    its operator-facing label (``Keywords``); both resolve to the same property,
+    so an operator can copy whichever they see in Uwazi. Matching is
+    case/format-insensitive so punctuation and spacing in a label do not break
+    it.
+    """
+    wanted = _key_form(configured)
+    if not wanted:
+        return None
+    for prop in properties:
+        if prop.type.value in _SKIP_TYPES or prop.name == "title":
+            continue
+        if _key_form(prop.name) == wanted or _key_form(prop.label or "") == wanted:
+            return prop
+    return None
+
+
+def _key_form(text: str) -> str:
+    """Case/punctuation-insensitive form of a property name or label."""
+    return "".join(ch for ch in str(text or "").casefold() if ch.isalnum())
+
+
+def _entity_url(shared_id: str) -> str:
+    """The Uwazi web URL of one entity (opens its detail page)."""
+    return f"{_CONTROLLED_UWAZI_URL.rstrip('/')}/entity/{shared_id}"
 
 
 def _display_value(value: Any) -> str:

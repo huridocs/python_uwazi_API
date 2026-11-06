@@ -313,11 +313,12 @@ file in a suggestions directory is one *source*, identified by its file stem,
 and each row is one entity's suggestion:
 
 ```json
-{"id": "<property_id>:<shared_id>", "predicted_labels": ["Family", "Identity"]}
+{"id": "<shared_id>:<object_id>", "predicted_labels": ["Family", "Identity"]}
 ```
 
-- `id` — the Uwazi entity's shared id after the last colon (a plain shared id
-  is accepted too),
+- `id` — the Uwazi entity's shared id, **before the first colon** (`qt7fau6bu7p`
+  in `qt7fau6bu7p:6a75c5bad410d2e28bd5e59c`); the trailing segment is the
+  document's database ObjectId. A plain shared id is accepted too,
 - `predicted_labels` — the suggested values (a list, or a single string),
 - `property_name` — optional; defaults to the configured fill property,
 - `confidence` — optional; defaults to `1.0`,

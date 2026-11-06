@@ -24,6 +24,9 @@ class DocumentCache:
     language: str
     pending: dict[str | None, list[PdfItem]] = field(default_factory=dict)
     validated: dict[str | None, list[PdfItem]] = field(default_factory=dict)
+    # Filled by :meth:`merge_filter_buckets_into_all`; not persisted (it
+    # describes the refresh that produced the rows, not the rows themselves).
+    merged_count: int = field(default=0, compare=False)
 
     def split(self, filter_value: str | None) -> tuple[list[PdfItem], list[PdfItem]]:
         """(pending, validated) copies for one filter bucket."""
@@ -40,6 +43,53 @@ class DocumentCache:
             if key is not None and key not in seen:
                 seen.append(key)
         return seen
+
+    def merge_filter_buckets_into_all(self) -> int:
+        """Union every filter bucket into the ALL bucket; return how many rows it gained.
+
+        Each filter value is searched separately, and *every* search is capped at
+        Elasticsearch's ``index.max_result_window`` (10 000) — a limit the
+        instance does not raise and this client cannot page past. The unfiltered
+        ALL search therefore reaches only its first 10 000 hits, while the
+        per-value buckets reach different sets. Their union is the largest
+        document set obtainable, and it costs no extra requests because the
+        buckets are already fetched for the filter dropdown.
+
+        A ``shared_id``'s status is global per instance, so a row appearing in
+        both lists keeps its validated state; the ALL bucket's own order is kept
+        and new rows are appended.
+        """
+        all_validated = {item.shared_id: item for item in self.validated.get(None, ())}
+        all_pending = {item.shared_id: item for item in self.pending.get(None, ())}
+        before = len(all_validated) + len(all_pending)
+
+        for value in self.values():
+            for item in self.validated.get(value, ()):
+                if item.shared_id not in all_validated:
+                    all_validated[item.shared_id] = item
+                    all_pending.pop(item.shared_id, None)
+            for item in self.pending.get(value, ()):
+                if item.shared_id in all_validated:
+                    continue
+                all_pending.setdefault(item.shared_id, item)
+
+        self.pending[None] = list(all_pending.values())
+        self.validated[None] = list(all_validated.values())
+        self.merged_count = len(all_validated) + len(all_pending) - before
+        return self.merged_count
+
+    def truncated_buckets(self, window: int = 10_000) -> list[str | None]:
+        """Buckets that filled the search window, so rows inside them may be unreached.
+
+        A bucket holding exactly ``window`` rows is at the cap: it matched at
+        least that many documents and anything beyond is invisible to this
+        client.
+        """
+        return [
+            value
+            for value in [None, *self.values()]
+            if len(self.pending.get(value, ())) + len(self.validated.get(value, ())) >= window
+        ]
 
     def total(self) -> int:
         """Total documents across all buckets (each entity counted per value)."""

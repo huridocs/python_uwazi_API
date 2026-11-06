@@ -11,8 +11,9 @@ earlier directory wins when two files share a stem.
 
 A row carries:
 
-* ``id`` — ``<property_id>:<shared_id>``; the shared id after the last colon
-  matches the Uwazi entity (a plain shared id is accepted too),
+* ``id`` — ``<shared_id>:<object_id>``; the shared id BEFORE the first colon
+  matches the Uwazi entity (a plain shared id is accepted too). The trailing
+  segment is the document's database ObjectId, not the shared id.
 * ``predicted_labels`` — the suggested values (a list or a single string),
 * optional ``property_name`` (defaults to the configured fill property),
 * optional ``confidence`` (defaults to ``1.0``).
@@ -35,13 +36,19 @@ from uwazi_property_filler.ports.suggestion_source_port import SuggestionSourceP
 
 
 def shared_id_from_id(value: Any) -> str:
-    """Extract the entity shared id from ``<property_id>:<shared_id>``.
+    """Extract the entity's shared id from a suggestion id.
 
-    The id prefix identifies the property/experiment; the suffix after the last
-    colon is the Uwazi shared id. A value without a colon is returned as-is.
+    Rows are written as ``<shared_id>:<object_id>`` — the Uwazi shared id
+    (a short alphanumeric string such as ``qt7fau6bu7p``) first, then the
+    document's database ObjectId (24 hex characters). The shared id is
+    therefore the segment BEFORE the first colon; taking the last segment, as
+    an earlier version did, yielded the ObjectId, which matches no document and
+    made every suggestion invisible to the UI.
+
+    A value without a colon is a plain shared id and is returned as-is.
     """
     text = str(value or "").strip()
-    return text.rsplit(":", 1)[-1].strip() if text else ""
+    return text.split(":", 1)[0].strip() if text else ""
 
 
 def _labels(value: Any) -> list[str]:

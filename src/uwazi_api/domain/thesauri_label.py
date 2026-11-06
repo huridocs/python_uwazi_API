@@ -60,9 +60,7 @@ def resolve_labels_to_ids(values: list[str], label_map: dict[str, str], thesauri
         elif value in label_map:
             resolved.append(label_map[value])
         else:
-            raise SearchError(
-                f"Value '{value}' not found in thesaurus '{thesauri_name}' for property '{property_name}'"
-            )
+            raise SearchError(f"Value '{value}' not found in thesaurus '{thesauri_name}' for property '{property_name}'")
     return resolved
 
 

@@ -9,12 +9,18 @@ from uwazi_property_filler.adapters.jsonl_suggestion_source import (
 )
 
 
-def test_shared_id_uses_the_suffix_after_the_property_id() -> None:
-    assert shared_id_from_id("qt7fau6bu7p:6a75c5bad410d2e28bd5e59c") == "6a75c5bad410d2e28bd5e59c"
+def test_shared_id_is_the_segment_before_the_object_id() -> None:
+    """Rows are ``<shared_id>:<object_id>``; the shared id comes first.
+
+    Verified against a live snapshot: all 14 packaged rows' first segments are
+    present in the instance's 19 360 document ids, and none of their trailing
+    ObjectIds are.
+    """
+    assert shared_id_from_id("qt7fau6bu7p:6a75c5bad410d2e28bd5e59c") == "qt7fau6bu7p"
 
 
 def test_shared_id_without_a_colon_is_returned_as_is() -> None:
-    assert shared_id_from_id("6a75c5bad410d2e28bd5e59c") == "6a75c5bad410d2e28bd5e59c"
+    assert shared_id_from_id("qt7fau6bu7p") == "qt7fau6bu7p"
 
 
 def test_shared_id_empty_values() -> None:
@@ -25,7 +31,7 @@ def test_shared_id_empty_values() -> None:
 def test_parse_suggestion_line_reads_predicted_labels() -> None:
     parsed = parse_suggestion_line(
         {
-            "id": "property-id:entity-shared-id",
+            "id": "entity-shared-id:property-id",
             "predicted_labels": ["Best interests of the child", "Family life"],
         },
         source="model-a",
@@ -42,7 +48,7 @@ def test_parse_suggestion_line_reads_predicted_labels() -> None:
 
 def test_parse_suggestion_line_accepts_a_single_label() -> None:
     parsed = parse_suggestion_line(
-        {"id": "p:e", "predicted_labels": "Family"},
+        {"id": "e:p", "predicted_labels": "Family"},
         source="model-a",
         default_property="topic",
     )
@@ -53,7 +59,7 @@ def test_parse_suggestion_line_accepts_a_single_label() -> None:
 def test_parse_suggestion_line_honors_row_overrides() -> None:
     parsed = parse_suggestion_line(
         {
-            "id": "p:e",
+            "id": "e:p",
             "predicted_labels": ["Family"],
             "source": "model-b",
             "property_name": "keywords",
@@ -71,7 +77,7 @@ def test_parse_suggestion_line_honors_row_overrides() -> None:
 
 def test_parse_suggestion_line_dedupes_labels_and_drops_empty_ones() -> None:
     parsed = parse_suggestion_line(
-        {"id": "p:e", "predicted_labels": ["Family", "  Family  ", "", None, "Identity"]},
+        {"id": "e:p", "predicted_labels": ["Family", "  Family  ", "", None, "Identity"]},
         source="model-a",
         default_property="topic",
     )
@@ -80,8 +86,8 @@ def test_parse_suggestion_line_dedupes_labels_and_drops_empty_ones() -> None:
 
 
 def test_parse_suggestion_line_returns_none_without_labels_or_id() -> None:
-    assert parse_suggestion_line({"id": "p:e", "predicted_labels": []}, source="s", default_property="p") is None
-    assert parse_suggestion_line({"id": "p:e"}, source="s", default_property="p") is None
+    assert parse_suggestion_line({"id": "e:p", "predicted_labels": []}, source="s", default_property="p") is None
+    assert parse_suggestion_line({"id": "e:p"}, source="s", default_property="p") is None
     assert parse_suggestion_line({"predicted_labels": ["Family"]}, source="s", default_property="p") is None
 
 
@@ -90,12 +96,8 @@ def test_source_reads_every_jsonl_file_of_every_directory(tmp_path: Path) -> Non
     runtime = tmp_path / "runtime"
     packaged.mkdir()
     runtime.mkdir()
-    (packaged / "model_a.jsonl").write_text(
-        '{"id": "p:e1", "predicted_labels": ["Family"]}\n', encoding="utf-8"
-    )
-    (runtime / "model_b.jsonl").write_text(
-        '{"id": "p:e2", "predicted_labels": ["Identity"]}\n', encoding="utf-8"
-    )
+    (packaged / "model_a.jsonl").write_text('{"id": "e1:p", "predicted_labels": ["Family"]}\n', encoding="utf-8")
+    (runtime / "model_b.jsonl").write_text('{"id": "e2:p", "predicted_labels": ["Identity"]}\n', encoding="utf-8")
 
     source = JsonlSuggestionSource([packaged, runtime], "topic")
 
@@ -110,9 +112,7 @@ def test_source_reads_every_jsonl_file_of_every_directory(tmp_path: Path) -> Non
 def test_source_ignores_directories_that_do_not_exist(tmp_path: Path) -> None:
     existing = tmp_path / "existing"
     existing.mkdir()
-    (existing / "model_a.jsonl").write_text(
-        '{"id": "p:e1", "predicted_labels": ["Family"]}\n', encoding="utf-8"
-    )
+    (existing / "model_a.jsonl").write_text('{"id": "e1:p", "predicted_labels": ["Family"]}\n', encoding="utf-8")
 
     source = JsonlSuggestionSource([tmp_path / "missing", existing], "topic")
 
@@ -121,9 +121,7 @@ def test_source_ignores_directories_that_do_not_exist(tmp_path: Path) -> None:
 
 
 def test_source_accepts_a_single_directory(tmp_path: Path) -> None:
-    (tmp_path / "model_a.jsonl").write_text(
-        '{"id": "p:e1", "predicted_labels": ["Family"]}\n', encoding="utf-8"
-    )
+    (tmp_path / "model_a.jsonl").write_text('{"id": "e1:p", "predicted_labels": ["Family"]}\n', encoding="utf-8")
 
     source = JsonlSuggestionSource(tmp_path, "topic")
 

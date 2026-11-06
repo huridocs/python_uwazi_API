@@ -186,9 +186,7 @@ class SearchRepository:
             raise SearchError(f"Property '{prop_name}' has no thesauri content")
         thesauri = self._find_thesaurus(thesauri_id, prop_name, language)
         return SelectFilter(
-            values=resolve_labels_to_ids(
-                list(filter_value.values), label_id_map(thesauri.values), thesauri.name, prop_name
-            )
+            values=resolve_labels_to_ids(list(filter_value.values), label_id_map(thesauri.values), thesauri.name, prop_name)
         )
 
     def _find_thesaurus(self, thesauri_id: str, prop_name: str, language: str):

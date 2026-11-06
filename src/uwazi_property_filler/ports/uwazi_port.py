@@ -65,3 +65,15 @@ class UwaziPort(ABC):
     @abstractmethod
     async def relationship_type_id(self, name_or_id: str) -> str | None:
         """Resolve a relationship type name/id to its id (or ``None``)."""
+
+    @abstractmethod
+    async def get_document(self, shared_id: str, template_name: str, language: str) -> PdfItem | None:
+        """One document by shared id, regardless of the search window.
+
+        ``/api/search`` stops at Elasticsearch's 10 000-hit window, so a
+        document outside that window is invisible to :meth:`list_documents`
+        even though it exists. ``/api/entities`` takes a shared id directly and
+        is not window-limited, which is how such a document can still be shown.
+        Returns ``None`` when the document has no file in ``language`` or the
+        entity does not exist.
+        """
