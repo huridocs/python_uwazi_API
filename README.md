@@ -298,6 +298,47 @@ language for tasks 1 and 2, default 2), `--keep-runs`.
 
 ---
 
+## Property Filler Web UI
+
+The property filler (`python -m uwazi_property_filler.drivers.web.app`, port
+`PROPERTY_FILLER_PORT`, default `7050`) is the operator-facing app that fills
+a document property from the document itself. It has its own login gate: the
+operator signs in with their Uwazi credentials, and the app then talks to the
+instance with those credentials.
+
+### Suggestion sources
+
+Precomputed suggestions are read from **JSON Lines files**. Every `*.jsonl`
+file in a suggestions directory is one *source*, identified by its file stem,
+and each row is one entity's suggestion:
+
+```json
+{"id": "<property_id>:<shared_id>", "predicted_labels": ["Family", "Identity"]}
+```
+
+- `id` — the Uwazi entity's shared id after the last colon (a plain shared id
+  is accepted too),
+- `predicted_labels` — the suggested values (a list, or a single string),
+- `property_name` — optional; defaults to the configured fill property,
+- `confidence` — optional; defaults to `1.0`,
+- `source` — optional; overrides the file stem as the source id.
+
+A malformed row is logged and skipped: one bad line never hides the rest.
+
+Two kinds of directories are scanned:
+
+| Directory | Where | Purpose |
+|-----------|-------|---------|
+| **Packaged** | `src/uwazi_property_filler/resources/suggestions/` | Ships with the code and the container image. Always read, so a deployment has the precomputed predictions without copying a data file around. |
+| **Runtime** | `data/suggestions/` (the repo's data dir) or `PROPERTY_FILLER_SUGGESTIONS_DIR` | Operator-owned. `PROPERTY_FILLER_SUGGESTIONS_DIR` takes a comma-separated list of directories. |
+
+Dropping another `*.jsonl` file into either directory exposes another model's
+predictions without changing the UI. The files are re-read on demand (the
+reader caches on each file's mtime and size), so a replaced file is picked up
+without a restart.
+
+---
+
 ## Client Services
 
 The `UwaziClient` provides access to these services:

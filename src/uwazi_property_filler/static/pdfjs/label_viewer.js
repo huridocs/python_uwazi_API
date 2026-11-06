@@ -10,9 +10,21 @@ import * as pdfjs from "./pdf.mjs";
 
 pdfjs.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.mjs";
 
-const SCALE = 1.5;
+const DEFAULT_SCALE = 1.5;
+const MIN_SCALE = DEFAULT_SCALE * 0.5;
+const MAX_SCALE = DEFAULT_SCALE * 3;
+const ZOOM_STEP = DEFAULT_SCALE * 0.2;
+
+const wrap = document.getElementById("page-wrap");
+const zoomLevel = document.getElementById("zoom-level");
+const zoomInButton = document.getElementById("zoom-in");
+const zoomOutButton = document.getElementById("zoom-out");
 
 let first = null; // { pageNum, span, index, items }
+let pdf = null;
+let labels = [];
+let scale = DEFAULT_SCALE;
+let renderToken = 0;
 
 function readLabels() {
   const hash = decodeURIComponent(window.location.hash || "").replace(/^#/, "");
@@ -130,9 +142,9 @@ function drawLabel(pageDiv, viewport, label) {
   pageDiv.appendChild(rect);
 }
 
-async function renderPage(pdf, pageNum, labels) {
+async function renderPage(pdf, pageNum, labels, scale) {
   const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({ scale: SCALE });
+  const viewport = page.getViewport({ scale });
 
   const pageDiv = document.createElement("div");
   pageDiv.className = "page";
@@ -172,19 +184,50 @@ async function renderPage(pdf, pageNum, labels) {
   return pageDiv;
 }
 
+function updateZoomControls() {
+  zoomLevel.textContent = `${Math.round((scale / DEFAULT_SCALE) * 100)}%`;
+  zoomOutButton.disabled = scale <= MIN_SCALE + 1e-9;
+  zoomInButton.disabled = scale >= MAX_SCALE - 1e-9;
+}
+
+async function renderAll() {
+  if (!pdf) return;
+  const token = ++renderToken;
+  const currentScale = scale;
+  first = null; // spans from the previous render are about to be replaced
+  wrap.replaceChildren();
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    if (token !== renderToken) return; // a newer zoom superseded this render
+    const pageDiv = await renderPage(pdf, pageNum, labels, currentScale);
+    if (token !== renderToken) return;
+    wrap.appendChild(pageDiv);
+  }
+}
+
+function setScale(next) {
+  const clamped = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
+  if (Math.abs(clamped - scale) < 1e-9) return;
+  scale = clamped;
+  updateZoomControls();
+  renderAll().catch((err) => {
+    document.getElementById("container").textContent = `Failed to render PDF: ${err.message}`;
+  });
+}
+
 async function render() {
   // Served at /label-viewer/<filename>; the raw bytes at /pdf/<filename>.
   const filename = decodeURIComponent(window.location.pathname.split("/").pop() || "");
   const url = `/pdf/${encodeURIComponent(filename)}`;
-  const labels = readLabels();
+  labels = readLabels();
   const loadingTask = pdfjs.getDocument(url);
-  const pdf = await loadingTask.promise;
-  const wrap = document.getElementById("page-wrap");
-
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    wrap.appendChild(await renderPage(pdf, pageNum, labels));
-  }
+  pdf = await loadingTask.promise;
+  updateZoomControls();
+  await renderAll();
 }
+
+zoomInButton.addEventListener("click", () => setScale(scale + ZOOM_STEP));
+zoomOutButton.addEventListener("click", () => setScale(scale - ZOOM_STEP));
 
 render().catch((err) => {
   document.getElementById("container").textContent = `Failed to render PDF: ${err.message}`;

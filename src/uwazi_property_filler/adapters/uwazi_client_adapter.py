@@ -17,14 +17,11 @@ from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
+from uwazi_api.domain.search_pages import MAX_RESULT_WINDOW, search_page_sizes
 from uwazi_property_filler.configuration import FILTER_PROPERTY, SUBTITLE_PROPERTY
 from uwazi_property_filler.domain.metadata_text import metadata_text, metadata_value
 from uwazi_property_filler.domain.pdf_item import PdfItem
 from uwazi_property_filler.ports.uwazi_port import UwaziPort
-
-# Elasticsearch ``index.max_result_window`` default: the largest window a single
-# Uwazi search request can return, so filtered fetches page by this size.
-_SEARCH_WINDOW = 10_000
 
 
 class UwaziClientAdapter(UwaziPort):
@@ -60,27 +57,37 @@ class UwaziClientAdapter(UwaziPort):
         def _fetch() -> list[PdfItem]:
             adapter = self._ensure_adapter()
             if filter_value is None:
-                entities = adapter.client.search.get(template_name=template_name, batch_size=10000, language=language)
+                entities = adapter.client.search.get(
+                    template_name=template_name, batch_size=MAX_RESULT_WINDOW, language=language
+                )
             else:
-                # One request per filter value, paged: Uwazi caps a single
-                # search at Elasticsearch's 10 000-result window, so each value
-                # is fetched in consecutive windows until exhausted.
+                # One result set per filter value. The request plan never leaves
+                # Elasticsearch's window (``from + size <= 10 000``): asking for
+                # from=10000,size=10000 is rejected outright by the instance.
                 filters = SearchFilters()
                 filters.add(FILTER_PROPERTY, SelectFilter(values=[filter_value]))
                 entities: list[Any] = []
-                start_from = 0
-                while True:
+                for page_from, page_size in search_page_sizes(0, MAX_RESULT_WINDOW):
                     page = adapter.client.search.search_by_filter(
                         filters,
                         template_name=template_name,
-                        start_from=start_from,
-                        batch_size=_SEARCH_WINDOW,
+                        start_from=page_from,
+                        batch_size=page_size,
                         language=language,
                     )
                     entities.extend(page)
-                    if len(page) < _SEARCH_WINDOW:
+                    if len(page) < page_size:
                         break  # exhausted the value's matching set
-                    start_from += _SEARCH_WINDOW
+            if len(entities) >= MAX_RESULT_WINDOW:
+                # The window is the hard reachable limit; say so instead of
+                # presenting a silently short bucket as complete.
+                logger.warning(
+                    "list_documents: template '{}' filter {!r} reached the {}-hit search window; "
+                    "documents beyond it are not listed",
+                    template_name,
+                    filter_value,
+                    MAX_RESULT_WINDOW,
+                )
             file_language = LANGUAGE_TO_FILE_LANGUAGE.get(language)
             items: list[PdfItem] = []
             for entity in entities:

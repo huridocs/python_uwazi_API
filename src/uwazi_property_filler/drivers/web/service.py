@@ -16,6 +16,7 @@ from uwazi_api.domain.selection_rectangle import SelectionRectangle
 from uwazi_api.domain.thesauri_label import qualify_label
 from uwazi_property_filler.adapters import document_cache_file
 from uwazi_property_filler.adapters.extension_stats import error_count
+from uwazi_property_filler.adapters.jsonl_suggestion_source import JsonlSuggestionSource
 from uwazi_property_filler.adapters.label_webhook_adapter import LabelWebhookAdapter
 from uwazi_property_filler.adapters.pdf_cache_store import PdfCacheStore
 from uwazi_property_filler.adapters.postgres_store import PostgresStore
@@ -26,7 +27,9 @@ from uwazi_property_filler.configuration import (
     INSTANCE_KEY,
     LABEL_RELATIONSHIP_TYPE,
     LABEL_WEBHOOK_URLS,
+    PROPERTY_NAME,
     PROPERTY_TEMPLATE,
+    SUGGESTIONS_DIRS,
     UWAZI_URL,
 )
 from uwazi_property_filler.domain.document_cache import DocumentCache
@@ -37,17 +40,28 @@ from uwazi_property_filler.domain.label import Label, LabelPrediction
 from uwazi_property_filler.domain.pdf_item import PdfItem
 from uwazi_property_filler.ports.extension_port import ExtensionPort
 from uwazi_property_filler.ports.label_notify_port import LabelNotifyPort
-from uwazi_property_filler.use_cases import extensions_use_case, label_use_case, list_pdfs_use_case, refresh_cache_use_case
+from uwazi_property_filler.ports.suggestion_source_port import SuggestionSourcePort
+from uwazi_property_filler.use_cases import extensions_use_case, label_use_case, list_pdfs_use_case
 from uwazi_property_filler.use_cases.get_predictions_use_case import get_predictions
 from uwazi_property_filler.use_cases.get_suggestions_use_case import get_suggestions
 from uwazi_property_filler.use_cases.validate_fill_use_case import validate_fill
 
 
 class PropertyFillerService:
-    def __init__(self, uwazi: UwaziClientAdapter, store: PostgresStore, cache: PdfCacheStore):
+    def __init__(
+        self,
+        uwazi: UwaziClientAdapter,
+        store: PostgresStore,
+        cache: PdfCacheStore,
+        suggestion_source: SuggestionSourcePort | None = None,
+    ):
         self.uwazi = uwazi
         self.store = store
         self.cache = cache
+        # One JSONL file per source under each suggestions directory (the
+        # packaged one plus the runtime ones). More files can be added at
+        # runtime; they are re-read on demand.
+        self.suggestion_source = suggestion_source or JsonlSuggestionSource(SUGGESTIONS_DIRS, PROPERTY_NAME)
         self.runners: list[ExtensionPort] = []
         self.highlighters: list[ExtensionPort] = []
         self.displayers: list[ExtensionPort] = []
@@ -150,10 +164,11 @@ class PropertyFillerService:
     async def refresh(self, template: str, language: str) -> int:
         """Fetch every filter bucket from Uwazi once and replace the cache.
 
-        Returns the total number of cached documents (the ALL bucket). This is
-        the fast half of Connect & Refresh (document metadata only); the slow
-        half is :meth:`warm_pdf_cache`, which the UI runs afterwards so the
-        new lists can render without waiting for every PDF download.
+        Returns the total number of listed documents (the ALL bucket). This is
+        the whole of ``Connect & Refresh``: document metadata only. PDFs are
+        fetched lazily, the first time a document is opened
+        (:meth:`get_pdf_bytes`), so connecting to the instance never waits on
+        bulk downloads.
         """
         documents = await self._fetch_document_cache(template, language)
         async with self._documents_lock:
@@ -161,17 +176,9 @@ class PropertyFillerService:
         await self._persist_documents()
         return documents.count(None)
 
-    async def warm_pdf_cache(self, template: str, language: str) -> int:
-        """Download and disk-cache every document's PDF bytes.
-
-        Returns the number of PDFs cached. Separated from :meth:`refresh`
-        because it is by far the slowest step of Connect & Refresh.
-        """
-        return await refresh_cache_use_case.refresh(self.uwazi, self.cache, template, language, None)
-
     async def _fetch_document_cache(self, template: str, language: str) -> DocumentCache:
-        """One Uwazi request per filter value (plus the ALL bucket), paged
-        under the 10 000-result search window, upserting statuses as before."""
+        """One Uwazi result set per filter value (plus the ALL bucket), each
+        capped at the 10 000-hit search window, upserting statuses as before."""
         values = list(self._filter_values_sync(template, language).keys())
         documents = DocumentCache(template=template, language=language)
         for value in [None, *values]:
@@ -273,7 +280,21 @@ class PropertyFillerService:
         properties: list[str],
     ) -> list[Any]:
         ctx = self._ctx(shared_id, template, language, filename, current_metadata, properties)
-        return await get_suggestions(ctx, self.runners, self.store, INSTANCE_KEY)
+        suggestions = await self.suggestion_source.list_for(shared_id)
+        try:
+            suggestions.extend(await get_suggestions(ctx, self.runners, self.store, INSTANCE_KEY))
+        except Exception as exc:  # noqa: BLE001 — static suggestions must still show
+            logger.warning("Could not gather extension suggestions for {}: {}", shared_id, exc)
+        return suggestions
+
+    async def suggested_shared_ids(self) -> set[str]:
+        """Documents that have a suggestion from any source (static or extension)."""
+        shared_ids = await self.suggestion_source.shared_ids()
+        try:
+            shared_ids.update(await self.store.shared_ids(INSTANCE_KEY))
+        except Exception as exc:  # noqa: BLE001 — the static file still drives the filter
+            logger.warning("Could not read persisted suggestion ids: {}", exc)
+        return shared_ids
 
     async def get_highlights(
         self,

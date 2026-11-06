@@ -436,6 +436,9 @@ def _build_page() -> None:
         "metadata": {},
         "widgets": {},
         "raw_values": {},
+        "only_with_suggestions": False,
+        "suggested_ids": set(),
+        "suggestions": [],
     }
     # Captured at build time: background tasks have no slot stack of their
     # own, so ``context.client`` is unavailable inside them.
@@ -483,7 +486,15 @@ def _build_page() -> None:
                 _render_lists()
 
             search_input.on("keydown.enter", _apply_search)
-            ui.button("Search", icon="search", on_click=_apply_search).props("flat dense color=secondary")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.button("Search", icon="search", on_click=_apply_search).props("flat dense color=secondary")
+                suggestion_checkbox = ui.checkbox("Only with suggestions").classes("text-caption")
+
+            def _apply_suggestion_filter(e: Any) -> None:
+                state["only_with_suggestions"] = bool(e.value)
+                _render_lists()
+
+            suggestion_checkbox.on_value_change(_apply_suggestion_filter)
 
             with ui.tabs().classes("w-full q-mt-sm pf-compact-tabs") as tabs:
                 pending_tab = ui.tab("pending", "Pending (0)")
@@ -525,6 +536,10 @@ def _build_page() -> None:
             pending, validated = await service.list_pdfs(template, state["language"], state["filter_value"])
             state["pending"] = pending
             state["validated"] = validated
+            try:
+                state["suggested_ids"] = await service.suggested_shared_ids()
+            except Exception as exc:  # noqa: BLE001 — the lists must render regardless
+                logger.warning("Could not load the ids that have suggestions: {}", exc)
             _render_lists()
             if select_first:
                 await _select_first_visible()
@@ -555,6 +570,8 @@ def _build_page() -> None:
         await _select_pdf(item)
 
     def _matches_search(item: PdfItem) -> bool:
+        if state.get("only_with_suggestions") and item.shared_id not in state.get("suggested_ids", set()):
+            return False
         needle = state.get("search_text", "")
         if not needle:
             return True
@@ -618,20 +635,8 @@ def _build_page() -> None:
             return
         finally:
             _finish_ongoing(page_client, "refresh")
-        # Render the new lists immediately: the PDF byte caching below can
-        # take minutes, and before this it delayed the UI update with no
-        # visible feedback at all.
         await _reload_after_refresh()
-        _notify(f"Refreshed: cached {count} documents", type="positive")
-        _start_ongoing(page_client, "pdfs", "Caching PDF files…")
-        try:
-            cached = await service.warm_pdf_cache(template, state["language"])
-        except Exception as exc:  # noqa: BLE001
-            _notify(f"PDF caching failed: {exc}", type="negative")
-            return
-        finally:
-            _finish_ongoing(page_client, "pdfs")
-        _notify(f"Cached {cached} PDF files", type="positive")
+        _notify(f"Refreshed: {count} documents", type="positive")
 
     async def _select_pdf(item: PdfItem) -> None:
         state["selected"] = item
@@ -692,6 +697,18 @@ def _build_page() -> None:
         state["metadata"] = metadata
         state["widgets"] = {}
         state["raw_values"] = {}
+        state["suggestions"] = []
+        try:
+            state["suggestions"] = await service.get_suggestions(
+                item.shared_id,
+                state["template"],
+                state["language"],
+                item.filename,
+                metadata,
+                [p.name for p in state["properties"]],
+            )
+        except Exception as exc:  # noqa: BLE001 — suggestions must not hide the form
+            logger.warning("Could not load suggestions for {}: {}", item.shared_id, exc)
 
         # Possible values of the fill property come from one of two places: a
         # template of entities (``PROPERTY_FILLER_PROPERTY_TEMPLATE``, e.g.
@@ -727,6 +744,7 @@ def _build_page() -> None:
         # Elements rebuilt by the selection handlers (created while rendering).
         current_box: Any = None
         values_box: Any = None
+        suggestions_box: Any = None
         filter_input: Any = None
 
         def _write_selection() -> None:
@@ -819,6 +837,7 @@ def _build_page() -> None:
                 _render_current()
                 if values_box is not None:
                     _render_values(filter_input.value if filter_input is not None else "")
+                _render_suggestions()
             else:
                 # Select-like field: refresh the read-only label from Uwazi.
                 state["raw_values"][fill_property.name] = fresh
@@ -838,6 +857,52 @@ def _build_page() -> None:
                     entry = {"shared_id": shared_id, "title": title}
                     box = ui.checkbox(title, value=True).classes("w-full")
                     box.on_value_change(lambda e, chosen=entry: _toggle_value(chosen, bool(e.value)))
+
+        def _suggestion_groups() -> dict[str, list[str]]:
+            """Suggested values grouped by source, for the fill property only."""
+            groups: dict[str, list[str]] = {}
+            for suggestion in state.get("suggestions", []):
+                if fill_property is not None and suggestion.property_name != fill_property.name:
+                    continue
+                values = suggestion.value if isinstance(suggestion.value, list) else [suggestion.value]
+                source = suggestion.source_extension_id or "unknown"
+                bucket = groups.setdefault(source, [])
+                for value in values:
+                    text = _display_value(value).strip()
+                    if text and text not in bucket:
+                        bucket.append(text)
+            return groups
+
+        def _matching_value(title: str) -> dict[str, str] | None:
+            wanted = title.strip().casefold()
+            for entry in template_values:
+                if (entry.get("title") or "").strip().casefold() == wanted:
+                    return entry
+            return None
+
+        def _render_suggestions() -> None:
+            """Show suggestions from every source; checked ones are applied."""
+            if suggestions_box is None or not _is_attached(suggestions_box):
+                return
+            groups = _suggestion_groups()
+            suggestions_box.clear()
+            with suggestions_box:
+                if not groups:
+                    ui.label("No suggestions.").classes("text-caption text-grey-6")
+                    return
+                for source, titles in groups.items():
+                    ui.label(source).classes("text-caption text-grey-6 q-mt-xs")
+                    for title in titles:
+                        target = _matching_value(title) if values_template else None
+                        if values_template and target is not None:
+                            box = ui.checkbox(title, value=target["shared_id"] in checked).classes("w-full")
+                            box.on_value_change(lambda e, chosen=target: _toggle_value(chosen, bool(e.value)))
+                        elif fill_property is not None and fill_property.type.value in ("select", "multiselect"):
+                            with ui.item(on_click=lambda chosen=title: _pick_value(chosen)).classes("cursor-pointer"):
+                                with ui.item_section():
+                                    ui.item_label(title).classes("pf-doc-title")
+                        else:
+                            ui.label(title).classes("text-caption")
 
         def _pool() -> list[dict[str, str]]:
             """Template entities plus checked ones missing from the search."""
@@ -886,6 +951,7 @@ def _build_page() -> None:
             _render_current()
             if values_box is not None:
                 _render_values(filter_input.value if filter_input is not None else "")
+            _render_suggestions()
             _schedule_save()
 
         if values_template:
@@ -921,10 +987,12 @@ def _build_page() -> None:
                 on_click=lambda: background_tasks.create(_validate()),
             ).props("color=primary").classes("w-full q-mb-sm")
 
-            # 2 — suggestions stay empty: the suggestion flow is not
-            # implemented yet, so nothing is fetched or rendered here.
+            # 2 — suggested values from every configured source (static JSONL
+            # files + enabled suggestion extensions). Checking one applies it
+            # to the current value and persists it, like the lists below.
             with _section("Suggestions"):
-                ui.label("Not implemented yet.").classes("text-caption text-grey-6")
+                suggestions_box = ui.column().classes("w-full")
+                _render_suggestions()
 
             # 3 — every possible value: the filter sits above the list
             # because the list can get long. Template-backed values carry a
@@ -1046,6 +1114,8 @@ def _build_label_page() -> None:
         "labels": [],
         "sources": {},
         "values": [],
+        "only_with_suggestions": False,
+        "suggested_ids": set(),
     }
     page_client = context.client
     page_client._pf_label_state = state  # noqa: SLF001
@@ -1092,7 +1162,15 @@ def _build_label_page() -> None:
                 _render_label_lists()
 
             search_input.on("keydown.enter", _apply_search)
-            ui.button("Search", icon="search", on_click=_apply_search).props("flat dense color=secondary")
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.button("Search", icon="search", on_click=_apply_search).props("flat dense color=secondary")
+                suggestion_checkbox = ui.checkbox("Only with suggestions").classes("text-caption")
+
+            def _apply_suggestion_filter(e: Any) -> None:
+                state["only_with_suggestions"] = bool(e.value)
+                _render_label_lists()
+
+            suggestion_checkbox.on_value_change(_apply_suggestion_filter)
 
             with ui.tabs().classes("w-full q-mt-sm pf-compact-tabs") as tabs:
                 pending_tab = ui.tab("pending", "Pending (0)")
@@ -1123,6 +1201,10 @@ def _build_label_page() -> None:
             pending, validated = await service.list_pdfs(state["template"], state["language"], state.get("filter_value"))
             state["pending"] = pending
             state["validated"] = validated
+            try:
+                state["suggested_ids"] = await service.suggested_shared_ids()
+            except Exception as exc:  # noqa: BLE001 — the lists must render regardless
+                logger.warning("Could not load the ids that have suggestions: {}", exc)
             _render_label_lists()
             if state["selected"] is None and select_first:
                 first = _first_label_visible()
@@ -1168,18 +1250,11 @@ def _build_label_page() -> None:
         finally:
             _finish_ongoing(page_client, "refresh")
         await _reload_label_after_refresh()
-        _notify(f"Refreshed: cached {count} documents", type="positive")
-        _start_ongoing(page_client, "pdfs", "Caching PDF files…")
-        try:
-            cached = await service.warm_pdf_cache(template, state["language"])
-        except Exception as exc:  # noqa: BLE001
-            _notify(f"PDF caching failed: {exc}", type="negative")
-            return
-        finally:
-            _finish_ongoing(page_client, "pdfs")
-        _notify(f"Cached {cached} PDF files", type="positive")
+        _notify(f"Refreshed: {count} documents", type="positive")
 
     def _label_matches(item: PdfItem) -> bool:
+        if state.get("only_with_suggestions") and item.shared_id not in state.get("suggested_ids", set()):
+            return False
         needle = state.get("search_text", "")
         if not needle:
             return True

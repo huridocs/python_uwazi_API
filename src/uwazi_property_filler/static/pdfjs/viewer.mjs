@@ -2,6 +2,21 @@ import * as pdfjs from "./pdf.mjs";
 
 pdfjs.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.mjs";
 
+const DEFAULT_SCALE = 1.5;
+const MIN_SCALE = DEFAULT_SCALE * 0.5;
+const MAX_SCALE = DEFAULT_SCALE * 3;
+const ZOOM_STEP = DEFAULT_SCALE * 0.2;
+
+const wrap = document.getElementById("page-wrap");
+const errorBox = document.getElementById("error");
+const zoomLevel = document.getElementById("zoom-level");
+const zoomInButton = document.getElementById("zoom-in");
+const zoomOutButton = document.getElementById("zoom-out");
+
+let pdf = null;
+let scale = DEFAULT_SCALE;
+let renderToken = 0;
+
 // Highlight JSON: array of {page, left, top, width, height} in PDF user-space.
 function readHighlights() {
   const hash = decodeURIComponent(window.location.hash || "").replace(/^#/, "");
@@ -30,17 +45,27 @@ function drawHighlights(pageNum, viewport, pageDiv) {
   }
 }
 
-async function render() {
-  // viewer.html is served at /viewer/<filename>; the raw bytes at /pdf/<filename>.
-  const filename = decodeURIComponent(window.location.pathname.split("/").pop() || "");
-  const url = `/pdf/${encodeURIComponent(filename)}`;
-  const loadingTask = pdfjs.getDocument(url);
-  const pdf = await loadingTask.promise;
-  const wrap = document.getElementById("page-wrap");
+function updateZoomControls() {
+  zoomLevel.textContent = `${Math.round((scale / DEFAULT_SCALE) * 100)}%`;
+  zoomOutButton.disabled = scale <= MIN_SCALE + 1e-9;
+  zoomInButton.disabled = scale >= MAX_SCALE - 1e-9;
+}
+
+function showError(err) {
+  errorBox.textContent = `Failed to render PDF: ${err.message}`;
+  errorBox.style.display = "grid";
+}
+
+async function renderPages() {
+  if (!pdf) return;
+  const token = ++renderToken;
+  const currentScale = scale;
+  wrap.replaceChildren();
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    if (token !== renderToken) return; // a newer zoom superseded this render
     const page = await pdf.getPage(pageNum);
-    const viewport = page.getViewport({ scale: 1.5 });
+    const viewport = page.getViewport({ scale: currentScale });
 
     const pageDiv = document.createElement("div");
     pageDiv.style.position = "relative";
@@ -55,11 +80,31 @@ async function render() {
     pageDiv.appendChild(canvas);
 
     await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    if (token !== renderToken) return;
     drawHighlights(pageNum, viewport, pageDiv);
     wrap.appendChild(pageDiv);
   }
 }
 
-render().catch((err) => {
-  document.getElementById("container").textContent = `Failed to render PDF: ${err.message}`;
-});
+function setScale(next) {
+  const clamped = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
+  if (Math.abs(clamped - scale) < 1e-9) return;
+  scale = clamped;
+  updateZoomControls();
+  renderPages().catch(showError);
+}
+
+async function render() {
+  // viewer.html is served at /viewer/<filename>; the raw bytes at /pdf/<filename>.
+  const filename = decodeURIComponent(window.location.pathname.split("/").pop() || "");
+  const url = `/pdf/${encodeURIComponent(filename)}`;
+  const loadingTask = pdfjs.getDocument(url);
+  pdf = await loadingTask.promise;
+  updateZoomControls();
+  await renderPages();
+}
+
+zoomInButton.addEventListener("click", () => setScale(scale + ZOOM_STEP));
+zoomOutButton.addEventListener("click", () => setScale(scale - ZOOM_STEP));
+
+render().catch(showError);

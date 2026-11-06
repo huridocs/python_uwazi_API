@@ -9,3 +9,7 @@ class SuggestionStorePort(ABC):
 
     @abstractmethod
     async def list_for(self, instance_key: str, shared_id: str) -> list[Suggestion]: ...
+
+    @abstractmethod
+    async def shared_ids(self, instance_key: str) -> set[str]:
+        """Shared ids with at least one persisted suggestion."""

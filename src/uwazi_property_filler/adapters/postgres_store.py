@@ -245,6 +245,17 @@ class PostgresStore(DocumentStorePort, SuggestionStorePort, AuditStorePort, Exte
     async def list_for(self, instance_key: str, shared_id: str) -> list[Suggestion]:
         return await asyncio.to_thread(self._list_for_sync, instance_key, shared_id)
 
+    async def shared_ids(self, instance_key: str) -> set[str]:
+        return await asyncio.to_thread(self._shared_ids_sync, instance_key)
+
+    def _shared_ids_sync(self, instance_key: str) -> set[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT shared_id FROM suggestion WHERE instance_key = %s",
+                (instance_key,),
+            ).fetchall()
+        return {str(row["shared_id"]) for row in rows}
+
     def _list_for_sync(self, instance_key: str, shared_id: str) -> list[Suggestion]:
         with self._pool.connection() as conn:
             rows = conn.execute(

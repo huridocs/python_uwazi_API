@@ -8,12 +8,11 @@ from uwazi_api.domain.entity import Entity
 from uwazi_api.domain.exceptions import SearchError
 from uwazi_api.domain.sanitize_property_label import PropertyLabelSanitizer
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
-from uwazi_api.domain.thesauri_label import qualify_label
+from uwazi_api.domain.search_pages import search_page_sizes
+from uwazi_api.domain.thesauri_label import label_id_map, resolve_labels_to_ids
 from uwazi_api.use_cases.entity_to_dataframe import entities_to_dataframe
 from uwazi_api.use_cases.repositories.template_repository import TemplateRepository, existing_template_scope
 from uwazi_api.use_cases.repositories.thesauri_repository import ThesauriRepository
-
-_MAX_RESULT_WINDOW = 10_000  # Elasticsearch index.max_result_window default
 
 
 class SearchRepository:
@@ -61,14 +60,13 @@ class SearchRepository:
         """Fetch entities, transparently paging under Elasticsearch's
         ``index.max_result_window`` (10 000) via ``from``/``limit`` windows.
 
-        ``batch_size`` larger than that window is silently served in
-        consecutive 10 000-sized pages; ``start_from`` offsets the first
-        returned entity within that paged stream.
+        Every request stays inside the window (``from + size <= 10 000``), so a
+        ``batch_size`` larger than it is served as the reachable prefix rather
+        than failing the whole call. ``start_from`` offsets the first returned
+        entity within that paged stream.
         """
-        page_size = min(batch_size, _MAX_RESULT_WINDOW)
         collected: list[Entity] = []
-        page_from = start_from
-        while len(collected) < batch_size:
+        for page_from, page_size in search_page_sizes(start_from, batch_size):
             params = {
                 "from": page_from,
                 "limit": page_size,
@@ -97,7 +95,6 @@ class SearchRepository:
             collected.extend(Entity.model_validate(row) for row in rows)
             if len(rows) < page_size:
                 break  # exhausted the matching set
-            page_from += page_size
         return collected[:batch_size]
 
     def search_by_text(
@@ -140,27 +137,33 @@ class SearchRepository:
         sort: str = "creationDate",
     ) -> list[Entity]:
         template_id = self._resolve_template_id(template_name) if template_name else None
-        property_name_to_id = self._validate_and_resolve_filters(filters, template_id, language)
-        serialized_filters = self._serialize_filters(filters, property_name_to_id)
+        resolved = self._resolve_filters(filters, template_id, language)
+        serialized_filters = self._serialize_filters(resolved)
         params = self._build_filter_search_params(
             serialized_filters, template_id, start_from, batch_size, published, order, sort
         )
         return self._execute_search(params, language)
 
-    def _validate_and_resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> dict:
+    def _resolve_filters(self, filters: SearchFilters, template_id: Optional[str], language: str) -> dict:
+        """``{sanitized property name: filter}`` with thesaurus labels resolved to ids.
+
+        Pure: the caller's ``SearchFilters`` is never modified. Callers that
+        page through a result set reuse one filter object across requests, and
+        an in-place label→id rewrite made the second request re-resolve an id as
+        if it were a label (``Value '<uuid>' not found in thesaurus ...``).
+        """
         if not template_id or not self._template_repo:
-            return {}
-        name_to_id = {}
+            return dict(filters.filters)
+        resolved: dict = {}
         for prop_name, filter_value in filters.filters.items():
             prop = self._template_repo.find_property(template_id, prop_name)
             if not prop:
                 raise SearchError(f"Property '{prop_name}' not found in template {template_id}")
             self._template_repo.ensure_property_filterable(prop, prop_name)
-            filter_key = PropertyLabelSanitizer.sanitize(prop.name)
-            name_to_id[prop_name] = filter_key
             if isinstance(filter_value, SelectFilter) and prop.type in ("select", "multiselect"):
-                self._resolve_select_filter(filter_value, prop, prop_name, language)
-        return name_to_id
+                filter_value = self._resolve_select_filter(filter_value, prop, prop_name, language)
+            resolved[PropertyLabelSanitizer.sanitize(prop.name)] = filter_value
+        return resolved
 
     def _resolve_template_id(self, template_name_or_id: str) -> str:
         if not self._template_repo:
@@ -170,29 +173,23 @@ class SearchRepository:
             raise SearchError(f"Template '{template_name_or_id}' not found")
         return template_id
 
-    def _resolve_select_filter(self, filter_value: SelectFilter, prop, prop_name: str, language: str) -> None:
+    def _resolve_select_filter(self, filter_value: SelectFilter, prop, prop_name: str, language: str) -> SelectFilter:
+        """Resolve a select filter's labels to thesaurus ids in a NEW filter.
+
+        Values that are already ids (e.g. a caller resolved them once and
+        passes them again) are kept as-is, so resolution is idempotent.
+        """
         if not filter_value.values:
-            return
+            return filter_value
         thesauri_id = prop.content
         if not thesauri_id:
             raise SearchError(f"Property '{prop_name}' has no thesauri content")
         thesauri = self._find_thesaurus(thesauri_id, prop_name, language)
-        name_to_id = {}
-        valid_ids = set()
-        for v in thesauri.values:
-            if v.values:
-                for child in v.values:
-                    name_to_id[child.label] = child.id
-                    name_to_id[qualify_label(v.label, child.label)] = child.id
-                    valid_ids.add(child.id)
-            else:
-                name_to_id[v.label] = v.id
-                valid_ids.add(v.id)
-        filter_value.values = [
-            name_to_id[name] if name != "missing" else name
-            for name in filter_value.values
-            if self._validate_thesaurus_value(name, name_to_id, thesauri, prop_name)
-        ]
+        return SelectFilter(
+            values=resolve_labels_to_ids(
+                list(filter_value.values), label_id_map(thesauri.values), thesauri.name, prop_name
+            )
+        )
 
     def _find_thesaurus(self, thesauri_id: str, prop_name: str, language: str):
         thesauri_list = self._thesauri_repo.get(language=language)
@@ -201,15 +198,9 @@ class SearchRepository:
             raise SearchError(f"Thesauri for property '{prop_name}' not found")
         return thesauri
 
-    def _validate_thesaurus_value(self, name: str, name_to_id: dict, thesauri, prop_name: str) -> bool:
-        if name != "missing" and name not in name_to_id:
-            raise SearchError(f"Value '{name}' not found in thesaurus '{thesauri.name}' for property '{prop_name}'")
-        return True
-
-    def _serialize_filters(self, filters: SearchFilters, property_name_to_id: dict) -> dict:
+    def _serialize_filters(self, resolved_filters: dict) -> dict:
         result = {}
-        for name, value in filters.filters.items():
-            key = property_name_to_id.get(name, name)
+        for key, value in resolved_filters.items():
             result[key] = value.model_dump(exclude_none=True) if hasattr(value, "model_dump") else value
         return result
 
@@ -270,8 +261,8 @@ class SearchRepository:
         sort: str = "creationDate",
     ) -> pd.DataFrame:
         template_id = self._resolve_template_id(template_name) if template_name else None
-        property_name_to_id = self._validate_and_resolve_filters(filters, template_id, language)
-        serialized_filters = self._serialize_filters(filters, property_name_to_id)
+        resolved = self._resolve_filters(filters, template_id, language)
+        serialized_filters = self._serialize_filters(resolved)
         params = self._build_filter_search_params(
             serialized_filters, template_id, start_from, batch_size, published, order, sort
         )

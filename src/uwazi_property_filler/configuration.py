@@ -101,6 +101,42 @@ DATABASE_URL: str = _DATABASE_URL
 PDF_CACHE_DIR: Path = DATA_DIR / "pdf_cache"
 PDF_CACHE_MAX_BYTES: int = 4 * 1024**3
 
+# Static suggestion sources: every ``*.jsonl`` file in a suggestions directory
+# is one source (the file stem is its source id). Add another file to expose
+# another model's predictions without changing the UI.
+#
+# Two kinds of directories are read:
+#
+# * the PACKAGED one, shipped inside the package (``resources/suggestions``).
+#   It travels with the code and the container image, so a deployment always
+#   has the precomputed predictions without copying a data file around.
+# * RUNTIME ones, operator-owned: ``PROPERTY_FILLER_SUGGESTIONS_DIR`` (a
+#   comma-separated list) when set, otherwise the repo's ``data/suggestions``.
+PACKAGED_SUGGESTIONS_DIR: Path = Path(__file__).parent / "resources" / "suggestions"
+
+
+def suggestions_dirs(configured: str | None = None, default_runtime: Path | None = None) -> list[Path]:
+    """The directories scanned for ``*.jsonl`` suggestion sources.
+
+    The packaged directory always comes first, followed by the runtime
+    directories. ``configured`` is the raw ``PROPERTY_FILLER_SUGGESTIONS_DIR``
+    value — a comma-separated list; when it is empty (or ``None``) the
+    ``default_runtime`` directory (the repo's ``data/suggestions``) is used,
+    but only when it exists.
+
+    Passing either argument explicitly makes the resolution testable without
+    touching the environment or the repo tree.
+    """
+    raw = os.environ.get("PROPERTY_FILLER_SUGGESTIONS_DIR", "") if configured is None else configured
+    runtime = [Path(part.strip()) for part in raw.split(",") if part.strip()]
+    if not runtime:
+        fallback = DATA_DIR / "suggestions" if default_runtime is None else default_runtime
+        runtime = [fallback] if fallback.is_dir() else []
+    return [PACKAGED_SUGGESTIONS_DIR, *runtime]
+
+
+SUGGESTIONS_DIRS: list[Path] = suggestions_dirs()
+
 EXTENSIONS_DIR: Path = DATA_DIR / "extensions"
 
 APP_PORT: int = int(os.environ.get("PROPERTY_FILLER_PORT", "7050"))

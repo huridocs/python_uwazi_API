@@ -13,6 +13,8 @@ metadata is resolved to qualified labels) and the write/filter side (qualified
 labels are resolved back to the child value id).
 """
 
+from uwazi_api.domain.exceptions import SearchError
+
 THESAURUS_GROUP_SEPARATOR = ": "
 
 
@@ -39,6 +41,29 @@ def label_id_map(values: list) -> dict[str, str]:
     label_map: dict[str, str] = {}
     _build_label_map(values, label_map)
     return label_map
+
+
+def resolve_labels_to_ids(values: list[str], label_map: dict[str, str], thesauri_name: str, property_name: str) -> list[str]:
+    """Resolve thesaurus labels to their ids, passing ids through unchanged.
+
+    Idempotent: a value that is already one of the map's ids is kept, so a
+    filter that was resolved once can be resolved again (and reused across
+    paged requests) without failing. ``"missing"`` is Uwazi's sentinel for an
+    empty select filter and is preserved. An unknown value raises
+    :class:`~uwazi_api.domain.exceptions.SearchError` naming the thesaurus.
+    """
+    valid_ids = set(label_map.values())
+    resolved: list[str] = []
+    for value in values:
+        if value == "missing" or value in valid_ids:
+            resolved.append(value)
+        elif value in label_map:
+            resolved.append(label_map[value])
+        else:
+            raise SearchError(
+                f"Value '{value}' not found in thesaurus '{thesauri_name}' for property '{property_name}'"
+            )
+    return resolved
 
 
 def _build_label_map(values: list, label_map: dict[str, str], parent_label: str | None = None) -> None:

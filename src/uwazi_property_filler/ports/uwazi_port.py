@@ -17,9 +17,9 @@ class UwaziPort(ABC):
 
         ``filter_value`` optionally restricts to a single thesaurus label of
         the configured ``FILTER_PROPERTY``; ``None`` returns all entities.
-        When filtering, the result set is fetched with one request per value,
-        paged under Uwazi's 10 000-result search window, so values larger than
-        that window are complete.
+        Requests stay inside Uwazi's 10 000-hit search window
+        (``from + size <= index.max_result_window``), so a bucket larger than
+        that window yields the first 10 000 documents and a truncation warning.
         """
 
     @abstractmethod

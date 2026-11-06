@@ -42,10 +42,35 @@
       border-color: rgba(24, 188, 156, 0.95);
       background: rgba(24, 188, 156, 0.22);
     }
+
+    #zoom-controls {
+      position: fixed; top: 34px; right: 12px; z-index: 20;
+      display: flex; align-items: center; gap: 2px;
+      padding: 4px; border-radius: 6px;
+      background: rgba(44, 62, 80, 0.92);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+      font: 12px/1 system-ui, sans-serif;
+    }
+    #zoom-controls button {
+      width: 28px; height: 26px; border: 0; border-radius: 4px;
+      background: rgba(255, 255, 255, 0.12); color: #fff;
+      font: 18px/1 system-ui, sans-serif; cursor: pointer;
+    }
+    #zoom-controls button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.24); }
+    #zoom-controls button:disabled { opacity: 0.4; cursor: default; }
+    #zoom-level {
+      min-width: 42px; text-align: center; color: #fff;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
   <div id="hint">Label mode: click a word, then click another word to select a span. The selection is sent to the parent app.</div>
+  <div id="zoom-controls" role="group" aria-label="PDF zoom">
+    <button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+    <span id="zoom-level" aria-live="polite">100%</span>
+    <button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+  </div>
   <div id="container">
     <div id="page-wrap"></div>
   </div>
