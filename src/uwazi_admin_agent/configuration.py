@@ -44,6 +44,17 @@ MAX_EXTRACTOR_LLM_CALLS: int = 40
 # sampling). HTML supporting files can be huge; the LLM context is not.
 MAX_PEEK_CHARS: int = 200_000
 
+# --- extraction strategy benchmark (benchmark_extractor) ----------------------
+#
+# Scoring a candidate extractor needs entities whose target properties ALREADY
+# hold a known value (that value is the ground truth). Sampling is bounded like
+# every other generation-time read: a handful of entities answers "does this
+# strategy work?" — a full scan is the script's job, not the benchmark's.
+MAX_BENCHMARK_SAMPLES: int = 30
+# Per-sample text fed to the candidate extractor: the same head-and-tail window
+# the peek tools use, so the benchmark exercises the same inputs a script sees.
+MAX_BENCHMARK_CHARS: int = 200_000
+
 # --- external URL fetching (source-page HTML extraction) ---------------------
 #
 # The agent's read boundary is extended to operator-supplied ``http(s)`` URLs (an

@@ -632,3 +632,63 @@ def test_prompt_isolates_per_entity_failures() -> None:
     assert "NEVER fall back to the" in SYSTEM_PROMPT
     assert "Do NOT wrap discovery" in SYSTEM_PROMPT
     assert "must propagate" in SYSTEM_PROMPT  # LLM budget halts are not entity failures
+
+
+# --- textmatch / dateparse boundaries; strategy benchmark --------------------
+
+
+def test_prompt_documents_the_textmatch_namespace() -> None:
+    """A generated script calls `textmatch.*` by bare name; the prompt must list the
+    members and the 0..100 scale, or the LLM hand-rolls normalisation (and calls
+    `rapidfuzz` directly, which is not bound)."""
+    for token in (
+        "textmatch",
+        "textmatch.wratio",
+        "textmatch.rank",
+        "textmatch.best",
+        "score_cutoff",
+    ):
+        assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_documents_the_dateparse_namespace_and_its_refusal() -> None:
+    """The date helper must be documented WITH its refusal semantics: a generic
+    fuzzy parser invents dates out of prose, and a fabricated date is a real write."""
+    for token in (
+        "dateparse",
+        "dateparse.parse",
+        "dateparse.find",
+        "LEAVE THE ENTITY UNTOUCHED",
+        "FABRICATED",
+    ):
+        assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_names_textmatch_and_dateparse_as_bound_stdlib() -> None:
+    """Both namespaces are in `_STDLIB`; the prompt's 'also bound' list must not
+    imply only `htmlextract` exists (the LLM would try `import rapidfuzz`)."""
+    assert "`textmatch` and `dateparse`" in SYSTEM_PROMPT
+
+
+def test_prompt_has_document_extraction_section() -> None:
+    """Segmentation-based extraction must be documented as its own source: a PDF's
+    text is NOT a supporting file, so `get_entity_files` will never see it."""
+    for token in (
+        "DOCUMENT EXTRACTION",
+        "get_segmentation(",
+        "get_segmentation_parallel",
+        'seg["paragraphs"]',
+    ):
+        assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_offers_the_strategy_benchmark_with_the_mismatch_rule() -> None:
+    """The generation agent must know it can MEASURE a strategy, and must prefer
+    zero mismatches over coverage (a wrong value is written; a missing one is not)."""
+    for token in (
+        "benchmark_extractor",
+        "known values",
+        "mismatched",
+        "accuracy",
+    ):
+        assert token in SYSTEM_PROMPT, token

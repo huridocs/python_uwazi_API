@@ -23,7 +23,6 @@ seam, unit-tested without mocks).
 
 from __future__ import annotations
 
-import ast
 from typing import Any
 
 from loguru import logger
@@ -32,8 +31,10 @@ from pydantic_ai import Agent, RunContext, UsageLimits
 
 from uwazi_admin_agent.configuration import MAX_EXTRACTOR_LLM_CALLS
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
+from uwazi_admin_agent.use_cases.extractor_sandbox import validate_extractor_source
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
-from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS
+from uwazi_admin_agent.use_cases.segmentation_tools import peek_segmentation, peek_segmentation_by_entity
 from uwazi_admin_agent.use_cases.url_fetch_tools import peek_url_text
 from uwazi_agent.use_cases.tools.get_templates_by_names import get_templates_by_names
 from uwazi_agent.use_cases.tools.query_entities import query_entities
@@ -53,7 +54,18 @@ Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
       htmlextract.text(html)   -> all visible text, tags stripped, whitespace collapsed
       htmlextract.meta(html)   -> {meta name-or-property: content}
       htmlextract.title(html)  -> <title> text or ""
-- Also allowed: the bound `re` module and plain str/list/dict methods.
+- Also allowed: the bound `re` module and plain str/list/dict methods, plus the
+  bound `textmatch` (fuzzy label/name matching, scores 0..100) and `dateparse`
+  (deterministic date detection -> "YYYY-MM-DD") namespaces. Both are bound in
+  the emitted script's namespace too:
+      textmatch.wratio(a, b)                 # 0..100 similarity (labels/names)
+      textmatch.rank(q, choices, score_cutoff=80)   # [{"choice","score","index"}]
+      textmatch.best(q, choices, score_cutoff=80)   # best hit or None
+      dateparse.parse(text)                  # "YYYY-MM-DD" or None
+      dateparse.find(text)                   # [{"iso","text","start","end"}]
+  PREFER THEM over hand-rolled normalisation/scoring: `textmatch.wratio` for
+  "is this the label/cell I want", `dateparse.parse` for a date value. Never
+  write a guessed date: `dateparse.parse` returning None means "not found".
 - `ctx` carries the entity's identity: a plain dict
   `{"shared_id": str, "title": str, "metadata": {prop: [values]}}` built by the
   bulk script per entity. When one HTML document holds rows/values for MULTIPLE
@@ -93,6 +105,15 @@ returned page is the `html` the same `extract` function consumes, so the rest of
 the workflow (author, then self-prove) is unchanged. Refine until coverage is
 good, then emit ExtractorFunction with honest samples_total/samples_matched
 numbers and notes about unmatched samples.
+WHEN the values live in the entity's PRIMARY DOCUMENT (a PDF) rather than an
+uploaded HTML file: sample with `peek_segmentation_by_entity` (page-ordered
+paragraphs), author the same `def extract(text, ctx)`, and use `dateparse.parse`
+for dates and `textmatch.wratio` for label/paragraph matching.
+OPTIONAL EVIDENCE: when several strategies look plausible, call
+`benchmark_extractor` with 2-3 candidate sources under distinct labels and the
+target property names; it scores each against the values the sampled entities
+ALREADY carry. Prefer the candidate with the fewest MISMATCHES (a missing value
+leaves the entity untouched; a mismatched one writes a wrong value).
 """
 
 
@@ -109,43 +130,6 @@ class ExtractorFunction(BaseModel):
     samples_total: int = Field(description="How many real HTML samples the function was proven against.")
     samples_matched: int = Field(description="How many of those samples extraction matched.")
     unmatched_notes: str | None = Field(default=None, description="Notes on which samples/strategies failed, when any.")
-
-
-def validate_extractor_source(code: str) -> str | None:
-    """Validate emitted extractor source WITHOUT mocks: parse it, reject imports
-    and classes, then ``exec`` it in the script sandbox and require a callable
-    two-argument ``extract``.
-
-    Returns ``None`` when valid, otherwise a rejection message the generation
-    agent can act on. Pure seam (no LLM, no I/O) — unit-tested directly.
-    """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        return f"Rejected: extractor source does not parse ({exc.lineno}: {exc.msg})."
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            return "Rejected: extractor source must contain ZERO import lines (everything is bound)."
-        if isinstance(node, ast.ClassDef):
-            return "Rejected: extractor source must not define classes (class does not work in the sandbox; use def)."
-    namespace: dict[str, Any] = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
-    try:
-        exec(compile(tree, "<extractor>", "exec"), namespace)  # noqa: S102 - sandboxed by SAFE_BUILTINS+_STDLIB
-    except Exception as exc:  # noqa: BLE001 - any exec failure is a rejection
-        return f"Rejected: extractor source failed to exec in the sandbox ({type(exc).__name__}: {exc})."
-    extract = namespace.get("extract")
-    if not callable(extract):
-        return "Rejected: extractor source must define a callable named `extract`."
-    code_obj = getattr(extract, "__code__", None)
-    if (
-        code_obj is None
-        or code_obj.co_argcount != 2
-        or code_obj.co_flags & 0x04  # CO_VARARGS
-        or code_obj.co_flags & 0x08  # CO_VARKEYWORDS
-    ):
-        argcount = code_obj.co_argcount if code_obj is not None else -1
-        return f"Rejected: `extract` must take exactly two arguments (html, ctx), got {argcount}."
-    return None
 
 
 def author_html_extractor(ctx: RunContext[AdminAgentDeps], task: str) -> str:
@@ -189,5 +173,12 @@ def build_extractor_agent(model: Any) -> Agent[AdminAgentDeps, ExtractorFunction
             peek_entity_files,
             peek_file_text,
             peek_url_text,
+            # Primary-document text: a PDF's paragraphs come from segmentation, not
+            # from a supporting file, so a document-extraction task samples here.
+            peek_segmentation_by_entity,
+            peek_segmentation,
+            # Compare competing extractor shapes over the SAME sampled entities
+            # whose target properties already hold a value: evidence, not taste.
+            benchmark_extractor,
         ],
     )

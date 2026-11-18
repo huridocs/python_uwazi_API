@@ -37,6 +37,7 @@ from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
+from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
 from uwazi_admin_agent.use_cases.instance_languages import fetch_instance_languages, system_prompt_with_languages
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.segmentation_tools import peek_segmentation, peek_segmentation_by_entity
@@ -118,6 +119,9 @@ class GenerateScriptUseCase:
                 list_thesauri,
                 # HTML extraction: sampling peek tools + the nested extractor author.
                 author_html_extractor,
+                # Strategy evidence: score candidate extractors against the values
+                # the samples ALREADY carry, before committing to a bulk write.
+                benchmark_extractor,
                 peek_entity_files,
                 peek_file_text,
                 # Document segmentation: read the structured text of a primary

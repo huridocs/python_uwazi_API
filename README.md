@@ -215,6 +215,44 @@ CLI equivalences: `scan` = the selection scan; `apply` = accept everything of
 the latest attempt and push it into the apply run. There is deliberately no
 `execute` step: a task-scope script never executes whole-set.
 
+### Extraction helpers in the generated script
+
+Bulk extraction over HTML files or a PDF's segmented text is the common task, and
+its two hardest parts (matching a document's wording to a schema label, and
+pulling a date out of prose) are now bound into the sandbox instead of being
+hand-rolled by every regenerated script:
+
+- `textmatch` — `ratio` / `partial_ratio` / `token_sort_ratio` /
+  `token_set_ratio` / `wratio` returning `0..100`, plus `rank(query, choices,
+  score_cutoff=…)` and `best(…)`. Backed by `rapidfuzz`; lexical only (a value
+  that needs genuine judgment still goes through `llm_complete`/`llm_map` under
+  the approved caps). `best` returns `None` below the cutoff, so a classification
+  never writes the "closest" thesaurus label by accident.
+- `dateparse` — `parse` / `find` / `is_date`, returning `"YYYY-MM-DD"` only for a
+  date-SHAPED token that parses without fuzzy matching and names its year.
+  Deliberately stricter than a generic parser: `dateutil`'s fuzzy mode turns
+  `"section 4.2"` into a calendar day, and a fabricated date is a real write.
+
+Both are deterministic, pure, and safe to call per entity — a bulk pass over
+10 000 entities stays reproducible, and a rerun shows the operator the same
+values.
+
+**Choosing a strategy with evidence.** The generation agent (and its nested
+extractor subagent) has a `benchmark_extractor` tool that scores 2–3 candidate
+`def extract(text, ctx)` sources against the values the sampled entities ALREADY
+carry, over the SAME samples. It reports accuracy, coverage, and the worst
+mismatches per property. The distinction that matters: `missing` leaves an entity
+untouched, while `mismatched` would WRITE A WRONG VALUE — so a strategy is ranked
+by accuracy first, then by fewest mismatches. Ground truth can be overridden with
+an explicit `known_values` map for properties that are still empty.
+
+Two model-based alternatives were considered and **not** adopted:
+
+| option | why not |
+|---|---|
+| GLiNER (zero-shot date/entity detector) | pulls `torch` + `transformers` + CUDA wheels (Torch's manylinux wheel alone is 539 MB) into a 414 MB app environment, and downloads model weights on first use; non-deterministic across model versions, while the date case — its strongest fit — is covered exactly by `dateparse` |
+| SetFit (few-shot topic classifier) | same torch footprint plus a per-task TRAINING step requiring operator-supplied labelled examples; `textmatch.best` over the thesaurus labels answers the topic-mapping case for free, and `llm_map` covers the semantic cases lexical matching cannot |
+
 ### Controlled LLM usage
 
 A script can call the LLM per entity through two helpers bound into the sandbox:

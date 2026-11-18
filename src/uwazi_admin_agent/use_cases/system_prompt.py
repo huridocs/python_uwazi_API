@@ -587,9 +587,54 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
     script dies on line 1): `import html`. These are pure functions bound in
     your namespace - reference them by name, never import them.
 
+  textmatch — curated fuzzy matching over normalised text (NO import):
+      textmatch.ratio(a, b)            # 0..100, whole-string edit similarity
+      textmatch.partial_ratio(a, b)   # 0..100, short string inside a long one
+      textmatch.token_sort_ratio(a, b)  # 0..100, order-insensitive
+      textmatch.token_set_ratio(a, b)   # 0..100, ignores extra/duplicate tokens
+      textmatch.wratio(a, b)          # 0..100, weighted (BEST default for labels)
+      textmatch.rank(query, choices, score_cutoff=0, limit=None, scorer="wratio")
+          # -> [{"choice", "score", "index"}, ...] best first
+      textmatch.best(query, choices, score_cutoff=0, scorer="wratio")
+          # -> the ONE best {"choice", "score", "index"} or None
+    Scores are 0..100, so `score_cutoff=80` reads as "at least 80 % similar".
+    Use it for the mapping problems `re` does badly:
+      - MATCH A LABEL: the document cell says "Case No." and the property is
+        `case_number` -> pick the best row/header instead of hard-coding one string;
+      - MATCH A THESAURUS LABEL: a document's free-text topic vs. the EXACT labels
+        `get_thesauris_by_names` returned -> `textmatch.best(topic, labels,
+        score_cutoff=85)`; when it returns None the topic matched nothing and the
+        value must be LEFT UNSET (never write the closest label regardless);
+      - MATCH A NAME: a party/person name in the text vs. an entity title or a
+        connection target, tolerant of accents, case and punctuation.
+    Deterministic and cheap (microseconds): safe to call per entity. It is NOT a
+    semantic model — it scores LEXICAL similarity, so "car" vs "automobile" scores
+    low. When a value needs real judgment, use `llm_complete`/`llm_map` under the
+    approved budget instead of stretching a fuzzy threshold.
+
+  dateparse — deterministic date DETECTION (NO import):
+      dateparse.parse(text, dayfirst=False)   # -> "YYYY-MM-DD" or None
+      dateparse.find(text, dayfirst=False, limit=None)
+          # -> [{"iso", "text", "start", "end"}, ...] in reading order
+      dateparse.is_date(text, dayfirst=False)  # -> True/False
+    It accepts only a date-SHAPED token that parses WITHOUT fuzzy matching
+    (`2026-11-17`, `17/11/2026`, `17 November 2026`, `November 17, 2026`,
+    `17th Nov. 2026`) and names its year explicitly. That precision is the point:
+    a generic fuzzy parser invents dates out of prose (`"section 4.2"` -> a
+    calendar day), which would write FABRICATED metadata. `None` therefore means
+    "no unambiguous date here" — LEAVE THE ENTITY UNTOUCHED; never fall back to a
+    guessed date. `dayfirst=True` picks day-first order for an ambiguous
+    `d/m/y` token (e.g. `05/06/2026`); an unambiguous one (`17/11/2026`) ignores
+    the flag. English month names only — for another language match the numeric
+    form yourself or ask the LLM.
+    Idiom (extraction of a `date` property):
+        hit = dateparse.parse(paragraph_text)
+        if hit:
+            metadata["judgment_date"] = hit     # SCALAR "YYYY-MM-DD" (see WRITE SHAPE)
+
 These stdlib modules are also bound: `json`, `re`, `collections`, `itertools`,
-`datetime`, `math`, `random`, plus the `htmlextract` namespace above. Nothing
-else is available.
+`datetime`, `math`, `random`, plus the `htmlextract`, `textmatch` and `dateparse`
+namespaces above. Nothing else is available.
 
   BOUND STDLIB CONTRACT (CRITICAL — getting this wrong raises AttributeError /
   ImportError and wastes a validation attempt):
@@ -1057,6 +1102,18 @@ one-document logic. Use this exact shape:
    (`def` works, `class` does not, everything it calls is bound).
    Pass the entity's `ctx` so the extractor can pick the row/value that belongs
    to THIS entity when the HTML holds rows for several entities.
+   WHEN THE VALUES ALREADY EXIST SOMEWHERE (a sibling property is filled, the
+   same data lives in another template/property, or the operator supplies a few
+   known cases), call the `benchmark_extractor` TOOL instead of trusting the
+   first extractor: pass 2-3 candidate `def extract` sources under different
+   labels and the target property names. It scores each candidate against the
+   known values on the SAME sampled entities and reports accuracy, coverage and
+   the worst mismatches. Choose the strategy with the best accuracy AND the
+   lowest mismatch count — 'missing' leaves an entity untouched, while
+   'mismatched' would WRITE A WRONG VALUE. When the best candidate is still weak,
+   say so in `GeneratedScript.description` and prefer recording fewer rows over
+   a wide guess; a prompt whose result would be mostly mismatches must be
+   improved, not executed.
 2. Per entity: fetch its files with the BULK helper —
    `files_by_id = get_entity_files_parallel(shared_ids, language)` (ONE call
    for the whole target set; it returns `{shared_id: [file dicts]}`) — then
@@ -1100,6 +1157,20 @@ from it exactly as above, swapping the file-fetch step for a URL fetch:
   text) and accumulate updates with `update_entities_parallel` as in steps 3-5.
 There is no `_parallel` URL helper: external fetches are already serial + fenced
 by a timeout/size cap on purpose (do NOT hammer an external site).
+
+DOCUMENT EXTRACTION (the value lives in the PRIMARY DOCUMENT, not in a file)
+A PDF's text comes from SEGMENTATION (`get_segmentation*`, contract above), NOT
+from `get_entity_files`: a primary document is never a supporting file, so do
+not hunt for it there. Same sample-derived extractor shape, different source:
+1. Author it with `author_html_extractor` (signature unchanged: it just receives
+   text). Sample with `peek_segmentation_by_entity` when the tool's own HTML
+   samples come back empty.
+2. Feed it `"\n".join(p["text"] for p in seg["paragraphs"])`, or the bulk
+   `get_segmentation_parallel(shared_ids, language)`. `None` -> count missing.
+3. Use the bound helpers rather than hand-rolling: `dateparse.parse(text)` for a
+   date (None = not found, never guess), and `textmatch.wratio(label, p["text"])`
+   to pick the paragraph that states the field when the wording varies.
+4. Return None when the value is absent: the entity stays untouched (hard rule 3).
 
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):

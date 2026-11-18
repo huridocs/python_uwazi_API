@@ -83,7 +83,19 @@ async def peek_file_text(ctx: RunContext[AdminAgentDeps], shared_id: str, filena
 
 def _truncate_peek(text: str) -> str:
     """Head+tail truncation to MAX_PEEK_CHARS (pure; unit-testable offline)."""
-    if len(text) > MAX_PEEK_CHARS:
-        head, tail = MAX_PEEK_CHARS - _PEEK_TAIL_CHARS, _PEEK_TAIL_CHARS
-        return text[:head] + "\n[...middle truncated...]\n" + text[-tail:] + "[truncated]"
-    return text
+    return _truncate_to_max(text, MAX_PEEK_CHARS)
+
+
+def _truncate_to_max(text: str, max_chars: int) -> str:
+    """Head+tail truncation to ``max_chars``, keeping a tail window (pure).
+
+    The tail matters: pagination/footer tables live near the end of a document, so
+    a plain prefix cut hides exactly what an extraction needs. Shared by the peek
+    tools and the extraction benchmark, which must feed candidates the SAME window
+    a generated script sees.
+    """
+    if len(text) <= max_chars:
+        return text
+    tail = min(_PEEK_TAIL_CHARS, max_chars // 4)
+    head = max_chars - tail
+    return text[:head] + "\n[...middle truncated...]\n" + text[-tail:] + "[truncated]"

@@ -55,10 +55,21 @@ from typing import Any, Callable
 from loguru import logger
 
 from uwazi_admin_agent.configuration import AI_TRANSLATED_MARKER
+from uwazi_admin_agent.domain.date_parse import find as date_find
+from uwazi_admin_agent.domain.date_parse import is_date as date_is_date
+from uwazi_admin_agent.domain.date_parse import parse as date_parse
 from uwazi_admin_agent.domain.file_deletion import group_deletions_by_entity
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.domain.html_extract import html_meta, html_tables, html_text, html_title, is_html_ref
 from uwazi_admin_agent.domain.llm_budget import LlmLedger
+from uwazi_admin_agent.domain.text_match import Scorer as TextMatchScorer
+from uwazi_admin_agent.domain.text_match import best as text_match_best
+from uwazi_admin_agent.domain.text_match import partial_ratio as text_match_partial_ratio
+from uwazi_admin_agent.domain.text_match import rank as text_match_rank
+from uwazi_admin_agent.domain.text_match import ratio as text_match_ratio
+from uwazi_admin_agent.domain.text_match import token_set_ratio as text_match_token_set_ratio
+from uwazi_admin_agent.domain.text_match import token_sort_ratio as text_match_token_sort_ratio
+from uwazi_admin_agent.domain.text_match import wratio as text_match_wratio
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
@@ -109,6 +120,30 @@ _HTMLEXTRACT: Any = SimpleNamespace(
     is_html=is_html_ref,
 )
 
+# Curated fuzzy-matching API (domain/text_match.py) over rapidfuzz: label/header/
+# name matching without hand-rolled normalisation. Curated (not the rapidfuzz
+# package) so the bound surface is small, deterministic, and JSON-friendly.
+_TEXTMATCH: Any = SimpleNamespace(
+    ratio=text_match_ratio,
+    partial_ratio=text_match_partial_ratio,
+    token_sort_ratio=text_match_token_sort_ratio,
+    token_set_ratio=text_match_token_set_ratio,
+    wratio=text_match_wratio,
+    rank=text_match_rank,
+    best=text_match_best,
+    Scorer=TextMatchScorer,
+)
+
+# Curated date DETECTION API (domain/date_parse.py): a date-shaped, non-fuzzy
+# token rendered as the ISO string a Uwazi `date` property writes. Curated rather
+# than binding dateutil itself: `dateutil.parser.parse(..., fuzzy=True)` invents
+# dates from arbitrary prose, which would write fabricated metadata.
+_DATEPARSE: Any = SimpleNamespace(
+    parse=date_parse,
+    find=date_find,
+    is_date=date_is_date,
+)
+
 # stdlib subset the system prompt promises the script (see system_prompt.py).
 
 _STDLIB: dict[str, Any] = {
@@ -120,6 +155,8 @@ _STDLIB: dict[str, Any] = {
     "math": math,
     "random": random,
     "htmlextract": _HTMLEXTRACT,
+    "textmatch": _TEXTMATCH,
+    "dateparse": _DATEPARSE,
 }
 
 
