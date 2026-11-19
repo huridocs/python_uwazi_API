@@ -13,16 +13,13 @@ from uwazi_admin_agent.domain.prompt_chat import (
     ChatMessage,
     ChatPromptStatus,
     ChatRole,
-    ChatTurn,
     build_chat_history,
     build_final_prompt_from_chat,
     mark_prompts_applied,
     parse_conversation,
     reconstruct_chat,
     render_chat_message,
-    render_question_answers,
 )
-from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import (
     _PROMPT_BUBBLE_CSS,
     PROMPT_BUBBLE_BACKGROUND,
@@ -152,17 +149,6 @@ def test_a_reopened_chat_does_not_repeat_the_previous_conversation() -> None:
     assert "and the case reference" in final
     # The prior conversation is CONTINUED, not repeated.
     assert final.index("also set the document reference") < final.index("and the case reference")
-
-
-def test_a_chat_turn_carries_the_questions_and_the_revised_prompt() -> None:
-    turn = ChatTurn(
-        summary="Understood.",
-        questions=[ClarifyingQuestion(question="Which property?")],
-        revised_prompt="Set the document reference.",
-    )
-    assert turn.summary == "Understood."
-    assert turn.questions[0].question == "Which property?"
-    assert turn.revised_prompt == "Set the document reference."
 
 
 def test_a_chat_message_defaults_to_no_questions_and_no_revised_prompt() -> None:
@@ -342,25 +328,6 @@ def test_mark_prompts_applied_flips_only_operator_prompts() -> None:
     assert history[1].status is ChatPromptStatus.PENDING
 
 
-def test_render_question_answers_lists_every_ticked_option_and_custom_answer() -> None:
-    request = render_question_answers(
-        [
-            QuestionAnswer(
-                question="Which property carries the reference?",
-                selected=["document_ref", "case_ref"],
-            ),
-            QuestionAnswer(question="Should the old value be kept?", custom="No, overwrite it."),
-        ]
-    )
-
-    assert request.startswith("Answers to your clarifying questions:")
-    assert "- Which property carries the reference?" in request
-    assert "  - document_ref" in request
-    assert "  - case_ref" in request
-    assert "- Should the old value be kept?" in request
-    assert "  - No, overwrite it." in request
-
-
 def test_prompt_bubble_css_paints_received_bubbles_with_the_requested_color() -> None:
     """The bubble background is the requested color, on received prompt bubbles.
 
@@ -373,23 +340,22 @@ def test_prompt_bubble_css_paints_received_bubbles_with_the_requested_color() ->
     assert PROMPT_BUBBLE_BACKGROUND in _PROMPT_BUBBLE_CSS
 
 
-def test_render_question_answers_omits_unanswered_questions() -> None:
-    request = render_question_answers(
-        [
-            QuestionAnswer(
-                question="Which property?",
-                selected=["document_ref"],
-            ),
-            QuestionAnswer(question="Skipped question?", selected=[]),
-            QuestionAnswer(question="Blank custom?", custom="   "),
-        ]
+def test_reopened_chat_shows_the_recorded_understanding_beside_each_prompt() -> None:
+    """The clarification's restatement is context the generation LLM receives.
+
+    It must survive the round trip: rendered into the conversation, parsed back
+    on reopen, and displayed as its own "Understanding" bubble next to the
+    request it belongs to.
+    """
+    validated = (
+        f"{ORIGINAL}\n\nConversation:\n"
+        "## Operator\nmake it one update row per entity\n\n"
+        "## Assistant\nUnderstood: one update per entity, not an info row."
     )
+    baseline, history = reconstruct_chat(ORIGINAL, validated)
 
-    assert "Which property?" in request
-    assert "Skipped question?" not in request
-    assert "Blank custom?" not in request
+    bubbles = _initial_bubbles(baseline, history)
 
-
-def test_render_question_answers_is_empty_when_nothing_was_answered() -> None:
-    assert render_question_answers([QuestionAnswer(question="Unanswered?")]) == ""
-    assert render_question_answers([]) == ""
+    assert [label for label, *_rest in bubbles] == ["Base prompt", "Prompt", "Understanding"]
+    assert bubbles[2][1] == "Understood: one update per entity, not an info row."
+    assert bubbles[2][3] is ChatPromptStatus.APPLIED

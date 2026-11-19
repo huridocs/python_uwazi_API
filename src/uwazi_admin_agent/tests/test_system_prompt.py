@@ -454,16 +454,16 @@ def test_prompt_teaches_move_plus_delete_is_one_operation_without_a_target_write
 
 
 def test_prompt_says_plain_info_rows_are_dropped_beside_changes() -> None:
-    """A change plan must explain itself; info is only for kept exceptions.
+    """A change plan must explain itself; info is only for cross-entity notes.
 
     The review conversion drops plain info rows whenever the same script records
-    changes, so the model is told not to add a summary row and to mark the
-    rows that must survive (failures/skips) with ``keep=True``.
+    changes, so the model is told not to add a summary row and to report per-entity
+    skips with ``record_skipped`` instead of an info paragraph.
     """
     assert "add_info(title, children=None, keep=False)" in SYSTEM_PROMPT
     assert "info rows are DROPPED automatically" in SYSTEM_PROMPT
-    assert "`add_info(..., keep=True)` ONLY for information no change row can show" in SYSTEM_PROMPT
-    assert 'add_info("N entities failed", [f"{sid}: {err}", ...], keep=True)' in SYSTEM_PROMPT
+    assert "record_skipped(shared_id, reason, title=''" in SYSTEM_PROMPT
+    assert "`add_info(..., keep=True)` ONLY for a cross-entity summary" in SYSTEM_PROMPT
 
 
 def test_prompt_multi_group_merge_batches_the_three_bulk_calls() -> None:
@@ -624,11 +624,10 @@ def test_prompt_explains_subset_scoping_via_discovery() -> None:
 def test_prompt_isolates_per_entity_failures() -> None:
     """One entity's failure must not abort the whole pass. The prompt must pin
     the per-entity try/except pattern, forbid an untranslated fallback, keep the
-    batched write outside the loop, and require the failures be reported."""
+    batched write outside the loop, and require a skipped row per failure."""
     assert "PER-ENTITY FAILURE ISOLATION" in SYSTEM_PROMPT
     assert "one bad entity must NOT lose the whole pass" in SYSTEM_PROMPT
-    assert 'failed.append((d["shared_id"], str(exc)))' in SYSTEM_PROMPT
-    assert 'add_info(f"{len(failed)} entities failed"' in SYSTEM_PROMPT
+    assert 'record_skipped(d["shared_id"], "extraction_error"' in SYSTEM_PROMPT
     assert "NEVER fall back to the" in SYSTEM_PROMPT
     assert "Do NOT wrap discovery" in SYSTEM_PROMPT
     assert "must propagate" in SYSTEM_PROMPT  # LLM budget halts are not entity failures
@@ -692,3 +691,74 @@ def test_prompt_offers_the_strategy_benchmark_with_the_mismatch_rule() -> None:
         "accuracy",
     ):
         assert token in SYSTEM_PROMPT, token
+
+
+def test_prompt_enforces_plan_kind_and_rejects_info_only_change_plans() -> None:
+    """The intent declaration is what makes the review table checkable.
+
+    The reported failure: a change request whose per-entity work failed became
+    ONE info row, and the pass accepted it as a completed plan. The prompt must
+    declare `plan_kind`, forbid standing in for a change with `add_info`, and say
+    an uncomputable change plan must FAIL instead of faking a table.
+    """
+    assert "DECLARE THE PLAN KIND" in SYSTEM_PROMPT
+    assert '`"changes"`' in SYSTEM_PROMPT
+    assert '`"query"`' in SYSTEM_PROMPT
+    assert "records ONLY `add_info` rows is REJECTED" in SYSTEM_PROMPT
+    assert "DO NOT fake a plan with a summary row" in SYSTEM_PROMPT
+    assert 'A `plan_kind="changes"` plan with no change row and no' in SYSTEM_PROMPT
+
+
+def test_prompt_query_example_uses_the_real_query_entities_full_contract() -> None:
+    """`query_entities_full` requires `mode` and returns list[dict].
+
+    The documented example used `query_entities_full(text=...)["examples"]`,
+    which raises TypeError on the first read of a query plan (and the `examples`
+    shape belongs to `query_entities`).
+    """
+    assert 'query_entities_full(mode="by_text", search_term="budget")' in SYSTEM_PROMPT
+    assert 'query_entities_full(text="budget")["examples"]' not in SYSTEM_PROMPT
+    assert 'never read `["examples"]`' in SYSTEM_PROMPT
+
+
+def test_prompt_extraction_recipe_does_not_fetch_entities_twice() -> None:
+    """The per-entity ctx comes from the dict the discovery loop already holds.
+
+    The recipe referenced an unbound `sid` and told the model to refetch via
+    `by_ids` (one HTTP request per entity), contradicting its own bulk-read rule.
+    """
+    assert 'files_by_id[d["shared_id"]]' in SYSTEM_PROMPT
+    assert "NOT a `by_ids`" in SYSTEM_PROMPT
+
+
+def test_prompt_treats_an_explicit_entity_limit_as_binding() -> None:
+    """A "only the first 5" prompt must record at most 5 changes.
+
+    The reported run asked for 5 entities and planned 448: the limit reached the
+    prompt but the contract never said it was binding, so the model treated it as
+    context. A scope decision is not a hint.
+    """
+    assert "AN EXPLICIT LIMIT IN THE PROMPT IS BINDING" in SYSTEM_PROMPT
+    assert "dicts[:5]" in SYSTEM_PROMPT
+    assert "A limit is NOT a filter" in SYSTEM_PROMPT
+
+
+def test_prompt_keeps_a_row_whose_proposed_value_equals_the_current_one() -> None:
+    """A matching value is still a proposal row.
+
+    The operator is asked "do you want a suggestion as well?" for the entities
+    whose value already matches, so the script must be able to record those
+    rows: skipping them silently would make the answered question a no-op.
+    """
+    assert "A ROW WHOSE PROPOSED VALUE EQUALS THE CURRENT VALUE IS STILL A ROW" in SYSTEM_PROMPT
+    assert "Do NOT skip an entity because the value you would propose is already" in SYSTEM_PROMPT
+    assert "records a row for EVERY entity in the set, matching ones" in SYSTEM_PROMPT
+
+
+def test_prompt_scopes_the_skip_to_an_explicit_operator_request() -> None:
+    """Skipping the matching rows is allowed ONLY when the operator asked for
+    the differing ones — that is a scope decision about WHICH ROWS to propose,
+    not a decision about overwriting a value (the script never overwrites)."""
+    assert "Skip such a row ONLY when the operator explicitly asked for" in SYSTEM_PROMPT
+    assert "only the ones that differ" in SYSTEM_PROMPT
+    assert "the script never overwrites anything — it proposes" in SYSTEM_PROMPT

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from uwazi_admin_agent.domain.instance_paths import instance_paths
 
 
@@ -77,3 +79,22 @@ def test_building_the_paths_creates_nothing(tmp_path: Path) -> None:
     instance_paths("http://a", root)
 
     assert not root.exists()
+
+
+def test_an_empty_url_is_refused(tmp_path: Path) -> None:
+    """An unbound session has no instance: it must not get a shared bucket."""
+    root = _root(tmp_path)
+
+    for url in ("", "   "):
+        with pytest.raises(ValueError):
+            instance_paths(url, root)
+
+    assert not root.exists()
+
+
+def test_require_instance_url_returns_the_stripped_url() -> None:
+    from uwazi_admin_agent.domain.instance_paths import require_instance_url
+
+    assert require_instance_url("  http://a  ") == "http://a"
+    with pytest.raises(ValueError):
+        require_instance_url(None)

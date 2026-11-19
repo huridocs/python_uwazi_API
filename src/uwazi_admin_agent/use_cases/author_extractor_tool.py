@@ -132,17 +132,24 @@ class ExtractorFunction(BaseModel):
     unmatched_notes: str | None = Field(default=None, description="Notes on which samples/strategies failed, when any.")
 
 
-def author_html_extractor(ctx: RunContext[AdminAgentDeps], task: str) -> str:
+async def author_html_extractor(ctx: RunContext[AdminAgentDeps], task: str) -> str:
     """Run the nested extractor subagent on ``task`` (a precise description of the
     values to extract + the target template/properties). Returns the validated
     `def extract(html, ctx)` source wrapped in a fenced block, plus its coverage
-    stats. The generation agent embeds the source VERBATIM in the bulk script."""
+    stats. The generation agent embeds the source VERBATIM in the bulk script.
+
+    MUST be ``async``: pydantic-ai dispatches sync tools through a worker thread
+    and forbids a nested ``Agent.run_sync``/``run_stream_sync`` there
+    (``check_no_nested_sync_run``), so the sync form always failed with a
+    ``UserError`` that the tool reported as a string — the extractor was never
+    authored at all. Delegation is the documented async shape.
+    """
     deps: AdminAgentDeps = ctx.deps
     extractor_agent = deps.extractor_agent
     if extractor_agent is None:
         return "Error: extractor agent is not wired (extractor_agent is None); cannot author an extractor."
     try:
-        run = extractor_agent.run_sync(task, deps=deps, usage_limits=UsageLimits(request_limit=MAX_EXTRACTOR_LLM_CALLS))
+        run = await extractor_agent.run(task, deps=deps, usage_limits=UsageLimits(request_limit=MAX_EXTRACTOR_LLM_CALLS))
     except Exception as exc:  # noqa: BLE001 - surface subagent failure to the generation agent
         return f"Error: extractor subagent failed: {type(exc).__name__}: {exc}"
     output = getattr(run, "output", None)

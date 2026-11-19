@@ -79,13 +79,13 @@ def _entity_row(*, proposal_count: int = 2, discarded: int = 0, applied: int = 0
 def test_the_status_filter_translates_the_discarded_state() -> None:
     """There is no separate 'Discarded' filter: the Status one carries it."""
     f = filter_from_controls(status="discarded")
-    assert f.status is SuggestionStatus.DISCARDED
+    assert f.status == [SuggestionStatus.DISCARDED]
 
 
 def test_filter_from_controls_keeps_the_other_filters_intact() -> None:
     f = filter_from_controls(status="pending", op="update")
-    assert f.status is SuggestionStatus.PENDING
-    assert f.op == "update"
+    assert f.status == [SuggestionStatus.PENDING]
+    assert f.op == ["update"]
 
 
 # --- the row contract ----------------------------------------------------------
@@ -101,11 +101,11 @@ def test_a_partially_discarded_operation_is_not_discarded() -> None:
 
 
 def test_run_status_reads_discarded_for_a_refused_operation() -> None:
-    assert run_status(_entity_row(proposal_count=2, discarded=2)) == ("discarded", "red")
+    assert run_status(_entity_row(proposal_count=2, discarded=2)) == ("discarded", "red-9")
 
 
 def test_run_status_stays_pending_when_only_some_rows_are_discarded() -> None:
-    assert run_status(_entity_row(proposal_count=3, discarded=1)) == ("pending", "grey")
+    assert run_status(_entity_row(proposal_count=3, discarded=1)) == ("pending", "grey-8")
 
 
 def test_entity_row_carries_the_discard_flag_for_the_actions_cell() -> None:
@@ -209,7 +209,7 @@ def test_the_status_filter_reads_the_discarded_rows(store: SqliteSuggestionStore
         ]
     )
 
-    rows, total = store.query("run1", SuggestionFilter(status=SuggestionStatus.DISCARDED))
+    rows, total = store.query("run1", SuggestionFilter(status=[SuggestionStatus.DISCARDED]))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["a"]
@@ -223,7 +223,7 @@ def test_the_status_filter_reads_the_rest_away_from_the_discarded_rows(store: Sq
         ]
     )
 
-    rows, total = store.query("run1", SuggestionFilter(status=SuggestionStatus.PENDING))
+    rows, total = store.query("run1", SuggestionFilter(status=[SuggestionStatus.PENDING]))
 
     assert total == 1
     assert [row.shared_id for row in rows] == ["b"]
@@ -238,8 +238,8 @@ def test_the_entity_table_filters_the_operations_by_their_discard_state(store: S
         ]
     )
 
-    discarded_rows, discarded_total = store.entity_rows("run1", SuggestionFilter(status=SuggestionStatus.DISCARDED))
-    kept_rows, kept_total = store.entity_rows("run1", SuggestionFilter(status=SuggestionStatus.PENDING))
+    discarded_rows, discarded_total = store.entity_rows("run1", SuggestionFilter(status=[SuggestionStatus.DISCARDED]))
+    kept_rows, kept_total = store.entity_rows("run1", SuggestionFilter(status=[SuggestionStatus.PENDING]))
 
     assert (discarded_total, [row.shared_id for row in discarded_rows]) == (1, ["a"])
     assert (kept_total, [row.shared_id for row in kept_rows]) == (1, ["b"])

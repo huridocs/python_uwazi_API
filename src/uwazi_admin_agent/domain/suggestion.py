@@ -43,6 +43,8 @@ SuggestionOp = Literal[
     "update_and_delete",
     "create_and_delete",
     "info",
+    "matched",
+    "skipped",
 ]
 
 # The pseud-op the script uses to surface arbitrary text (a query's answer, a
@@ -50,6 +52,39 @@ SuggestionOp = Literal[
 # Uwazi: its rows are display-only and are never selectable, applied, or
 # reverted.
 INFO_OP: str = "info"
+
+# Display-only outcomes of a prediction pass. ``matched`` records an extracted
+# value that equals the value already stored in Uwazi; ``skipped`` records one
+# entity the script could not process, with the reason and any extracted
+# evidence. Neither proposes a write: both are excluded from selection and the
+# apply path, so they can never be mistaken for pending work.
+MATCHED_OP: str = "matched"
+SKIPPED_OP: str = "skipped"
+DISPLAY_ONLY_OPS: frozenset[str] = frozenset({INFO_OP, MATCHED_OP, SKIPPED_OP})
+
+# Human-readable skip reasons. The ids are stable contract values the generated
+# script passes to ``record_skipped``; the labels are what the review table
+# shows. Keeping the mapping here makes every surface use the same wording.
+SKIP_REASON_LABELS: dict[str, str] = {
+    "no_document": "No primary document is attached to this entity.",
+    "no_segmentation": "The primary document has no usable text segmentation.",
+    "no_page_1": "The segmentation has no readable first page.",
+    "no_code_in_page_1": "No matching document code was found on the first page.",
+    "extraction_error": "An error occurred while extracting the document code.",
+}
+
+
+def skip_reason_label(reason: str | None) -> str:
+    """The end-user sentence for one stable skip reason id (pure).
+
+    Unknown reasons (a future script) still read as a sentence instead of
+    leaking the raw contract id: the id is appended in parentheses so support
+    can identify it without the operator having to decode snake_case.
+    """
+    if not reason:
+        return "This entity was not processed; no reason was provided."
+    return SKIP_REASON_LABELS.get(reason, f"This entity was not processed ({reason.replace('_', ' ')}).")
+
 
 # Ops whose table rows carry a proposed property value (and so get current-value
 # hydration, inline editing, and the update/create apply payloads).
@@ -200,6 +235,14 @@ class Suggestion(BaseModel):
     )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
     current_value: Any = Field(default=None, description="Uwazi's current value for that key, when fetched.")
+    skip_reason: str | None = Field(
+        default=None,
+        description=(
+            "For a `skipped` row: the stable reason id (`no_document`, `no_segmentation`, "
+            "`no_page_1`, `no_code_in_page_1`, `extraction_error`). The UI maps it to a "
+            "descriptive sentence; the raw id stays available for filtering/support."
+        ),
+    )
     match: bool | None = Field(
         default=None,
         description=(
@@ -353,7 +396,13 @@ class SuggestionFilter(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    status: SuggestionStatus | None = Field(default=None, description="Only rows in this status.")
+    status: list[SuggestionStatus] | None = Field(
+        default=None,
+        description=(
+            "Only rows in these statuses (the review table's multi-select Status filter). "
+            "An explicit empty list matches NOTHING."
+        ),
+    )
     include_obsolete: bool = Field(
         default=False,
         description=(
@@ -362,7 +411,12 @@ class SuggestionFilter(BaseModel):
             "obsolete status explicitly always shows them."
         ),
     )
-    op: str | None = Field(default=None, description="Only rows of this op.")
+    op: list[str] | None = Field(
+        default=None,
+        description=(
+            "Only rows of these ops (the review table's multi-select Op filter). An explicit empty list matches NOTHING."
+        ),
+    )
     property_name: str | None = Field(default=None, description="Only rows for this property (or '_title').")
     match: Literal["exact", "mismatch", "new"] | None = Field(
         default=None,
@@ -459,6 +513,15 @@ class PredictionPass(BaseModel):
     error: str | None = Field(default=None, description="Why the pass aborted/failed, when it did.")
     created_at: datetime | None = Field(default=None, description="When the pass started.")
     finished_at: datetime | None = Field(default=None, description="When the pass reached a terminal state.")
+    refused_commit: bool = Field(
+        default=False,
+        description=(
+            "The pass ran cleanly but its plan has NOTHING the operator can run (a 'changes' plan of "
+            "info rows only). Nothing was merged, so the run's previous table — and its previous "
+            "script — are unchanged; the message says why. Separate from ``error`` because a refused "
+            "commit leaves a USABLE table, while a failure leaves none."
+        ),
+    )
 
 
 def entity_language_key(shared_id: str, language: str | None) -> str:
@@ -474,9 +537,11 @@ def entity_language_key(shared_id: str, language: str | None) -> str:
 
 __all__ = [
     "CREATE_OPS",
+    "DISPLAY_ONLY_OPS",
     "EntityReviewRow",
     "FILE_OPS",
     "INFO_OP",
+    "MATCHED_OP",
     "MERGE_OPS",
     "MOVE_OP",
     "OperationReviewRow",
@@ -484,6 +549,8 @@ __all__ = [
     "PredictionAttemptStatus",
     "PredictionPass",
     "REVERT_RECREATES_OPS",
+    "SKIP_REASON_LABELS",
+    "SKIPPED_OP",
     "Suggestion",
     "SuggestionFilter",
     "SuggestionOp",
@@ -491,4 +558,5 @@ __all__ = [
     "TITLE_PROPERTY",
     "UPDATE_OPS",
     "entity_language_key",
+    "skip_reason_label",
 ]

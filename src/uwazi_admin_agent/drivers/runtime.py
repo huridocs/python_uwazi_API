@@ -55,9 +55,9 @@ from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
-from uwazi_admin_agent.adapters.thesaurus_value_adapter import UwaziThesaurusValues
 from uwazi_admin_agent.adapters.template_property_adapter import UwaziTemplatePropertyLookup
 from uwazi_admin_agent.adapters.template_property_type_adapter import UwaziTemplatePropertyTypes
+from uwazi_admin_agent.adapters.thesaurus_value_adapter import UwaziThesaurusValues
 from uwazi_admin_agent.adapters.translation_repository_adapter import (
     CachedTranslationRepository,
     UwaziTranslationRepository,
@@ -73,7 +73,7 @@ from uwazi_admin_agent.configuration import (
 )
 from uwazi_admin_agent.domain.file_cache import instance_dir_name
 from uwazi_admin_agent.domain.instance import parse_instance_urls
-from uwazi_admin_agent.domain.instance_paths import instance_paths
+from uwazi_admin_agent.domain.instance_paths import instance_paths, require_instance_url
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.drift_probe_port import DriftProbePort
@@ -189,15 +189,26 @@ def default_instance_url() -> str:
     return urls[0]
 
 
+def _instance_url_or_default(url: str | None) -> str:
+    """The explicit URL, or the CLI default when the argument is OMITTED.
+
+    Only ``None`` means "the CLI did not choose one". An explicit empty string
+    (a logged-out web session) is never silently redirected to the first
+    configured instance: that is another instance's data.
+    """
+    return require_instance_url(default_instance_url() if url is None else url)
+
+
 def build_backup_store(url: str | None = None, root: Path | None = None) -> BackupStorePort:
     """Return a :class:`FilesystemBackupStore` rooted at the instance's runs dir.
 
     ``url`` defaults to :func:`default_instance_url` (the CLI's single-instance
-    default); every WEB caller passes the session's instance URL explicitly.
+    default); every WEB caller passes the session's instance URL explicitly and
+    an empty URL raises instead of falling back.
     """
     if root is not None:
         return FilesystemBackupStore(Path(root))
-    return FilesystemBackupStore(instance_paths(url or default_instance_url(), INSTANCE_IDS_DIR).runs_path)
+    return FilesystemBackupStore(instance_paths(_instance_url_or_default(url), INSTANCE_IDS_DIR).runs_path)
 
 
 def build_audit_log(url: str | None = None, root: Path | None = None) -> AuditLogPort:
@@ -208,7 +219,7 @@ def build_audit_log(url: str | None = None, root: Path | None = None) -> AuditLo
     """
     if root is not None:
         return JsonlAuditLog(Path(root))
-    return JsonlAuditLog(instance_paths(url or default_instance_url(), INSTANCE_IDS_DIR).runs_path)
+    return JsonlAuditLog(instance_paths(_instance_url_or_default(url), INSTANCE_IDS_DIR).runs_path)
 
 
 def build_file_cache(url: str) -> FileCacheStore | None:
@@ -244,9 +255,11 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
 
     Explicit ``user``/``password``/``url`` win when given; otherwise the
     credentials fall back to ``UWAZI_USER``/``UWAZI_PASSWORD`` and the URL to
-    :func:`default_instance_url` (the CLI's single-instance default).
+    :func:`default_instance_url` (the CLI's single-instance default). An
+    explicitly EMPTY url raises: a logged-out web session has no instance, and
+    serving it the first configured one would leak another instance's data.
     """
-    url = url or default_instance_url()
+    url = _instance_url_or_default(url)
     user = user if user is not None else os.environ["UWAZI_USER"]
     password = password if password is not None else os.environ["UWAZI_PASSWORD"]
 
@@ -296,6 +309,11 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
         # it never asks which languages exist.
         settings_api=api,
         search_probe=search_probe,
+        # Generation-time file sampling (peek_entity_files / benchmark_extractor)
+        # reads the RAW entity rows (the validated AgentEntity strips documents /
+        # attachments), so this repository must be on the deps — without it both
+        # tools degrade to "not wired" and an extraction task cannot sample.
+        entity_repository=entity_repository,
         file_repository=file_repository,
         segmentation_repository=segmentation_repository,
         url_fetcher=url_fetcher,

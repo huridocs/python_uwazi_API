@@ -28,10 +28,13 @@ from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.property_language_scope import is_per_language_property_type
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    DISPLAY_ONLY_OPS,
     INFO_OP,
+    MATCHED_OP,
     MERGE_OPS,
     MOVE_OP,
     PROPERTY_OPS,
+    SKIPPED_OP,
     TITLE_PROPERTY,
     UPDATE_OPS,
     Suggestion,
@@ -122,6 +125,8 @@ def _record_shared_id(record: dict[str, Any], index: int) -> str:
         return str(record.get("to_shared_id") or "")
     if not shared_id and record.get("op") == INFO_OP:
         return f"info-{index}"
+    if not shared_id and record.get("op") == SKIPPED_OP:
+        return f"skipped-{index}"
     return shared_id
 
 
@@ -239,6 +244,8 @@ def _as_op(raw: Any) -> SuggestionOp | None:
         "update_and_delete",
         "create_and_delete",
         INFO_OP,
+        MATCHED_OP,
+        SKIPPED_OP,
     ):
         return value  # type: ignore[return-value] — the literal set above matches SuggestionOp exactly
     return None
@@ -432,9 +439,10 @@ def records_to_suggestions(
     merge_sources = {source for merge in merges.values() for source in merge.source_shared_ids}
     anchored_targets: set[str] = set()
     # A plan that records ANY change explains itself through its operations.
-    # Info rows in such a plan are dropped unless explicitly marked ``keep``, so
-    # a stray "moved 2 files" summary cannot bury the actual change rows.
-    has_changes = any(_as_op(record.get("op")) not in (None, INFO_OP) for record in records)
+    # Info/match/skip rows in such a plan are display-only observations; they are
+    # dropped unless explicitly marked ``keep``, so a stray "moved 2 files"
+    # summary cannot bury the actual change rows.
+    has_changes = any(_as_op(record.get("op")) not in (None, *DISPLAY_ONLY_OPS) for record in records)
 
     for index, record in enumerate(records):
         op = _as_op(record.get("op"))
@@ -527,6 +535,41 @@ def records_to_suggestions(
                 )
             continue
 
+        if op == SKIPPED_OP:
+            # ONE display-only row PER ENTITY. Unlike an info bucket, a skip
+            # belongs to a real entity, so it can link to Uwazi, carry the
+            # reason and be filtered/paged like any other outcome. It proposes
+            # no write and is excluded from every action path.
+            reason = str(record.get("reason") or "").strip() or None
+            suggestions.append(
+                Suggestion(
+                    **base,
+                    property_name=None,
+                    language=None,
+                    proposed_value=record.get("detail"),
+                    skip_reason=reason,
+                )
+            )
+            continue
+
+        if op == MATCHED_OP:
+            # A script may report a match explicitly (the extraction helper
+            # does); normally the no-op filter derives it from a matched
+            # update. Keep the entity and its values so it is visible.
+            suggestions.append(
+                Suggestion(
+                    **base,
+                    property_name=record.get("property_name"),
+                    language=record.get("language"),
+                    proposed_value=record.get("proposed_value"),
+                    current_value=record.get("current_value"),
+                    skip_reason=None,
+                    match=True,
+                    status=SuggestionStatus.PENDING,
+                )
+            )
+            continue
+
         if op in PROPERTY_OPS:
             record_metadata = record.get("metadata")
             metadata: dict[str, Any] = record_metadata if isinstance(record_metadata, dict) else {}
@@ -609,10 +652,10 @@ def drop_unchanged_property_rows(suggestions: list[Suggestion]) -> list[Suggesti
     """Remove property rows whose proposed value EQUALS the current value (pure).
 
     Hydration fills ``match`` after the records are converted, so this runs on
-    the hydrated rows. A no-op property row is not a change: showing it offers
-    the operator a "value → same value" suboperation that says nothing, and
-    pushing it would send a pointless write. Such rows are dropped here at the
-    source instead of being hidden in one of the two review surfaces.
+    the hydrated rows. A no-op property row is not a change: pushing it would
+    send a pointless write. Instead of hiding it, the row becomes a display-only
+    ``matched`` operation carrying the extracted and current values, so the
+    operator can see that the extraction succeeded and needed no write.
 
     A merge whose target writes are ALL no-ops keeps ONE propertyless anchor
     row. The merge still has two real actions — copying the sources' files and
@@ -638,6 +681,22 @@ def drop_unchanged_property_rows(suggestions: list[Suggestion]) -> list[Suggesti
             kept.append(suggestion)
             continue
         if suggestion.op not in MERGE_OPS:
+            # A plain update/create whose value is already stored: keep its
+            # evidence as a read-only row instead of silently discarding the
+            # fact that the extraction found and compared a value.
+            kept.append(
+                suggestion.model_copy(
+                    update={
+                        "op": MATCHED_OP,
+                        "detail_key": suggestion.detail_key or suggestion.property_name,
+                        "status": SuggestionStatus.PENDING,
+                        "edited_value": None,
+                        "rejected_values": [],
+                        "discard_reason": None,
+                        "reviewed_at": None,
+                    }
+                )
+            )
             continue
         key = (suggestion.shared_id, suggestion.op)
         if key not in anchors or key in anchored:
@@ -651,6 +710,7 @@ def drop_unchanged_property_rows(suggestions: list[Suggestion]) -> list[Suggesti
                     "detail_key": None,
                     "proposed_value": None,
                     "current_value": None,
+                    "skip_reason": None,
                     "match": None,
                 }
             )

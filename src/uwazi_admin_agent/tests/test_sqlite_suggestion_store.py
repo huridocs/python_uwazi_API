@@ -80,13 +80,13 @@ def test_build_where_always_scopes_to_run() -> None:
 def test_build_where_appends_only_set_predicates() -> None:
     sql, params = build_where(
         SuggestionFilter(
-            status=SuggestionStatus.PENDING, op="update", property_name="excerpt", match="mismatch", text="foo"
+            status=[SuggestionStatus.PENDING], op=["update"], property_name="excerpt", match="mismatch", text="foo"
         ),
         "run1",
     )
     assert params == ["run1", "pending", "update", "excerpt", 0, "%foo%", "%foo%"]
-    assert "status = ?" in sql
-    assert "op = ?" in sql
+    assert "status IN (?)" in sql
+    assert "op IN (?)" in sql
     assert "property_name = ?" in sql
     assert "match_state = ?" in sql
     assert "LIKE ?" in sql
@@ -234,7 +234,7 @@ def test_query_filters_by_status_op_property_match_and_text(store: SqliteSuggest
     assert store.query("run1", SuggestionFilter(match="mismatch"))[1] == 1
     assert store.query("run1", SuggestionFilter(match="exact"))[1] == 1
     assert store.query("run1", SuggestionFilter(match="new"))[1] == 2  # a3 + a4 (NULL match_state)
-    assert store.query("run1", SuggestionFilter(op="delete"))[1] == 1
+    assert store.query("run1", SuggestionFilter(op=["delete"]))[1] == 1
     assert store.query("run1", SuggestionFilter(text="beta"))[1] == 1  # title LIKE, case-insensitive
     assert store.query("run1", SuggestionFilter(text="a4"))[1] == 1  # shared_id LIKE
 
@@ -362,7 +362,7 @@ def test_set_status_by_filter_honors_the_filter(store: SqliteSuggestionStore) ->
     counts = store.counts("run1")
     assert counts["discarded"] == 1
     assert counts["pending"] == 1
-    discarded = store.query("run1", SuggestionFilter(status=SuggestionStatus.DISCARDED))[0]
+    discarded = store.query("run1", SuggestionFilter(status=[SuggestionStatus.DISCARDED]))[0]
     assert discarded[0].discard_reason == "mismatch"
 
 
@@ -391,6 +391,22 @@ def test_property_names_are_distinct_and_sorted(store: SqliteSuggestionStore) ->
         ]
     )
     assert store.property_names("run1") == ["alpha", "zebra"]
+
+
+def test_op_status_counts_group_the_run_rows(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="s1", op="update"),
+            _suggestion(shared_id="s2", op="update"),
+            _suggestion(shared_id="s3", op="delete", property_name=None),
+            _suggestion(shared_id="s4", op="update", status=SuggestionStatus.DISCARDED),
+        ]
+    )
+    counts = store.op_status_counts("run1")
+    assert counts["op"] == {"update": 3, "delete": 1}
+    assert counts["status"] == {"pending": 3, "discarded": 1}
+    # Another run's rows never leak into this run's option counts.
+    assert store.op_status_counts("run2") == {"op": {}, "status": {}}
 
 
 def test_shared_ids_projection_honors_the_filter_and_ignores_paging(store: SqliteSuggestionStore) -> None:

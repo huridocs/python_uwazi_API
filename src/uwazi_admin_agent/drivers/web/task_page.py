@@ -14,15 +14,30 @@ from __future__ import annotations
 from typing import Any
 
 from loguru import logger
-from nicegui import app, background_tasks, context, ui
+from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.domain.task import StepView, TaskView
-from uwazi_admin_agent.drivers.web.operation_gate import busy_text, release, snapshot, try_acquire
+from uwazi_admin_agent.drivers.web.operation_gate import (
+    busy_text,
+    release,
+    release_runs,
+    run_claim,
+    run_claim_text,
+    snapshot,
+    try_acquire,
+    try_claim_runs,
+)
 from uwazi_admin_agent.drivers.web.run_service import (
     revert_run,
     task_view,
 )
-from uwazi_admin_agent.drivers.web.session import session_instance_url
+from uwazi_admin_agent.drivers.web.session import (
+    bind_client_instance,
+    credentials_for_instance,
+    page_instance_url,
+    session_credentials,
+    session_is_active,
+)
 
 _STEP_COLORS: dict[str, str] = {
     "planned": "grey",
@@ -38,7 +53,7 @@ _STEP_COLORS: dict[str, str] = {
 @ui.page("/task/{task_id}")
 def task_page(task_id: str) -> None:
     """Render the task page (login required)."""
-    if not app.storage.user.get("user"):
+    if session_credentials() is None:
         ui.navigate.to("/")
         return
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
@@ -46,15 +61,17 @@ def task_page(task_id: str) -> None:
 
 
 def _build_page(task_id: str) -> None:
+    bind_client_instance()
+    instance = page_instance_url()
     try:
-        view = task_view(session_instance_url(), task_id)
+        view = task_view(instance, task_id)
     except Exception as exc:  # noqa: BLE001 — a missing task shows an error, never a crash
         with ui.column().classes("w-full items-center justify-center min-h-screen"):
             ui.label(f"Cannot open task {task_id!r}: {exc}").classes("text-body1 text-negative")
             ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat")
         return
 
-    state: dict[str, Any] = {"task_id": task_id, "view": view, "cards": {}}
+    state: dict[str, Any] = {"task_id": task_id, "instance_url": instance, "view": view, "cards": {}}
 
     with ui.header().classes("items-center justify-between"):
         with ui.row().classes("items-center"):
@@ -144,22 +161,29 @@ def _revert_task(state: dict[str, Any]) -> None:
 
 
 async def _run_revert_task(state: dict[str, Any]) -> None:
-    user = app.storage.user.get("user")
-    password = app.storage.user.get("password")
-    if not user or not password:
+    instance = state["instance_url"]
+    credentials = credentials_for_instance(instance)
+    if credentials is None:
         ui.notify("Not logged in to Uwazi", type="negative")
         return
-    # Whole-task reverts write Uwazi too, so they ride the same one-slot gate
-    # the review pages' actions hold: no revert sequence may overlap a Run,
-    # a Revert or a refresh that is still in flight.
-    if not try_acquire("revert", state["task_id"]):
-        ui.notify(busy_text(snapshot()), type="warning", multi_line=True)
-        return
     view: TaskView = state["view"]
+    run_ids = [run_id for _kind, run_id in view.revert_targets]
+    # A whole-task revert writes Uwazi for several runs in sequence. It claims
+    # every target run atomically and then THIS instance's single write slot:
+    # another instance's pass is never a conflict, but a Run/Revert already in
+    # flight on this instance must finish first.
+    if not try_claim_runs(instance, run_ids, "revert"):
+        busy = next((claim for claim in map(lambda rid: run_claim(instance, rid), run_ids) if claim), None)
+        ui.notify(run_claim_text(busy), type="warning", multi_line=True)
+        return
+    if not try_acquire(instance, "revert", state["task_id"]):
+        ui.notify(busy_text(snapshot(instance)), type="warning", multi_line=True)
+        release_runs(instance, run_ids, "revert")
+        return
     done: list[str] = []
     try:
         for kind, run_id in view.revert_targets:
-            await revert_run(session_instance_url(), run_id, user, password)
+            await revert_run(instance, run_id, credentials.user, credentials.password)
             done.append(f"{kind} {run_id}")
         ui.notify(f"Task reverted ({len(done)} run(s))", type="positive")
     except Exception as exc:  # noqa: BLE001 — leave the remainder visible for retry
@@ -170,14 +194,17 @@ async def _run_revert_task(state: dict[str, Any]) -> None:
             multi_line=True,
         )
     finally:
-        release("revert", state["task_id"])
+        release(instance, "revert", state["task_id"])
+        release_runs(instance, run_ids, "revert")
         _reload(state)
 
 
 def _reload(state: dict[str, Any]) -> None:
     """Re-read the task view and re-render the step cards."""
+    if not session_is_active(state["instance_url"]):
+        return
     try:
-        state["view"] = task_view(session_instance_url(), state["task_id"])
+        state["view"] = task_view(state["instance_url"], state["task_id"])
         _render_steps(state)
     except Exception:  # noqa: BLE001 — a refresh failure must not break the page
         logger.exception("task refresh failed")

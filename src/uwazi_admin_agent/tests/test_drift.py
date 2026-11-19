@@ -11,7 +11,12 @@ from uwazi_admin_agent.domain.drift import (
     build_report,
     max_live_edit_date,
 )
-from uwazi_admin_agent.drivers.web.review_view import DRIFT_STATUS_COLORS, drift_banner_text, drift_banner_time
+from uwazi_admin_agent.drivers.web.review_view import (
+    DRIFT_STATUS_COLORS,
+    drift_banner_text,
+    drift_banner_time,
+    drift_text_classes,
+)
 from uwazi_admin_agent.drivers.web.run_service import _drift_detail
 
 
@@ -159,7 +164,11 @@ def test_banner_texts() -> None:
     # checking wins over any verdict
     assert drift_banner_text(status=DriftStatus.VALID.value, detail=None, checking=True) == "Checking drift…"
     # the banner color map covers every verdict
-    assert DRIFT_STATUS_COLORS[DriftStatus.DRIFTED.value] == "orange"
+    assert DRIFT_STATUS_COLORS[DriftStatus.DRIFTED.value] == "red"
+    # the OUT OF DATE message itself is red, not just its icon
+    assert drift_text_classes(DRIFT_STATUS_COLORS[DriftStatus.DRIFTED.value]) == "text-body2 text-red grow"
+    # the resting state stays grey
+    assert drift_text_classes(DRIFT_STATUS_COLORS[DriftStatus.UNKNOWN.value]) == "text-body2 text-grey-7 grow"
 
 
 def test_banner_time_formats() -> None:

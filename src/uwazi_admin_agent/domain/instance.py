@@ -46,6 +46,17 @@ def instance_key(url: str) -> str:
     return hashlib.sha1(_normalized(url).encode("utf-8")).hexdigest()[:16]
 
 
+def same_instance(a: str, b: str) -> bool:
+    """True when two URLs name the same instance (normalized identity).
+
+    Empty URLs never match: an unbound session must not receive another
+    instance's notifications.
+    """
+    if not a or not b:
+        return False
+    return instance_key(a) == instance_key(b)
+
+
 def instance_slug(url: str) -> str:
     """A human-readable, filesystem-safe directory name for one instance.
 

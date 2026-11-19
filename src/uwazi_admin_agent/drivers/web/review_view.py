@@ -22,7 +22,9 @@ from uwazi_admin_agent.domain.metadata_diff import (
 )
 from uwazi_admin_agent.domain.suggestion import (
     FILE_OPS,
+    MATCHED_OP,
     PROPERTY_OPS,
+    SKIPPED_OP,
     TITLE_PROPERTY,
     EntityReviewRow,
     Suggestion,
@@ -32,31 +34,60 @@ from uwazi_admin_agent.domain.suggestion import (
 )
 
 # Column/table op and status colors (the UI maps these onto Quasar badges).
+# Badges render WHITE text on the color, so every value here is a DARK shade:
+# the base palette colors (green, orange, amber, grey) sit at ~2:1 contrast
+# with white and are hard to read. These shades keep at least ~4.5:1.
 STATUS_COLORS: dict[str, str] = {
-    "pending": "grey",
-    "accepted": "green",
-    "edited": "teal",
-    "discarded": "red",
-    "applied": "blue",
+    "pending": "grey-8",
+    "accepted": "green-9",
+    "edited": "teal-9",
+    "discarded": "red-9",
+    "applied": "blue-9",
     "reverted": "indigo",
-    "obsolete": "grey-6",
+    "obsolete": "grey-7",
 }
 
 OP_COLORS: dict[str, str] = {
-    "update": "primary",
-    "create": "secondary",
+    "update": "blue-9",
+    "create": "cyan-10",
     "delete": "negative",
-    "publish": "positive",
-    "unpublish": "orange",
-    "set_publish_status": "orange",
+    "publish": "green-9",
+    "unpublish": "deep-orange-10",
+    "set_publish_status": "deep-orange-10",
     "create_relationships": "purple",
-    "move_files": "teal",
+    "move_files": "teal-9",
     "update_and_delete": "deep-purple",
     "create_and_delete": "indigo",
-    "info": "blue-grey",
+    "info": "blue-grey-8",
+    "matched": "green-9",
+    "skipped": "deep-orange-10",
 }
 
-MATCH_COLORS: dict[str, str] = {"exact": "green", "mismatch": "red", "new": "grey-6", "mixed": "orange", "n/a": "grey-4"}
+# The human labels of the Op filter. Kept beside the colors so the control and
+# the badges agree on what each op is called.
+OP_LABELS: dict[str, str] = {
+    "update": "update",
+    "create": "create",
+    "delete": "delete",
+    "publish": "publish",
+    "unpublish": "unpublish",
+    "set_publish_status": "set publish status",
+    "create_relationships": "create relationships",
+    "move_files": "move files",
+    "update_and_delete": "merge (update + delete)",
+    "create_and_delete": "merge (create + delete)",
+    "info": "information",
+    "matched": "matched Uwazi value",
+    "skipped": "not processed",
+}
+
+MATCH_COLORS: dict[str, str] = {
+    "exact": "green-9",
+    "mismatch": "red-9",
+    "new": "grey-7",
+    "mixed": "deep-orange-10",
+    "n/a": "blue-grey-7",
+}
 
 # The entity table's Run column: has this entity's recorded work been written
 # to Uwazi yet? Reuses the per-row statuses' colors ('applied' blue, 'pending'
@@ -64,19 +95,21 @@ MATCH_COLORS: dict[str, str] = {"exact": "green", "mismatch": "red", "new": "gre
 # 'discarded' red, the state an operation the operator refused to execute ends
 # up in.
 RUN_STATUS_COLORS: dict[str, str] = {
-    "applied": "blue",
+    "applied": "blue-9",
     "reverted": "indigo",
-    "pending": "grey",
-    "discarded": "red",
-    "obsolete": "grey-6",
-    "info": "blue-grey",
+    "pending": "grey-8",
+    "discarded": "red-9",
+    "obsolete": "grey-7",
+    "info": "blue-grey-8",
+    "matched": "green-9",
+    "skipped": "deep-orange-10",
 }
 
 
 # Ops whose entity ALREADY EXISTS in Uwazi, so the review row can link to its
 # public page. A create row still holds its dry-created placeholder, so
 # opening it would land on nothing.
-OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files"})
+OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files", MATCHED_OP, SKIPPED_OP})
 
 # Ops whose per-entity undo is NOT an in-place restore of one live entity, so
 # their rows never offer the Revert icon: a `delete` row's undo is a re-create
@@ -104,6 +137,8 @@ RUN_OP_PHRASES: dict[str, str] = {
     "move_files": "Add files",
     "update_and_delete": "Merge (update + delete)",
     "create_and_delete": "Merge (create + delete)",
+    "matched": "Already matches Uwazi",
+    "skipped": "Not processed",
 }
 
 
@@ -394,24 +429,57 @@ def suggestion_to_row(suggestion: Suggestion) -> dict[str, Any]:
         "shared_id": suggestion.shared_id,
         "title": suggestion.entity_title or suggestion.shared_id,
         "op": suggestion.op,
-        "op_color": OP_COLORS.get(suggestion.op, "grey"),
+        "op_color": OP_COLORS.get(suggestion.op, "grey-7"),
         "property": suggestion.property_name or "—",
         "proposed": truncate(suggestion.proposed_value),
         "current": truncate(suggestion.current_value),
         "match": label,
-        "match_color": MATCH_COLORS.get(label, "grey"),
+        "match_color": MATCH_COLORS.get(label, "grey-7"),
         "status": suggestion.status.value,
-        "status_color": STATUS_COLORS.get(suggestion.status.value, "grey"),
+        "status_color": STATUS_COLORS.get(suggestion.status.value, "grey-7"),
         "editable": suggestion.op in PROPERTY_OPS,
     }
 
 
+def _selection(value: str | list[str] | tuple[str, ...] | None) -> list[str] | None:
+    """Normalize a select value to a list (``None`` when nothing is selected)."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
+def filter_options(
+    labels: dict[str, str],
+    counts: dict[str, int],
+    selected: list[str] | str | None,
+) -> dict[str, str]:
+    """Options of a COUNTED filter control: only present values, each with its count.
+
+    ``labels`` fixes the display order and wording; a value is listed when the
+    run actually has rows for it (``counts``). The label reads
+    ``update (1,204)``.
+
+    A SELECTED value is always kept, even when its count dropped to zero: a
+    rebuild after an action must not silently clear a filter that is still set.
+    """
+    selected_values = _selection(selected) or []
+    options: dict[str, str] = {}
+    for value, label in labels.items():
+        if value in counts or value in selected_values:
+            options[value] = f"{label} ({counts.get(value, 0):,})"
+    for value in selected_values:
+        if value not in options:
+            options[value] = f"{value} ({counts.get(value, 0):,})"
+    return options
+
+
 def filter_from_controls(
     *,
-    status: str = "",
-    op: str = "",
+    status: str | list[str] = "",
+    op: str | list[str] = "",
     property_name: str = "",
-    match: str = "",
     text: str = "",
     language: str = "",
     offset: int = 0,
@@ -423,20 +491,23 @@ def filter_from_controls(
 ) -> SuggestionFilter:
     """Build the server-side filter from the page's raw control values (pure).
 
-    Empty strings mean "no constraint" — the UI's select controls use "" for
-    their "all" option, and translating that here keeps the page's handlers
-    trivial. ``language`` narrows the SUBOPERATIONS to one written language (the
-    language-independent rows are their own group and are not matched).
-    ``shared_ids`` is the table's checkbox selection passed through verbatim
-    (``None`` = no constraint, ``[]`` = match nothing). ``sort_by``/``sort_desc``
-    are the always-visible sort control's state; the store orders the WHOLE
-    filtered set, so the order holds across pages.
+    Empty selections mean "no constraint" — the single-value selects use "" for
+    their "all" option and the multi-selects use an empty list, and translating
+    both here keeps the page's handlers trivial. ``status``/``op`` accept one
+    value or a list (the Op and Status controls are multi-selects). ``language``
+    narrows the SUBOPERATIONS to one written language (the language-independent
+    rows are their own group and are not matched). ``shared_ids`` is the table's
+    checkbox selection passed through verbatim (``None`` = no constraint, ``[]``
+    = match nothing). ``sort_by``/``sort_desc`` are the always-visible sort
+    control's state; the store orders the WHOLE filtered set, so the order holds
+    across pages.
     """
+    statuses = _selection(status)
+    ops = _selection(op)
     return SuggestionFilter(
-        status=SuggestionStatus(status) if status else None,
-        op=op or None,
+        status=[SuggestionStatus(s) for s in statuses] if statuses else None,
+        op=ops,
         property_name=property_name or None,
-        match=match or None,  # type: ignore[arg-type] — validated by the pydantic Literal
         text=(text or "").strip() or None,
         languages=[language] if language else None,
         accepted_only=accepted_only,
@@ -559,7 +630,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
         "language": item.language or "",
         "template": truncate(", ".join(item.template_names) or "—", 28),
         "ops": ", ".join(item.ops),
-        "op_colors": [OP_COLORS.get(op, "grey") for op in item.ops],  # used by the slot
+        "op_colors": [OP_COLORS.get(op, "grey-7") for op in item.ops],  # used by the slot
         "url": entity_open_url(item, uwazi_url),  # used by the title cell's open-in-Uwazi icon
         "run_status": status_label,
         "run_status_color": status_color,  # used by the slot
@@ -615,10 +686,14 @@ def pending_suboperation_count(counts: dict[str, int]) -> int:
 
 # --- drift banner ------------------------------------------------------------
 
+# The verdict's color, used for BOTH the banner icon and the banner TEXT.
+# "drifted" is red on purpose: an out-of-date table is the one state the
+# operator must not miss, and orange reads as "advisory" next to a green
+# "up to date" badge.
 DRIFT_STATUS_COLORS: dict[str, str] = {
-    "unknown": "grey-6",
+    "unknown": "grey-7",
     "valid": "green",
-    "drifted": "orange",
+    "drifted": "red",
     "error": "red",
     "checking": "blue",
 }
@@ -642,6 +717,16 @@ def drift_banner_text(*, status: str, detail: str | None, checking: bool = False
     if detail:
         return f"{text} — {detail}"
     return text
+
+
+def drift_text_classes(color: str) -> str:
+    """The drift banner TEXT's class list for one verdict color (pure).
+
+    The banner's text carries the verdict color too, not just its icon: a
+    red "Out of date" line is the whole point of the banner. ``color`` is a
+    Quasar/Tailwind color name (``grey-7`` for the resting state).
+    """
+    return f"text-body2 text-{color} grow"
 
 
 def drift_banner_time(checked_at: Any) -> str:
@@ -706,9 +791,11 @@ __all__ = [
     "ACTIONS_COLUMN",
     "CURRENCY_SYMBOL",
     "MATCH_COLORS",
+    "MATCHED_OP",
     "MODIFIED_COLUMN",
     "OPENABLE_OPS",
     "OP_COLORS",
+    "OP_LABELS",
     "OPERATION_SORT_OPTIONS",
     "OPS_COLUMN",
     "RUN_OP_PHRASES",
@@ -716,6 +803,7 @@ __all__ = [
     "SHARED_ID_CLASS",
     "SHARED_ID_CSS",
     "SHARED_ID_MAX_CHARS",
+    "SKIPPED_OP",
     "STATUS_COLUMN",
     "STATUS_COLORS",
     "TEMPLATE_COLUMN",
@@ -727,11 +815,13 @@ __all__ = [
     "discard_confirmation",
     "drift_banner_text",
     "drift_banner_time",
+    "drift_text_classes",
     "entity_is_discarded",
     "entity_row",
     "entity_open_url",
     "entity_language_key",
     "filter_from_controls",
+    "filter_options",
     "format_cost",
     "match_label",
     "modified_label",

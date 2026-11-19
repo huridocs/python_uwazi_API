@@ -6,9 +6,9 @@ clarifications (both read-only context), then the operator types free-form
 requests. A request is recorded as one OPERATOR message: its text is the
 prompt, and once the clarification step's answers are resolved they are folded
 into that SAME text in the wizard's ``Clarifications (resolved during
-validation):`` format. The optional assistant-turn model (:class:`ChatTurn`)
-remains available for an assistant that answers with a summary, questions and
-a revised prompt.
+validation):`` format. The clarification step's own restatement of the request
+and the questions it asked are recorded as ASSISTANT messages, so the generation
+LLM receives them together with the requests and every earlier turn.
 
 The rendering helpers are PURE (no I/O) so the shapes that matter — what the
 assistant sees when the chat is replayed, and what the generation LLM receives
@@ -66,16 +66,6 @@ class ChatMessage(BaseModel):
     revised_prompt: str | None = None
 
 
-class ChatTurn(BaseModel):
-    """One assistant answer: the questions it raised + the prompt it proposes."""
-
-    model_config = ConfigDict(frozen=True)
-
-    summary: str = Field(description="What the assistant understood the request to mean.")
-    questions: list[ClarifyingQuestion] = Field(default_factory=list)
-    revised_prompt: str = Field(description="The full revised prompt, ready to be sent to the generation LLM.")
-
-
 _HEADINGS: dict[ChatRole, str] = {
     ChatRole.OPERATOR: "## Operator",
     ChatRole.ASSISTANT: "## Assistant",
@@ -115,27 +105,6 @@ def render_chat_message(message: ChatMessage) -> str:
 def build_chat_history(messages: list[ChatMessage]) -> str:
     """Render the chat so far as one plain-text block (pure)."""
     return "\n\n".join(render_chat_message(message) for message in messages)
-
-
-def render_question_answers(answers: list[QuestionAnswer]) -> str:
-    """Render the operator's ticked answers as the next chat request (pure).
-
-    The text is what the operator "says" after answering a turn's clarifying
-    questions, so it is recorded as an OPERATOR message. Questions with neither
-    a ticked option nor a custom answer are omitted: the operator skipped them,
-    and the assistant can ask again.
-    """
-    lines: list[str] = ["Answers to your clarifying questions:"]
-    for answer in answers:
-        custom = (answer.custom or "").strip()
-        if not answer.selected and not custom:
-            continue
-        lines.append(f"- {answer.question}")
-        for option in answer.selected:
-            lines.append(f"  - {option}")
-        if custom:
-            lines.append(f"  - {custom}")
-    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _split_validation(text: str) -> tuple[str, str]:
@@ -261,6 +230,70 @@ def mark_prompts_applied(messages: list[ChatMessage]) -> list[ChatMessage]:
     ]
 
 
+def build_compaction_input(messages: list[ChatMessage]) -> str:
+    """The text the compaction LLM receives: the WHOLE chat, labeled (pure).
+
+    It reuses :func:`build_final_prompt_from_chat` — the SAME folding the
+    generation LLM receives — and splits it back into its two parts, so the
+    compactor sees the original prompt (with its resolved clarifications) and
+    the conversation as SEPARATE sections. The compactor needs that split: the
+    conversation alone does not say what the run was, and the original prompt
+    alone does not say what changed.
+    """
+    folded = build_final_prompt_from_chat(messages)
+    head, _, conversation = folded.partition(_CONVERSATION_HEADING)
+    sections: list[str] = []
+    if head.strip():
+        sections.append(f"ORIGINAL PROMPT (with its resolved clarifications):\n{head.strip()}")
+    if conversation.strip():
+        sections.append(f"CONVERSATION:\n{conversation.strip()}")
+    return "\n\n".join(sections)
+
+
+def compacted_history(compacted_text: str, stamp: str = "", *, applied: bool = False) -> list[ChatMessage]:
+    """The chat history AFTER a compaction: ONE operator prompt (pure).
+
+    The compaction replaces the WHOLE conversation with the LLM's rewrite, so
+    the history becomes a single ``OPERATOR`` message holding the final logic:
+    the original prompt, the resolved clarifications and every request are now
+    stated by that one text.
+
+    It is an ``OPERATOR`` message (not a ``SYSTEM`` one) so it stays visible as
+    a PROMPT bubble. ``applied`` says whether that logic was ALREADY part of
+    the script's prompt (every operator request was applied): the compaction
+    rewrites the prompt WITHOUT regenerating the table, so an already-run chat
+    stays "Run" and an unrun one stays "Not run yet".
+    """
+    return [
+        ChatMessage(
+            role=ChatRole.OPERATOR,
+            text=compacted_text.strip(),
+            stamp=stamp,
+            status=ChatPromptStatus.APPLIED if applied else ChatPromptStatus.PENDING,
+        )
+    ]
+
+
+def apply_compaction(messages: list[ChatMessage], compacted_text: str, stamp: str = "") -> list[ChatMessage]:
+    """The chat history with the WHOLE conversation replaced by the rewrite (pure).
+
+    The run's own context survives — the original prompt and its resolved
+    clarifications (the ``SYSTEM`` messages) — because they are what the run
+    IS; the CONVERSATION (every operator request and every clarification turn)
+    is what the compaction collapses into one prompt.
+
+    The compacted prompt's status follows the conversation it replaces: it is
+    ``APPLIED`` when every request it summarizes was already folded into a Run
+    (the compaction changes no logic), and ``PENDING`` when any of them was
+    still waiting for the Run button.
+    """
+    system = [message for message in messages if message.role is ChatRole.SYSTEM]
+    applied = not any(
+        message.role is ChatRole.OPERATOR and message.status is ChatPromptStatus.PENDING for message in messages
+    )
+    return [*system, *compacted_history(compacted_text, stamp, applied=applied)]
+
+
 def build_final_prompt_from_chat(messages: list[ChatMessage]) -> str:
     """The prompt the generation LLM receives: the original + the whole chat.
 
@@ -321,12 +354,13 @@ __all__ = [
     "ChatMessage",
     "ChatPromptStatus",
     "ChatRole",
-    "ChatTurn",
+    "apply_compaction",
     "build_chat_history",
+    "build_compaction_input",
     "build_final_prompt_from_chat",
+    "compacted_history",
     "mark_prompts_applied",
     "parse_conversation",
     "reconstruct_chat",
     "render_chat_message",
-    "render_question_answers",
 ]

@@ -33,6 +33,7 @@ from typing import Any
 from loguru import logger
 
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmUsage
+from uwazi_admin_agent.domain.plan_intent import PlanOutcome, plan_outcome, plan_refusal
 from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
@@ -41,6 +42,7 @@ from uwazi_admin_agent.domain.suggestion import (
     PredictionAttemptStatus,
     PredictionPass,
     Suggestion,
+    SuggestionStatus,
 )
 from uwazi_admin_agent.domain.suggestion_scoring import (
     compare_values,
@@ -265,6 +267,11 @@ class GeneratePredictionsUseCase:
         self._llm_cache = llm_cache
         # Set by a reconcile refresh so the caller can report what changed.
         self.last_reconciliation: ReconciliationSummary | None = None
+        # What the LAST pass's plan amounted to after hydration: how many rows
+        # are runnable, how many were dropped as already-applied, and whether the
+        # plan was refused. The caller reports it instead of a row count that
+        # hides "everything was already up to date".
+        self.last_plan_outcome: PlanOutcome | None = None
 
     def _property_types_for(self, records: list[dict[str, Any]]) -> dict[str, str]:
         """``{property_name: property_type}`` for the templates these records touch.
@@ -294,13 +301,18 @@ class GeneratePredictionsUseCase:
         run_id: str,
         budget: LlmBudget,
         entity_scope: list[str] | None = None,
+        plan_kind: str | None = None,
     ) -> PredictionPass:
         """Run one prediction pass and persist its suggestions.
 
         Returns the terminal pass row (``COMPLETED``/``ABORTED``/``FAILED``).
         A budget abort does NOT raise: the aborted pass row plus the kept
-        suggestions ARE the user-facing result. Any other script error is
-        recorded as ``FAILED`` and re-raised.
+        suggestions ARE the user-facing result. Any other script error — and
+        any INTENT violation (``plan_intent_problem``: a ``changes`` plan that
+        records only display-only info rows, or a ``query`` plan that records
+        writes) — is recorded as ``FAILED`` and re-raised, BEFORE anything is
+        merged into the table. The previous table therefore survives, instead
+        of being replaced by rows the operator cannot run.
 
         The result is ALWAYS merged into the run's ONE live table by
         :meth:`SuggestionStorePort.reconcile_suggestions` (the pure rules live
@@ -340,8 +352,12 @@ class GeneratePredictionsUseCase:
 
         ledger = LlmLedger(budget)
         records: list[dict[str, Any]] = []
-        _result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope)
+        result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope)
 
+        # 1. RENDER the plan into the rows the table would show. Hydration is what
+        #    reveals that a proposed value equals the stored one; the outcome
+        #    filter turns such rows into display-only ``matched`` evidence. Both
+        #    must run BEFORE the gate can judge.
         suggestions = records_to_suggestions(
             run_id,
             records,
@@ -356,12 +372,85 @@ class GeneratePredictionsUseCase:
                 self._template_labels,
             )
             suggestions = drop_unchanged_property_rows(suggestions)
+
+        # 2. THE INTENT GATE — judged on those RENDERED rows, never on the raw
+        #    records: a script can record hundreds of correct writes whose every
+        #    value Uwazi already holds, and the filter turns them all into
+        #    display-only matches. A record-level check passed exactly such a
+        #    run. (A budget abort and a script error keep their own handling
+        #    below.)
+        refusal: str | None = None
+        if error is None and not aborted:
+            refusal = plan_refusal(records, suggestions, plan_kind, result)
+        if refusal is not None:
+            logger.warning("prediction pass REFUSED run={}: {}", run_id, refusal)
+            final = pass_row.model_copy(
+                update={
+                    "status": PredictionAttemptStatus.FAILED,
+                    "spent": ledger.snapshot(),
+                    "error": refusal,
+                    "refused_commit": True,
+                    "finished_at": datetime.now(timezone.utc),
+                }
+            )
+            self._store.save_pass(final)
+            raise PredictionPassError(refusal)
+
+        # 3. WHY THE TABLE CAN LOOK EMPTY. A script may record hundreds of correct
+        #    changes that Uwazi ALREADY holds, and the no-op filter drops every
+        #    one. What survives is only the script's failure/skip info rows, so the
+        #    operator sees "105 entities could not be processed" and concludes the
+        #    run did nothing (the reported case: 448 DOCUMENTs, all 448 already
+        #    carrying their document_ref). The table must SAY that the work is
+        #    already done instead of leaving the failure list as its only content.
+        outcome = plan_outcome(records, suggestions)
+        logger.info(
+            "prediction pass run={} outcome: changes={} matched={} skipped={} info={} files={}",
+            run_id,
+            outcome.change_rows,
+            outcome.matched_rows,
+            outcome.skipped_rows,
+            outcome.info_rows,
+            outcome.file_rows,
+        )
+        if outcome.only_dropped_no_ops and not outcome.matched_rows:
+            # A legacy/foreign row set that dropped every no-op without emitting
+            # matched evidence still deserves an explicit explanation. A normal
+            # pass now keeps one ``matched`` row per entity, so this synthetic
+            # summary must NOT be added beside them: it would hide the actual
+            # per-entity results behind one paragraph again.
+            message = (
+                f"Nothing to run: all {outcome.unchanged_rows} proposed change(s) already match the "
+                "current values in Uwazi. The entities are up to date — this is a successful plan "
+                "with no pending writes, not a failure."
+            )
+            suggestions.append(
+                Suggestion(
+                    run_id=run_id,
+                    shared_id="plan-summary",
+                    op=INFO_OP,
+                    # The Target column reads ``entity_title`` for an info row, and
+                    # info rows are never hydrated — so the headline must be here.
+                    entity_title=message,
+                    property_name=None,
+                    proposed_value=message,
+                    status=SuggestionStatus.PENDING,
+                    created_at=now,
+                )
+            )
+            logger.info(
+                "prediction pass run={}: every recorded change was already applied ({} rows dropped)",
+                run_id,
+                outcome.unchanged_rows,
+            )
+
         self.last_reconciliation = await asyncio.to_thread(
             self._store.reconcile_suggestions,
             run_id,
             suggestions,
             scope,
         )
+        self.last_plan_outcome = outcome
 
         spent = ledger.snapshot()
         if aborted:
@@ -421,10 +510,11 @@ class GeneratePredictionsUseCase:
         script: str,
         run_id: str,
         budget: LlmBudget,
+        plan_kind: str | None = None,
     ) -> tuple[PredictionPass, ReconciliationSummary]:
         """Re-run the script against current Uwazi and merge into the live table."""
         self.last_reconciliation = None
-        final = await self.run(script, run_id=run_id, budget=budget)
+        final = await self.run(script, run_id=run_id, budget=budget, plan_kind=plan_kind)
         return final, self.last_reconciliation or ReconciliationSummary()
 
     def _run_script(

@@ -15,6 +15,10 @@ services:
     environment:
       - UWAZI_URL=${UWAZI_URL}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      # Signs the session cookie. The browser's session id names the
+      # server-side session (and its in-memory credentials), so this must be a
+      # per-deployment secret — never a well-known default.
+      - ADMIN_WEB_STORAGE_SECRET=${ADMIN_WEB_STORAGE_SECRET}
     volumes:
       - admin_agent_data:/app/data
     command: ["/app/.venv/bin/python", "-m", "uwazi_admin_agent.drivers.web.app"]

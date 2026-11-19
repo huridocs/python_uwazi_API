@@ -25,14 +25,18 @@ from typing import Any, Iterable
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, value_decisions
 from uwazi_admin_agent.domain.suggestion import (
+    DISPLAY_ONLY_OPS,
     INFO_OP,
+    MATCHED_OP,
     MERGE_OPS,
     MOVE_OP,
     REVERT_RECREATES_OPS,
+    SKIPPED_OP,
     TITLE_PROPERTY,
     OperationReviewRow,
     Suggestion,
     SuggestionStatus,
+    skip_reason_label,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
     MATCH_COLORS,
@@ -71,6 +75,8 @@ OP_BORDER_COLORS: dict[str, str] = {
     "update_and_delete": "#5e35b1",
     "create_and_delete": "#3949ab",
     "info": "#546e7a",
+    "matched": "#2e7d32",
+    "skipped": "#ef6c00",
 }
 DEFAULT_BORDER_COLOR: str = "#607d8b"
 
@@ -178,9 +184,10 @@ NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_de
 def is_selectable(op: str) -> bool:
     """Whether one suboperation of ``op`` can be run on its own (pure).
 
-    ``info`` rows are display-only, so they are never selectable.
+    ``info``/``matched``/``skipped`` rows are display-only, so they are never
+    selectable.
     """
-    return op not in LOCKED_SUB_OPS and op != INFO_OP
+    return op not in LOCKED_SUB_OPS and op not in DISPLAY_ONLY_OPS
 
 
 def lock_note(op: str) -> str:
@@ -195,7 +202,7 @@ def sub_status_label(status: SuggestionStatus) -> str:
 
 def sub_status_color(status: SuggestionStatus) -> str:
     """The Quasar color of one suboperation's status badge (pure)."""
-    return SUB_STATUS_COLORS.get(sub_status_label(status), "grey")
+    return SUB_STATUS_COLORS.get(sub_status_label(status), "grey-7")
 
 
 def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
@@ -210,6 +217,10 @@ def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
     """
     if sub.op == INFO_OP:
         return "" if sub.proposed_value is None else str(sub.proposed_value)
+    if sub.op == SKIPPED_OP:
+        return skip_reason_label(sub.skip_reason)
+    if sub.op == MATCHED_OP:
+        return property_heading(sub.property_name, sub.op, labels or {})
     if sub.op == "create_relationships":
         rel = sub.proposed_value if isinstance(sub.proposed_value, dict) else {}
         target = sub.detail_key or str(rel.get("to_entity_shared_id") or "")
@@ -223,6 +234,10 @@ def sub_caption(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
     """The raw name shown under a suboperation's heading, or "" (pure)."""
     if sub.op == INFO_OP:
         return ""
+    if sub.op == SKIPPED_OP:
+        return ""
+    if sub.op == MATCHED_OP:
+        return property_caption(sub.property_name, labels or {})
     if sub.op == "create_relationships":
         rel = sub.proposed_value if isinstance(sub.proposed_value, dict) else {}
         return str(rel.get("relationship_type_name") or "")
@@ -248,6 +263,11 @@ def sub_values(sub: Suggestion, types: dict[str, str] | None = None) -> tuple[st
     """
     if sub.op == INFO_OP:
         return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
+    if sub.op == SKIPPED_OP:
+        return "—", "" if sub.proposed_value is None else truncate(sub.proposed_value)
+    if sub.op == MATCHED_OP:
+        property_type = (types or {}).get(sub.property_name or "")
+        return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
     if sub.op == "create_relationships":
         return "—", _relationship_proposed(sub)
     if sub.op == "set_publish_status":
@@ -317,10 +337,15 @@ def suboperation_row(
 ) -> dict[str, Any]:
     """One suboperation's table payload (pure). Colors are resolved here, not in Vue."""
     status_label = sub_status_label(sub.status)
+    status_color = sub_status_color(sub.status)
+    if sub.op == MATCHED_OP:
+        status_label, status_color = "matched", "green-9"
+    elif sub.op == SKIPPED_OP:
+        status_label, status_color = "not processed", "deep-orange-10"
     current, proposed = sub_values(sub, types)
     match = sub_match(sub)
     blocked = rerun_blocked(sub.op, status_label)
-    runnable = is_runnable_status(status_label) and not blocked
+    runnable = is_runnable_status(status_label) and not blocked and sub.op not in DISPLAY_ONLY_OPS
     selectable = is_selectable(sub.op) and runnable
     if blocked:
         note = rerun_blocked_reason(sub.op)
@@ -341,7 +366,7 @@ def suboperation_row(
         "match": match,
         "match_color": MATCH_COLORS.get(match, "grey-4"),
         "status": status_label,
-        "status_color": sub_status_color(sub.status),
+        "status_color": status_color,
         # A part is selectable only while a Run can still write it. APPLIED,
         # DISCARDED and OBSOLETE parts stay visible (and revertable/restorable)
         # but must not inflate Run (N) / Discard (N). A REVERTED delete/merge is
@@ -361,6 +386,7 @@ def suboperation_row(
         "op": sub.op,
         "property_name": sub.property_name,
         "is_info": sub.op == INFO_OP,
+        "is_display_only": sub.op in DISPLAY_ONLY_OPS,
         "structural": False,
         # Multiselect value-level decisions ([] for every other row, so
         # existing payload consumers are unaffected).
@@ -603,7 +629,7 @@ def file_move_detail_rows(subs: Iterable[Suggestion]) -> list[dict[str, Any]]:
             _file_structural_rows(
                 primary,
                 status=status,
-                status_color=RUN_STATUS_COLORS.get(status, "grey"),
+                status_color=RUN_STATUS_COLORS.get(status, "grey-7"),
                 key_prefix=f"move-{primary.id or primary.shared_id}-",
             )
         )
@@ -666,6 +692,16 @@ def operation_open_url(shared_id: str, ops: list[str], languages: list[str], uwa
     return f"{uwazi_url.rstrip('/')}/{language}/entity/{shared_id}"
 
 
+def is_display_only_operation(item: OperationReviewRow) -> bool:
+    """Whether an operation is read-only evidence rather than runnable work (pure).
+
+    ``info``, ``matched`` and ``skipped`` name outcomes, not writes. The
+    review table must render them without a checkbox, Run, Discard, Revert or
+    Edit action, and the action paths must never select them.
+    """
+    return bool(item.ops) and all(op in DISPLAY_ONLY_OPS for op in item.ops)
+
+
 def operation_row(
     item: OperationReviewRow,
     *,
@@ -683,12 +719,14 @@ def operation_row(
     template's human labels, so a child row reads "Document Ref", not the raw
     ``document_ref``.
 
-    An ``info`` operation is display-only: its parent row carries the arbitrary
-    text and only its detail lines become suboperations. The payload is marked
-    ``is_info`` so the page hides every checkbox and action.
+    Display-only operations (``info``/``matched``/``skipped``) carry no
+    checkbox and no actions. ``info`` shows its headline as the target text;
+    ``matched`` and ``skipped`` behave like entity rows (title, sharedId and
+    Uwazi link) but read their values from the suboperations.
     """
     checked = set(checked_ids)
     is_info = bool(item.ops) and all(op == INFO_OP for op in item.ops)
+    is_display_only = is_display_only_operation(item)
     in_place = not any(op in NON_IN_PLACE_OPS for op in item.ops)
     # A merge's own row is revertable (the operation restores its target and
     # re-creates the sources it deleted), but its PARTS are not: putting one
@@ -721,8 +759,8 @@ def operation_row(
     status = operation_status([payload for _sub, payload in rendered])
     subs = [payload for sub, payload in rendered if not is_merge_anchor(sub) and not is_file_move_row(sub)]
     text, color = validated_cell(subs)
-    if not is_info:
-        subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey")))
+    if not is_display_only:
+        subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey-7")))
         subs.extend(file_move_detail_rows(item.subs))
     blocked_sub = next((sub for sub in subs if sub.get("rerun_blocked")), None)
     rerun_blocked = blocked_sub is not None
@@ -740,14 +778,14 @@ def operation_row(
             "template": "—",
             "languages": [],
             "ops": INFO_OP,
-            "op_colors": [OP_COLORS.get(INFO_OP, "grey")],
+            "op_colors": [OP_COLORS.get(INFO_OP, "grey-7")],
             "url": None,
             "modified": modified_label(item.modified_at),
             "rerun_blocked": False,
             "rerun_blocked_reason": "",
             "run_title": "Info rows are display-only",
             "run_status": "info",
-            "run_status_color": RUN_STATUS_COLORS.get("info", "grey"),
+            "run_status_color": RUN_STATUS_COLORS.get("info", "grey-7"),
             "validated": "n/a",
             "validated_color": "grey-4",
             "has_validated": False,
@@ -759,7 +797,44 @@ def operation_row(
             "has_applied": False,
             "subs": subs,
             "is_info": True,
+            "is_display_only": True,
             "has_subs": bool(subs),
+        }
+    if is_display_only:
+        # Matched/skipped: real entities, read-only results. The title, sharedId
+        # and Uwazi link stay available; every action and selection is removed.
+        display_op = item.ops[0] if item.ops else ""
+        display_label = "not processed" if display_op == SKIPPED_OP else display_op
+        display_ops = ["not processed" if op == SKIPPED_OP else op for op in item.ops]
+        return {
+            "row_key": item.shared_id,
+            "shared_id": item.shared_id,
+            "title": truncate(title, TITLE_CELL_CHARS),
+            "title_full": title,
+            "template": truncate(", ".join(item.template_names) or "—", 28),
+            "languages": item.languages,
+            "ops": ", ".join(display_ops),
+            "op_colors": [OP_COLORS.get(op, "grey-7") for op in item.ops],
+            "url": operation_open_url(item.shared_id, item.ops, item.languages, uwazi_url),
+            "modified": modified_label(item.modified_at),
+            "rerun_blocked": False,
+            "rerun_blocked_reason": "",
+            "run_title": "This row reports a result; it is display-only",
+            "run_status": display_label,
+            "run_status_color": RUN_STATUS_COLORS.get(display_op, "grey-7"),
+            "validated": "n/a",
+            "validated_color": "grey-4",
+            "has_validated": False,
+            "has_checkable": False,
+            "has_runnable": False,
+            "border_color": OP_BORDER_COLORS.get(display_op, DEFAULT_BORDER_COLOR),
+            "in_place": False,
+            "revertable": False,
+            "has_applied": False,
+            "subs": subs,
+            "is_info": False,
+            "is_display_only": True,
+            "has_subs": True,
         }
     return {
         "row_key": item.shared_id,
@@ -769,14 +844,14 @@ def operation_row(
         "template": truncate(", ".join(item.template_names) or "—", 28),
         "languages": item.languages,
         "ops": ", ".join(item.ops),
-        "op_colors": [OP_COLORS.get(op, "grey") for op in item.ops],
+        "op_colors": [OP_COLORS.get(op, "grey-7") for op in item.ops],
         "url": operation_open_url(item.shared_id, item.ops, item.languages, uwazi_url),
         "modified": modified_label(item.modified_at),
         "rerun_blocked": rerun_blocked,
         "rerun_blocked_reason": rerun_reason,
         "run_title": rerun_reason or "Run this operation: the ticked suboperations (all of them when none is ticked)",
         "run_status": status,
-        "run_status_color": RUN_STATUS_COLORS.get(status, "grey"),
+        "run_status_color": RUN_STATUS_COLORS.get(status, "grey-7"),
         "validated": text,
         "validated_color": color,
         "has_validated": validated_counts(subs)[1] > 0,
@@ -788,6 +863,7 @@ def operation_row(
         "has_applied": item.applied > 0,
         "subs": subs,
         "is_info": False,
+        "is_display_only": False,
         "has_subs": True,
     }
 
@@ -955,6 +1031,7 @@ __all__ = [
     "file_move_detail_rows",
     "ids_of_refs",
     "is_file_move_row",
+    "is_display_only_operation",
     "is_merge_anchor",
     "is_runnable_status",
     "is_selectable",

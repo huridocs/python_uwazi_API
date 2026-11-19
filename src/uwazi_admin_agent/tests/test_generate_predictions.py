@@ -291,13 +291,13 @@ result = len(entities)
     assert counts["match_new"] == 1
 
 
-def test_prediction_pass_drops_exact_matches(store: SqliteSuggestionStore) -> None:
-    """A row that proposes the value the entity already has is not a change.
+def test_prediction_pass_keeps_exact_matches_as_read_only_outcomes(store: SqliteSuggestionStore) -> None:
+    """A row that proposes the value the entity already has becomes ``matched``.
 
-    Hydration marks it a match, then the pass drops it: the review must not
-    offer a "value → same value" suboperation, and a Run must not re-send a
-    pointless write. A row with no current value (s3) is a genuine new value
-    and survives.
+    Hydration marks it a match, and the review keeps that evidence as a
+    display-only row instead of silently discarding the result. It is not
+    writable: a Run must not re-send a pointless write. A row with no current
+    value (s3) is a genuine new value and survives as an update.
     """
     script = """
 for d in query_entities_full(mode="by_template", template_name="Case"):
@@ -306,7 +306,13 @@ result = "ok"
 """
     asyncio.run(_use_case(store).run(script, "run1", _budget()))
     rows, _ = store.query("run1", SuggestionFilter())
-    assert [(row.shared_id, row.match) for row in rows] == [("s3", None)]
+    assert [(row.shared_id, row.op, row.match) for row in rows] == [
+        ("s1", "matched", True),
+        ("s2", "matched", True),
+        ("s3", "update", None),
+    ]
+    matched = [row for row in rows if row.op == "matched"]
+    assert all(row.current_value is not None and row.proposed_value is not None for row in matched)
 
 
 def test_prediction_pass_records_progress_and_finish(store: SqliteSuggestionStore) -> None:
@@ -492,3 +498,97 @@ def test_ledger_reports_exceeded_only_after_a_breach() -> None:
     with pytest.raises(Exception):
         ledger.reserve()
     assert ledger.exceeded is True
+
+
+# --- plan-intent gate -------------------------------------------------------
+
+
+def test_an_info_only_changes_plan_fails_the_pass_and_keeps_the_previous_table(store: SqliteSuggestionStore) -> None:
+    """A ``changes`` script that records only info rows must NOT become the table.
+
+    The reported failure: every entity "failed", the script reported it through
+    ``add_info``, and the pass merged that single display-only row into the live
+    table as if it were a completed plan. The gate fails the pass instead, so the
+    rows already reviewed keep being the run's plan.
+    """
+    from uwazi_admin_agent.use_cases.generate_predictions_use_case import PredictionPassError
+
+    usable = """
+for d in query_entities_full(mode="by_template", template_name="Case"):
+    update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": "kept"}}])
+result = "ok"
+"""
+    asyncio.run(_use_case(store).run(usable, "run1", _budget(), plan_kind="changes"))
+    before = store.query("run1", SuggestionFilter(include_obsolete=True))[1]
+    assert before == 3
+
+    gave_up = """
+add_info("0 of 3 entities matched: no segmentation available", keep=True)
+result = "0 extracted"
+"""
+    with pytest.raises(PredictionPassError, match="plan_kind='changes'"):
+        asyncio.run(_use_case(store).run(gave_up, "run1", _budget(), plan_kind="changes"))
+
+    rows, total = store.query("run1", SuggestionFilter(include_obsolete=True))
+    assert total == 3
+    assert all(row.proposed_value == "kept" for row in rows)
+    pass_row = store.get_pass("run1")
+    assert pass_row is not None
+    assert pass_row.status is PredictionAttemptStatus.FAILED
+    assert "info row" in (pass_row.error or "")
+
+
+def test_a_query_plan_records_its_info_rows(store: SqliteSuggestionStore) -> None:
+    script = """
+add_info("3 entities match 'Case'", ["One", "Two", "Three"])
+result = ["s1", "s2", "s3"]
+"""
+    pass_row = asyncio.run(_use_case(store).run(script, "query-run", _budget(), plan_kind="query"))
+
+    assert pass_row.status is PredictionAttemptStatus.COMPLETED
+    rows, total = store.query("query-run", SuggestionFilter())
+    assert total == 4  # the headline + one child per answer
+    assert [row.op for row in rows] == ["info", "info", "info", "info"]
+
+
+def test_a_changes_plan_records_no_changes_is_rejected_before_merging(store: SqliteSuggestionStore) -> None:
+    from uwazi_admin_agent.use_cases.generate_predictions_use_case import PredictionPassError
+
+    with pytest.raises(PredictionPassError):
+        asyncio.run(_use_case(store).run('result = "nothing to do"', "empty-run", _budget(), plan_kind="changes"))
+
+    assert store.query("empty-run", SuggestionFilter())[1] == 0
+
+
+def test_a_plan_whose_every_update_is_already_applied_shows_matched_rows(store: SqliteSuggestionStore) -> None:
+    """THE REPORTED RUN, end to end: correct updates, all already stored.
+
+    Every value the script proposes equals the entity's current one. The pass
+    must complete (the entities ARE up to date) and keep one display-only
+    ``matched`` row per entity, with its current and extracted values, instead
+    of replacing them with a single synthetic paragraph.
+    """
+    script = """
+updates = []
+for d in query_entities_full(mode="by_template", template_name="Case"):
+    current = d["metadata"].get("excerpt")
+    if not current:
+        continue  # nothing extracted for this entity
+    updates.append({"shared_id": d["shared_id"], "metadata": {"excerpt": current}})
+if updates:
+    update_entities_parallel(updates)
+add_info("3 entities could not be processed", ["s9: no segmentation"], keep=True)
+result = "recorded %d updates, all already applied" % len(updates)
+"""
+    pass_row = asyncio.run(_use_case(store, runtime=None).run(script, "up-to-date", _budget(), plan_kind="changes"))
+
+    assert pass_row.status is PredictionAttemptStatus.COMPLETED
+    assert pass_row.refused_commit is False
+    rows, _total = store.query("up-to-date", SuggestionFilter())
+    matched = [row for row in rows if row.op == "matched"]
+    assert {row.shared_id for row in matched} == {"s1", "s2"}
+    assert all(row.match is True and row.property_name == "excerpt" for row in matched)
+    # No synthetic summary replaces the per-entity evidence.
+    assert not any("Nothing to run" in str(row.proposed_value) for row in rows)
+    # The script's own failure report is still there.
+    assert any("could not be processed" in str(row.proposed_value) for row in rows)

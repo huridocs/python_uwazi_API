@@ -62,9 +62,31 @@ def test_include_obsolete_drops_only_the_default_status_exclusion() -> None:
 def test_an_explicit_obsolete_status_filter_shows_them() -> None:
     from uwazi_admin_agent.domain.suggestion import SuggestionStatus
 
-    where, params = build_where(SuggestionFilter(status=SuggestionStatus.OBSOLETE), "run-1")
-    assert where == "run_id = ? AND status = ?"
+    where, params = build_where(SuggestionFilter(status=[SuggestionStatus.OBSOLETE]), "run-1")
+    assert where == "run_id = ? AND status IN (?)"
     assert params == ["run-1", "obsolete"]
+
+
+def test_the_multi_status_filter_adds_one_in_clause() -> None:
+    from uwazi_admin_agent.domain.suggestion import SuggestionStatus
+
+    where, params = build_where(
+        SuggestionFilter(status=[SuggestionStatus.PENDING, SuggestionStatus.DISCARDED]),
+        "run-1",
+    )
+    assert where == "run_id = ? AND status IN (?, ?)"
+    assert params == ["run-1", "pending", "discarded"]
+
+
+def test_the_multi_op_filter_adds_one_in_clause() -> None:
+    where, params = build_where(SuggestionFilter(op=["update", "delete"]), "run-1")
+    assert where == "run_id = ? AND status != ? AND op IN (?, ?)"
+    assert params == ["run-1", "obsolete", "update", "delete"]
+
+
+def test_an_empty_status_or_op_selection_matches_nothing() -> None:
+    assert "1 = 0" in build_where(SuggestionFilter(status=[]), "run-1")[0]
+    assert "1 = 0" in build_where(SuggestionFilter(op=[]), "run-1")[0]
 
 
 def test_filter_from_controls_translates_the_language_select() -> None:

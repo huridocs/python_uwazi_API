@@ -47,3 +47,47 @@ def test_clarify_prompt_qualifies_the_instance_languages_question() -> None:
     """The language question is asked only for a per-language change."""
     assert "ONLY when the change is actually per-language" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "there is no language to ask about" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_states_that_the_script_only_proposes() -> None:
+    """The agent must know the script RECORDS a review table and the operator
+    applies it — otherwise it phrases its questions as if the script writes to
+    Uwazi on its own."""
+    assert "WHAT THE SCRIPT ACTUALLY DOES" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "does NOT touch Uwazi" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "only RECORDS a" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "the operator applies it" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_forbids_the_override_question() -> None:
+    """The bug: the agent asked "when the value is the same do you want to
+    override the value?" — an apply-time decision the operator makes per row
+    in the review table, not an ambiguity of the prompt."""
+    assert "NEVER ASK AN APPLY-TIME QUESTION" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "do you want to override it?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "never as a question about overwriting a value" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_offers_the_table_content_question_instead() -> None:
+    """The legitimate question behind the override one: which ROWS the table
+    should carry — "do you want a suggestion as well?"."""
+    assert "Do you want a suggestion as well?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "WHICH ROWS to" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "Worked example of the swap" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "RIGHT question" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_bans_the_other_apply_time_questions() -> None:
+    """The rest of the apply-time family the agent was drifting into."""
+    assert "Should I apply this now?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "revertable / backed up / undoable" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "Do you want a dry run / validation first?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "that is a\n    confirmation, not a clarification" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "what should the budget" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_restatement_is_phrased_as_a_proposal() -> None:
+    """The restatement itself must not say "Uwazi will be updated" — the
+    script proposes, the operator applies."""
+    assert "Do NOT phrase the" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "the table will propose" in CLARIFY_SYSTEM_PROMPT_TEMPLATE

@@ -171,7 +171,7 @@ def test_get_entity_applies_the_review_tables_status_filter(store: SqliteSuggest
         "run1",
         "s1",
         "es",
-        SuggestionFilter(status=SuggestionStatus.APPLIED),
+        SuggestionFilter(status=[SuggestionStatus.APPLIED]),
     )
 
     assert [row.property_name for row in rows] == ["summary"]

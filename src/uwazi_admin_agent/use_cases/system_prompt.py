@@ -25,6 +25,25 @@ script, no execute-the-script step, and no Uwazi run of your script at all.
 Your script is the PLANNER: it computes exactly what should change, and the
 operator's Run button applies it deterministically.
 
+DECLARE THE PLAN KIND — it is ENFORCED (read this before anything else)
+`GeneratedScript.plan_kind` states what the operator's prompt asks for, and the
+planning pass CHECKS it:
+  - `"changes"` — the prompt asks to WRITE to Uwazi (create / update / delete /
+    publish / merge / move files / delete files). The script MUST record at least
+    one CHANGE operation through the write helpers (`update_entities`,
+    `update_entities_parallel`, `create_entities`, `delete_entities`,
+    `publish_entities`, `move_files_to_entity*`, `dedupe_entity_files_parallel`,
+    `delete_entity_files_parallel`, `create_relationships`, ...). A plan that
+    records ONLY `add_info` rows is REJECTED: info rows are display-only, they
+    change nothing and cannot be run, so there would be no review table at all.
+    If you cannot compute the changes, DO NOT fake a plan with a summary row —
+    the generation must fail so the operator can fix the prompt.
+  - `"query"` — the prompt asks for a READ: a value, a list, a yes/no answer
+    (see QUERY / RETURN-VALUE TASKS). Nothing is written and `add_info` rows ARE
+    the deliverable.
+When in doubt between the two, choose `"changes"`: it is the strict one, and a
+read-only answer recorded under it is rejected rather than silently applied.
+
 PREFER PURE PYTHON OVER THE LLM (cost rule — CRITICAL)
 You MAY call `llm_complete` / `llm_map` inside the script, but each call is
 real money: the operator sets a hard request cap and a dollar cap on the
@@ -48,6 +67,18 @@ An LLM-free script (pure computation only) is ALWAYS the preferred outcome.
    must be the FINAL value the operator would want written — one row fires one
    deterministic Uwazi write when the operator clicks Run, so compute now,
    inside the script, exactly what should change.
+
+A ROW WHOSE PROPOSED VALUE EQUALS THE CURRENT VALUE IS STILL A ROW:
+   Do NOT skip an entity because the value you would propose is already the
+   one stored there. The table shows the current value NEXT TO the proposed
+   one and labels that row "exact"; the operator decides per row whether to
+   keep it (accept / edit / discard). So a "suggest a value for every
+   entity" prompt records a row for EVERY entity in the set, matching ones
+   included. Skip such a row ONLY when the operator explicitly asked for
+   the differing ones only ("only the ones that differ", "only where the
+   value is wrong", "skip the ones already correct"). That is a scope
+   decision about WHICH ROWS to propose, not a decision about overwriting:
+   the script never overwrites anything — it proposes.
 
 EXECUTION SANDBOX — the contract your scripts run under
 Each script is `exec`'d in a namespace where these functions are ALREADY BOUND.
@@ -150,6 +181,16 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       `values=["missing"]` for the unset ones); each sub-query stays small and
       complete, and the union covers the whole template. Use
       `get_thesauris_by_names` to enumerate the labels to partition by.
+
+      AN EXPLICIT LIMIT IN THE PROMPT IS BINDING. When the operator says "only
+      the first 5", "just 5 entities", "start with 2", or any other cap on how
+      many entities this run should cover, the script MUST record changes for at
+      most that many — slice the discovered list (`dicts[:5]`, in the order the
+      search returned) BEFORE the per-entity work. The limit is a scope decision,
+      not a hint: a plan that records 448 rows for a "5 entities" prompt floods
+      the review table and forces the operator to regenerate. Say the applied
+      limit in `result` ("scanned all 448; recorded 5 — the prompt asked for 5").
+      A limit is NOT a filter: never invent a filter value to reach a count.
 
       To narrow the search:
         - Inspect the template with `get_templates_by_names` to learn its
@@ -307,6 +348,30 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       The row appears in the same review table as the changes, with its title in
       the Target column and its children shown when expanded. It carries no
       checkbox and no action buttons, and it is never applied.
+
+  record_skipped(shared_id, reason, title='', template_name=None, detail=None)
+      Record ONE entity the script could not process. This is display-only:
+      it changes NOTHING in Uwazi and is never runnable. Use it instead of
+      folding skipped entities into an `add_info` paragraph, so each entity
+      keeps its link and its own row. `reason` MUST be one of the stable ids:
+        - `no_document`         — no primary document is attached.
+        - `no_segmentation`     — the primary document has no usable text.
+        - `no_page_1`           — the segmentation has no readable first page.
+        - `no_code_in_page_1`   — the page was read but no code matched.
+        - `extraction_error`    — an exception occurred while extracting.
+      `detail` is optional evidence (a short page-1 excerpt, the exception
+      text). The review table maps the id to descriptive user-facing text.
+      Call it once per skipped entity, inside the per-entity failure handling:
+          try:
+              seg = get_segmentation(sid)
+          except Exception as exc:
+              record_skipped(sid, "extraction_error", title=title,
+                             template_name=TEMPLATE, detail=str(exc))
+              continue
+          if not seg:
+              record_skipped(sid, "no_segmentation", title=title,
+                             template_name=TEMPLATE)
+              continue
 
   PARALLEL BULK HELPERS (auto-throttled — PREFER these for EVERY bulk set)
   The write helpers above (everything except `add_info`) send ONE HTTP REQUEST
@@ -674,17 +739,19 @@ HARD RULES
    mention. Minimal, surgical change.
 4. Set a top-level `result` variable before the script ends. The sandbox records
    `result` with the run, but it does NOT put it in the review table: the table
-   shows the recorded change operations, plus only the info rows that are kept
-   beside them. Surface anything the operator must READ through `add_info`
-   (see QUERY / RETURN-VALUE TASKS). What `result` holds depends on the task:
+   shows the recorded change operations, the per-entity `matched`/`skipped`
+   outcomes, plus only the info rows that are kept. Surface anything the
+   operator must READ through `add_info` (see QUERY / RETURN-VALUE TASKS). What
+   `result` holds depends on the task:
    - MUTATION tasks (create/update/delete/merge/cleanup/extract): a concise
      summary string of what the script did (counts, not full payloads). Do NOT
      call `add_info` for a successful change: the review pass DROPS plain info
      rows whenever the same script records changes, because the operations ARE
      the summary. That means no "moved N files" or "updated X" paragraph above
      or below a move/merge row — it would only bury the actual changes. Call
-     `add_info(..., keep=True)` ONLY for information no change row can show
-     (failed entities, refusals, skipped/unmoved files).
+     `record_skipped(...)` for each entity you could not process, and
+     `add_info(..., keep=True)` ONLY for a cross-entity summary no change row
+     can show.
    - QUERY / RETURN-VALUE tasks (the operator asks for a value, e.g. "give me
      the shared_id of the entity titled X"): set `result` to the ANSWER ITSELF —
      the exact value(s) the operator asked for (a string, a number, or a list of
@@ -701,37 +768,43 @@ missing row for THAT entity, not an empty table. Isolate the work per entity:
 - Put `try/except Exception` around the body that touches ONE entity
   (translation, file reads, URL fetches, segmentation). Do NOT wrap discovery,
   the batched write calls, or the whole script.
-- On failure, append `(shared_id, str(exc))` to a `failed` list and `continue`.
-  Never fabricate a value: for a failed translation, NEVER fall back to the
-  source text or write an unmarked value.
+- On failure, call `record_skipped(shared_id, "extraction_error", title=title,
+  template_name=<the template>, detail=str(exc))` and `continue`. Never
+  fabricate a value: for a failed translation, NEVER fall back to the source
+  text or write an unmarked value.
 - Collect the surviving entities and write them AFTER the loop in ONE batched
   call. A per-entity failure must not split or duplicate the write batches.
-- Report honestly: `result` says how many entities succeeded and failed, and an
-  `add_info("N entities failed", [f"{sid}: {err}", ...], keep=True)` row names
-  them so the operator can rerun just those. `keep=True` is what makes this row
-  survive beside the change rows: it reports something they cannot show, which
-  is exactly what `add_info` is for.
+- Report honestly: `result` says how many entities succeeded and failed, and
+  `record_skipped(...)` names each failed entity with its reason so the operator
+  can rerun just those. Skipped rows survive beside change rows automatically:
+  they report something the change rows cannot show. Use `add_info(...,
+  keep=True)` only for a summary that is not about one entity's processing
+  outcome.
+- If EVERY entity failed, record each one with `record_skipped(...)`. Those
+  rows ARE a legitimate result table: they name every entity and why it could
+  not be processed. A `plan_kind="changes"` plan with no change row and no
+  skipped/matched evidence is still REJECTED (see the ENFORCED rule at the top)
+  because it cannot explain what happened. Do not invent a placeholder write.
 - Do NOT put `llm_complete`/`llm_map` inside a catch-all: an LLM budget halt is
   the designed stop (see BUDGET) and must propagate. Isolate translation/read
   calls; a budget error is not an entity failure.
 
 Pattern (translation pass; the same shape for any per-entity I/O):
 
-    updates, failed = [], []
+    updates = []
     for d in dicts:
         try:
             translated = translate_text(d["metadata"]["summary"], "en", "es")
             files = get_entity_files(d["shared_id"])   # other per-entity I/O
         except Exception as exc:
-            failed.append((d["shared_id"], str(exc)))
+            record_skipped(d["shared_id"], "extraction_error",
+                           title=d["title"], template_name=tmpl, detail=str(exc))
             continue
         updates.append({"shared_id": d["shared_id"], "template_name": tmpl,
                         "metadata": {"summary": translated}})
     if updates:
         results = update_entities_parallel(updates, "es")
-    if failed:
-        add_info(f"{len(failed)} entities failed", [f"{sid}: {err}" for sid, err in failed], keep=True)
-    result = f"Translated {len(updates)} entities; {len(failed)} failed"
+    result = f"Translated {len(updates)} entities; {len(dicts) - len(updates)} skipped"
 
 WORKFLOW
 - SCHEMA INSPECTION FIRST (do this BEFORE writing any create/update script —
@@ -780,7 +853,7 @@ SELF-CHECK BEFORE EMITTING (there is no validation run):
 QUERY / RETURN-VALUE TASKS
 
 The operator asks for a value, a list, or a yes/no answer rather than a change.
-A query script WRITES NOTHING to Uwazi: use only the read helpers
+Declare `plan_kind="query"` and WRITE NOTHING to Uwazi: use only the read helpers
 (`query_entities`, `query_entities_full`, `get_entity_files*`, `get_file_bytes*`,
 `get_segmentation*`, `get_url_text`, ...), then display the answer with the
 display-only helper `add_info(title, children=None, keep=False)`. The row appears in the
@@ -788,24 +861,32 @@ review table with the title in the Target column and the children as its
 two-level detail lines; it has no checkbox and no action button and is never
 applied. Everything is rendered as text, so convert values yourself:
 
-    matches = query_entities_full(text="budget")["examples"]
+    matches = query_entities_full(mode="by_text", search_term="budget")
     add_info(
         f"{len(matches)} entities match 'budget'",
         [f"{m['title']} — {m['shared_id']}" for m in matches],
     )
     result = [m["shared_id"] for m in matches]   # the exact answer, recorded too
 
+`query_entities_full` REQUIRES `mode` and returns a `list[dict]` (see EXECUTION
+SANDBOX / RETURN ACCESS): subscript or iterate it, never read `["examples"]`
+from it — that shape belongs to `query_entities`.
+
 Rules:
 - Put the ANSWER (or its headline + one child per result) in `add_info`; set
   `result` to the same exact answer. For a single value, use it as `title` and
   omit `children`. For a list, one child per item reads best; a long list may be
   summarized in `child` lines, but never hide the answer from `result`.
-- One `add_info` call per distinct answer. Never call a write helper (or
-  `add_info` as a substitute for one) when the operator asked only a question.
-  A query script records no changes, so its info rows are always shown; do not
-  pass `keep` (that flag is for a kept exception inside a change plan).
+- One `add_info` call per distinct answer. A query records no changes, so its
+  info rows are always shown; do not pass `keep` (that flag is for a kept
+  exception inside a change plan). A query plan must NOT call a write helper:
+  it declared `plan_kind="query"`, and a change row under that declaration is a
+  contradiction the operator cannot run as an answer.
 - A `result`-only script shows nothing in the review table: if the operator must
   read the answer there, `add_info` is mandatory.
+- A prompt that asks for a CHANGE must not be answered with a query plan. Use
+  `plan_kind="changes"` and record the changes; if the data to compute them is
+  unavailable, let the generation fail (see the ENFORCED rule at the top).
 
 MERGE TASKS
 A "merge" collapses N source entities (sharing a title or some selector) into a
@@ -1117,7 +1198,7 @@ one-document logic. Use this exact shape:
 2. Per entity: fetch its files with the BULK helper —
    `files_by_id = get_entity_files_parallel(shared_ids, language)` (ONE call
    for the whole target set; it returns `{shared_id: [file dicts]}`) — then
-   `html_files = [f for f in files_by_id[sid] if htmlextract.is_html(f)]`
+   `html_files = [f for f in files_by_id[d["shared_id"]] if htmlextract.is_html(f)]`
    (`is_html` is the fifth `htmlextract` member: content_type text/html or
    .html/.htm originalname). Then
    `data_map = get_file_bytes_parallel([f["filename"] for f in html_files])`
@@ -1125,9 +1206,10 @@ one-document logic. Use this exact shape:
    `None` -> count it as missing and continue (do NOT crash the bulk run).
    The sequential `get_entity_files` / `get_file_bytes` still work for
    single-entity fetches; the `_parallel` pair is the bulk-scale form.
-3. Build the per-entity context from the entity dict you already fetched via
-   `by_ids` (no extra fetch): `ctx = {"shared_id": d["shared_id"], "title":
-   d["title"], "metadata": d["metadata"]}`. Then
+3. Build the per-entity context from the entity dict you ALREADY hold from the
+   discovery loop of step 1 — no second fetch, and specifically NOT a `by_ids`
+   refetch (one HTTP request per id): `ctx = {"shared_id": d["shared_id"],
+   "title": d["title"], "metadata": d["metadata"]}`. Then
    `parsed = extract(data.decode("utf-8", errors="replace"), ctx)`; when it
    returns None the value was NOT found for THIS entity - LEAVE THE ENTITY UNTOUCHED
    (hard rule 3: never write a guessed/fallback value) and count it as unmatched.
@@ -1138,9 +1220,17 @@ one-document logic. Use this exact shape:
    (auto-throttled; same result shape as `update_entities`). Keep the plain
    `update_entities` only for tiny non-bulk fixes.
 5. `result` MUST report: entities scanned, files fetched, matched, unmatched,
-   missing-files. A low match rate is visible BEFORE execute is run - surface
-   it honestly in `GeneratedScript.description` so the operator can re-generate
-   with a refined prompt instead of wide-scale partial writes.
+   missing-files, skipped-by-reason. A low match rate is visible BEFORE execute
+   is run - surface it honestly in `GeneratedScript.description` so the
+   operator can re-generate with a refined prompt. For every entity you could
+   not process, call `record_skipped(...)` ONCE with the concrete reason (see
+   its contract above) instead of collecting them into one `add_info`
+   paragraph. This is what gives the operator one visible, linked row per
+   entity even when nothing changes. Use `no_document` when no primary document
+   exists, `no_segmentation` when the document has no usable text, `no_page_1`
+   when page 1 is unreadable, `no_code_in_page_1` when the page was read but no
+   value matched, and `extraction_error` for a caught exception. Put a short
+   excerpt or exception message in `detail` so the reason is verifiable.
 
 SOURCE PAGE URL (when entities carry NO supporting file but DO carry a link):
 Some entities store their source as a `link` metadata property (e.g.
@@ -1202,9 +1292,13 @@ KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 
 OUTPUT
 Return a `GeneratedScript` (one turn):
+- `plan_kind`: `"changes"` or `"query"` per the ENFORCED rule at the top.
 - `python_code`: the script body. No helper imports. Discover the affected
   entities, record ONE intended change per entity with the write helpers, and
   set `result` to a concise summary of the planned change (counts + LLM calls
   made, if any).
-- `description`: one line summarizing the script's intent.
+- `description`: one line summarizing the script's intent. State any refusal to
+  guess here (a weak extractor, an unmatched entity class): it is persisted with
+  the run and shown to the operator, because an info row alone would be dropped
+  beside the change rows.
 """

@@ -1,0 +1,70 @@
+"""Execute reviewed table rows onto Uwazi as one revertable apply run.
+
+The public surface is unchanged; pure payload builders are re-exported.
+"""
+
+from __future__ import annotations
+
+from .errors import ApplyRefusedError, ApplyWriteError, format_write_failures
+from .payloads import (
+    _as_int,
+    _decode_edited,
+    _failure_entry,
+    _geolocation_entries,
+    _in_rows,
+    _relationship_entries,
+    _selected,
+    _value_entries,
+    accepted_value,
+    apply_units_total,
+    build_apply_creates,
+    build_apply_updates,
+    effective_value,
+    file_move_targets,
+    language_groups,
+    language_scoped_value,
+    merge_deletions,
+    merge_moves,
+    metadata_value,
+    partition_for_apply,
+    payload_units,
+    property_scope_ids,
+    pushable_rows,
+    stamp_language,
+    track_progress,
+    write_failures,
+)
+from .use_case import ApplySuggestionsUseCase
+
+__all__ = [
+    "ApplyRefusedError",
+    "ApplySuggestionsUseCase",
+    "ApplyWriteError",
+    "_as_int",
+    "_decode_edited",
+    "_failure_entry",
+    "_geolocation_entries",
+    "_in_rows",
+    "_relationship_entries",
+    "_selected",
+    "_value_entries",
+    "accepted_value",
+    "apply_units_total",
+    "build_apply_creates",
+    "build_apply_updates",
+    "effective_value",
+    "file_move_targets",
+    "format_write_failures",
+    "language_groups",
+    "language_scoped_value",
+    "merge_deletions",
+    "merge_moves",
+    "metadata_value",
+    "partition_for_apply",
+    "payload_units",
+    "property_scope_ids",
+    "pushable_rows",
+    "stamp_language",
+    "track_progress",
+    "write_failures",
+]

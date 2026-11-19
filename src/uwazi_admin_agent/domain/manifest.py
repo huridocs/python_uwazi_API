@@ -99,6 +99,23 @@ class MigrationManifest(BaseModel):
         ),
     )
     script: str = Field(description="The generated Python script that was executed.")
+    plan_kind: Literal["changes", "query"] | None = Field(
+        default=None,
+        description=(
+            "What the generation turn declared the prompt asks for: 'changes' (write to Uwazi) or "
+            "'query' (read-only answer). ``None`` marks a run generated BEFORE the declaration existed "
+            "(or a seeded run): the planning pass then keeps its historical behaviour instead of "
+            "guessing the intent. Every new generation records a value."
+        ),
+    )
+    plan_description: str | None = Field(
+        default=None,
+        description=(
+            "The generation turn's one-line description of the script's intent. Kept because the "
+            "prompt asks a generator whose extractor is weak to SAY SO here — discarding it left the "
+            "operator with an info row and no explanation."
+        ),
+    )
     modified: list[EntityIdentity] = Field(
         default_factory=list,
         description="Entities that existed pre-run and were modified (or relationship-touched).",

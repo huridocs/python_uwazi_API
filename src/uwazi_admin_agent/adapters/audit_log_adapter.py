@@ -18,6 +18,7 @@ from typing import override
 from loguru import logger
 
 from uwazi_admin_agent.domain.audit_record import AuditRecord
+from uwazi_admin_agent.domain.run_name import validate_run_name
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 
 AUDIT_FILENAME = "audit.jsonl"
@@ -53,4 +54,4 @@ class JsonlAuditLog(AuditLogPort):
         return records
 
     def _run_dir(self, run_id: str) -> Path:
-        return self._root / run_id
+        return self._root / validate_run_name(run_id)

@@ -7,8 +7,10 @@ as its OWN bubble and triggers the LLM CLARIFICATION step; the clarifying
 questions open in their own modal (the same checkbox cards as the New task
 wizard's validation step). The operator's answers are folded into the SAME
 bubble as that request, in the wizard's ``Clarifications (resolved during
-validation):`` format, so every bubble has the same shape and the assistant's
-"thinking" is never shown.
+validation):`` format, so every bubble has the same shape. The clarification
+step's restatement ("Understanding") and its questions are shown as context
+bubbles AND recorded in the history, so the generation LLM receives them too —
+a change request read as a report is visible before the Run.
 
 Every prompt bubble carries a status badge: **Run** once the prompt is part of
 the script's current prompt, **Not run yet** while it waits for the Run button.
@@ -28,9 +30,12 @@ stage (regenerating the script, saving it, recomputing the table) and a start
 toast; the closing toast reports the reconciliation counts.
 
 The chat's history lives in this modal's in-memory state. The durable record of
-what the prompt became is the manifest's ``validated_prompt`` (rewritten on
-every Run) plus the generation history file, so the next turn repairs against
-the last one's context.
+what the prompt became is the manifest's ``validated_prompt`` — the WHOLE folded
+context (original prompt + validation clarifications + every request with its
+own answers + every understanding/turn) — rewritten on every Run and rebuilt
+into bubbles when the chat is reopened. Each Run generates a FRESH script from
+that context with the CURRENT system prompt; no old generation conversation is
+replayed.
 
 The improvement flow does NOT open the LLM-spend approval dialog: a
 clarification turn is one tool-free request and the Run is the run's normal
@@ -46,7 +51,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from nicegui import app, background_tasks, context, ui
+from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import (
     PREDICTION_DEFAULT_MAX_COST,
@@ -58,6 +63,8 @@ from uwazi_admin_agent.domain.prompt_chat import (
     ChatMessage,
     ChatPromptStatus,
     ChatRole,
+    apply_compaction,
+    build_compaction_input,
     build_final_prompt_from_chat,
     mark_prompts_applied,
     reconstruct_chat,
@@ -66,11 +73,12 @@ from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_fin
 from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
 from uwazi_admin_agent.drivers.web.run_service import (
     clarify_prompt,
+    compact_chat,
     get_run,
     read_run_script,
     regenerate_from_chat,
 )
-from uwazi_admin_agent.drivers.web.session import session_instance_url
+from uwazi_admin_agent.drivers.web.session import credentials_for_instance, page_instance_url
 from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
 
 # The projected output tokens per regeneration turn (the Run button's planning
@@ -114,7 +122,7 @@ def _regeneration_estimate(run_id: str) -> SpendEstimate:
     count is unknown until the pass runs.
     """
     try:
-        script = read_run_script(session_instance_url(), run_id)
+        script = read_run_script(page_instance_url(), run_id)
     except OSError:
         script = ""
     usage = apply_script_llm_usage(script)
@@ -142,7 +150,7 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
     the runs table opens the modal without one.
     """
     try:
-        detail = get_run(session_instance_url(), run_id)
+        detail = get_run(page_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -190,6 +198,12 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                     )
                     send_button = ui.button("Send", icon="send", on_click=lambda: _send(state, request_input))
                     state["_send_button"] = send_button
+                    compact_button = ui.button(
+                        "Compact",
+                        icon="compress",
+                        on_click=lambda: _compact_clicked(state),
+                    ).props("flat dense color=grey-7")
+                    state["_compact_button"] = compact_button
 
             with run_area:
                 spinner = ui.spinner(size="sm", color="primary")
@@ -276,8 +290,10 @@ def _initial_bubbles(
     """The bubbles a re-opened chat renders, in display order (pure).
 
     Returns one ``(label, text, stamp, status)`` per bubble: the base prompt
-    first, then EVERY prior operator request. Keeping this pure lets the test
-    prove the recovered history is not collapsed back into one bubble.
+    first, then EVERY prior message in chat order — each operator request and
+    each clarification "Understanding" the assistant recorded, so the reopened
+    chat shows the same context the generation LLM receives. Keeping this pure
+    lets the test prove the recovered history is not collapsed into one bubble.
     """
     bubbles: list[tuple[str, str, str, ChatPromptStatus]] = []
     if baseline:
@@ -285,6 +301,8 @@ def _initial_bubbles(
     for message in history:
         if message.role is ChatRole.OPERATOR:
             bubbles.append(("Prompt", message.text, message.stamp, message.status))
+        elif message.role is ChatRole.ASSISTANT and (message.text.strip() or message.questions):
+            bubbles.append(("Understanding", message.text, message.stamp, ChatPromptStatus.APPLIED))
     return bubbles
 
 
@@ -297,12 +315,14 @@ def _load_initial_context(state: dict[str, Any], detail: Any) -> None:
 
     - ONE "Base prompt" bubble for the run itself (the original plus its
       resolved clarifications), marked Run, and
-    - one bubble per prior operator request recovered from the persisted
-      ``validated_prompt``'s conversation, each marked Run.
+    - one bubble per prior message recovered from the persisted
+      ``validated_prompt``'s conversation: each operator request AND each
+      clarification "Understanding", each marked Run.
 
     Reconstructing the bubbles (instead of rendering the whole validated prompt
     as one block) is what stops a re-opened chat from folding the earlier
-    requests into the base prompt.
+    requests into the base prompt, and it keeps the visible context identical to
+    the one the generation LLM receives.
     """
     original = detail.prompt or ""
     validated = detail.validated_prompt or ""
@@ -327,10 +347,12 @@ def _send(state: dict[str, Any], request_input: Any) -> None:
 def _submit_request(state: dict[str, Any], request: str) -> None:
     """Append one operator request and start the clarification turn.
 
-    The turn runs on the configured default caps: the improve-prompt flow does
-    NOT ask for spend approval (neither the caps nor the estimate are shown).
-    The clarification sees the WHOLE conversation so far, so it never re-asks
-    what an earlier turn already resolved.
+    The clarification is fed the WHOLE folded context so far —
+    ``build_final_prompt_from_chat``: the original prompt, the validation
+    clarifications, every earlier request with its answers and every earlier
+    understanding — so it neither re-asks what was resolved nor loses the run's
+    original intent. The turn runs on the configured default caps: this flow
+    does NOT ask for spend approval.
     """
     if state["busy"]:
         return
@@ -349,30 +371,74 @@ def _submit_request(state: dict[str, Any], request: str) -> None:
 
 
 async def _do_clarify(state: dict[str, Any], prompt: str) -> None:
-    """Run the clarification step and open its questions modal."""
+    """Run the clarification step, record its understanding, open its questions.
+
+    The understanding is ALWAYS recorded — even when the clarification found no
+    ambiguity. It is part of the context the generation LLM receives (its own
+    restatement of the intent and the questions it raised), and it is what lets
+    the operator notice a change request read as a report BEFORE pressing Run.
+    """
+    instance = page_instance_url()
+    credentials = credentials_for_instance(instance)
+    if credentials is None:
+        _set_busy(state, False)
+        with state.get("_client"):
+            ui.notify("Not logged in to Uwazi — log in again", type="negative")
+        return
     try:
         understanding = await clarify_prompt(
-            session_instance_url(),
+            instance,
             prompt,
-            app.storage.user["user"],
-            app.storage.user["password"],
+            credentials.user,
+            credentials.password,
         )
     except Exception as exc:  # noqa: BLE001 — the chat reports; the page never crashes
         _set_busy(state, False)
         ui.notify(f"Clarification failed: {exc}", type="negative", multi_line=True)
         return
     _set_busy(state, False)
+    summary = (understanding.summary or "").strip()
+    if summary or understanding.questions:
+        state["history"].append(
+            ChatMessage(
+                role=ChatRole.ASSISTANT,
+                text=summary,
+                stamp=_stamp(),
+                status=ChatPromptStatus.APPLIED,
+                questions=list(understanding.questions),
+            )
+        )
+        _add_understanding_bubble(state, summary, understanding.questions)
     if understanding.questions:
         _open_questions_dialog(state, understanding.questions)
+
+
+def _add_understanding_bubble(state: dict[str, Any], summary: str, questions: list[Any]) -> None:
+    """Show what the clarification LLM understood, above its questions.
+
+    Display-only context (no status badge): the read-back that catches a misread
+    intent. Its text is also in the chat history, so the same words reach the
+    generation LLM.
+    """
+    with state["_client"]:
+        with state["_messages"]:
+            with ui.column().classes("w-full gap-0"):
+                with ui.row().classes("items-center gap-2 q-ml-sm no-wrap"):
+                    ui.label("Understanding").classes("text-caption text-weight-medium")
+                ui.chat_message(text=summary or "(no summary)", sent=False).classes(PROMPT_BUBBLE_CLASS)
+                for question in questions:
+                    ui.label(f"• {question.question}").classes("text-caption text-grey-7 q-ml-md")
+    _scroll_to_bottom(state)
 
 
 def _open_questions_dialog(state: dict[str, Any], questions: list[Any]) -> None:
     """Show the clarifications in their own modal.
 
     The questions use the same checkbox cards as the New task wizard's
-    validation step: every suggested option is a checkbox, plus a "Custom
-    answer" checkbox and free-text input. Sending the answers folds them into
-    the request's existing bubble instead of appending an assistant message.
+    validation step: every suggested option is a checkbox plus a free-text
+    field. The free-text answer counts on its own — no extra checkbox to forget.
+    Sending the answers folds them into the request's existing bubble instead of
+    appending an assistant message.
     """
     client = state.get("_client")
     with client.layout:
@@ -393,13 +459,11 @@ def _open_questions_dialog(state: dict[str, Any], questions: list[Any]) -> None:
                             with ui.card().classes("w-full q-mb-sm"):
                                 ui.label(question.question).classes("text-body1 text-weight-medium")
                                 option_checkboxes = [ui.checkbox(option) for option in question.options]
-                                custom_checkbox = ui.checkbox("Custom answer")
                                 custom_input = ui.input("Your answer").classes("w-full")
                                 answer_widgets.append(
                                     {
                                         "question": question.question,
                                         "options": list(zip(question.options, option_checkboxes)),
-                                        "custom_checkbox": custom_checkbox,
                                         "custom_input": custom_input,
                                     }
                                 )
@@ -424,16 +488,16 @@ def _skip_questions(state: dict[str, Any], dialog: Any) -> None:
 
 
 def _submit_answers(state: dict[str, Any], dialog: Any, answer_widgets: list[dict[str, Any]]) -> None:
-    """Fold the ticked answers into the request's bubble (no new assistant turn)."""
+    """Fold the answers into the request's bubble (no new assistant turn).
+
+    A free-text answer counts on its own: it is the operator's custom
+    resolution, whether or not a suggested option was ticked.
+    """
     answers = [
         QuestionAnswer(
             question=widget["question"],
             selected=[option for option, checkbox in widget["options"] if checkbox.value],
-            custom=(
-                widget["custom_input"].value.strip()
-                if widget["custom_checkbox"].value and (widget["custom_input"].value or "").strip()
-                else None
-            ),
+            custom=(widget["custom_input"].value or "").strip() or None,
         )
         for widget in answer_widgets
     ]
@@ -493,10 +557,106 @@ def _mark_prompts_run(state: dict[str, Any]) -> None:
     state["_pending_bubble"] = None
 
 
+# --- compaction ---------------------------------------------------------------
+
+
+def _compact_clicked(state: dict[str, Any]) -> None:
+    """The Compact button: rewrite the whole chat as ONE concise prompt.
+
+    The rewrite is an LLM call over the WHOLE chat (the original prompt, the
+    resolved clarifications and every request), so it runs in the background
+    with the modal's own busy state. The table is NOT touched: the compaction
+    only rewrites the CHAT, and the operator still presses Run to regenerate
+    the script from it.
+    """
+    if state["busy"]:
+        return
+    if not state["history"]:
+        ui.notify("There is nothing to compact yet", type="warning")
+        return
+    _set_busy(state, True, "Compacting the chat…")
+    background_tasks.create(
+        _do_compact(state),
+        name=f"compact chat {state['run_id']}",
+    )
+
+
+async def _do_compact(state: dict[str, Any]) -> None:
+    """Run the compaction and replace the chat with the rewrite.
+
+    On failure NOTHING changes: the chat keeps its bubbles and its history, so
+    the operator can retry.
+    """
+    try:
+        compacted = await compact_chat(build_compaction_input(state["history"]))
+    except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
+        _set_busy(state, False)
+        with state.get("_client"):
+            ui.notify(f"Compaction failed: {exc}", type="negative", multi_line=True)
+        return
+    _replace_chat_with_compaction(state, compacted)
+    _set_busy(state, False)
+    with state.get("_client"):
+        ui.notify("Chat compacted — press Run modifications to apply it", type="positive", multi_line=True)
+
+
+def _replace_chat_with_compaction(state: dict[str, Any], compacted: str) -> None:
+    """Swap the chat's bubbles and history for the compacted prompt.
+
+    The run's own context survives as the base bubble (the original prompt and
+    its resolved clarifications): the run itself did not change, only the
+    conversation did. Every other bubble is replaced by the ONE compacted
+    prompt, which keeps the run-status badge of the conversation it summarizes
+    (applied when every request was already Run).
+    """
+    messages = state["_messages"]
+    stamp = _stamp()
+    history = apply_compaction(state["history"], compacted, stamp)
+    state["history"] = history
+    # The compacted prompt is the only prompt left, so the pending set is
+    # exactly the new bubble (when it still has to be Run).
+    state["_unrun_bubbles"] = []
+    state["_pending_index"] = None
+    state["_pending_request"] = None
+    state["_pending_bubble"] = None
+    state["dirty"] = any(
+        message.role is ChatRole.OPERATOR and message.status is ChatPromptStatus.PENDING for message in history
+    )
+
+    with state.get("_client"):
+        messages.clear()
+        with messages:
+            for label, text, message_stamp, status in _compacted_bubbles(history):
+                handle = _add_prompt_bubble(state, text, message_stamp, label=label, status=status)
+                if status is ChatPromptStatus.PENDING:
+                    state["_unrun_bubbles"].append(handle)
+    _scroll_to_bottom(state)
+    _refresh_run_button(state)
+
+
+def _compacted_bubbles(history: list[ChatMessage]) -> list[tuple[str, str, str, ChatPromptStatus]]:
+    """The bubbles a compacted chat renders (pure).
+
+    The base prompt (the original + its resolved clarifications) first, then
+    the ONE compacted prompt — the whole conversation collapsed into it.
+    """
+    bubbles: list[tuple[str, str, str, ChatPromptStatus]] = []
+    system = [message for message in history if message.role is ChatRole.SYSTEM]
+    if system:
+        baseline = build_final_prompt_from_chat(system).strip()
+        if baseline:
+            bubbles.append(("Base prompt", baseline, "", ChatPromptStatus.APPLIED))
+    compacted = [message for message in history if message.role is ChatRole.OPERATOR]
+    for message in compacted:
+        bubbles.append(("Compacted prompt", message.text, message.stamp, message.status))
+    return bubbles
+
+
 def _set_busy(state: dict[str, Any], busy: bool, message: str = "") -> None:
     """Flip the busy state, refresh the actions, and show/hide the progress row."""
     state["busy"] = busy
     _set_send_enabled(state, not busy)
+    _set_compact_enabled(state, not busy)
     _set_run_progress(state, message if busy else "", visible=busy)
     _refresh_run_button(state)
 
@@ -515,6 +675,14 @@ def _set_run_progress(state: dict[str, Any], message: str, *, visible: bool) -> 
 def _set_send_enabled(state: dict[str, Any], enabled: bool) -> None:
     """Enable or disable the one input action."""
     button = state.get("_send_button")
+    if button is not None and not button.is_deleted:
+        with state.get("_client"):
+            button.enable() if enabled else button.disable()
+
+
+def _set_compact_enabled(state: dict[str, Any], enabled: bool) -> None:
+    """Enable or disable the Compact button (disabled while a turn runs)."""
+    button = state.get("_compact_button")
     if button is not None and not button.is_deleted:
         with state.get("_client"):
             button.enable() if enabled else button.disable()
@@ -581,13 +749,20 @@ async def _do_run(
     def _on_stage(message: str) -> None:
         _set_run_progress(state, message, visible=True)
 
+    instance = page_instance_url()
+    credentials = credentials_for_instance(instance)
+    if credentials is None:
+        _set_busy(state, False)
+        with state.get("_client"):
+            ui.notify("Not logged in to Uwazi — log in again", type="negative")
+        return
     try:
         result = await regenerate_from_chat(
-            session_instance_url(),
+            instance,
             state["run_id"],
             state["history"],
-            app.storage.user["user"],
-            app.storage.user["password"],
+            credentials.user,
+            credentials.password,
             budget,
             on_stage=_on_stage,
         )

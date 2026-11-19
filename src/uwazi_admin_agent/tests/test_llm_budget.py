@@ -84,11 +84,19 @@ def test_budget_call_cost_uses_its_price() -> None:
     assert budget.call_cost(1_000_000, 1_000_000) == pytest.approx(0.69)
 
 
-def test_budget_rejects_nonpositive_cost_or_requests() -> None:
+def test_budget_allows_zero_caps_and_rejects_negative_ones() -> None:
+    """0 is a REAL cap (the wizard's deny-by-default), negatives are invalid.
+
+    ``LlmBudget`` documents 0 as "deny every call", and the ledger relies on it:
+    ``max_requests=0`` aborts on the first reserved call rather than making the
+    wizard's prefill unusable. Only a negative cap is a modelling error.
+    """
+    deny_all = LlmBudget(max_cost=0, max_requests=0, price=_price())
+    assert (deny_all.max_cost, deny_all.max_requests) == (0, 0)
     with pytest.raises(ValueError):
-        LlmBudget(max_cost=0, max_requests=5, price=_price())
+        LlmBudget(max_cost=-1, max_requests=5, price=_price())
     with pytest.raises(ValueError):
-        LlmBudget(max_cost=10, max_requests=0, price=_price())
+        LlmBudget(max_cost=10, max_requests=-1, price=_price())
 
 
 # --- usage arithmetic --------------------------------------------------------

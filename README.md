@@ -74,10 +74,24 @@ OLLAMA_API_KEY=<api-key>
   login gate.
 - `OLLAMA_API_KEY` — required by the LLM adapter. This is a key for the hosted
   API at `https://ollama.com/v1`, not a local Ollama install.
-- `ADMIN_WEB_PORT` (default `5055`), `ADMIN_WEB_STORAGE_SECRET` (has a dev
-  default), `UWAZI_ADMIN_FILE_CACHE=0` (disables the per-instance disk cache,
-  which can grow up to 4 GiB under `src/uwazi_admin_agent/data/file_cache/`)
-  are all optional.
+- `ADMIN_WEB_PORT` (default `5055`), `ADMIN_WEB_STORAGE_SECRET`,
+  `ADMIN_WEB_PUBLIC_URL`, `UWAZI_ADMIN_FILE_CACHE=0` (disables the per-instance
+  disk cache, which can grow up to 4 GiB under
+  `src/uwazi_admin_agent/data/file_cache/`) are all optional.
+- `ADMIN_WEB_PUBLIC_URL` is this app's public address (e.g.
+  `https://admin.example.org`). It is used to build **absolute invite links**
+  (see [Invite links](#invite-links)). When unset, the generated links are
+  relative (`/?instance=…`) and only work on the host that serves the app.
+- `ADMIN_WEB_STORAGE_SECRET` signs the session cookie. **Set it in any shared
+  deployment:** the cookie's session id is the only thing naming the
+  server-side session, so a well-known value would let a leaked id be replayed
+  as a login. When unset, a random per-start secret is used and a warning is
+  logged (sessions then end on restart).
+- The **Uwazi password is never written to disk.** Login credentials are kept
+  in the server process's memory, keyed by a random, non-secret token that is
+  the only credential-related value in the persisted session document
+  (`.nicegui/storage-user-*.json`). A restarted server therefore logs everyone
+  out: log in again after a restart.
 
 #### Several Uwazi instances
 
@@ -87,12 +101,21 @@ OLLAMA_API_KEY=<api-key>
 UWAZI_URL=http://localhost:3000,https://uwazi.example.org
 ```
 
-- The login screen shows an **"Uwazi instance" dropdown** when more than one
-  URL is configured (a single instance needs no choice). The operator picks the
-  instance at login; the choice is bound to the session.
+- The login screen has **no instance picker**: the instance comes from the
+  URL's `instance` parameter (see [Invite links](#invite-links)), or from the
+  first configured URL when the page is opened bare. A link's instance is
+  matched against the configured list and the CONFIGURED url is what is used,
+  so a parameter can never point the login at another host.
 - **Every task and run belongs to the instance that created it.** Switching
   instances shows an empty task table, because a run's shared ids only make
-  sense on their own instance. To switch, log out and pick the other instance.
+  sense on their own instance. To switch, log out and open the link of the
+  other instance.
+- **Isolation is enforced, not just intended.** Toasts and table refreshes
+  reach only clients whose session is still logged in to that same instance;
+  a page whose session logged out (in any tab) stops reading that instance's
+  runs, tasks and executions; the in-app log viewer was removed because a
+  process-wide log shares every instance's run ids; and run/task names are
+  validated so a name can never step outside its instance's directory.
 - The credentials (`UWAZI_USER`/`UWAZI_PASSWORD`) are **shared** by all listed
   instances — there is no per-instance credential model.
 - Each instance gets its own on-disk tree, so nothing bleeds across them:
@@ -110,7 +133,8 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
   The old flat `data/` layout is **not** migrated — it is simply no longer
   read.
 - The CLI (`uwazi-admin-agent …`) is single-instance: it targets the **first**
-  configured URL.
+  configured URL — except `uwazi-admin-agent links`, which only PRINTS one
+  link per configured instance.
 - The **property filler** is single-instance too: it targets
   `PROPERTY_FILLER_UWAZI_URL` when set, otherwise the **first** URL (with a
   startup warning). Set `PROPERTY_FILLER_UWAZI_URL=https://one.instance` when
@@ -154,6 +178,39 @@ Open `http://localhost:5055` and log in with your Uwazi credentials. The server
 binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
+
+### Invite links
+
+An **invite link** opens the login page with the Uwazi instance — and, when a
+username is given, the account — already filled in, so the admin only types
+their Uwazi **password**:
+
+```
+http://localhost:5055/?instance=global-rep&user=admin
+```
+
+- The `instance` parameter is a **token**, matched EXACTLY against the
+  configured `UWAZI_URL` list: the host's first dot-label (`global-rep`), the
+  host with its port (`global-rep.uwazi.io`, `localhost:3000`), or the full
+  URL. Only a CONFIGURED url is ever used downstream, so a forged parameter
+  can never point the login at another host — an unknown (or ambiguous) token
+  renders a banner with **no login form at all**.
+- The `user` parameter is optional. With it, the username field is not shown;
+  without it, the admin types their username. A link whose username is stale
+  is fixed by dropping `&user=…` from the URL.
+- **The link carries no credential.** The password is always typed by the
+  admin and validated against Uwazi with a real `POST /api/login`.
+- Links are generated from the app's header menu (**Invite links**) — one card
+  per configured instance — or from the CLI:
+
+  ```bash
+  uv run uwazi-admin-agent links --base-url https://admin.example.org --user admin
+  uv run uwazi-admin-agent links --instance global-rep
+  ```
+
+  `--base-url` defaults to `ADMIN_WEB_PUBLIC_URL`; without it the links are
+  relative (`/?instance=…`). The server also logs the link of the first
+  configured instance at startup.
 
 ### Reviewing: selection scan → run → revert
 
@@ -207,9 +264,11 @@ On the review page:
   reason the operator typed is stored with it, and **Restore** brings the
   operation back into the review queue. The **Discarded** filter reads both
   halves of that decision ("discarded" / "not discarded");
-- **Improve the prompt** shows the run's current prompt editable plus this
-  round's discard/mismatch evidence; submitting regenerates BOTH scripts
-  (selection + apply) with the original discovery context still in view.
+- **Show prompt** opens the prompt chat: the run's whole prompt context — the
+  original prompt, the validation clarifications, and every revision with its
+  answers and the clarification's understanding — then regenerates ONE fresh
+  script from all of it. Nothing is replayed from an old generation conversation,
+  so the CURRENT contract is always what the generator reads.
 
 CLI equivalences: `scan` = the selection scan; `apply` = accept everything of
 the latest attempt and push it into the apply run. There is deliberately no
@@ -257,10 +316,9 @@ Two model-based alternatives were considered and **not** adopted:
 
 A script can call the LLM per entity through two helpers bound into the sandbox:
 `llm_complete(instruction, text)` and `llm_map(instruction, items)` (batched).
-Before any LLM-spending action — generating a script, a prediction pass, or a
-prompt-repair turn — a dialog shows the projected request/token counts and an
-*estimated* cost and lets you tighten the **hard limits** that are enforced at
-runtime. When a limit is hit the pass aborts cleanly: predictions never write to
+Before any LLM-spending action — generating a script or a prediction pass — a
+dialog shows the projected request/token counts and an *estimated* cost and lets
+you tighten the **hard limits** that are enforced at runtime. When a limit is hit the pass aborts cleanly: predictions never write to
 Uwazi, so everything recorded before the halt is kept and reviewable.
 
 Pricing is a placeholder and must be set for your provider via
@@ -270,7 +328,7 @@ request/token counts, not money.
 ### Multistep tasks
 
 The New Task wizard accepts extra step prompts (one per line) to create a
-**multistep task** — one generated run (selection + apply scripts) per step
+**multistep task** — one generated run (one planning script) per step
 (`/task/<task_id>`). Each step card shows the status, its selection scan's
 implication counts ("Refresh implications"), and a **"Review & apply"** link to
 the step's own review page — reviewing there is what writes; the task page has

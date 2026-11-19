@@ -20,6 +20,7 @@ from typing import override
 from loguru import logger
 
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
+from uwazi_admin_agent.domain.run_name import validate_run_name
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 
@@ -167,4 +168,4 @@ class FilesystemBackupStore(BackupStorePort):
     # --- helpers -------------------------------------------------------------
 
     def _run_dir(self, run_id: str) -> Path:
-        return self._root / run_id
+        return self._root / validate_run_name(run_id)

@@ -68,10 +68,6 @@ class GenerateScriptUseCase:
         self._max_requests: int = max(1, max_requests)
         self._max_output_tokens: int = max(1, max_output_tokens)
         self._deps: AdminAgentDeps = deps
-        self._last_messages: list[Any] = []
-        # The same conversation serialized (``all_messages_json()``), written to the
-        # run folder so a later repair turn can restore the full context.
-        self._last_messages_json: bytes | None = None
         # Build the extractor subagent ONCE (the use case owns the LlmPort) and
         # share it with the author_html_extractor tool via the deps.
         deps.extractor_agent = build_extractor_agent(self._llm.get_model())
@@ -147,48 +143,25 @@ class GenerateScriptUseCase:
         return system_prompt_with_languages(SYSTEM_PROMPT, await fetch_instance_languages(self._deps))
 
     async def execute(self, prompt: str) -> GeneratedScript:
-        """Run the agent once on ``prompt`` and return the generated script."""
+        """Run the agent once on ``prompt`` and return the generated script.
+
+        Every turn starts from a FRESH conversation with the CURRENT system
+        prompt. There is deliberately no history replay: a persisted
+        conversation carries the system prompt of the moment it was captured,
+        and pydantic-ai only injects ``system_prompt=`` when the history is
+        empty — so a "repair" turn silently ran the OLD contract (the
+        two-script selection/apply contract of early runs), whatever the prompt
+        said. The whole operator context is folded into ``prompt`` instead
+        (see :func:`uwazi_admin_agent.domain.prompt_chat.build_final_prompt_from_chat`).
+        """
         agent = self._build_agent(self._llm.get_model(), self._max_output_tokens, await self._system_prompt())
         run = await agent.run(
             prompt,
             deps=self._deps,
             usage_limits=UsageLimits(request_limit=self._max_requests),
         )
-        self._last_messages = list(run.all_messages())
-        self._last_messages_json = run.all_messages_json()
         script = self._coerce_result(run)
         logger.info("generated script: lines={} preview={}", script.python_code.count("\n") + 1, script.python_code[:200])
-        return script
-
-    def load_history_json(self, payload: bytes | str) -> None:
-        """Restore the conversation from a persisted ``all_messages_json()`` payload.
-
-        The repair path reloads a run's stored history so a repair turn can fix
-        the script with the ORIGINAL discovery context still in view (no
-        re-exploration, no re-discovery cost).
-        """
-        from pydantic_ai.messages import ModelMessagesTypeAdapter
-
-        raw = payload.encode("utf-8") if isinstance(payload, str) else payload
-        self._last_messages = list(ModelMessagesTypeAdapter.validate_json(raw))
-
-    async def repair(self, feedback: str) -> GeneratedScript:
-        """Run a repair turn with ``feedback`` over the prior message history.
-
-        Reuses the discovery + generation context from the prior ``execute`` so
-        the agent can fix the script without re-exploring.
-        """
-        agent = self._build_agent(self._llm.get_model(), self._max_output_tokens, await self._system_prompt())
-        run = await agent.run(
-            feedback,
-            deps=self._deps,
-            usage_limits=UsageLimits(request_limit=self._max_requests),
-            message_history=self._last_messages,
-        )
-        self._last_messages = list(run.all_messages())
-        self._last_messages_json = run.all_messages_json()
-        script = self._coerce_result(run)
-        logger.info("repaired script: lines={} preview={}", script.python_code.count("\n") + 1, script.python_code[:200])
         return script
 
     @staticmethod

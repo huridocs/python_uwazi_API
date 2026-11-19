@@ -20,7 +20,7 @@ from typing import Any, Callable
 from nicegui import context, ui
 
 from uwazi_admin_agent.drivers.web.run_service import get_run
-from uwazi_admin_agent.drivers.web.session import session_instance_url
+from uwazi_admin_agent.drivers.web.session import page_instance_url
 
 
 def close_button(dialog: Any, dense: bool = False) -> Any:
@@ -51,22 +51,27 @@ def modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = N
             close_button(dialog)
 
 
-def copy_to_clipboard(text: str, label: str = "Copy") -> None:
+def copy_to_clipboard(text: str | Callable[[], str], label: str = "Copy") -> None:
     """Button that copies ``text`` to the clipboard via the browser API.
 
     Uses ``navigator.clipboard.writeText`` when available (secure contexts);
     otherwise falls back to a hidden textarea + ``document.execCommand('copy')``.
+
+    ``text`` may be a callable: it is then evaluated at CLICK time, so the
+    button copies the CURRENT value of a field that the operator can still
+    change (never a stale snapshot taken when the button was built).
     """
-    payload = json.dumps(text)
-    js = (
-        f"navigator.clipboard ? navigator.clipboard.writeText({payload}) : (() => {{ "
-        f"const el = document.createElement('textarea'); el.value = {payload}; "
-        "el.style.position = 'fixed'; el.style.opacity = '0'; "
-        "document.body.appendChild(el); el.select(); "
-        "document.execCommand('copy'); el.remove(); })()"
-    )
 
     def _do_copy() -> None:
+        value = text() if callable(text) else text
+        payload = json.dumps(value)
+        js = (
+            f"navigator.clipboard ? navigator.clipboard.writeText({payload}) : (() => {{ "
+            f"const el = document.createElement('textarea'); el.value = {payload}; "
+            "el.style.position = 'fixed'; el.style.opacity = '0'; "
+            "document.body.appendChild(el); el.select(); "
+            "document.execCommand('copy'); el.remove(); })()"
+        )
         ui.run_javascript(js)
         ui.notify("Copied to clipboard", type="positive", timeout=1.5)
 
@@ -90,7 +95,7 @@ def script_dialog(run_id: str) -> None:
     shrinkable the column simply scrolls instead.
     """
     try:
-        detail = get_run(session_instance_url(), run_id)
+        detail = get_run(page_instance_url(), run_id)
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -106,6 +111,8 @@ def script_dialog(run_id: str) -> None:
                     dialog,
                     f"Generated script — {run_id}",
                     lambda: copy_to_clipboard(
+                        f"Plan kind: {detail.plan_kind or 'undeclared (legacy run)'}\n"
+                        f"Plan description: {detail.plan_description or ''}\n\n"
                         f"Prompt:\n{detail.prompt or ''}\n\n"
                         f"Validated prompt:\n{detail.validated_prompt or ''}\n\n"
                         f"Script:\n{detail.script}",
@@ -113,6 +120,11 @@ def script_dialog(run_id: str) -> None:
                     ),
                 )
                 with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
+                    with ui.row().classes("w-full items-center gap-2 shrink-0"):
+                        ui.badge(detail.plan_kind or "undeclared", color="primary").props("rounded")
+                        ui.label("Declared plan kind (enforced by the planning pass)").classes("text-caption text-grey-7")
+                    if detail.plan_description:
+                        ui.label(detail.plan_description).classes("text-body2 q-mb-sm")
                     with ui.row().classes("w-full items-center justify-between shrink-0"):
                         ui.label("Prompt").classes("text-subtitle1 text-grey-7")
                         copy_to_clipboard(detail.prompt or "", "Copy prompt")

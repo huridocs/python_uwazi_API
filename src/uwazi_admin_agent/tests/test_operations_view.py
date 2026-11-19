@@ -112,7 +112,7 @@ def test_set_publish_status_value_follows_the_flag() -> None:
 
 def test_sub_status_vocabulary_uses_applied_for_written_rows() -> None:
     assert view.sub_status_label(SuggestionStatus.APPLIED) == "applied"
-    assert view.sub_status_color(SuggestionStatus.APPLIED) == "blue"
+    assert view.sub_status_color(SuggestionStatus.APPLIED) == "blue-9"
     assert view.sub_status_label(SuggestionStatus.DISCARDED) == "discarded"
     assert view.sub_status_label(SuggestionStatus.REVERTED) == "reverted"
 
@@ -123,8 +123,8 @@ def test_sub_status_vocabulary_keeps_only_pending_applied_and_reverted() -> None
     assert view.sub_status_label(SuggestionStatus.PENDING) == "pending"
     assert view.sub_status_label(SuggestionStatus.ACCEPTED) == "pending"
     assert view.sub_status_label(SuggestionStatus.EDITED) == "pending"
-    assert view.sub_status_color(SuggestionStatus.ACCEPTED) == "grey"
-    assert view.sub_status_color(SuggestionStatus.EDITED) == "grey"
+    assert view.sub_status_color(SuggestionStatus.ACCEPTED) == "grey-8"
+    assert view.sub_status_color(SuggestionStatus.EDITED) == "grey-8"
 
 
 def test_operation_status_is_derived_from_its_parts() -> None:

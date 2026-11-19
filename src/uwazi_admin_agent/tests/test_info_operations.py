@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
+    MATCHED_OP,
+    SKIPPED_OP,
     OperationReviewRow,
     Suggestion,
     SuggestionStatus,
+    skip_reason_label,
 )
-from uwazi_admin_agent.domain.suggestion_scoring import records_to_suggestions
+from uwazi_admin_agent.domain.suggestion_scoring import drop_unchanged_property_rows, records_to_suggestions
 from uwazi_admin_agent.drivers.web import operations_view as view
-from uwazi_admin_agent.use_cases.apply_suggestions_use_case import pushable_rows
+from uwazi_admin_agent.use_cases.apply_suggestions_use_case import partition_for_apply, pushable_rows
 from uwazi_admin_agent.use_cases.script_exec_namespace import _dry_run_write_helpers
 
 
@@ -240,3 +243,141 @@ def test_pushable_rows_never_applies_info() -> None:
     )
 
     assert pushable_rows([info, update]) == [update]
+
+
+# --- matched / skipped display-only outcomes ---------------------------------
+
+
+def _display_operation(op: str, *, reason: str | None = None) -> OperationReviewRow:
+    sub = Suggestion(
+        id=20,
+        run_id="run1",
+        shared_id="entity-a",
+        entity_title="A/HRC/37/2",
+        template_name="DOCUMENT",
+        op=op,  # type: ignore[arg-type]
+        language=None if op == SKIPPED_OP else "en",
+        property_name=None if op == SKIPPED_OP else "document_ref",
+        current_value=None if op == SKIPPED_OP else "A/HRC/37/2",
+        proposed_value="first page excerpt" if op == SKIPPED_OP else "A/HRC/37/2",
+        skip_reason=reason,
+        match=True if op == MATCHED_OP else None,
+        status=SuggestionStatus.PENDING,
+    )
+    return OperationReviewRow(
+        shared_id="entity-a",
+        entity_title="A/HRC/37/2",
+        template_names=["DOCUMENT"],
+        ops=[op],
+        properties=[] if op == SKIPPED_OP else ["document_ref"],
+        languages=[] if op == SKIPPED_OP else ["en"],
+        proposal_count=1,
+        pending=1,
+        accepted=0,
+        applied=0,
+        reverted=0,
+        discarded=0,
+        edited=0,
+        match_summary="n/a",
+        has_outcome=False,
+        subs=[sub],
+    )
+
+
+def test_skipped_reason_ids_map_to_descriptive_text() -> None:
+    assert skip_reason_label("no_segmentation") == "The primary document has no usable text segmentation."
+    assert skip_reason_label("no_document") == "No primary document is attached to this entity."
+    assert skip_reason_label("no_code_in_page_1") == "No matching document code was found on the first page."
+    assert skip_reason_label(None).startswith("This entity was not processed")
+
+
+def test_skip_record_becomes_a_per_entity_display_row() -> None:
+    records: list[dict] = []
+    record_skipped = _dry_run_write_helpers(records)["record_skipped"]
+
+    record_skipped("entity-a", "no_segmentation", title="A/HRC/37/2", template_name="DOCUMENT", detail="page 1")
+
+    assert records[0]["op"] == SKIPPED_OP
+    assert records[0]["shared_id"] == "entity-a"
+    rows = records_to_suggestions("run1", records)
+    assert len(rows) == 1
+    assert rows[0].shared_id == "entity-a"
+    assert rows[0].entity_title == "A/HRC/37/2"
+    assert rows[0].template_name == "DOCUMENT"
+    assert rows[0].skip_reason == "no_segmentation"
+    assert rows[0].proposed_value == "page 1"
+
+
+def test_matched_operation_has_no_actions_but_has_link_and_values() -> None:
+    payload = view.operation_row(_display_operation(MATCHED_OP), uwazi_url="https://example.test")
+
+    assert payload["url"] == "https://example.test/en/entity/entity-a"
+    assert payload["has_checkable"] is False
+    assert payload["has_runnable"] is False
+    assert payload["revertable"] is False
+    assert payload["is_display_only"] is True
+    assert payload["run_status"] == "matched"
+    sub = payload["subs"][0]
+    assert (sub["current"], sub["proposed"]) == ("A/HRC/37/2", "A/HRC/37/2")
+    assert sub["status"] == "matched"
+    assert sub["selectable"] is False
+
+
+def test_skipped_operation_shows_the_reason_and_entity_link() -> None:
+    payload = view.operation_row(_display_operation(SKIPPED_OP, reason="no_segmentation"), uwazi_url="https://example.test")
+
+    assert payload["url"] == "https://example.test/en/entity/entity-a"
+    assert payload["run_status"] == "not processed"
+    assert payload["is_display_only"] is True
+    assert payload["has_runnable"] is False
+    sub = payload["subs"][0]
+    assert sub["label"] == "The primary document has no usable text segmentation."
+    assert sub["caption"] == ""
+    assert sub["proposed"] == "first page excerpt"
+    assert sub["status"] == "not processed"
+    assert sub["selectable"] is False
+
+
+def test_matched_unchanged_outputs_become_matched_rows() -> None:
+    row = Suggestion(
+        id=1,
+        run_id="run1",
+        shared_id="entity-a",
+        op="update",
+        property_name="document_ref",
+        language="en",
+        current_value="A/HRC/37/2",
+        proposed_value="A/HRC/37/2",
+        match=True,
+        status=SuggestionStatus.PENDING,
+    )
+
+    kept = drop_unchanged_property_rows([row])
+
+    assert len(kept) == 1
+    assert kept[0].op == MATCHED_OP
+    assert kept[0].current_value == "A/HRC/37/2"
+    assert kept[0].proposed_value == "A/HRC/37/2"
+    assert kept[0].match is True
+
+
+def test_pushable_rows_and_apply_partitions_exclude_matched_and_skipped() -> None:
+    matched = Suggestion(
+        id=1,
+        run_id="run1",
+        shared_id="a",
+        op=MATCHED_OP,
+        property_name="document_ref",
+        proposed_value="same",
+        status=SuggestionStatus.ACCEPTED,
+    )
+    skipped = Suggestion(
+        id=2,
+        run_id="run1",
+        shared_id="b",
+        op=SKIPPED_OP,
+        status=SuggestionStatus.ACCEPTED,
+    )
+
+    assert pushable_rows([matched, skipped]) == []
+    assert partition_for_apply([matched, skipped]) == ([], [])

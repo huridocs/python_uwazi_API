@@ -6,7 +6,12 @@ functions over literal strings.
 
 from __future__ import annotations
 
-from uwazi_admin_agent.domain.instance import instance_key, instance_slug, parse_instance_urls
+from uwazi_admin_agent.domain.instance import (
+    instance_key,
+    instance_slug,
+    parse_instance_urls,
+    same_instance,
+)
 
 
 def test_parse_instance_urls_single_url() -> None:
@@ -28,6 +33,18 @@ def test_parse_instance_urls_empty_and_none() -> None:
 
 def test_instance_key_ignores_a_trailing_slash() -> None:
     assert instance_key("https://x.io/") == instance_key("https://x.io")
+
+
+def test_same_instance_matches_normalized_urls() -> None:
+    assert same_instance("https://x.io", "https://x.io/") is True
+    assert same_instance("http://a", "http://b") is False
+
+
+def test_same_instance_never_matches_an_unbound_url() -> None:
+    # An unregistered session (no instance) must not receive another's events.
+    assert same_instance("", "http://a") is False
+    assert same_instance("http://a", "") is False
+    assert same_instance("", "") is False
 
 
 def test_instance_key_differs_per_instance() -> None:

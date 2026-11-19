@@ -146,6 +146,17 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
+    def op_status_counts(self, run_id: str) -> dict[str, dict[str, int]]:
+        """Row counts per ``op`` and per ``status`` over the whole run.
+
+        The Op and Status filters' options: ``{"op": {value: n}, "status":
+        {value: n}}``. Counts are ROW-level (the suboperations the filters match)
+        and span the WHOLE run, so they do not shift as the operator pages or
+        narrows the table.
+        """
+        ...
+
+    @abstractmethod
     def templates(self, run_id: str) -> list[str]:
         """The distinct template names of the run — used to resolve property labels."""
         ...

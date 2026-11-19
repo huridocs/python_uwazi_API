@@ -17,6 +17,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     entity_open_url,
     entity_row,
     filter_from_controls,
+    filter_options,
     format_cost,
     full_value,
     match_label,
@@ -109,8 +110,8 @@ def test_suggestion_to_row_carries_the_badge_colors() -> None:
     """Vue slots cannot reach ``window.*``, so colors must ride on the row."""
     row = suggestion_to_row(_suggestion(op="delete", property_name=None, match=None, status=SuggestionStatus.DISCARDED))
     assert row["op_color"] == "negative"
-    assert row["match_color"] == "grey-6"
-    assert row["status_color"] == "red"
+    assert row["match_color"] == "grey-7"
+    assert row["status_color"] == "red-9"
 
 
 def test_suggestion_to_row_uses_shared_id_when_there_is_no_title() -> None:
@@ -138,12 +139,46 @@ def test_filter_from_controls_maps_empty_strings_to_no_constraint() -> None:
 
 
 def test_filter_from_controls_maps_values_through() -> None:
-    f = filter_from_controls(status="accepted", op="update", property_name="excerpt", match="mismatch", text=" foo ")
-    assert f.status == SuggestionStatus.ACCEPTED
-    assert f.op == "update"
+    f = filter_from_controls(status="accepted", op="update", property_name="excerpt", text=" foo ")
+    assert f.status == [SuggestionStatus.ACCEPTED]
+    assert f.op == ["update"]
     assert f.property_name == "excerpt"
-    assert f.match == "mismatch"
+    assert f.match is None
     assert f.text == "foo"  # trimmed
+
+
+def test_filter_from_controls_passes_multi_select_lists_through() -> None:
+    f = filter_from_controls(status=["pending", "discarded"], op=["update", "delete"])
+    assert f.status == [SuggestionStatus.PENDING, SuggestionStatus.DISCARDED]
+    assert f.op == ["update", "delete"]
+
+
+def test_filter_from_controls_maps_empty_lists_to_no_constraint() -> None:
+    f = filter_from_controls(status=[], op=[])
+    assert f.status is None
+    assert f.op is None
+
+
+def test_filter_options_list_only_present_values_with_counts() -> None:
+    labels = {"update": "update", "delete": "delete", "publish": "publish"}
+    options = filter_options(labels, {"update": 1240, "delete": 3}, [])
+    assert options == {"update": "update (1,240)", "delete": "delete (3)"}
+
+
+def test_filter_options_keep_a_selected_value_listed_at_zero() -> None:
+    labels = {"update": "update", "delete": "delete"}
+    options = filter_options(labels, {"update": 2}, ["delete"])
+    assert options == {"update": "update (2)", "delete": "delete (0)"}
+
+
+def test_filter_options_append_a_selected_value_without_a_label() -> None:
+    assert filter_options({"a": "A"}, {}, ["b"]) == {"b": "b (0)"}
+
+
+def test_filter_options_keep_the_label_order() -> None:
+    labels = {"pending": "pending", "accepted": "accepted", "discarded": "discarded"}
+    counts = {"discarded": 1, "pending": 5, "accepted": 2}
+    assert list(filter_options(labels, counts, [])) == ["pending", "accepted", "discarded"]
 
 
 def test_filter_from_controls_whitespace_text_is_no_constraint() -> None:
@@ -224,7 +259,7 @@ def test_entity_row_flattens_the_entity_contract() -> None:
     assert row["shared_id"] == "s1"
     assert row["title"] == "One"
     assert row["ops"] == "update"
-    assert row["op_colors"] == ["primary"]
+    assert row["op_colors"] == ["blue-9"]
     assert row["template"] == "Judgment"
 
 
@@ -241,7 +276,7 @@ def test_entity_row_dashes_an_unknown_template() -> None:
 def test_entity_row_mixed_ops_keep_their_colors_aligned() -> None:
     row = entity_row(_entity_row(ops=["update", "delete"]))
     assert row["ops"] == "update, delete"
-    assert row["op_colors"] == ["primary", "negative"]
+    assert row["op_colors"] == ["blue-9", "negative"]
 
 
 def test_entity_row_match_column_is_gone() -> None:
@@ -438,11 +473,11 @@ def test_property_caption_is_empty_when_the_heading_is_the_name() -> None:
 
 
 def test_run_status_is_pending_for_an_unreviewed_entity() -> None:
-    assert run_status(_entity_row(pending=2, applied=0)) == ("pending", "grey")
+    assert run_status(_entity_row(pending=2, applied=0)) == ("pending", "grey-8")
 
 
 def test_run_status_is_applied_when_every_row_is_applied() -> None:
-    assert run_status(_entity_row(pending=0, applied=2)) == ("applied", "blue")
+    assert run_status(_entity_row(pending=0, applied=2)) == ("applied", "blue-9")
 
 
 def test_run_status_is_reverted_once_a_revert_undid_the_writes() -> None:
@@ -451,7 +486,7 @@ def test_run_status_is_reverted_once_a_revert_undid_the_writes() -> None:
 
 def test_run_status_stays_pending_on_a_partial_state() -> None:
     # One applied + one reverted: work remains, and it is not fully applied.
-    assert run_status(_entity_row(pending=0, applied=1, reverted=1)) == ("pending", "grey")
+    assert run_status(_entity_row(pending=0, applied=1, reverted=1)) == ("pending", "grey-8")
 
 
 def test_pending_card_counts_every_state_the_row_badge_calls_pending() -> None:
