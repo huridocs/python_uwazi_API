@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
-from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, value_decisions
+from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, effective_selection, labels_of
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
     INFO_OP,
@@ -352,7 +352,15 @@ def suboperation_row(
     else:
         note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
     select_type = "multiselect" if (types or {}).get(sub.property_name or "") == MULTISELECT_TYPE else None
-    decisions = value_decisions(sub.proposed_value, sub.rejected_values) if select_type else []
+    selected = effective_selection(sub.proposed_value, sub.rejected_values, sub.selected_values) if select_type else []
+    # One chip per DISTINCT proposed label; accepted == the operator's own
+    # selection, which may add catalog values and drop proposed ones.
+    proposal_labels: list[str] = []
+    if select_type:
+        for label in labels_of(sub.proposed_value):
+            if label not in proposal_labels:
+                proposal_labels.append(label)
+    decisions = [{"label": label, "accepted": label in selected} for label in proposal_labels]
     return {
         "id": sub.id,
         "key": f"sub-{sub.id}",
@@ -392,6 +400,7 @@ def suboperation_row(
         # existing payload consumers are unaffected).
         "values": decisions,
         "has_rejected": any(not decision["accepted"] for decision in decisions),
+        "selection_text": ", ".join(selected) or "— nothing (the row is discarded)",
         "select_type": select_type,
     }
 

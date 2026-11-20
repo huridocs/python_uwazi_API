@@ -10,10 +10,12 @@ from nicegui import background_tasks, ui
 from uwazi_admin_agent.configuration import (
     LLM_PRICE_INPUT_PER_MTOK,
     LLM_PRICE_OUTPUT_PER_MTOK,
+    PREDICTION_DEFAULT_MAX_COST,
+    PREDICTION_DEFAULT_MAX_REQUESTS,
     SCRIPT_DEFAULT_MAX_COST,
     SCRIPT_DEFAULT_MAX_REQUESTS,
 )
-from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice
+from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web import operation_gate
 
@@ -342,14 +344,24 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
             ).classes("text-body2 text-grey-7")
             with ui.row().classes("w-full items-center gap-2"):
                 state["_caps_cost_input"] = ui.number(
-                    "Max cost ($)", value=SCRIPT_DEFAULT_MAX_COST, min=0.0, step=0.5, format="%.2f"
+                    "Max cost ($)",
+                    value=SCRIPT_DEFAULT_MAX_COST,
+                    min=0.0,
+                    step=0.5,
+                    format="%.2f",
+                    on_change=lambda: _caps_opt_in(state, "cost"),
                 ).classes("grow")
                 state["_caps_requests_input"] = ui.number(
-                    "Max calls (backstop)", value=SCRIPT_DEFAULT_MAX_REQUESTS, min=0, step=1
+                    "Max calls (backstop)",
+                    value=SCRIPT_DEFAULT_MAX_REQUESTS,
+                    min=0,
+                    step=1,
+                    on_change=lambda: _caps_opt_in(state, "requests"),
                 ).classes("grow")
             ui.label(
                 "Default is 0 on both: the script's LLM calls are disabled — the pass aborts cleanly on the "
-                "first one. Raise a cap here to let the script spend within it."
+                "first one. Raise EITHER cap to opt in; the other is filled with its standard backstop so the "
+                "allowance is actually usable."
             ).classes("text-body2 text-grey-7")
             ui.label("The pass aborts cleanly at the caps; rows computed before the halt are kept.").classes(
                 "text-body2 text-grey-7"
@@ -439,18 +451,59 @@ def _script_caps_model() -> str:
         return "(model not configured)"
 
 
+def _caps_opt_in(state: dict[str, Any], changed: str) -> None:
+    """Fill the missing backstop when the operator RAISES one cap (UI mirror).
+
+    Both caps are enforced by the planning pass's ledger, so a lone positive cap
+    would deny the script's first LLM call. This writes the standard backstop
+    into the visible field, so the operator sees the budget that will apply.
+    Only a RAISE fills the sibling; clearing a field back to 0 is left alone (the
+    operator can zero both to disable LLM calls), so the mirror never fights a
+    deliberate clear.
+    """
+    cost_widget = state.get("_caps_cost_input")
+    requests_widget = state.get("_caps_requests_input")
+    if cost_widget is None or requests_widget is None:
+        return
+    cost = _cap_float(cost_widget.value)
+    requests = _cap_int(requests_widget.value)
+    if changed == "cost" and cost is not None and cost > 0 and (requests is None or requests <= 0):
+        requests_widget.value = with_default_backstops(
+            cost,
+            0,
+            default_cost=PREDICTION_DEFAULT_MAX_COST,
+            default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
+        )[1]
+    elif changed == "requests" and requests is not None and requests > 0 and (cost is None or cost <= 0):
+        cost_widget.value = with_default_backstops(
+            0,
+            requests,
+            default_cost=PREDICTION_DEFAULT_MAX_COST,
+            default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
+        )[0]
+
+
 def _wizard_budget(state: dict[str, Any]) -> LlmBudget:
     """The approved budget for the script's llm_complete/llm_map calls (wizard caps step).
 
-    0 is a real, operator-visible value — the deny-by-default prefill — so it
-    is kept as-is (a 0 request cap aborts the pass on its first LLM call).
-    Only an empty/invalid input falls back to the configured default.
+    0 on BOTH is a real, operator-visible value — the deny-by-default prefill —
+    so it is kept as-is (a 0 request cap aborts the pass on its first LLM call).
+    Raising either cap opts in: the other dimension is filled with its standard
+    backstop, because the ledger enforces both and a lone cap would otherwise
+    deny the very call the operator just allowed. Only an empty/invalid input
+    falls back to the configured default.
     """
     cost = _cap_float(state["_caps_cost_input"].value) if state.get("_caps_cost_input") is not None else None
     requests = _cap_int(state["_caps_requests_input"].value) if state.get("_caps_requests_input") is not None else None
+    max_cost, max_requests = with_default_backstops(
+        SCRIPT_DEFAULT_MAX_COST if cost is None else cost,
+        SCRIPT_DEFAULT_MAX_REQUESTS if requests is None else requests,
+        default_cost=PREDICTION_DEFAULT_MAX_COST,
+        default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
+    )
     return LlmBudget(
-        max_cost=SCRIPT_DEFAULT_MAX_COST if cost is None else cost,
-        max_requests=SCRIPT_DEFAULT_MAX_REQUESTS if requests is None else requests,
+        max_cost=max_cost,
+        max_requests=max_requests,
         price=LlmPrice(
             model=_script_caps_model(),
             input_per_mtok=LLM_PRICE_INPUT_PER_MTOK,

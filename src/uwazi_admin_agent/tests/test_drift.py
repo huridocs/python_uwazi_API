@@ -169,6 +169,8 @@ def test_banner_texts() -> None:
     assert drift_text_classes(DRIFT_STATUS_COLORS[DriftStatus.DRIFTED.value]) == "text-body2 text-red grow"
     # the resting state stays grey
     assert drift_text_classes(DRIFT_STATUS_COLORS[DriftStatus.UNKNOWN.value]) == "text-body2 text-grey-7 grow"
+    # UP TO DATE is neutral grey too, not green: only drift demands attention
+    assert drift_text_classes(DRIFT_STATUS_COLORS[DriftStatus.VALID.value]) == "text-body2 text-grey-7 grow"
 
 
 def test_banner_time_formats() -> None:

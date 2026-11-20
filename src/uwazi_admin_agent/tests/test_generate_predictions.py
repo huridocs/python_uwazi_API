@@ -592,3 +592,18 @@ result = "recorded %d updates, all already applied" % len(updates)
     assert not any("Nothing to run" in str(row.proposed_value) for row in rows)
     # The script's own failure report is still there.
     assert any("could not be processed" in str(row.proposed_value) for row in rows)
+
+
+def test_prediction_pass_persists_the_recorded_basis_on_the_row(store: SqliteSuggestionStore) -> None:
+    """A script that says WHERE its value came from keeps that provenance on the row."""
+    script = """
+entities = query_entities_full(mode="by_template", template_name="Case")
+for d in entities:
+    update_entities([{"shared_id": d["shared_id"], "metadata": {"excerpt": [{"value": "new"}]},
+                      "basis": ["_title"]}])
+result = len(entities)
+"""
+    asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    rows, total = store.query("run1", SuggestionFilter())
+    assert total == 3
+    assert {row.shared_id: row.basis for row in rows} == {sid: ["_title"] for sid in ("s1", "s2", "s3")}

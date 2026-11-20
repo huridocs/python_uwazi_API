@@ -219,6 +219,30 @@ def format_budget(budget: LlmBudget) -> str:
     )
 
 
+def with_default_backstops(
+    max_cost: float,
+    max_requests: int,
+    *,
+    default_cost: float,
+    default_requests: int,
+) -> tuple[float, int]:
+    """Fill the cap left at 0 when the OTHER cap opts in (pure).
+
+    Both caps are enforced by :func:`ensure_within_budget`, so a lone positive
+    cap would otherwise deny the script's first LLM call — even though raising
+    it is exactly how the wizard's caps step says the operator opts in. The
+    missing dimension becomes a backstop at its standard default. Both zero
+    stays "deny every call" (the wizard's deny-by-default prefill).
+    """
+    if max_cost <= 0 and max_requests <= 0:
+        return 0.0, 0
+    if max_cost > 0 and max_requests <= 0:
+        return max_cost, max(1, default_requests)
+    if max_requests > 0 and max_cost <= 0:
+        return max(0.01, default_cost), max_requests
+    return max_cost, max_requests
+
+
 class LlmLedger:
     """The single mutable piece of the budget machinery: a running account.
 
@@ -322,4 +346,5 @@ __all__ = [
     "n_calls_for_entities",
     "remaining",
     "sum_usage",
+    "with_default_backstops",
 ]

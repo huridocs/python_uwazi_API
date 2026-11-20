@@ -402,3 +402,45 @@ def test_score_accuracy_counts_and_ratio() -> None:
 def test_score_accuracy_none_when_nothing_comparable() -> None:
     assert score_accuracy([]).accuracy is None
     assert score_accuracy([_suggestion("a", None)]).accuracy is None
+
+
+# --- provenance (basis) ------------------------------------------------------
+
+
+def test_update_record_puts_basis_on_every_property_row() -> None:
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            metadata={"excerpt": [{"value": "v1"}], "title_ref": [{"value": "X"}]},
+            title=None,
+            template_name="Case",
+            language=None,
+            basis=["_title", "document_ref"],
+        )
+    ]
+    rows = records_to_suggestions("run1", records)
+    assert [r.property_name for r in rows] == ["excerpt", "title_ref"]
+    assert [r.basis for r in rows] == [["_title", "document_ref"], ["_title", "document_ref"]]
+
+
+def test_a_per_language_split_row_inherits_the_basis() -> None:
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            metadata={"excerpt": [{"value": "en text", "language": "en"}, {"value": "es text", "language": "es"}]},
+            title=None,
+            template_name="Case",
+            language=None,
+            basis=["_title"],
+        )
+    ]
+    rows = records_to_suggestions("run1", records)
+    assert [r.language for r in rows] == ["en", "es"]
+    assert [r.basis for r in rows] == [["_title"], ["_title"]]
+
+
+def test_a_record_without_basis_yields_no_provenance() -> None:
+    records = [_rec(op="update", shared_id="s1", metadata={"excerpt": [{"value": "v"}]}, title=None)]
+    assert records_to_suggestions("run1", records)[0].basis == []

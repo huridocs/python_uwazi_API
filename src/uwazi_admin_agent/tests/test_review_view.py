@@ -25,6 +25,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     pending_suboperation_count,
     property_caption,
     property_heading,
+    row_neighbours,
     run_confirmation,
     run_status,
     section_toggle_label,
@@ -556,3 +557,26 @@ def test_filter_from_controls_passes_the_sort_through() -> None:
     f = filter_from_controls(sort_by="modified", sort_desc=True)
     assert (f.sort_by, f.sort_desc) == ("modified", True)
     assert (filter_from_controls().sort_by, filter_from_controls().sort_desc) == ("recorded", False)
+
+
+def test_row_neighbours_has_no_buttons_for_a_single_row() -> None:
+    assert row_neighbours([("a", None)], ("a", None)) == (None, None)
+
+
+def test_row_neighbours_walks_both_directions_in_the_middle() -> None:
+    pairs = [("a", None), ("b", "en"), ("c", None)]
+    assert row_neighbours(pairs, ("b", "en")) == (("a", None), ("c", None))
+
+
+def test_row_neighbours_hides_the_previous_at_the_first_row() -> None:
+    pairs = [("a", None), ("b", None)]
+    assert row_neighbours(pairs, ("a", None)) == (None, ("b", None))
+
+
+def test_row_neighbours_hides_the_next_at_the_last_row() -> None:
+    pairs = [("a", None), ("b", None)]
+    assert row_neighbours(pairs, ("b", None)) == (("a", None), None)
+
+
+def test_row_neighbours_never_wraps_a_missing_current_row() -> None:
+    assert row_neighbours([("a", None), ("b", None)], ("missing", None)) == (None, None)

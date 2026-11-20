@@ -70,6 +70,97 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
         store.close()
 
 
+def test_a_matched_row_that_becomes_a_change_becomes_that_update_row() -> None:
+    """A refresh that turns "already in Uwazi" into a real change keeps ONE row.
+
+    The old code retired the matched row as OBSOLETE and inserted a duplicate
+    update for the same property: the filter showed one obsolete row while the
+    table showed an update row for the same entity.
+    """
+    store = SqliteSuggestionStore(Path(":memory:"))
+    try:
+        store.add_suggestions(
+            [
+                _suggestion(
+                    "excerpt",
+                    "before",
+                    op="matched",
+                    detail_key="excerpt",
+                    match=True,
+                )
+            ]
+        )
+        summary = store.reconcile_suggestions("r", [_suggestion("excerpt", "new")])
+
+        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        assert total == 1
+        assert rows[0].op == "update"
+        assert rows[0].property_name == "excerpt"
+        assert rows[0].detail_key is None
+        assert rows[0].status is SuggestionStatus.PENDING
+        assert rows[0].proposed_value == [{"value": "new"}]
+        assert summary.inserted == 0
+        assert summary.obsolete == 0
+    finally:
+        store.close()
+
+
+def test_an_update_that_now_matches_becomes_the_matched_row_in_place() -> None:
+    store = SqliteSuggestionStore(Path(":memory:"))
+    try:
+        store.add_suggestions([_suggestion("excerpt", "same", status=SuggestionStatus.ACCEPTED)])
+        incoming = _suggestion(
+            "excerpt",
+            "same",
+            op="matched",
+            detail_key="excerpt",
+            match=True,
+            status=SuggestionStatus.PENDING,
+        )
+        summary = store.reconcile_suggestions("r", [incoming])
+
+        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        assert total == 1
+        assert rows[0].op == "matched"
+        assert rows[0].status is SuggestionStatus.PENDING
+        assert summary.inserted == 0
+        assert summary.obsolete == 0
+    finally:
+        store.close()
+
+
+def test_a_legacy_duplicate_matched_row_is_dropped_on_refresh() -> None:
+    """Old tables can hold an OBSOLETE matched row beside its update row.
+
+    Once the script reports the property as a change, the matched evidence is
+    superseded; keeping it would leave a phantom "obsolete"/"matched" count for
+    a row the table never shows.
+    """
+    store = SqliteSuggestionStore(Path(":memory:"))
+    try:
+        store.add_suggestions(
+            [
+                _suggestion(
+                    "excerpt",
+                    "before",
+                    op="matched",
+                    detail_key="excerpt",
+                    status=SuggestionStatus.OBSOLETE,
+                ),
+                _suggestion("excerpt", "new"),
+            ]
+        )
+        summary = store.reconcile_suggestions("r", [_suggestion("excerpt", "new")])
+
+        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        assert total == 1
+        assert rows[0].op == "update"
+        assert summary.obsolete == 0
+        assert summary.inserted == 0
+    finally:
+        store.close()
+
+
 def test_a_scoped_refresh_retires_a_stale_info_row() -> None:
     """Info rows name no entity, so a scoped pass still re-decides them.
 

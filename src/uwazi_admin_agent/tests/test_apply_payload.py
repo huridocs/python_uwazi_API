@@ -25,6 +25,7 @@ from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
     metadata_value,
     partition_for_apply,
     pushable_rows,
+    select_labels,
     stamp_language,
     write_failures,
 )
@@ -865,3 +866,34 @@ def test_apply_updates_unknown_property_type_keeps_previous_behaviour() -> None:
     row = _s(shared_id="s1", property_name="keywords", proposed=["Alpha", "Beta"])
     updates = build_apply_updates([row], property_types=None, select_value_ids=None)
     assert updates[0]["metadata"]["keywords"] == ["Alpha", "Beta"]
+
+
+# --- the explicit multiselect selection --------------------------------------
+
+
+def test_select_labels_prefers_the_edit_then_the_selection_then_the_proposal() -> None:
+    row = _s(property_name="keywords", proposed=["Alpha", "Beta"])
+    row = row.model_copy(update={"rejected_values": ["Beta"], "selected_values": ["Gamma"]})
+    assert select_labels(row) == ["Gamma"]
+    edited = row.model_copy(update={"status": SuggestionStatus.EDITED, "edited_value": '["Delta"]'})
+    assert select_labels(edited) == ["Delta"]
+    plain = _s(property_name="keywords", proposed=["Alpha", "Beta"]).model_copy(update={"rejected_values": ["Beta"]})
+    assert select_labels(plain) == ["Alpha"]
+
+
+def test_apply_updates_write_an_operator_added_and_drop_a_removed_label() -> None:
+    # The proposal was Alpha+Beta; the operator replaced it with Alpha alone plus
+    # the catalog value Gamma, which the script never proposed.
+    row = _s(
+        shared_id="s1",
+        property_name="keywords",
+        template_name="Case",
+        proposed=["Alpha", "Beta"],
+    )
+    row = row.model_copy(update={"selected_values": ["Alpha", "Gamma"]})
+    updates = build_apply_updates(
+        [row],
+        property_types={"keywords": "multiselect"},
+        select_value_ids={("Case", "keywords"): {"Alpha": "u1", "Beta": "u2", "Gamma": "u3"}},
+    )
+    assert updates[0]["metadata"]["keywords"] == [{"value": "u1"}, {"value": "u3"}]

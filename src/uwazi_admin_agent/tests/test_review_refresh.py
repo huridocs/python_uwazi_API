@@ -7,6 +7,7 @@ restore-value lookup. No store, no network, no mocks.
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
     evaluate_preflight,
+    matched_swap_pairs,
     missing_status,
     reconciled_status,
     restored_value,
@@ -136,6 +137,38 @@ def test_preflight_accepts_an_absent_language_when_the_row_recorded_none() -> No
 
 
 # --- restore values ----------------------------------------------------------
+
+
+def test_a_matched_row_is_paired_with_the_update_that_replaces_it() -> None:
+    """The row keeps its identity slot instead of becoming obsolete + a duplicate."""
+    matched = ("entity-1", "matched", "en", "excerpt", "excerpt")
+    update = ("entity-1", "update", "en", "excerpt", "")
+    pairs = matched_swap_pairs([(matched, "matched", "en", "excerpt")], [(update, "update", "en", "excerpt")])
+    assert pairs == [(matched, update)]
+
+
+def test_a_property_that_now_matches_is_paired_with_its_stored_update() -> None:
+    update = ("entity-1", "update", "en", "excerpt", "")
+    matched = ("entity-1", "matched", "en", "excerpt", "excerpt")
+    pairs = matched_swap_pairs([(update, "update", "en", "excerpt")], [(matched, "matched", "en", "excerpt")])
+    assert pairs == [(update, matched)]
+
+
+def test_no_swap_when_the_table_already_holds_both_rows_for_one_property() -> None:
+    """A legacy obsolete matched row + its update must not collide on promotion."""
+    matched = ("entity-1", "matched", "en", "excerpt", "excerpt")
+    update = ("entity-1", "update", "en", "excerpt", "")
+    pairs = matched_swap_pairs(
+        [(matched, "matched", "en", "excerpt"), (update, "update", "en", "excerpt")],
+        [(update, "update", "en", "excerpt")],
+    )
+    assert pairs == []
+
+
+def test_rows_of_another_language_or_property_are_not_paired() -> None:
+    matched = ("entity-1", "matched", "es", "excerpt", "excerpt")
+    update = ("entity-1", "update", "en", "excerpt", "")
+    assert matched_swap_pairs([(matched, "matched", "es", "excerpt")], [(update, "update", "en", "excerpt")]) == []
 
 
 def test_restored_value_reads_a_property_from_the_snapshot() -> None:

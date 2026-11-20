@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
+    MATCHED_OP,
     PROPERTY_OPS,
     TITLE_PROPERTY,
     Suggestion,
@@ -85,6 +86,89 @@ def identity_of(suggestion: Suggestion) -> tuple[str, str, str, str, str]:
 def same_proposal(stored: Any, incoming: Any) -> bool:
     """Whether a re-run produced the SAME proposal value (pure)."""
     return stored == incoming
+
+
+def property_row_key(
+    shared_id: str,
+    language: str | None,
+    property_name: str | None,
+) -> tuple[str, str, str]:
+    """The key under which a MATCHED row and the UPDATE it stands for agree (pure).
+
+    Their store identities differ (the op is ``matched`` vs ``update``, and a
+    matched row keeps the property name in ``detail_key``), but they describe the
+    same proposal for the same entity/language/property.
+    """
+    return (str(shared_id), language or "", property_name or "")
+
+
+def matched_swap_pairs(
+    existing: list[tuple[tuple[str, str, str, str, str], str, str | None, str | None]],
+    incoming: list[tuple[tuple[str, str, str, str, str], str, str | None, str | None]],
+) -> list[tuple[tuple[str, str, str, str, str], tuple[str, str, str, str, str]]]:
+    """Pair a stored row with an incoming row when a property starts or stops matching (pure).
+
+    A refresh re-runs the script, so a property that used to equal Uwazi's value
+    can become a real ``update`` (Uwazi changed underneath) — and the reverse.
+    Because a ``matched`` row is a DIFFERENT identity than the update it came
+    from, the naive merge would retire the matched row as OBSOLETE and insert a
+    duplicate update row for the same property, leaving the operator with two
+    rows (and a phantom "obsolete" count) for one change. Pairing them rewrites
+    the stored row in place instead: one row, the new op.
+
+    Each input item is ``(identity, op, language, property_name)``. Returns
+    ``(existing_identity, incoming_identity)`` pairs. A pair is only formed when
+    the same side does not already hold a row for that key: a legacy table that
+    already has both a matched and an update row for one property falls back to
+    the normal identity match, so the UPDATE cannot collide with its unique index.
+    """
+    existing_changes = {
+        property_row_key(identity[0], language, property_name): identity
+        for identity, op, language, property_name in existing
+        if op in PROPERTY_OPS and property_name is not None
+    }
+    existing_matches = {
+        property_row_key(identity[0], language, property_name): identity
+        for identity, op, language, property_name in existing
+        if op == MATCHED_OP and property_name is not None
+    }
+    incoming_changes = {
+        property_row_key(identity[0], language, property_name): identity
+        for identity, op, language, property_name in incoming
+        if op in PROPERTY_OPS and property_name is not None
+    }
+    incoming_matches = {
+        property_row_key(identity[0], language, property_name): identity
+        for identity, op, language, property_name in incoming
+        if op == MATCHED_OP and property_name is not None
+    }
+
+    pairs: list[tuple[tuple[str, str, str, str, str], tuple[str, str, str, str, str]]] = []
+    paired_existing: set[tuple[str, str, str, str, str]] = set()
+    paired_incoming: set[tuple[str, str, str, str, str]] = set()
+
+    # A property that stopped matching: promote its stored MATCHED evidence to
+    # the incoming UPDATE, unless a legacy UPDATE row already exists.
+    for key, existing_identity in existing_matches.items():
+        incoming_identity = incoming_changes.get(key)
+        if incoming_identity is None or key in existing_changes:
+            continue
+        pairs.append((existing_identity, incoming_identity))
+        paired_existing.add(existing_identity)
+        paired_incoming.add(incoming_identity)
+
+    # A property that now matches: demote its stored property row in place.
+    for key, incoming_identity in incoming_matches.items():
+        existing_identity = existing_changes.get(key)
+        if existing_identity is None or key in existing_matches:
+            continue
+        if existing_identity in paired_existing or incoming_identity in paired_incoming:
+            continue
+        pairs.append((existing_identity, incoming_identity))
+        paired_existing.add(existing_identity)
+        paired_incoming.add(incoming_identity)
+
+    return pairs
 
 
 def reconciled_status(
@@ -266,7 +350,9 @@ __all__ = [
     "display_equal",
     "evaluate_preflight",
     "identity_of",
+    "matched_swap_pairs",
     "missing_status",
+    "property_row_key",
     "raw_answered_other_language",
     "reconciled_status",
     "restored_value",

@@ -96,6 +96,12 @@ async def create_and_generate(
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
+        # The generated script's own LLM allowance. The generation conversation
+        # is not charged against it, but the generator must plan within it (and
+        # knows whether it may use llm_complete/llm_map at all). With no explicit
+        # budget the planning pass falls back to the configured script caps, so
+        # the prompt is told the same effective allowance.
+        budget=budget or _script_caps_budget(),
     )
 
     final_prompt = validated_prompt or prompt
@@ -288,6 +294,11 @@ async def regenerate_from_chat(
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
+        # The budget that will govern this regenerated script's planning pass;
+        # the generator plans LLM usage against it (see the script-budget
+        # section of the system prompt). No explicit budget falls back to the
+        # configured script caps, exactly like the planning pass.
+        budget=budget or _script_caps_budget(),
     )
     if on_stage is not None:
         on_stage("Regenerating the script from the whole prompt context…")

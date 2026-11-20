@@ -73,6 +73,10 @@ class BaseMixin:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN detail_key TEXT")
             if "rejected_values" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN rejected_values TEXT")
+            if "selected_values" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN selected_values TEXT")
+            if "basis" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN basis TEXT")
             if "skip_reason" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN skip_reason TEXT")
             pass_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(prediction_pass)")}

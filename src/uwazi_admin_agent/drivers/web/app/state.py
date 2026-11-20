@@ -61,7 +61,11 @@ _EXAMPLE_TASKS = [
     ),
 ]
 
-_STATIC_DIR = Path(__file__).parent / "static"
+# The web app is a PACKAGE (``drivers/web/app/``) whose static assets stayed at
+# the parent ``drivers/web/static`` when the original ``app.py`` was split, so
+# the directory is two levels up from this module. Pointing at the package
+# directory mounted an empty tree and every pdf.js asset answered 404.
+_STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 
 
 def _run_in_flight(instance: str, run_id: str) -> str | None:

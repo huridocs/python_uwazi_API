@@ -11,7 +11,11 @@ The generated script MAY call ``llm_complete``/``llm_map``; the LLM caps the
 operator approves in the wizard (a request cap + a dollar cap) are enforced on
 THOSE calls by the :class:`LlmLedger` bound into the script's namespace when
 the planning pass runs — never on this generation conversation, which keeps
-the built-in ``MAX_LLM_CALLS`` pydantic-ai cap.
+the built-in ``MAX_LLM_CALLS`` pydantic-ai cap. The approved caps are also
+rendered into this agent's system prompt (see
+:mod:`uwazi_admin_agent.use_cases.script_budget`): with an allowance the
+generator should use the LLM where judgment genuinely helps, and with no
+allowance it must stay pure-Python.
 
 The model comes from the injected :class:`LlmPort` (reused from
 ``uwazi_agent``); the live :class:`AdminAgentDeps` (entity API, entity store,
@@ -35,11 +39,13 @@ from pydantic_ai.models import Model
 
 from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
+from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
 from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
 from uwazi_admin_agent.use_cases.instance_languages import fetch_instance_languages, system_prompt_with_languages
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
+from uwazi_admin_agent.use_cases.script_budget import system_prompt_with_script_budget
 from uwazi_admin_agent.use_cases.segmentation_tools import peek_segmentation, peek_segmentation_by_entity
 from uwazi_admin_agent.use_cases.system_prompt import SYSTEM_PROMPT
 from uwazi_admin_agent.use_cases.url_fetch_tools import peek_url_text
@@ -60,6 +66,7 @@ class GenerateScriptUseCase:
         deps: AdminAgentDeps,
         max_requests: int = MAX_LLM_CALLS,
         max_output_tokens: int = LLM_MAX_OUTPUT_TOKENS,
+        budget: LlmBudget | None = None,
     ) -> None:
         self._llm: LlmPort = llm
         # The operator-approved ceiling from the wizard's caps step: the
@@ -67,6 +74,12 @@ class GenerateScriptUseCase:
         # output budget (the GENERATION conversation's caps, not the script's).
         self._max_requests: int = max(1, max_requests)
         self._max_output_tokens: int = max(1, max_output_tokens)
+        # The caps the operator approved for the GENERATED SCRIPT's own
+        # llm_complete/llm_map calls. They are not enforced here (the planning
+        # pass's ledger does that); they are rendered into the system prompt so
+        # the generator plans LLM usage — or pure Python — with the real
+        # allowance in view.
+        self._budget: LlmBudget | None = budget
         self._deps: AdminAgentDeps = deps
         # Build the extractor subagent ONCE (the use case owns the LlmPort) and
         # share it with the author_html_extractor tool via the deps.
@@ -132,15 +145,22 @@ class GenerateScriptUseCase:
         )
 
     async def _system_prompt(self) -> str:
-        """The contract PLUS this instance's configured language keys.
+        """The contract PLUS this instance's configured language keys and the approved script budget.
 
         The generator writes ``language=`` arguments, so it must know the real
         set. Without it the model invents candidate lists of ISO codes and the
         script plans writes into languages the instance does not have. The
         fetch is best-effort: on failure the prompt says the list is
         unavailable and forbids inventing one.
+
+        The operator's caps for the generated script's LLM helpers follow the
+        languages: they tell the generator whether it may spend on
+        ``llm_complete``/``llm_map`` at all, and how far.
         """
-        return system_prompt_with_languages(SYSTEM_PROMPT, await fetch_instance_languages(self._deps))
+        return system_prompt_with_script_budget(
+            system_prompt_with_languages(SYSTEM_PROMPT, await fetch_instance_languages(self._deps)),
+            self._budget,
+        )
 
     async def execute(self, prompt: str) -> GeneratedScript:
         """Run the agent once on ``prompt`` and return the generated script.

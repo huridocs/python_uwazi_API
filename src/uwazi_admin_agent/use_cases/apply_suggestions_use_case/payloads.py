@@ -72,6 +72,23 @@ def effective_value(suggestion: Suggestion) -> object:
     return accepted_value(suggestion.proposed_value, suggestion.rejected_values)
 
 
+def select_labels(suggestion: Suggestion) -> list[str]:
+    """The labels a select/multiselect Run writes: edit > explicit selection > proposal.
+
+    An ``EDITED`` row writes its decoded edit; a row carrying the operator's
+    explicit ``selected_values`` writes exactly those (an empty list writes
+    nothing — but such a row is sentinel-discarded and never pushed); every
+    other row writes its proposal minus the rejected labels. ``labels_of``
+    normalizes all three shapes, so the thesaurus lookup downstream sees plain
+    label strings.
+    """
+    if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
+        return labels_of(_decode_edited(suggestion.edited_value))
+    if suggestion.selected_values is not None:
+        return labels_of(suggestion.selected_values)
+    return labels_of(accepted_value(suggestion.proposed_value, suggestion.rejected_values))
+
+
 def _decode_edited(text: str) -> object:
     """Best-effort decode of an operator-typed value (JSON when it parses, else the string)."""
     try:
@@ -641,7 +658,7 @@ def build_apply_updates(
                     )
                 try:
                     payload["metadata"][suggestion.property_name] = select_value_envelope(
-                        labels_of(value), ids_by_label, suggestion.property_name
+                        select_labels(suggestion), ids_by_label, suggestion.property_name
                     )
                 except UnknownThesaurusValue as exc:
                     raise ApplyRefusedError(str(exc)) from exc

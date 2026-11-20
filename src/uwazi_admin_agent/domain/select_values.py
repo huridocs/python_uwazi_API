@@ -68,15 +68,70 @@ def all_values_rejected(proposal: Any, rejected: list[str]) -> bool:
     return not accepted_values(labels, rejected)
 
 
-def rejected_after_toggle(rejected: list[str], value: str, accepted: bool) -> list[str]:
-    """New rejected list: adds ``value`` (once) when ``accepted`` is False,
-    removes it otherwise."""
-    if accepted:
-        removed = [r for r in rejected if r != value]
-        return removed
-    if value in rejected:
-        return list(rejected)
-    return [*rejected, value]
+def _dedupe(labels: list[str]) -> list[str]:
+    """``labels`` with duplicates collapsed, first occurrence wins."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for label in labels:
+        if label in seen:
+            continue
+        seen.add(label)
+        unique.append(label)
+    return unique
+
+
+def effective_selection(proposal: Any, rejected: list[str], selected: list[str] | None) -> list[str]:
+    """The labels a multiselect row currently writes: the operator's explicit
+    ``selected`` when it was set (an EMPTY list means "nothing"), otherwise the
+    proposal minus ``rejected``."""
+    if selected is not None:
+        return _dedupe(labels_of(selected))
+    return accepted_values(proposal, rejected)
+
+
+def value_options(
+    proposal: Any,
+    rejected: list[str],
+    selected: list[str] | None,
+    available: list[str],
+) -> list[dict[str, Any]]:
+    """The ordered options of the multiselect picker, each
+    ``{"label": <str>, "recommended": <bool>}``: the proposal's distinct labels
+    first (recommended), then every ``available`` catalog label the proposal
+    does not carry, then any selected label in neither set (so an out-of-catalog
+    selection stays visible and removable). Labels are unique, first occurrence
+    wins — the picker keys its options by the display string."""
+    recommended = _dedupe(labels_of(proposal))
+    proposed = set(recommended)
+    options: list[dict[str, Any]] = [{"label": label, "recommended": True} for label in recommended]
+    seen = set(recommended)
+    for label in available:
+        if label in seen:
+            continue
+        seen.add(label)
+        options.append({"label": label, "recommended": False})
+    for label in effective_selection(proposal, rejected, selected):
+        if label in seen:
+            continue
+        seen.add(label)
+        options.append({"label": label, "recommended": label in proposed})
+    return options
+
+
+def catalog_labels(ids_by_label: dict[str, str]) -> list[str]:
+    """The picker option list for a thesaurus: ONE label per value id, in the
+    map's own order. A grouped thesaurus maps both ``"Child"`` and
+    ``"Group: Child"`` to one id; the qualified (``": "``) form is the label
+    emitted, at the position of the id's first appearance."""
+    order: list[str] = []
+    label_by_id: dict[str, str] = {}
+    for label, value_id in ids_by_label.items():
+        if value_id not in label_by_id:
+            order.append(value_id)
+            label_by_id[value_id] = label
+        elif ": " in label:
+            label_by_id[value_id] = label
+    return [label_by_id[value_id] for value_id in order]
 
 
 def value_decisions(proposal: Any, rejected: list[str]) -> list[dict[str, Any]]:
@@ -149,9 +204,11 @@ __all__ = [
     "UnknownThesaurusValue",
     "accepted_values",
     "all_values_rejected",
+    "catalog_labels",
+    "effective_selection",
     "labels_of",
-    "rejected_after_toggle",
     "select_value_envelope",
     "unpredicted_values",
     "value_decisions",
+    "value_options",
 ]

@@ -762,3 +762,10 @@ def test_prompt_scopes_the_skip_to_an_explicit_operator_request() -> None:
     assert "Skip such a row ONLY when the operator explicitly asked for" in SYSTEM_PROMPT
     assert "only the ones that differ" in SYSTEM_PROMPT
     assert "the script never overwrites anything — it proposes" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_the_optional_basis_provenance_key() -> None:
+    """A value inferred from the entity's own data states its source, so the
+    review window can show those properties instead of the PDF."""
+    assert "'basis': ['_title', 'document_ref']" in SYSTEM_PROMPT
+    assert "PROVENANCE (`basis`)" in SYSTEM_PROMPT

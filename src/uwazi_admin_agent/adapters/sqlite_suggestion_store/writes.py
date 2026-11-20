@@ -11,7 +11,9 @@ from loguru import logger
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
     identity_of,
+    matched_swap_pairs,
     missing_status,
+    property_row_key,
     reconciled_status,
     same_proposal,
     suggestion_identity,
@@ -19,6 +21,8 @@ from uwazi_admin_agent.domain.review_refresh import (
 from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
+    MATCHED_OP,
+    PROPERTY_OPS,
     REVERT_RECREATES_OPS,
     Suggestion,
     SuggestionFilter,
@@ -26,6 +30,92 @@ from uwazi_admin_agent.domain.suggestion import (
 )
 
 from .sql import _dt_to_text, _json_or_none, _value_from_json, build_where
+
+
+def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple[tuple[Any, ...], dict[str, bool]]:
+    """The UPDATE bindings for one stored row that survives a refresh (pure-ish).
+
+    Shared by the identity match and by the matched/update swap, so both apply
+    exactly the same status rules. The tuple order must match the UPDATE
+    statement in ``reconcile_suggestions``.
+    """
+    old_status = SuggestionStatus(str(old["status"]))
+    same = same_proposal(_value_from_json(old["proposed_value"]), suggestion.proposed_value)
+    status = reconciled_status(
+        old_status,
+        same=same,
+        reappearing=old_status is SuggestionStatus.OBSOLETE,
+        # A delete/merge undo re-created an entity, so the reverted row
+        # could not be run again. The refresh has just re-read the
+        # operation from live Uwazi (and replaced a merge's source ids),
+        # so it is safe to put it back in the runnable queue.
+        rerun_after_refresh=str(old["op"]) in REVERT_RECREATES_OPS,
+    )
+    # A display-only outcome is not work the operator can accept or run: coming
+    # back to MATCHED drops any pending review decision (APPLIED, a write that
+    # really happened, stays as history). Promoting a MATCHED row to a real
+    # change puts it back in the review queue.
+    if suggestion.op == MATCHED_OP:
+        status = SuggestionStatus.APPLIED if old_status is SuggestionStatus.APPLIED else SuggestionStatus.PENDING
+    elif str(old["op"]) == MATCHED_OP:
+        status = SuggestionStatus.PENDING
+    edited_value = old["edited_value"] if status is SuggestionStatus.EDITED else None
+    discard_reason = old["discard_reason"] if status is SuggestionStatus.DISCARDED else None
+    reviewed_at = old["reviewed_at"] if status is old_status else now_text
+    old_rejected = _value_from_json(old["rejected_values"]) or []
+    # Same proposal keeps the operator's value-level choices; a changed
+    # proposal clears them (never carry stale tokens into a new list).
+    rejected_values: list[str] = old_rejected if same else []
+    old_selected = _value_from_json(old["selected_values"])
+    # The explicit selection is operator state like the rejections: a changed
+    # proposal clears it, the same proposal keeps it.
+    selected_values: list[str] | None = old_selected if same else None
+    if not same and old_status is SuggestionStatus.DISCARDED:
+        # A whole-row discard left by the value mechanism only means
+        # "nothing left to keep", not a real refusal: the refresh puts
+        # the new proposal back into review.
+        if old["discard_reason"] == ALL_VALUES_REJECTED_REASON:
+            status = SuggestionStatus.PENDING
+            discard_reason = None
+    old_match = old["match_state"]
+    new_match = None if suggestion.match is None else (1 if suggestion.match else 0)
+    refreshed = (
+        not same
+        or old["entity_title"] != suggestion.entity_title
+        or old["template_name"] != suggestion.template_name
+        or _value_from_json(old["current_value"]) != suggestion.current_value
+        or old["skip_reason"] != suggestion.skip_reason
+        or old_match != new_match
+        or (_value_from_json(old["merge_files"]) or []) != suggestion.merge_files
+        or str(old["op"]) != suggestion.op
+        or old["detail_key"] != suggestion.detail_key
+        or (_value_from_json(old["basis"]) or []) != suggestion.basis
+    )
+    values = (
+        suggestion.op,
+        suggestion.detail_key,
+        suggestion.entity_title,
+        suggestion.template_name,
+        _json_or_none(suggestion.proposed_value),
+        _json_or_none(suggestion.current_value),
+        suggestion.skip_reason,
+        new_match,
+        _json_or_none(suggestion.merge_source_ids) if suggestion.merge_source_ids else None,
+        _json_or_none(suggestion.merge_files) if suggestion.merge_files else None,
+        status.value,
+        edited_value,
+        discard_reason,
+        _json_or_none(rejected_values) if rejected_values else None,
+        _json_or_none(selected_values) if selected_values is not None else None,
+        _json_or_none(suggestion.basis) if suggestion.basis else None,
+        reviewed_at,
+        int(old["id"]),
+    )
+    return values, {
+        "refreshed": refreshed,
+        "status_reset": status is SuggestionStatus.PENDING and status is not old_status,
+        "reappeared": old_status is SuggestionStatus.OBSOLETE,
+    }
 
 
 class WritesMixin:
@@ -60,6 +150,8 @@ class WritesMixin:
                 s.status.value,
                 s.edited_value,
                 _json_or_none(s.rejected_values) if s.rejected_values else None,
+                _json_or_none(s.selected_values) if s.selected_values is not None else None,
+                _json_or_none(s.basis) if s.basis else None,
                 s.discard_reason,
                 _dt_to_text(s.reviewed_at),
                 _dt_to_text(s.created_at),
@@ -73,9 +165,9 @@ class WritesMixin:
                 INSERT INTO suggestion
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, skip_reason, match_state, merge_source_ids,
-                     merge_files, status, edited_value, rejected_values, discard_reason,
-                     reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     merge_files, status, edited_value, rejected_values, selected_values, basis,
+                     discard_reason, reviewed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
@@ -86,7 +178,8 @@ class WritesMixin:
                     skip_reason = excluded.skip_reason,
                     match_state = excluded.match_state,
                     merge_source_ids = excluded.merge_source_ids,
-                    merge_files = excluded.merge_files
+                    merge_files = excluded.merge_files,
+                    basis = excluded.basis
                 """,
                 rows,
             )
@@ -110,6 +203,9 @@ class WritesMixin:
         - same proposal → keep the operator's status, refresh the proposal
           columns (including ``current_value``);
         - changed proposal → PENDING unless the row is EDITED/DISCARDED;
+        - a property that starts/stops matching Uwazi → the SAME row becomes the
+          incoming ``update``/``matched`` row (one row, never an obsolete
+          duplicate beside the new one);
         - missing → APPLIED stays APPLIED, everything else becomes OBSOLETE;
         - a returning OBSOLETE row → PENDING.
 
@@ -147,75 +243,67 @@ class WritesMixin:
         inserts: list[Suggestion] = []
         updates: list[tuple[Any, ...]] = []
         refreshed = status_reset = reappeared = 0
+
+        # A property can flip between "already equal to Uwazi" (a display-only
+        # MATCHED row) and a real change (an UPDATE row). Their store identities
+        # differ, so without this pairing the merge would retire the matched row
+        # and insert a duplicate update for the same property. Pair them and
+        # rewrite the stored row in place instead: one row, the new op.
+        swaps = matched_swap_pairs(
+            [(key, str(row["op"]), row["language"], row["property_name"]) for key, row in existing_by_key.items()],
+            [
+                (key, suggestion.op, suggestion.language, suggestion.property_name)
+                for key, suggestion in incoming_by_key.items()
+            ],
+        )
+        swapped_existing = {old_key for old_key, _incoming_key in swaps}
+        swapped_incoming = {incoming_key for _old_key, incoming_key in swaps}
+
+        for old_key, incoming_key in swaps:
+            values, meta = _reconciled_values(existing_by_key[old_key], incoming_by_key[incoming_key], now_text)
+            updates.append(values)
+            refreshed += int(meta["refreshed"])
+            status_reset += int(meta["status_reset"])
+            reappeared += int(meta["reappeared"])
+
         for key, suggestion in incoming_by_key.items():
+            if key in swapped_incoming:
+                continue
             old = existing_by_key.get(key)
             if old is None:
                 inserts.append(suggestion)
                 continue
-            old_status = SuggestionStatus(str(old["status"]))
-            same = same_proposal(_value_from_json(old["proposed_value"]), suggestion.proposed_value)
-            status = reconciled_status(
-                old_status,
-                same=same,
-                reappearing=old_status is SuggestionStatus.OBSOLETE,
-                # A delete/merge undo re-created an entity, so the reverted row
-                # could not be run again. The refresh has just re-read the
-                # operation from live Uwazi (and replaced a merge's source ids),
-                # so it is safe to put it back in the runnable queue.
-                rerun_after_refresh=str(old["op"]) in REVERT_RECREATES_OPS,
-            )
-            if old_status is SuggestionStatus.OBSOLETE:
-                reappeared += 1
-            if status is SuggestionStatus.PENDING and status is not old_status:
-                status_reset += 1
-            edited_value = old["edited_value"] if status is SuggestionStatus.EDITED else None
-            discard_reason = old["discard_reason"] if status is SuggestionStatus.DISCARDED else None
-            reviewed_at = old["reviewed_at"] if status is old_status else now_text
-            old_rejected = _value_from_json(old["rejected_values"]) or []
-            # Same proposal keeps the operator's value-level choices; a changed
-            # proposal clears them (never carry stale tokens into a new list).
-            rejected_values: list[str] = old_rejected if same else []
-            if not same and old_status is SuggestionStatus.DISCARDED:
-                # A whole-row discard left by the value mechanism only means
-                # "nothing left to keep", not a real refusal: the refresh puts
-                # the new proposal back into review.
-                if old["discard_reason"] == ALL_VALUES_REJECTED_REASON:
-                    status = SuggestionStatus.PENDING
-                    discard_reason = None
-            old_match = old["match_state"]
-            new_match = None if suggestion.match is None else (1 if suggestion.match else 0)
-            if (
-                not same
-                or old["entity_title"] != suggestion.entity_title
-                or old["template_name"] != suggestion.template_name
-                or _value_from_json(old["current_value"]) != suggestion.current_value
-                or old["skip_reason"] != suggestion.skip_reason
-                or old_match != new_match
-                or (_value_from_json(old["merge_files"]) or []) != suggestion.merge_files
-            ):
-                refreshed += 1
-            updates.append(
-                (
-                    suggestion.entity_title,
-                    suggestion.template_name,
-                    _json_or_none(suggestion.proposed_value),
-                    _json_or_none(suggestion.current_value),
-                    suggestion.skip_reason,
-                    new_match,
-                    _json_or_none(suggestion.merge_source_ids) if suggestion.merge_source_ids else None,
-                    _json_or_none(suggestion.merge_files) if suggestion.merge_files else None,
-                    status.value,
-                    edited_value,
-                    discard_reason,
-                    _json_or_none(rejected_values) if rejected_values else None,
-                    reviewed_at,
-                    int(old["id"]),
-                )
-            )
+            values, meta = _reconciled_values(old, suggestion, now_text)
+            updates.append(values)
+            refreshed += int(meta["refreshed"])
+            status_reset += int(meta["status_reset"])
+            reappeared += int(meta["reappeared"])
+
+        # Legacy tables (refreshed before the swap rule existed) can already
+        # hold an OBSOLETE matched row NEXT TO the update row for the same
+        # property. The matched evidence is fully superseded, so drop it rather
+        # than keep a phantom "obsolete"/"matched" count for work the table does
+        # not show. Only an OBSOLETE matched row whose property the script now
+        # reports as a real change is removed; anything the script no longer
+        # produces keeps its normal refresh verdict.
+        incoming_change_keys = {
+            property_row_key(suggestion.shared_id, suggestion.language, suggestion.property_name)
+            for suggestion in incoming_by_key.values()
+            if suggestion.op in PROPERTY_OPS and suggestion.property_name is not None
+        }
+        stale_matched_ids: list[int] = []
+        for key, old in existing_by_key.items():
+            if key in swapped_existing or str(old["op"]) != MATCHED_OP:
+                continue
+            if SuggestionStatus(str(old["status"])) is not SuggestionStatus.OBSOLETE:
+                continue
+            if property_row_key(str(old["shared_id"]), old["language"], old["property_name"]) in incoming_change_keys:
+                stale_matched_ids.append(int(old["id"]))
+        stale_matched = set(stale_matched_ids)
 
         obsolete = kept_applied = 0
         for key, old in existing_by_key.items():
-            if key in incoming_by_key:
+            if key in incoming_by_key or key in swapped_existing or int(old["id"]) in stale_matched:
                 continue
             old_status = SuggestionStatus(str(old["status"]))
             status = missing_status(old_status)
@@ -226,6 +314,8 @@ class WritesMixin:
             if status is not old_status or status is SuggestionStatus.OBSOLETE:
                 updates.append(
                     (
+                        old["op"],
+                        old["detail_key"],
                         old["entity_title"],
                         old["template_name"],
                         old["proposed_value"],
@@ -238,24 +328,33 @@ class WritesMixin:
                         None if status is not SuggestionStatus.EDITED else old["edited_value"],
                         None if status is not SuggestionStatus.DISCARDED else old["discard_reason"],
                         _json_or_none(_value_from_json(old["rejected_values"]) or []),
+                        old["selected_values"],
+                        old["basis"],
                         now_text,
                         int(old["id"]),
                     )
                 )
 
-        if updates:
+        if updates or stale_matched_ids:
             with self._lock:
-                self._conn.executemany(
-                    """
-                    UPDATE suggestion
-                       SET entity_title = ?, template_name = ?, proposed_value = ?,
-                           current_value = ?, skip_reason = ?, match_state = ?, merge_source_ids = ?,
-                           merge_files = ?, status = ?, edited_value = ?, discard_reason = ?,
-                           rejected_values = ?, reviewed_at = ?
-                     WHERE id = ?
-                    """,
-                    updates,
-                )
+                if updates:
+                    self._conn.executemany(
+                        """
+                        UPDATE suggestion
+                           SET op = ?, detail_key = ?, entity_title = ?, template_name = ?,
+                               proposed_value = ?, current_value = ?, skip_reason = ?, match_state = ?,
+                               merge_source_ids = ?, merge_files = ?, status = ?, edited_value = ?,
+                               discard_reason = ?, rejected_values = ?, selected_values = ?, basis = ?,
+                               reviewed_at = ?
+                         WHERE id = ?
+                        """,
+                        updates,
+                    )
+                if stale_matched_ids:
+                    self._conn.executemany(
+                        "DELETE FROM suggestion WHERE id = ?",
+                        [(suggestion_id,) for suggestion_id in stale_matched_ids],
+                    )
                 self._conn.commit()
         if inserts:
             self.add_suggestions(inserts)
@@ -313,10 +412,19 @@ class WritesMixin:
             f"""
             UPDATE suggestion
                SET status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?,
-                   rejected_values = CASE WHEN ? = 'edited' THEN NULL ELSE rejected_values END
+                   rejected_values = CASE WHEN ? = 'edited' THEN NULL ELSE rejected_values END,
+                   selected_values = CASE WHEN ? = 'edited' THEN NULL ELSE selected_values END
              WHERE id IN ({placeholders})
             """,
-            [status.value, edited_value, reason, _dt_to_text(datetime.now().astimezone()), status.value, *ids],
+            [
+                status.value,
+                edited_value,
+                reason,
+                _dt_to_text(datetime.now().astimezone()),
+                status.value,
+                status.value,
+                *ids,
+            ],
         )
 
     def set_rejected_values(
@@ -336,6 +444,30 @@ class WritesMixin:
             """,
             [
                 _json_or_none(rejected) if rejected else None,
+                None if status is None else status.value,
+                reason,
+                _dt_to_text(datetime.now().astimezone()),
+                row_id,
+            ],
+        )
+
+    def set_selected_values(
+        self,
+        row_id: int,
+        selected: list[str] | None,
+        status: SuggestionStatus | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Persist one multiselect row's explicit selection; clears the proposal rejections."""
+        self._execute(
+            """
+            UPDATE suggestion
+               SET selected_values = ?, rejected_values = NULL, status = COALESCE(?, status),
+                   discard_reason = ?, reviewed_at = ?
+             WHERE id = ?
+            """,
+            [
+                _json_or_none(selected) if selected is not None else None,
                 None if status is None else status.value,
                 reason,
                 _dt_to_text(datetime.now().astimezone()),
@@ -371,12 +503,14 @@ class WritesMixin:
             f"""
             UPDATE suggestion
                SET status = ?, discard_reason = NULL, reviewed_at = ?,
-                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END
+                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END,
+                   selected_values = CASE WHEN discard_reason = ? THEN NULL ELSE selected_values END
              WHERE id IN ({placeholders}) AND status = ?
             """,
             [
                 SuggestionStatus.PENDING.value,
                 now,
+                ALL_VALUES_REJECTED_REASON,
                 ALL_VALUES_REJECTED_REASON,
                 *ids,
                 SuggestionStatus.DISCARDED.value,
@@ -428,12 +562,14 @@ class WritesMixin:
             f"""
             UPDATE suggestion
                SET status = ?, discard_reason = NULL, reviewed_at = ?,
-                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END
+                   rejected_values = CASE WHEN discard_reason = ? THEN NULL ELSE rejected_values END,
+                   selected_values = CASE WHEN discard_reason = ? THEN NULL ELSE selected_values END
              WHERE {where} AND status = ?
             """,
             [
                 SuggestionStatus.PENDING.value,
                 _dt_to_text(datetime.now().astimezone()),
+                ALL_VALUES_REJECTED_REASON,
                 ALL_VALUES_REJECTED_REASON,
                 *params,
                 SuggestionStatus.DISCARDED.value,

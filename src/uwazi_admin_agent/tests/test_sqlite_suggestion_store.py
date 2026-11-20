@@ -52,6 +52,7 @@ def _suggestion(
     title: str = "Title",
     run_id: str = "run1",
     proposed: object = "v",
+    basis: list[str] | None = None,
 ) -> Suggestion:
     return Suggestion(
         run_id=run_id,
@@ -64,6 +65,7 @@ def _suggestion(
         current_value="v",
         match=match,
         status=status,
+        basis=basis or [],
         created_at=NOW,
     )
 
@@ -688,7 +690,7 @@ def test_store_opens_a_legacy_database_and_adds_the_missing_columns(tmp_path) ->
     store = SqliteSuggestionStore(path)
     try:
         columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(suggestion)")}  # noqa: SLF001
-        assert {"template_name", "language"} <= columns
+        assert {"template_name", "language", "selected_values", "basis"} <= columns
         indexes = {
             row["name"]
             for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")  # noqa: SLF001
@@ -898,3 +900,106 @@ def test_add_suggestions_over_existing_identity_keeps_stored_rejections(store: S
     store.add_suggestions([_multiselect(proposed=["A", "B"])])
     row = _row_of(store)
     assert row.rejected_values == ["B"]
+
+
+# --- multiselect selected_values + basis -------------------------------------
+
+
+def test_selected_values_distinguishes_none_from_empty(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(), _multiselect(shared_id="s2", property_name="other")])
+    rows, _total = store.query("run1", SuggestionFilter())
+    by_shared = {row.shared_id: row for row in rows}
+    store.set_selected_values(by_shared["s1"].id or 1, ["A"])
+    store.set_selected_values(by_shared["s2"].id or 2, [])
+    fresh, _total = store.query("run1", SuggestionFilter())
+    after = {row.shared_id: row for row in fresh}
+    assert after["s1"].selected_values == ["A"]
+    assert after["s2"].selected_values == []
+    assert after["s1"].status is SuggestionStatus.PENDING
+
+
+def test_set_selected_values_clears_proposal_rejections(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect()])
+    store.set_rejected_values(1, ["B"])
+    store.set_selected_values(1, ["A", "C"])
+    row = _row_of(store)
+    assert row.selected_values == ["A", "C"]
+    assert row.rejected_values == []
+
+
+def test_clearing_the_selection_restores_none(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect()])
+    store.set_selected_values(1, ["A"])
+    store.set_selected_values(1, None)
+    assert _row_of(store).selected_values is None
+
+
+def test_set_status_edit_clears_the_selection_but_apply_keeps_it(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(), _multiselect(shared_id="s2", property_name="other")])
+    rows, _total = store.query("run1", SuggestionFilter())
+    ids = [row.id for row in rows]
+    store.set_selected_values(ids[0], ["A"])
+    store.set_selected_values(ids[1], ["A"])
+    store.set_status([ids[0]], SuggestionStatus.EDITED, edited_value="fix")
+    store.set_status([ids[1]], SuggestionStatus.APPLIED)
+    fresh, _total = store.query("run1", SuggestionFilter())
+    by_id = {row.id: row for row in fresh}
+    assert by_id[ids[0]].selected_values is None
+    assert by_id[ids[1]].selected_values == ["A"]
+
+
+def test_reconcile_keeps_the_selection_for_a_same_proposal(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_selected_values(1, ["C"])
+    summary = store.reconcile_suggestions("run1", [_multiselect(proposed=["A", "B"])])
+    assert _row_of(store).selected_values == ["C"]
+    assert summary.refreshed == 0
+
+
+def test_reconcile_clears_the_selection_on_a_changed_proposal(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(proposed=["A", "B"])])
+    store.set_selected_values(1, ["A"])
+    store.reconcile_suggestions("run1", [_multiselect(proposed=["A", "C"])])
+    assert _row_of(store).selected_values is None
+
+
+def test_restore_by_filter_clears_the_selection_only_for_the_sentinel_discard(
+    store: SqliteSuggestionStore,
+) -> None:
+    store.add_suggestions([_multiselect(shared_id="sentinel"), _multiselect(shared_id="manual", property_name="other")])
+    rows, _total = store.query("run1", SuggestionFilter())
+    by_shared = {row.shared_id: row for row in rows}
+    store.set_selected_values(by_shared["sentinel"].id or 1, [], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    store.set_selected_values(
+        by_shared["manual"].id or 2, ["A"], SuggestionStatus.DISCARDED, "the operator refused this whole row"
+    )
+    store.restore_by_filter("run1", SuggestionFilter())
+    fresh, _total = store.query("run1", SuggestionFilter())
+    after = {row.shared_id: row for row in fresh}
+    assert after["sentinel"].selected_values is None
+    # A real operator discard keeps the selection they made.
+    assert after["manual"].selected_values == ["A"]
+
+
+def test_reset_statuses_clears_the_selection_only_for_the_sentinel_discard(
+    store: SqliteSuggestionStore,
+) -> None:
+    store.add_suggestions([_multiselect(shared_id="sentinel"), _multiselect(shared_id="manual", property_name="other")])
+    rows, _total = store.query("run1", SuggestionFilter())
+    by_shared = {row.shared_id: row for row in rows}
+    ids = [by_shared["sentinel"].id or 1, by_shared["manual"].id or 2]
+    store.set_selected_values(ids[0], [], SuggestionStatus.DISCARDED, ALL_VALUES_REJECTED_REASON)
+    store.set_selected_values(ids[1], ["A"], SuggestionStatus.DISCARDED, "the operator refused this whole row")
+    store.reset_statuses("run1", ids)
+    fresh, _total = store.query("run1", SuggestionFilter())
+    after = {row.shared_id: row for row in fresh}
+    assert after["sentinel"].selected_values is None
+    assert after["manual"].selected_values == ["A"]
+
+
+def test_basis_persists_and_reconcile_refreshes_a_changed_one(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(basis=["_title"])])
+    assert _row_of(store).basis == ["_title"]
+    summary = store.reconcile_suggestions("run1", [_multiselect(basis=["_title", "document_ref"])])
+    assert _row_of(store).basis == ["_title", "document_ref"]
+    assert summary.refreshed == 1

@@ -260,6 +260,25 @@ class Suggestion(BaseModel):
             "other row and for an untouched multiselect."
         ),
     )
+    selected_values: list[str] | None = Field(
+        default=None,
+        description=(
+            "The operator's EXPLICIT multiselect selection: the exact labels the Run writes. "
+            "None = no explicit selection (the proposal minus `rejected_values` is used). "
+            "An empty list means 'nothing selected' — the row becomes the sentinel-discarded "
+            "row (ALL_VALUES_REJECTED_REASON) and a Run writes nothing. An EDITED row's "
+            "`edited_value` still wins over both."
+        ),
+    )
+    basis: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Property names the recorded value was INFERRED from instead of the primary "
+            "document (the script's `basis` key; `_title` for the entity title). Non-empty "
+            "makes the entity window show those properties' values instead of the document. "
+            "Display-only: never written to Uwazi."
+        ),
+    )
     discard_reason: str | None = Field(default=None, description="Why the operator discarded this row.")
     reviewed_at: datetime | None = Field(default=None, description="When the operator last changed the status.")
     created_at: datetime | None = Field(default=None, description="When the suggestion was persisted.")

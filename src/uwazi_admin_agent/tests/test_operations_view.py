@@ -356,6 +356,26 @@ def test_suboperation_row_multiselect_without_rejections_reads_all_accepted() ->
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
     assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": True}]
     assert row["has_rejected"] is False
+    assert row["selection_text"] == "A, B"
+
+
+def test_suboperation_row_reports_the_operator_selection_as_the_written_set() -> None:
+    sub = _sub(1, property_name="keywords", proposed=["A", "B"])
+    sub = sub.model_copy(update={"selected_values": ["A", "C"]})
+    row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
+    # The chips are the PROPOSAL (B stays visible, marked dropped); the caption
+    # is what the Run writes, including the value the operator added.
+    assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": False}]
+    assert row["has_rejected"] is True
+    assert row["selection_text"] == "A, C"
+
+
+def test_suboperation_row_reads_an_empty_selection_as_nothing_written() -> None:
+    sub = _sub(1, property_name="keywords", proposed=["A", "B"])
+    sub = sub.model_copy(update={"selected_values": []})
+    row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
+    assert [value["accepted"] for value in row["values"]] == [False, False]
+    assert row["selection_text"] == "— nothing (the row is discarded)"
 
 
 # --- modified column ---------------------------------------------------------

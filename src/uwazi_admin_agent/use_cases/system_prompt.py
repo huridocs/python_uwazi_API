@@ -48,7 +48,7 @@ PREFER PURE PYTHON OVER THE LLM (cost rule — CRITICAL)
 You MAY call `llm_complete` / `llm_map` inside the script, but each call is
 real money: the operator sets a hard request cap and a dollar cap on the
 script's LLM tool calls at creation time. Use the LLM ONLY where pure Python
-cannot compute the value, and never speculatively:
+cannot compute the value reliably, and never speculatively:
 - pure-Python first: regex, string ops, dict/table lookups over fetched
   metadata/files cover most transformation tasks — compute without the LLM;
 - batch when you must call: `llm_map` over looped `llm_complete` (few requests
@@ -57,7 +57,10 @@ cannot compute the value, and never speculatively:
   free-text summary, a classification the document does not state structurally);
 - never probe LLM behavior, never build test calls, never re-derive a value the
   discovery reads already carry.
-An LLM-free script (pure computation only) is ALWAYS the preferred outcome.
+An LLM-free script is preferred whenever pure computation is reliable. When the
+operator approved a SCRIPT LLM BUDGET (see that section), spend it where model
+judgment genuinely improves the result instead of stretching a fragile
+heuristic; the budget is a ceiling, not a quota.
 
    Record ONE intended change per entity:
      update_entities([{"shared_id": <sid>, "template_name": <tmpl>,
@@ -372,6 +375,17 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
               record_skipped(sid, "no_segmentation", title=title,
                              template_name=TEMPLATE)
               continue
+
+  PROVENANCE (`basis`) — when a value is inferred from the entity's OWN data rather than
+  its document, say so IN the update dict: `'basis': ['_title', 'document_ref']`
+  (`_title` = the title). List every property you actually read. The review window then
+  shows those properties' values instead of the PDF, so the operator can verify the
+  inference. Omit `basis` when the value comes from a document/file/URL. Example:
+      update_entities([{'shared_id': sid, 'template_name': T,
+                        'metadata': {'rights_engaged': rights},
+                        'basis': ['_title', 'document_ref']}], language)
+  Multiselect values inferred this way are still ONE update per entity; the operator
+  picks the final value set in the review window before Run.
 
   PARALLEL BULK HELPERS (auto-throttled — PREFER these for EVERY bulk set)
   The write helpers above (everything except `add_info`) send ONE HTTP REQUEST

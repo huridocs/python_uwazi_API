@@ -12,8 +12,10 @@ from .apply import _apply_use_case, apply_outcomes
 from .chat import clarify_prompt, compact_chat
 from .documents import (
     _instance_languages,
+    basis_values,
     document_language_candidates,
     fetch_entity_document_bytes,
+    get_entity_basis,
     get_entity_segmentation,
     resolve_entity_document,
 )
@@ -73,7 +75,9 @@ from .review import (
     property_types_for,
     restore_ids,
     restore_rows,
+    select_value_catalog,
     set_rejected_values,
+    set_selected_values,
 )
 from .runs import (
     _resolve_titles,
@@ -165,6 +169,10 @@ __all__ = [
     "discard_ids",
     "restore_ids",
     "set_rejected_values",
+    "set_selected_values",
+    "select_value_catalog",
+    "basis_values",
+    "get_entity_basis",
     "_apply_use_case",
     "apply_outcomes",
     "build_task_store",

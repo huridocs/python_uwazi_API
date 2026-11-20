@@ -75,7 +75,6 @@ from .core import (
     _toggle_select_all,
     _toggle_sort_direction,
     _toggle_sub,
-    _toggle_value,
     _update_table_now,
 )
 from .dialogs import _fire, _reason_dialog, _simple_confirm, _submit_reason
@@ -105,7 +104,7 @@ from .entity_window import (
     _revert_entity_rows,
     _revert_suboperation,
     _revert_suboperation_clicked,
-    _set_rejections,
+    _set_selection_by_id,
     _template_labels,
     _template_types,
     _types_for_operation,
@@ -219,7 +218,7 @@ __all__ = [
     "_set_children_checked",
     "_set_drift_error",
     "_set_filter",
-    "_set_rejections",
+    "_set_selection_by_id",
     "_set_sort",
     "_simple_confirm",
     "_sort_bar",
@@ -235,7 +234,6 @@ __all__ = [
     "_toggle_select_all",
     "_toggle_sort_direction",
     "_toggle_sub",
-    "_toggle_value",
     "_types_for_operation",
     "_update_table_clicked",
     "_update_table_now",

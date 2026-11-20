@@ -458,6 +458,8 @@ def records_to_suggestions(
         if merge is not None and op in UPDATE_OPS | CREATE_OPS:
             op = "update_and_delete" if merge.target_op == "update" else "create_and_delete"
         title = titles.get(shared_id, "") or str(record.get("title") or "")
+        recorded_basis = record.get("basis")
+        basis: list[str] = [str(name) for name in recorded_basis] if isinstance(recorded_basis, list) else []
         base: dict[str, Any] = {
             "run_id": run_id,
             "shared_id": shared_id,
@@ -468,6 +470,7 @@ def records_to_suggestions(
             "created_at": created,
             "merge_source_ids": list(merge.source_shared_ids) if merge is not None else [],
             "merge_files": [dict(file) for file in merge.files] if merge is not None else [],
+            "basis": basis,
         }
 
         if op == MOVE_OP:

@@ -10,9 +10,6 @@ from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
-from uwazi_admin_agent.domain.select_values import (
-    rejected_after_toggle,
-)
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
     FILE_OPS,
@@ -122,13 +119,13 @@ _RUN_STATUS_BADGE_COLORS: dict[str, str] = {
 
 def _accept_values_clicked(state: dict[str, Any], args: Any) -> None:
     """Accept every predicted value of ONE multiselect suboperation back."""
-    from .entity_window import _set_rejections
+    from .entity_window import _set_selection_by_id
 
     _row, sub = _sub_of(state, args)
     if sub is None or sub.get("is_info") or sub.get("is_display_only") or not isinstance(sub.get("id"), int):
         return
     background_tasks.create(
-        _set_rejections(state, int(sub["id"]), [], context.client),
+        _set_selection_by_id(state, int(sub["id"]), None, context.client),
         name=f"accept values {sub['id']}",
     )
 
@@ -374,8 +371,7 @@ def _change_table(state: dict[str, Any]) -> None:
                     <col style="width: 22%;" />
                     <col style="width: 76px;" />
                     <col style="width: 19%;" />
-                    <col style="width: 22%;" />
-                    <col style="width: 84px;" />
+                    <col style="width: 26%;" />
                     <col style="width: 104px;" />
                     <col style="width: 132px;" />
                   </colgroup>
@@ -386,7 +382,6 @@ def _change_table(state: dict[str, Any]) -> None:
                       <th class="text-left q-pa-xs">Language</th>
                       <th class="text-left q-pa-xs">Value</th>
                       <th class="text-left q-pa-xs">Proposed value</th>
-                      <th class="text-left q-pa-xs">Match</th>
                       <th class="text-left q-pa-xs">Status</th>
                       <th class="text-left q-pa-xs">Actions</th>
                     </tr>
@@ -395,7 +390,7 @@ def _change_table(state: dict[str, Any]) -> None:
                     <template v-for="sub in props.row.subs">
                       <tr v-if="sub.is_info" :key="'info-' + sub.id">
                         <td></td>
-                        <td class="q-pa-xs" colspan="7">
+                        <td class="q-pa-xs" colspan="6">
                           <div class="text-body2"
                                style="white-space: pre-wrap; overflow-wrap: anywhere;
                                       user-select: text;">{{ sub.label }}</div>
@@ -425,12 +420,10 @@ def _change_table(state: dict[str, Any]) -> None:
                                       :text-color="v.accepted ? 'green-10' : 'red-10'"
                                       :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
                             </div>
-                            <div class="text-caption text-grey-6">{{ sub.values.filter(v => v.accepted).length }} /
-                              {{ sub.values.length }} values</div>
+                            <div class="text-caption text-grey-6">Will write: {{ sub.selection_text }}</div>
                           </template>
                           <div v-else class="text-body2">{{ sub.proposed }}</div>
                         </td>
-                        <td class="q-pa-xs"><q-badge :color="sub.match_color">{{ sub.match }}</q-badge></td>
                         <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
                         <td class="q-pa-xs subs-actions">
                           <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
@@ -1810,24 +1803,6 @@ def _toggle_sub(state: dict[str, Any], args: Any) -> None:
         return
     _apply_checked(state, [int(sub_id)], bool(checked))
     _sync_selection(state)
-
-
-def _toggle_value(state: dict[str, Any], suggestion: Suggestion, label: str, accepted: bool) -> None:
-    """Apply ONE checkbox's decision for a multiselect row (thin wrapper).
-
-    The ``rejected`` list is built from the suggestion object the checkbox was
-    built with: the window re-renders after every write, so the widget's row and
-    the stored row agree.
-    """
-    from .entity_window import _set_rejections
-
-    if suggestion.id is None:
-        return
-    rejected = rejected_after_toggle(suggestion.rejected_values, label, accepted)
-    background_tasks.create(
-        _set_rejections(state, suggestion.id, rejected, context.client),
-        name=f"toggle value {suggestion.id}",
-    )
 
 
 async def _update_table_now(state: dict[str, Any], client: Any) -> None:

@@ -17,6 +17,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     discard_ids,
     restore_ids,
     set_rejected_values,
+    set_selected_values,
 )
 from uwazi_admin_agent.tests.e2e_support import (
     UWAZI_URL,
@@ -159,3 +160,31 @@ def test_set_rejected_values_refuses_applied_and_other_discards(workspace: Admin
     with pytest.raises(ValueError) as err:
         set_rejected_values(UWAZI_URL, run_id, row.id, ["Alpha"])
     assert "already applied" in str(err.value)
+
+
+def test_multiselect_explicit_selection_writes_added_and_dropped_values(workspace: AdminE2EWorkspace) -> None:
+    """The operator's own value set is what the Run writes, verbatim.
+
+    A row proposing Alpha only, with the operator selecting Beta + Gamma from
+    the thesaurus: the Run must write those two and nothing else, even though
+    neither label was part of the proposal.
+    """
+    ws = workspace
+    # A fresh entity: entity_ids[0]/[1] already carry the other tests' writes.
+    shared_id = ws.create_entity()
+    language = ws.languages.default
+    prop = ws.multiselect_property
+
+    run_id = ws.new_run(_labels_script(ws, [shared_id], ["Alpha"]))
+    row = _multiselect_rows(ws, run_id)[0]
+    assert row.selected_values is None
+
+    selected = set_selected_values(UWAZI_URL, run_id, row.id, ["Beta", "Gamma"])
+    assert selected.selected_values == ["Beta", "Gamma"]
+    assert selected.status is SuggestionStatus.PENDING
+    assert selected.rejected_values == []
+
+    ws.apply(run_id, rows=[selected])
+    labels = _labels_via_mapping(ws.raw(shared_id, language), prop, ws)
+    assert sorted(labels) == ["Beta", "Gamma"], f"expected the operator's set, got {labels}"
+    assert _multiselect_rows(ws, run_id)[0].status is SuggestionStatus.APPLIED

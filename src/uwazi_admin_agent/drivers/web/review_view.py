@@ -688,11 +688,11 @@ def pending_suboperation_count(counts: dict[str, int]) -> int:
 
 # The verdict's color, used for BOTH the banner icon and the banner TEXT.
 # "drifted" is red on purpose: an out-of-date table is the one state the
-# operator must not miss, and orange reads as "advisory" next to a green
-# "up to date" badge.
+# operator must not miss. "valid" is grey, not green: being up to date is the
+# resting state, so it must not compete with the red warning for attention.
 DRIFT_STATUS_COLORS: dict[str, str] = {
     "unknown": "grey-7",
-    "valid": "green",
+    "valid": "grey-7",
     "drifted": "red",
     "error": "red",
     "checking": "blue",
@@ -786,6 +786,27 @@ def sort_direction_label(sort_by: str, sort_desc: bool) -> str:
     return "Z → A" if sort_desc else "A → Z"
 
 
+def row_neighbours(
+    pairs: list[tuple[str, str | None]],
+    current: tuple[str, str | None],
+) -> tuple[tuple[str, str | None] | None, tuple[str, str | None] | None]:
+    """The previous/next rows around ``current`` for the entity window (pure).
+
+    Navigation does NOT wrap: the first row has no previous and the last has no
+    next. The window hides the button that has nowhere to go, so a result with a
+    single row shows no navigation buttons at all instead of two buttons that
+    reload the same entity. A current row missing from the filtered list has no
+    neighbours to walk.
+    """
+    try:
+        index = pairs.index(current)
+    except ValueError:
+        return None, None
+    previous = pairs[index - 1] if index > 0 else None
+    following = pairs[index + 1] if index + 1 < len(pairs) else None
+    return previous, following
+
+
 __all__ = [
     "DRIFT_STATUS_COLORS",
     "ACTIONS_COLUMN",
@@ -832,6 +853,7 @@ __all__ = [
     "prune_selection",
     "revert_entity_confirmation",
     "rows_excluding_keys",
+    "row_neighbours",
     "unique_entities",
     "run_button_label",
     "run_confirmation",

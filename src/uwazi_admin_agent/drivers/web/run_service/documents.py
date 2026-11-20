@@ -81,6 +81,54 @@ async def resolve_entity_document(
     return None
 
 
+def basis_values(raw: dict[str, Any], names: list[str]) -> dict[str, Any]:
+    """The live value of each inferred-from property (pure; `_title` reads the title).
+
+    ``raw`` is one entity's raw Uwazi row: ``_title`` comes from its top-level
+    ``title``, every other name from its ``metadata`` cell (the WHOLE cell — a
+    shared property has one cell, so no language narrowing applies). A name the
+    row does not carry maps to ``None``, which the window renders as an empty
+    value instead of failing.
+    """
+    metadata = raw.get("metadata") or {}
+    values: dict[str, Any] = {}
+    for name in names:
+        if name == "_title":
+            values[name] = raw.get("title")
+        else:
+            values[name] = metadata.get(name)
+    return values
+
+
+async def get_entity_basis(
+    url: str,
+    user: str,
+    password: str,
+    shared_id: str,
+    language: str,
+    names: list[str],
+) -> tuple[str, dict[str, Any]]:
+    """One entity's raw row (and the language it lives in) for the basis pane.
+
+    Resolves the language exactly like :func:`resolve_entity_document` (the
+    requested language first, then the instance's configured ones) and returns
+    the FIRST readable raw row plus :func:`basis_values` of it. Raises
+    ``RuntimeError`` when no candidate resolves — the pane then shows its
+    message rather than an empty panel.
+    """
+    runtime = build_runtime(user=user, password=password, url=url)
+    candidates = document_language_candidates(language, await _instance_languages(runtime))
+    for candidate in candidates:
+        try:
+            raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, candidate)
+        except Exception as exc:  # noqa: BLE001 — no locale row for this language
+            logger.info("no entity raw for sharedId={} language={}: {}", shared_id, candidate, exc)
+            continue
+        if raw:
+            return candidate, basis_values(raw, names)
+    raise RuntimeError(f"no readable row for {shared_id}")
+
+
 async def fetch_entity_document_bytes(
     url: str, user: str, password: str, shared_id: str, language: str | None = None
 ) -> bytes | None:

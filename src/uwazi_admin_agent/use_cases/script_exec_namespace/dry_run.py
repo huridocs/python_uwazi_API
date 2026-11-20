@@ -90,6 +90,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "metadata": d.get("metadata"),
                     "title": d.get("title"),
                     "language": language,
+                    "basis": [str(b) for b in d.get("basis") or []],
                 }
             )
         return [{"shared_id": d.get("shared_id"), "success": True} for d in entities_dicts]

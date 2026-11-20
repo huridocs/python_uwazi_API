@@ -13,9 +13,10 @@ from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.select_values import (
     ALL_VALUES_REJECTED_REASON,
     MULTISELECT_TYPE,
-    accepted_values,
+    catalog_labels,
+    effective_selection,
     unpredicted_values,
-    value_decisions,
+    value_options,
 )
 from uwazi_admin_agent.domain.suggestion import (
     MATCHED_OP,
@@ -53,9 +54,11 @@ from uwazi_admin_agent.drivers.web.review_view import (
     property_caption,
     property_heading,
     revert_entity_confirmation,
+    row_neighbours,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
     entity_is_merge,
+    get_entity_basis,
     get_entity_segmentation,
     get_entity_suggestions,
     get_selection_rows,
@@ -65,7 +68,8 @@ from uwazi_admin_agent.drivers.web.run_service import (
     resolve_entity_document,
     revert_entity_rows,
     revert_suboperation,
-    set_rejected_values,
+    select_value_catalog,
+    set_selected_values,
 )
 from uwazi_admin_agent.drivers.web.session import (
     SessionCredentials,
@@ -80,7 +84,6 @@ from .core import (
     _refresh_all,
     _run_refs,
     _suggestion_is_runnable,
-    _toggle_value,
 )
 from .dialogs import _simple_confirm
 
@@ -120,6 +123,10 @@ def _open_entity_window(
         "focus_property": focus_property,
         "label": label,
     }
+    # Only offer the direction(s) that lead somewhere: no wrap-around, so a
+    # single-row result (or the first/last row) never gets a button that just
+    # reloads the entity the operator is already reading.
+    previous_row, next_row = row_neighbours(_navigation_pairs(state), (shared_id, language))
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
             dialog.props("maximized")
@@ -131,17 +138,20 @@ def _open_entity_window(
                 # The navigation row sits BETWEEN the header and the panels: the
                 # operator sees the row controls while looking at the document
                 # and the values, without them crowding the top bar.
-                with ui.row().classes("w-full justify-center shrink-0"):
-                    ui.button(
-                        "Previous row",
-                        icon="chevron_left",
-                        on_click=lambda: _navigate_entity(state, shared_id, language, -1),
-                    ).props("flat dense")
-                    ui.button(
-                        "Next row",
-                        icon="chevron_right",
-                        on_click=lambda: _navigate_entity(state, shared_id, language, 1),
-                    ).props("flat dense")
+                if previous_row is not None or next_row is not None:
+                    with ui.row().classes("w-full justify-center shrink-0"):
+                        if previous_row is not None:
+                            ui.button(
+                                "Previous row",
+                                icon="chevron_left",
+                                on_click=lambda: _navigate_entity(state, previous_row),
+                            ).props("flat dense")
+                        if next_row is not None:
+                            ui.button(
+                                "Next row",
+                                icon="chevron_right",
+                                on_click=lambda: _navigate_entity(state, next_row),
+                            ).props("flat dense")
                 with ui.row().classes("w-full grow no-wrap items-stretch").style("min-height: 0"):
                     document_pane = ui.column().classes("grow").style("min-width: 50%; height: 100%")
                     details_host = ui.column().classes("grow").style("min-width: 45%; height: 100%; overflow-y: auto")
@@ -152,7 +162,18 @@ def _open_entity_window(
     _render_entity_header(state, suggestions, label, shared_id, language)
     _render_entity_details(state, suggestions, focus_property)
     dialog.open()
-    background_tasks.create(_load_document(state, shared_id, language, document_pane), name=f"document {shared_id}")
+    background_tasks.create(
+        _load_document(
+            state,
+            shared_id,
+            language,
+            document_pane,
+            _basis_properties(suggestions),
+            _property_labels(suggestions),
+            _property_types_for_suggestions(suggestions),
+        ),
+        name=f"document {shared_id}",
+    )
 
 
 def _entity_rows(state: dict[str, Any], shared_id: str, language: str | None) -> list[Suggestion]:
@@ -258,13 +279,26 @@ def _close_entity_window(state: dict[str, Any]) -> None:
     state["_entity_document_pane"] = None
 
 
-async def _load_document(state: dict[str, Any], shared_id: str, language: str | None, pane: Any) -> None:
+async def _load_document(
+    state: dict[str, Any],
+    shared_id: str,
+    language: str | None,
+    pane: Any,
+    basis: list[str] | None = None,
+    labels: dict[str, str] | None = None,
+    types: dict[str, str] | None = None,
+) -> None:
     """Fill the left pane with the entity's PDF viewer, or its document text.
 
     The decision is made BEFORE rendering: an entity with no uploaded primary
     document gets the segmentation text panel instead of a viewer that would show
     nothing (the plan's no-blank-viewer rule). Both paths degrade to a message
     rather than an empty box.
+
+    ``basis`` short-circuits both: when the rows record that their value was
+    inferred from the entity's OWN properties (its title, its ``document_ref``),
+    the pane shows those properties' live values — the evidence the operator
+    must check — and never resolves or loads a document.
 
     The document is resolved in the ROW's language with a fallback to the
     instance's other configured languages (an entity usually holds its PDF in
@@ -280,6 +314,9 @@ async def _load_document(state: dict[str, Any], shared_id: str, language: str | 
     credentials = credentials_for_instance(page_instance_url())
     if credentials is None:
         _render_pane_message(pane, "Not logged in to Uwazi — cannot show the document.")
+        return
+    if basis:
+        await _render_basis(pane, credentials, shared_id, language, basis, labels or {}, types or {})
         return
     try:
         document = await resolve_entity_document(
@@ -348,6 +385,57 @@ def _render_pane_message(pane: Any, message: str) -> None:
     pane.clear()
     with pane:
         ui.label(message).classes("text-body2 text-grey-7")
+
+
+def _basis_properties(suggestions: list[Suggestion]) -> list[str]:
+    """The distinct non-empty ``basis`` names across one entity group, in first-appearance order (pure)."""
+    names: list[str] = []
+    for suggestion in suggestions:
+        for name in suggestion.basis:
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+async def _render_basis(
+    pane: Any,
+    credentials: SessionCredentials,
+    shared_id: str,
+    language: str | None,
+    basis: list[str],
+    labels: dict[str, str],
+    types: dict[str, str],
+) -> None:
+    """Show the entity's own properties when the recorded value was inferred from them.
+
+    The evidence for such a row is not the PDF: it is the title/``document_ref``
+    the script read. Rendering those live values lets the operator check the
+    inference without the document viewer implying the value came from a file.
+    """
+    try:
+        raw_language, values = await get_entity_basis(
+            page_instance_url(),
+            credentials.user,
+            credentials.password,
+            shared_id,
+            language or DUMMY_LANGUAGE,
+            basis,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to a message, never a blank pane
+        _render_pane_message(pane, f"Could not read the properties this value was inferred from ({exc}).")
+        return
+    if pane.is_deleted:  # the operator moved on while we were reading
+        return
+    pane.clear()
+    with pane:
+        ui.label("Inferred from these properties (no document loaded)").classes("text-subtitle2 text-grey-7")
+        ui.label(f"Read from the {raw_language} row").classes("text-caption text-grey-6")
+        for name in basis:
+            ui.label(property_heading(name, "update", labels)).classes("text-subtitle2")
+            caption = property_caption(name, labels)
+            if caption:
+                ui.label(caption).classes("text-caption text-grey-6")
+            _entity_value_label(full_value(values.get(name), types.get(name)), "text-body2")
 
 
 def _entity_header(
@@ -659,34 +747,54 @@ def _entity_suggestions(
                     f"Value: {full_value(suggestion.current_value, property_type)}", "text-body2 text-grey-7"
                 )
                 if property_type == MULTISELECT_TYPE:
-                    decisions = value_decisions(suggestion.proposed_value, suggestion.rejected_values)
-                    # A row discarded BY the value mechanism stays toggleable
-                    # (rejecting more, or accepting one back, is exactly the
-                    # review loop); every other non-runnable state, and an
-                    # EDITED row (its edit wins over the proposal), is
-                    # read-only.
-                    toggling = (
+                    selected = effective_selection(
+                        suggestion.proposed_value, suggestion.rejected_values, suggestion.selected_values
+                    )
+                    available = catalog_labels(_select_catalog_map(suggestion))
+                    options = value_options(
+                        suggestion.proposed_value,
+                        suggestion.rejected_values,
+                        selected,
+                        available,
+                    )
+                    # A row discarded BY the value mechanism stays editable
+                    # (picking a value back is exactly the review loop); every
+                    # other non-runnable state, and an EDITED row (its edit wins
+                    # over the values), is read-only.
+                    editable = (
                         _suggestion_is_runnable(suggestion) or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON
                     ) and suggestion.status is not SuggestionStatus.EDITED
-                    for decision in decisions:
-                        box = ui.checkbox(
-                            decision["label"],
-                            value=decision["accepted"],
-                            on_change=lambda e, s=suggestion, label=decision["label"]: _toggle_value(
-                                state, s, label, bool(e.value)
-                            ),
-                        ).props("dense")
-                        if not toggling:
-                            box.disable()
-                    unpredicted = unpredicted_values(suggestion.current_value, suggestion.proposed_value)
+                    picker = ui.select(
+                        {option["label"]: _option_text(option) for option in options},
+                        multiple=True,
+                        with_input=True,
+                        value=selected,
+                        label="Values",
+                        on_change=lambda e, s=suggestion: _set_selection(
+                            state,
+                            s,
+                            list(e.value) if isinstance(e.value, list) else [],
+                        ),
+                    ).props("dense outlined")
+                    picker.classes("w-full")
+                    if not editable:
+                        picker.disable()
+                    if not available:
+                        _entity_value_label(
+                            "Could not read this property's thesaurus — only the recommended values are listed.",
+                            "text-caption text-grey-7",
+                        )
+                    unpredicted = unpredicted_values(suggestion.current_value, selected)
                     if unpredicted:
                         _entity_value_label(
                             f"Not predicted, will be removed by this Run: {', '.join(unpredicted)}",
                             "text-body2 text-orange-9",
                         )
-                    accepted_now = accepted_values(suggestion.proposed_value, suggestion.rejected_values)
+                    recommended = [option["label"] for option in options if option["recommended"]]
+                    if recommended:
+                        _entity_value_label(f"Recommended: {', '.join(recommended)}", "text-caption text-grey-7")
                     _entity_value_label(
-                        f"Will write: {', '.join(accepted_now) or '— (nothing: the row is discarded)'}",
+                        f"Will write: {', '.join(selected) or '— (nothing)'}",
                         "text-body2 text-teal",
                     )
                 else:
@@ -721,8 +829,8 @@ def _entity_structural_card(detail: dict[str, Any]) -> None:
         _entity_value_label(f"Proposed: {detail['proposed']}", "text-body2")
 
 
-def _navigate_entity(state: dict[str, Any], current: str, language: str | None, direction: int) -> None:
-    """Move to the previous/next ROW within the current filter's row list.
+def _navigation_pairs(state: dict[str, Any]) -> list[tuple[str, str | None]]:
+    """The (sharedId, language) rows the window can walk, in the filter's order.
 
     Navigation walks (sharedId, language) pairs, so it lands on the next row of
     the table the operator is looking at — for a translation task that means the
@@ -737,12 +845,16 @@ def _navigate_entity(state: dict[str, Any], current: str, language: str | None, 
         pair = (shared_id, row_language)
         if pair not in pairs:
             pairs.append(pair)
-    if not pairs:
-        return
-    current_key = (current, language)
-    index = pairs.index(current_key) if current_key in pairs else 0
-    target_shared_id, target_language = pairs[(index + direction) % len(pairs)]
-    _open_entity_window(state, target_shared_id, target_language)
+    return pairs
+
+
+def _navigate_entity(state: dict[str, Any], target: tuple[str, str | None]) -> None:
+    """Open another row of the current filter's list (the window's Previous/Next).
+
+    The button is only created when :func:`row_neighbours` found that row, so
+    this never wraps around to the current entity.
+    """
+    _open_entity_window(state, target[0], target[1])
 
 
 async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
@@ -895,15 +1007,57 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
             _refresh_entity_window(state)
 
 
-async def _set_rejections(state: dict[str, Any], row_id: int, rejected: list[str], client: Any) -> None:
-    """Persist one multiselect row's rejected labels, then refresh page + window."""
+def _option_text(option: dict[str, Any]) -> str:
+    """The picker's DISPLAY text for one option (pure): the raw label, marked when recommended.
+
+    The select's option dict is keyed by the raw thesaurus label and this string
+    is only what the widget renders, so the element's ``.value`` — and therefore
+    every persisted selection — never carries the suffix.
+    """
+    return f"{option['label']} (recommended)" if option["recommended"] else str(option["label"])
+
+
+def _select_catalog_map(suggestion: Suggestion) -> dict[str, str]:
+    """``{label: value id}`` of the row's thesaurus (best-effort; ``{}`` when unreachable)."""
+    if not suggestion.template_name or not suggestion.property_name:
+        return {}
+    url = page_instance_url()
+    credentials = credentials_for_instance(url)
+    if credentials is None:
+        return {}
+    return select_value_catalog(
+        url,
+        suggestion.template_name,
+        suggestion.property_name,
+        credentials.user,
+        credentials.password,
+    )
+
+
+def _set_selection(state: dict[str, Any], suggestion: Suggestion, selected: list[str] | None) -> None:
+    """Persist the picker's selection for one row (the select's ``on_change`` handler)."""
+    if suggestion.id is None:
+        return
+    background_tasks.create(
+        _set_selection_by_id(state, suggestion.id, selected, context.client),
+        name=f"select values {suggestion.id}",
+    )
+
+
+async def _set_selection_by_id(state: dict[str, Any], row_id: int, selected: list[str] | None, client: Any) -> None:
+    """Persist one multiselect row's explicit selection, then refresh page + window.
+
+    ``None`` drops the explicit selection (the proposal applies again); ``[]``
+    is the operator's "nothing selected", which the service turns into the
+    row's sentinel discard.
+    """
     try:
         await asyncio.to_thread(
-            set_rejected_values,
+            set_selected_values,
             page_instance_url(),
             state["run_id"],
             row_id,
-            rejected,
+            selected,
         )
     except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
         logger.exception("multiselect value update failed")

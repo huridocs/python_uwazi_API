@@ -9,11 +9,13 @@ from uwazi_admin_agent.domain.select_values import (
     UnknownThesaurusValue,
     accepted_values,
     all_values_rejected,
+    catalog_labels,
+    effective_selection,
     labels_of,
-    rejected_after_toggle,
     select_value_envelope,
     unpredicted_values,
     value_decisions,
+    value_options,
 )
 
 
@@ -45,11 +47,44 @@ def test_all_values_rejected_true_only_when_everything_dropped() -> None:
     assert all_values_rejected(None, []) is False
 
 
-def test_rejected_after_toggle_add_and_remove() -> None:
-    assert rejected_after_toggle([], "B", accepted=False) == ["B"]
-    assert rejected_after_toggle(["B"], "B", accepted=False) == ["B"]  # idempotent add
-    assert rejected_after_toggle(["A", "B"], "B", accepted=True) == ["A"]
-    assert rejected_after_toggle(["A"], "B", accepted=True) == ["A"]  # idempotent remove
+def test_effective_selection_prefers_explicit_selection() -> None:
+    assert effective_selection(["A", "B"], ["B"], ["C"]) == ["C"]
+    # An empty explicit selection means "nothing", not "fall back to the proposal".
+    assert effective_selection(["A", "B"], [], []) == []
+    # No explicit selection → the proposal minus the rejections.
+    assert effective_selection(["A", "B"], ["B"], None) == ["A"]
+
+
+def test_effective_selection_deduplicates_selected_labels() -> None:
+    assert effective_selection(["A"], [], ["C", "C", "A"]) == ["C", "A"]
+
+
+def test_value_options_orders_proposal_then_catalog_then_selection() -> None:
+    options = value_options(["Alpha", "Beta"], [], ["Alpha", "Beta", "Zeta"], ["Beta", "Gamma", "Alpha"])
+    assert options == [
+        {"label": "Alpha", "recommended": True},
+        {"label": "Beta", "recommended": True},
+        {"label": "Gamma", "recommended": False},
+        {"label": "Zeta", "recommended": False},
+    ]
+
+
+def test_value_options_keeps_out_of_catalog_selection_visible() -> None:
+    options = value_options(["Alpha"], [], ["Delta"], [])
+    assert options == [
+        {"label": "Alpha", "recommended": True},
+        {"label": "Delta", "recommended": False},
+    ]
+
+
+def test_value_options_labels_are_unique() -> None:
+    options = value_options(["Alpha", "Alpha"], [], ["Alpha"], ["Alpha"])
+    assert [option["label"] for option in options] == ["Alpha"]
+
+
+def test_catalog_labels_collapses_a_grouped_value_to_its_qualified_label() -> None:
+    ids = {"A": "u1", "Group: B": "u2", "B": "u2", "C": "u3"}
+    assert catalog_labels(ids) == ["A", "Group: B", "C"]
 
 
 def test_value_decisions_per_distinct_label() -> None:

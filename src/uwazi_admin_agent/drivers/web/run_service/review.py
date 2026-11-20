@@ -23,6 +23,9 @@ _PROPERTY_LABELS: dict[tuple[str, str, str], dict[str, str]] = {}
 _PROPERTY_TYPES: dict[tuple[str, str, str], dict[str, str]] = {}
 
 
+_SELECT_CATALOG: dict[tuple[str, str, str, str], dict[str, str]] = {}
+
+
 def get_suggestions(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
     """Return a page of suggestions + the filter's total (the review grid's read)."""
     return build_suggestion_store(url).query(run_id, f)
@@ -124,6 +127,89 @@ def property_types_for(url: str, template_name: str | None, user: str, password:
         logger.warning("could not resolve property types for template {}: {}", template_name, exc)
     _PROPERTY_TYPES[key] = types
     return types
+
+
+def set_selected_values(url: str, run_id: str, row_id: int, selected: list[str] | None) -> Suggestion:
+    """Persist one multiselect row's explicit selection and its derived status; return the fresh row.
+
+    ``selected`` is the FULL set of labels the Run writes (not a delta); ``None``
+    drops the explicit selection so the proposal minus ``rejected_values``
+    applies again. The same guards as :func:`set_rejected_values` hold: APPLIED
+    rows raise "already applied — revert it first", OBSOLETE rows "refresh the
+    table", and a row discarded for another reason "restore it first". An empty
+    list means "nothing selected": the row becomes DISCARDED with
+    ``ALL_VALUES_REJECTED_REASON`` (a Run writes nothing); any non-empty
+    selection — or clearing it — puts a row discarded by that sentinel back
+    into PENDING with the reason cleared.
+    """
+    store = build_suggestion_store(url)
+    found, _total = store.query(
+        run_id,
+        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+    )
+    if not found:
+        raise ValueError(f"row {row_id} not found in run {run_id}")
+    row = found[0]
+    if row.status is SuggestionStatus.APPLIED:
+        raise ValueError("already applied — revert it first")
+    if row.status is SuggestionStatus.OBSOLETE:
+        raise ValueError("refresh the table")
+    if row.discard_reason not in (None, ALL_VALUES_REJECTED_REASON):
+        raise ValueError("restore it first")
+    sentinel_discarded = row.status is SuggestionStatus.DISCARDED and row.discard_reason == ALL_VALUES_REJECTED_REASON
+    status: SuggestionStatus | None = None
+    reason: str | None = None
+    if selected is not None and not selected:
+        status = SuggestionStatus.DISCARDED
+        reason = ALL_VALUES_REJECTED_REASON
+    elif sentinel_discarded:
+        status = SuggestionStatus.PENDING
+        reason = None
+    store.set_selected_values(row_id, selected, status, reason)
+    fresh, _total = store.query(
+        run_id,
+        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+    )
+    if not fresh:
+        raise ValueError(f"row {row_id} not found in run {run_id}")
+    return fresh[0]
+
+
+def select_value_catalog(
+    url: str,
+    template_name: str | None,
+    property_name: str | None,
+    user: str,
+    password: str,
+) -> dict[str, str]:
+    """``{label: value id}`` for one select/multiselect property, cached; ``{}`` when unresolvable.
+
+    The entity window's value picker lists every thesaurus value of the property,
+    not just the ones the script proposed, so the operator can add one. The map
+    is returned whole (not a label list) because a grouped thesaurus maps BOTH
+    ``"Child"`` and ``"Group: Child"`` to one id: the caller collapses those by
+    id. Degrades to ``{}`` whenever the instance cannot be reached or the
+    property carries no thesaurus — a display lookup never blocks the window.
+    """
+    if not template_name or not property_name:
+        return {}
+    key = (url, user, template_name, property_name)
+    cached = _SELECT_CATALOG.get(key)
+    if cached is not None:
+        return cached
+    ids: dict[str, str] = {}
+    try:
+        runtime = build_runtime(user=user, password=password, url=url)
+        ids = dict(runtime.thesaurus_values.value_ids(template_name, property_name)) if runtime.thesaurus_values else {}
+    except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the window
+        logger.warning(
+            "could not resolve thesaurus values for {}.{}: {}",
+            template_name,
+            property_name,
+            exc,
+        )
+    _SELECT_CATALOG[key] = ids
+    return ids
 
 
 def get_entity_rows(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:

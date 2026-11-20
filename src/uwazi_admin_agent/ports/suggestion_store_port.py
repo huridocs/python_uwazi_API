@@ -229,6 +229,17 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
+    def set_selected_values(
+        self,
+        row_id: int,
+        selected: list[str] | None,
+        status: SuggestionStatus | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Persist one multiselect row's explicit selection; clears the proposal rejections."""
+        ...
+
+    @abstractmethod
     def set_status_by_filter(
         self,
         run_id: str,

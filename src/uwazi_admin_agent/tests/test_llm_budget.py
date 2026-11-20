@@ -24,6 +24,7 @@ from uwazi_admin_agent.domain.llm_budget import (
     n_calls_for_entities,
     remaining,
     sum_usage,
+    with_default_backstops,
 )
 
 
@@ -97,6 +98,21 @@ def test_budget_allows_zero_caps_and_rejects_negative_ones() -> None:
         LlmBudget(max_cost=-1, max_requests=5, price=_price())
     with pytest.raises(ValueError):
         LlmBudget(max_cost=10, max_requests=-1, price=_price())
+
+
+def test_with_default_backstops_fills_the_cap_the_operator_left_at_zero() -> None:
+    """Raising EITHER wizard cap opts in; the other becomes its backstop (pure).
+
+    Both caps are enforced, so a lone positive cap would otherwise deny the
+    first LLM call and make the opt-in unusable.
+    """
+    assert with_default_backstops(0.0, 0, default_cost=10.0, default_requests=2000) == (0.0, 0)
+    assert with_default_backstops(3.0, 0, default_cost=10.0, default_requests=2000) == (3.0, 2000)
+    assert with_default_backstops(0.0, 5, default_cost=10.0, default_requests=2000) == (10.0, 5)
+    assert with_default_backstops(3.0, 5, default_cost=10.0, default_requests=2000) == (3.0, 5)
+    # A defensive non-zero backstop even if a caller passes a zero default.
+    assert with_default_backstops(2.0, 0, default_cost=10.0, default_requests=0) == (2.0, 1)
+    assert with_default_backstops(0.0, 3, default_cost=0.0, default_requests=2000) == (0.01, 3)
 
 
 # --- usage arithmetic --------------------------------------------------------
