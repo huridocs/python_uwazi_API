@@ -22,9 +22,12 @@ from urllib.parse import urlencode, urlsplit
 
 from uwazi_admin_agent.domain.instance import same_instance
 
+MISSING_INSTANCE_MESSAGE = (
+    "The instance parameter is mandatory. Open the full link you were given, which names the Uwazi instance in the URL."
+)
 UNMATCHED_INSTANCE_MESSAGE = "This link does not name a configured Uwazi instance. Check the URL you were given."
 AMBIGUOUS_INSTANCE_MESSAGE = (
-    "This link matches more than one configured Uwazi instance. Open this app without an instance parameter and pick yours."
+    "This link matches more than one configured Uwazi instance. Ask for a link whose instance parameter names exactly one."
 )
 
 
@@ -137,15 +140,17 @@ def resolve_login_target(
     """Resolve the login page's query parameters to (instance, user, error).
 
     The instance is ALWAYS a configured url string or empty — never the raw
-    parameter — so an unmatched token can never reach the API adapter. An
-    empty instance parameter keeps today's behavior: the first configured
-    instance. The error is None when the target is usable.
+    parameter — so an unmatched token can never reach the API adapter. The
+    ``instance`` parameter is MANDATORY: an empty one is reported as an error
+    instead of falling back to the first configured instance, so a bare ``/``
+    shows guidance rather than a login form. The error is None when the target
+    is usable.
     """
     user = (user_param or "").strip()
     if not configured:
         return "", user, None
     if not (instance_param or "").strip():
-        return configured[0], user, None
+        return "", user, MISSING_INSTANCE_MESSAGE
     matched, error = match_instance(instance_param, configured)
     if error is not None or matched is None:
         return "", user, error
@@ -169,6 +174,7 @@ def startup_login_url(configured: list[str], base_url: str, port: int) -> str | 
 
 __all__ = [
     "AMBIGUOUS_INSTANCE_MESSAGE",
+    "MISSING_INSTANCE_MESSAGE",
     "UNMATCHED_INSTANCE_MESSAGE",
     "instance_token",
     "instance_tokens",

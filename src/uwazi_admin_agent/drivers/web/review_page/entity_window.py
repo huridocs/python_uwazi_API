@@ -802,6 +802,11 @@ def _entity_suggestions(
                         f"Proposed: {full_value(suggestion.proposed_value, property_type)}",
                         "text-body2",
                     )
+                if suggestion.context:
+                    _entity_value_label(
+                        f"Source context: {suggestion.context}",
+                        "text-body2 text-grey-7",
+                    )
             if suggestion.edited_value is not None:
                 _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
     if merge_rows:

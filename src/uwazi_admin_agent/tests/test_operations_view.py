@@ -462,3 +462,18 @@ def test_rerun_blocked_only_matches_a_reverted_recreating_op() -> None:
     assert view.rerun_blocked("delete", "pending") is False
     assert view.rerun_blocked("update", "reverted") is False
     assert view.rerun_blocked("create", "reverted") is False
+
+
+def test_suboperation_row_carries_the_context() -> None:
+    sub = _sub(1)
+    sub = sub.model_copy(update={"context": "the paragraph it was read from"})
+
+    row = view.suboperation_row(sub, checked=False, in_place=False)
+
+    assert row["context"] == "the paragraph it was read from"
+
+
+def test_suboperation_row_carries_an_empty_context_when_there_is_none() -> None:
+    row = view.suboperation_row(_sub(1), checked=False, in_place=False)
+
+    assert row["context"] == ""

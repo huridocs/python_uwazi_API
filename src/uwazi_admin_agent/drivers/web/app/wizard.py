@@ -40,14 +40,31 @@ from .broadcast import _broadcast_rows
 from .state import _broadcast_notify, _busy_run_text, _notify_error, _session_ended
 
 
-def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "") -> None:
+def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_validated_prompt: str | None = None) -> None:
     """Multi-step dialog to create + generate a run.
 
     ``prefill_name``/``prefill_prompt`` pre-populate the wizard (used by the
     Duplicate menu action); when a prefill is present the wizard opens
     directly on the Generate review step (validation is skipped).
+
+    ``prefill_validated_prompt`` is the source run's FINAL prompt — the original
+    request plus the validation step's resolved clarifications (and, after a
+    chat Run, the whole conversation). A duplicate must generate from that, not
+    from the bare original: dropping the clarifications is what made a second
+    generation plan a weaker request and get refused. ``prefill_prompt`` stays
+    the original request, which is what the manifest records as ``prompt``.
     """
-    state: dict[str, Any] = {"name": prefill_name, "prompt": prefill_prompt, "final_prompt": prefill_prompt}
+    base_prompt = (prefill_validated_prompt or prefill_prompt).strip() or prefill_prompt
+    state: dict[str, Any] = {"name": prefill_name, "prompt": prefill_prompt, "final_prompt": base_prompt}
+    # What the clarification pass is shown, and what a re-validation's answers
+    # get folded back into. For a fresh wizard it is the operator's request; for
+    # a duplicate it is the source run's already-resolved prompt.
+    state["_clarify_base"] = base_prompt
+    if prefill_name or prefill_prompt:
+        # The generate step recomputes from ``_prompt_base``; set it BEFORE the
+        # step is built or the first repaint would drop the clarifications.
+        state["_prompt_base"] = base_prompt
+        state["validated_prompt"] = base_prompt
 
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
@@ -119,10 +136,18 @@ def _wizard_details_next(state: dict[str, Any], name_input: Any, prompt_input: A
     if not prompt:
         ui.notify("Prompt is required", type="warning")
         return
+    # A duplicate opens with the source run's FOLDED prompt (original +
+    # clarifications) already applied. Stepping back to this panel must not
+    # silently drop it: only an EDITED request invalidates those clarifications,
+    # because they answered the previous wording.
+    unchanged = prompt == state.get("prompt")
+    if not unchanged:
+        state["validated_prompt"] = None
+        state["_prompt_base"] = prompt
+        state["_clarify_base"] = prompt
     state["name"] = name
     state["prompt"] = prompt
-    state["final_prompt"] = prompt
-    state["validated_prompt"] = None
+    state["final_prompt"] = state.get("validated_prompt") or prompt
     state["_validation_done"] = False
     _render_validate_idle(state, state["_validate_container"])
     stepper.set_value("validate")
@@ -160,7 +185,11 @@ def _start_validation(state: dict[str, Any]) -> None:
 
 async def _do_clarify(state: dict[str, Any], container: Any) -> None:
     """Run the clarification LLM call on a worker thread, then render the result."""
-    prompt = state["prompt"]
+    # Validate the prompt that would actually be SENT, not the bare original: a
+    # duplicate (or a run whose validation already resolved questions) carries
+    # its clarifications in ``_clarify_base``, and re-validating the naked
+    # request would ask the LLM to answer questions the operator already settled.
+    prompt = state.get("_clarify_base") or state["prompt"]
     instance = page_instance_url()
     credentials = credentials_for_instance(instance)
     if credentials is None:
@@ -262,10 +291,18 @@ def _collect_answers(state: dict[str, Any]) -> list[QuestionAnswer]:
 
 
 def _refresh_final_prompt(state: dict[str, Any]) -> None:
-    """Recompute the final prompt from the current answers + notes and update the preview."""
+    """Recompute the final prompt from the current answers + notes and update the preview.
+
+    Folds onto the SAME text the clarification pass was shown (``_clarify_base``),
+    not the bare original: a duplicate's questions were asked about the source
+    run's folded prompt, so folding the answers into the naked request would
+    drop the clarifications they were asked about. A fresh wizard's base is the
+    operator's request itself, where both coincide.
+    """
     notes_input = state.get("_notes_input")
     notes = (notes_input.value or "") if notes_input is not None else ""
-    final = build_final_prompt(state["prompt"], _collect_answers(state), notes)
+    base = state.get("_clarify_base") or state["prompt"]
+    final = build_final_prompt(base, _collect_answers(state), notes)
     state["final_prompt"] = final
     preview = state.get("_preview")
     if preview is not None:
@@ -273,10 +310,15 @@ def _refresh_final_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_skip(state: dict[str, Any]) -> None:
-    """Proceed to generate with the original prompt (no validation applied)."""
-    state["final_prompt"] = state["prompt"]
-    state["validated_prompt"] = None
-    state["_prompt_base"] = state["prompt"]
+    """Proceed without running a NEW validation pass.
+
+    The base is the prompt already resolved for this wizard: a duplicate opens
+    with the source run's clarifications applied, and "Skip" here means "do not
+    ask the LLM again", never "throw those clarifications away".
+    """
+    base = state.get("validated_prompt") or state["prompt"]
+    state["final_prompt"] = base
+    state["_prompt_base"] = base
     _show_generate_prompt(state)
     state["_stepper"].set_value("generate")
 

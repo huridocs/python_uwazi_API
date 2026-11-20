@@ -279,6 +279,15 @@ class Suggestion(BaseModel):
             "Display-only: never written to Uwazi."
         ),
     )
+    context: str | None = Field(
+        default=None,
+        description=(
+            "The source text the recorded value was read from (the paragraph that was "
+            "classified, the segment the value was extracted from). Set by the script's "
+            "`context` key in an update/create dict. Display-only: never written to "
+            "Uwazi. None means the row has no context to show."
+        ),
+    )
     discard_reason: str | None = Field(default=None, description="Why the operator discarded this row.")
     reviewed_at: datetime | None = Field(default=None, description="When the operator last changed the status.")
     created_at: datetime | None = Field(default=None, description="When the suggestion was persisted.")

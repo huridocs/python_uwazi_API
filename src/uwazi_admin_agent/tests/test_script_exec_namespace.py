@@ -1,6 +1,4 @@
 import builtins
-import datetime as _datetime_module
-import random as _random_module
 
 import pytest
 
@@ -140,17 +138,23 @@ def test_safe_builtins_blocks_import_in_exec() -> None:
 def test_stdlib_binds_random_module() -> None:
     """`random` is bound (pure-compute, no I/O) so 'fill with random information'
     create scripts use `random.randint/choice` instead of `__import__` or a
-    hand-rolled pseudo-random."""
-    assert _STDLIB["random"] is _random_module
+    hand-rolled pseudo-random. Bound as a curated facade, not the module object."""
+    facade = _STDLIB["random"]
+    assert callable(facade.randint)
+    assert callable(facade.choice)
+    assert callable(facade.random)
 
 
 def test_stdlib_binds_datetime_as_module_not_class() -> None:
-    """`datetime` is bound as the MODULE so the script uses the standard
+    """`datetime` is bound as a MODULE-SHAPED facade so the script uses the standard
     `datetime.datetime.now()` / `datetime.timedelta()` idiom (the LLM's natural
     instinct) and gets `timedelta`/`date`/`time` for free. Pinning this guards the
     live bug where the LLM wrote `datetime.datetime.datetime...` (treating the
     bound name as a class while it was the module, or vice-versa)."""
-    assert _STDLIB["datetime"] is _datetime_module
+    facade = _STDLIB["datetime"]
+    assert facade.datetime.__name__ == "datetime"
+    assert callable(facade.timedelta)
+    assert callable(facade.date)
 
 
 def test_run_script_sync_random_and_datetime_module_idiom_run_clean() -> None:
@@ -235,12 +239,12 @@ result = (
 
 
 def test_run_script_sync_import_html_fails() -> None:
-    """`import html` must fail (zero import lines; `__import__` is not bound)."""
+    """`import html` must fail: the static gate rejects any import before exec."""
 
     ns: dict = {"__builtins__": SAFE_BUILTINS, **_STDLIB}
     result, error = run_script_sync("import html\nresult = 'x'\n", ns)
     assert result is None
-    assert error is not None and "ImportError" in error
+    assert error is not None and "import" in error.lower()
 
 
 # --- dummy-scoped file-fetch stubs ----------------------------------------------

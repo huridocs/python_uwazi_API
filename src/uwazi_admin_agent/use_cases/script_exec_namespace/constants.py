@@ -55,13 +55,61 @@ _DATEPARSE: Any = SimpleNamespace(
 
 
 _STDLIB: dict[str, Any] = {
-    "json": json,
-    "re": re,
-    "collections": collections,
-    "itertools": itertools,
-    "datetime": _datetime,
-    "math": math,
-    "random": random,
+    # Curated facades, not raw module objects. A module object exposes
+    # ``__dict__``/``__builtins__`` and its functions expose ``__globals__``;
+    # binding specific members (and the AST gate in ``script_safety``) keeps the
+    # documented surface while shrinking the introspection handles.
+    "json": SimpleNamespace(dumps=json.dumps, loads=json.loads),
+    "re": SimpleNamespace(
+        sub=re.sub,
+        findall=re.findall,
+        search=re.search,
+        match=re.match,
+        split=re.split,
+        compile=re.compile,
+        escape=re.escape,
+        IGNORECASE=re.IGNORECASE,
+        DOTALL=re.DOTALL,
+        MULTILINE=re.MULTILINE,
+    ),
+    "collections": SimpleNamespace(
+        Counter=collections.Counter,
+        defaultdict=collections.defaultdict,
+        OrderedDict=collections.OrderedDict,
+        deque=collections.deque,
+    ),
+    "itertools": SimpleNamespace(
+        chain=itertools.chain,
+        groupby=itertools.groupby,
+        islice=itertools.islice,
+        product=itertools.product,
+    ),
+    "datetime": SimpleNamespace(
+        datetime=_datetime.datetime,
+        date=_datetime.date,
+        time=_datetime.time,
+        timedelta=_datetime.timedelta,
+        timezone=_datetime.timezone,
+    ),
+    "math": SimpleNamespace(
+        sqrt=math.sqrt,
+        floor=math.floor,
+        ceil=math.ceil,
+        fabs=math.fabs,
+        isnan=math.isnan,
+        isinf=math.isinf,
+        log=math.log,
+        pi=math.pi,
+        inf=math.inf,
+    ),
+    "random": SimpleNamespace(
+        randint=random.randint,
+        choice=random.choice,
+        random=random.random,
+        shuffle=random.shuffle,
+        sample=random.sample,
+        seed=random.seed,
+    ),
     "htmlextract": _HTMLEXTRACT,
     "textmatch": _TEXTMATCH,
     "dateparse": _DATEPARSE,
@@ -120,7 +168,6 @@ _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
     "callable",
     "print",
     "Exception",
-    "BaseException",
     "StopIteration",
     "StopAsyncIteration",
     "ArithmeticError",
@@ -135,7 +182,6 @@ _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
     "ModuleNotFoundError",
     "IndexError",
     "KeyError",
-    "KeyboardInterrupt",
     "LookupError",
     "MemoryError",
     "NameError",
@@ -154,8 +200,6 @@ _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
     "Warning",
     "DeprecationWarning",
     "UserWarning",
-    "GeneratorExit",
-    "SystemExit",
 )
 
 

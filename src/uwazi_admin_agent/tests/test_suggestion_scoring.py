@@ -444,3 +444,28 @@ def test_a_per_language_split_row_inherits_the_basis() -> None:
 def test_a_record_without_basis_yields_no_provenance() -> None:
     records = [_rec(op="update", shared_id="s1", metadata={"excerpt": [{"value": "v"}]}, title=None)]
     assert records_to_suggestions("run1", records)[0].basis == []
+
+
+# --- records_to_suggestions: source context ----------------------------------
+
+
+def test_update_record_puts_the_context_on_every_property_row() -> None:
+    records = [
+        _rec(
+            op="update",
+            shared_id="s1",
+            metadata={"excerpt": [{"value": "v"}], "topic": ["T"]},
+            title=None,
+            template_name="Case",
+            language="en",
+            context="the paragraph",
+        )
+    ]
+    rows = records_to_suggestions("run1", records)
+    assert [r.property_name for r in rows] == ["excerpt", "topic"]
+    assert [r.context for r in rows] == ["the paragraph", "the paragraph"]
+
+
+def test_a_record_without_a_context_leaves_the_rows_context_free() -> None:
+    records = [_rec(op="update", shared_id="s1", metadata={"excerpt": [{"value": "v"}]}, title=None)]
+    assert records_to_suggestions("run1", records)[0].context is None

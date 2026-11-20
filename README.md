@@ -101,11 +101,12 @@ OLLAMA_API_KEY=<api-key>
 UWAZI_URL=http://localhost:3000,https://uwazi.example.org
 ```
 
-- The login screen has **no instance picker**: the instance comes from the
-  URL's `instance` parameter (see [Invite links](#invite-links)), or from the
-  first configured URL when the page is opened bare. A link's instance is
-  matched against the configured list and the CONFIGURED url is what is used,
-  so a parameter can never point the login at another host.
+- The login screen has **no instance picker**: the `instance` parameter is
+  **mandatory** and comes from the URL (see [Invite links](#invite-links)).
+  Opening the app bare (`http://localhost:5055/`) shows guidance to use the
+  full link instead of a login form. A link's instance is matched against the
+  configured list and the CONFIGURED url is what is used, so a parameter can
+  never point the login at another host.
 - **Every task and run belongs to the instance that created it.** Switching
   instances shows an empty task table, because a run's shared ids only make
   sense on their own instance. To switch, log out and open the link of the
@@ -174,7 +175,9 @@ cp1252 consoles (use `setx PYTHONUTF8 1` to make it permanent).
 
 ### Run it
 
-Open `http://localhost:5055` and log in with your Uwazi credentials. The server
+Open `http://localhost:5055/?instance=<instance>` (the `instance` parameter is
+mandatory; a bare `http://localhost:5055/` only shows guidance) and log in with
+your Uwazi credentials. The server
 binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
@@ -193,8 +196,8 @@ http://localhost:5055/?instance=global-rep&user=admin
   configured `UWAZI_URL` list: the host's first dot-label (`global-rep`), the
   host with its port (`global-rep.uwazi.io`, `localhost:3000`), or the full
   URL. Only a CONFIGURED url is ever used downstream, so a forged parameter
-  can never point the login at another host — an unknown (or ambiguous) token
-  renders a banner with **no login form at all**.
+  can never point the login at another host — a missing, unknown, or
+  ambiguous token renders a banner with **no login form at all**.
 - The `user` parameter is optional. With it, the username field is not shown;
   without it, the admin types their username. A link whose username is stale
   is fixed by dropping `&user=…` from the URL.

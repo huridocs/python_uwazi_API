@@ -17,6 +17,7 @@ from uwazi_admin_agent.drivers.links import startup_login_url
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.web.host_guard import assert_safe_bind
 from uwazi_admin_agent.drivers.web.run_service import (
     fetch_entity_document_bytes,
 )
@@ -103,9 +104,10 @@ def _build_page() -> None:
 def _index(request: Request) -> None:
     """Login gate: nothing renders until the Uwazi credentials validate.
 
-    The query parameters come from the invite link: ``instance`` preselects
-    the Uwazi instance (matched against the configured list) and ``user``
-    preselects the account.
+    The query parameters come from the invite link: the MANDATORY ``instance``
+    selects the Uwazi instance (matched against the configured list) and
+    ``user`` preselects the account. A bare ``/`` shows guidance to open the
+    full link instead of a login form.
     """
     _login_page(
         request.query_params.get("instance", ""),
@@ -123,14 +125,24 @@ def _app() -> None:
 
 
 def main() -> None:
-    """Run the NiceGUI server (uvicorn under the hood) on port 5055."""
+    """Run the NiceGUI server (uvicorn under the hood) on port 5055.
+
+    Binds loopback by default. A deployment that needs remote access sets
+    ``ADMIN_WEB_HOST`` plus an ``https://`` ``ADMIN_WEB_PUBLIC_URL`` and a
+    stable ``ADMIN_WEB_STORAGE_SECRET``; :func:`assert_safe_bind` refuses the
+    cleartext/wrong-secret combinations before the server starts.
+    """
     _register_static_and_routes()
     port = int(os.environ.get("ADMIN_WEB_PORT", "5055"))
-    link = startup_login_url(_INSTANCE_URLS, os.environ.get("ADMIN_WEB_PUBLIC_URL", ""), port)
+    host = os.environ.get("ADMIN_WEB_HOST", "127.0.0.1")
+    public_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
+    storage_secret = os.environ.get("ADMIN_WEB_STORAGE_SECRET")
+    assert_safe_bind(host, public_url, storage_secret)
+    link = startup_login_url(_INSTANCE_URLS, public_url, port)
     if link is not None:
         logger.info("Admin web login link (first configured instance): {}", link)
     ui.run(
-        host="0.0.0.0",
+        host=host,
         port=port,
         reload=False,
         title="Uwazi Admin Agent",

@@ -10,6 +10,8 @@ derivable from its URL). Every filesystem join on a run id goes through
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 _SEPARATORS = ("/", "\\")
 _RESERVED = (".", "..")
 
@@ -34,4 +36,23 @@ def validate_run_name(name: str) -> str:
     return value
 
 
-__all__ = ["validate_run_name"]
+__all__ = ["free_copy_name", "validate_run_name"]
+
+
+def free_copy_name(run_id: str, taken: Iterable[str]) -> str:
+    """The first ``"<run_id> copy"``, ``"... copy 2"``, … not in ``taken`` (pure).
+
+    The Duplicate action used to hardcode ``"<run_id> copy"``. Duplicating the
+    same run twice therefore targeted the SAME run folder: generation overwrote
+    the first copy's script + manifest (nothing new appeared) and, when a wizard
+    check did fire, it was on a screen the prefilled wizard skips. Numbering the
+    name makes every duplication land on a fresh run id.
+    """
+    existing = set(taken)
+    base = f"{run_id} copy"
+    if base not in existing:
+        return base
+    counter = 2
+    while f"{base} {counter}" in existing:
+        counter += 1
+    return f"{base} {counter}"

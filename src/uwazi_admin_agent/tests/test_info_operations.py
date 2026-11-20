@@ -381,3 +381,30 @@ def test_pushable_rows_and_apply_partitions_exclude_matched_and_skipped() -> Non
 
     assert pushable_rows([matched, skipped]) == []
     assert partition_for_apply([matched, skipped]) == ([], [])
+
+
+def test_update_records_the_context_it_is_given() -> None:
+    records: list[dict] = []
+    update_entities = _dry_run_write_helpers(records)["update_entities"]
+
+    update_entities([{"shared_id": "s1", "metadata": {"topic": ["T"]}, "context": "a paragraph"}])
+
+    assert records[0]["context"] == "a paragraph"
+
+
+def test_update_records_no_context_when_there_is_none() -> None:
+    records: list[dict] = []
+    update_entities = _dry_run_write_helpers(records)["update_entities"]
+
+    update_entities([{"shared_id": "s1", "metadata": {"topic": ["T"]}}])
+
+    assert records[0]["context"] is None
+
+
+def test_a_list_of_paragraphs_is_joined_into_one_context() -> None:
+    records: list[dict] = []
+    update_entities = _dry_run_write_helpers(records)["update_entities"]
+
+    update_entities([{"shared_id": "s1", "metadata": {"topic": ["T"]}, "context": ["first", "  second  "]}])
+
+    assert records[0]["context"] == "first\n\nsecond"

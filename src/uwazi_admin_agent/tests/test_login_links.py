@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uwazi_admin_agent.drivers.links import (
     AMBIGUOUS_INSTANCE_MESSAGE,
+    MISSING_INSTANCE_MESSAGE,
     UNMATCHED_INSTANCE_MESSAGE,
     instance_token,
     instance_tokens,
@@ -90,8 +91,12 @@ def test_login_link_keeps_a_relative_form_without_a_base_url() -> None:
     assert login_link("", "a.example", "") == "/?instance=a.example"
 
 
-def test_resolve_login_target_on_a_bare_path_uses_the_first_instance() -> None:
-    assert resolve_login_target("", "", CONFIGURED) == ("https://global-rep.uwazi.io", "", None)
+def test_resolve_login_target_on_a_bare_path_requires_the_instance() -> None:
+    assert resolve_login_target("", "", CONFIGURED) == ("", "", MISSING_INSTANCE_MESSAGE)
+
+
+def test_resolve_login_target_treats_a_blank_instance_as_missing() -> None:
+    assert resolve_login_target("   ", "", CONFIGURED) == ("", "", MISSING_INSTANCE_MESSAGE)
 
 
 def test_resolve_login_target_preselects_the_instance_and_the_user() -> None:
@@ -100,6 +105,10 @@ def test_resolve_login_target_preselects_the_instance_and_the_user() -> None:
         "bob",
         None,
     )
+
+
+def test_resolve_login_target_keeps_the_user_without_an_instance() -> None:
+    assert resolve_login_target("", " bobby ", CONFIGURED) == ("", "bobby", MISSING_INSTANCE_MESSAGE)
 
 
 def test_resolve_login_target_keeps_an_empty_user() -> None:

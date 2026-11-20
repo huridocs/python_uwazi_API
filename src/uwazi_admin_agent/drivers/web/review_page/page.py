@@ -110,6 +110,8 @@ def _build_page(run_id: str) -> None:
         body.body--dark .subs-card {{ background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.15); }}
         .subs-table td.subs-actions {{ white-space: nowrap; width: 132px; }}
         .subs-table td.subs-actions .q-btn {{ margin: 0; }}
+        .subs-context {{ border-left: 3px solid rgba(0,0,0,0.12); padding-left: 8px; }}
+        body.body--dark .subs-context {{ border-left-color: rgba(255,255,255,0.15); }}
         {SHARED_ID_CSS}
         </style>
         """

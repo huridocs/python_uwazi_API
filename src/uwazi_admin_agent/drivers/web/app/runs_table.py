@@ -6,6 +6,7 @@ from typing import Any
 
 from nicegui import app, context, ui
 
+from uwazi_admin_agent.domain.run_name import free_copy_name
 from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
@@ -16,6 +17,7 @@ from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
     delete_run,
     get_run,
+    list_runs,
 )
 from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
@@ -207,19 +209,40 @@ def _rowmenu_retry(run_id: str) -> None:
 
 
 def _rowmenu_duplicate(run_id: str) -> None:
-    """Open the new-task wizard prefilled with this run's name + prompt.
+    """Open the new-task wizard prefilled with this run's prompt + a free name.
 
     No busy claim: duplicating only opens a dialog; the claim is taken by
-    ``_start_generation`` when the operator presses Generate. A name collision
-    (``"<name> copy"`` already existing) is caught by the wizard's own
-    duplicate-name validation when the operator goes back to edit.
+    ``_start_generation`` when the operator presses Generate.
+
+    The prefill carries the run's FULL prompt — ``validated_prompt`` when it has
+    one, i.e. the original request plus the validation step's resolved
+    clarifications (and, after a chat Run, the whole conversation). Passing only
+    ``detail.prompt`` dropped those clarifications, so a second generation
+    planned a weaker request and could be refused with an empty table even
+    though the first run worked.
+
+    The name is numbered against the existing runs (``"<id> copy"``,
+    ``"<id> copy 2"``, …) instead of being hardcoded: the prefilled wizard jumps
+    straight to the Generate step, which skips ``_wizard_details_next``'s
+    existing-name check — so a repeated duplicate silently regenerated the SAME
+    run folder instead of creating a second task.
     """
+    instance = page_instance_url()
     try:
-        detail = get_run(page_instance_url(), run_id)
+        detail = get_run(instance, run_id)
+        # In-flight generations have no manifest yet, so ``list_runs`` cannot see
+        # them; their claims are exactly what a second duplicate would collide
+        # with (and the claim is what ``_start_generation`` would refuse).
+        taken = [run.run_id for run in list_runs(instance)]
+        taken.extend(claim.run_id for claim in operation_gate.run_claims(instance))
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
-    _new_task_wizard(prefill_name=f"{run_id} copy", prefill_prompt=detail.prompt)
+    _new_task_wizard(
+        prefill_name=free_copy_name(run_id, taken),
+        prefill_prompt=detail.prompt,
+        prefill_validated_prompt=detail.validated_prompt,
+    )
 
 
 def _on_errors(e: Any) -> None:

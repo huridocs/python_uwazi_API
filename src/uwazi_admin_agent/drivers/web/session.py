@@ -23,7 +23,9 @@ it without a request.
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -39,6 +41,14 @@ _TOKEN_KEY = "credential_token"
 _USER_KEY = "user"
 _INSTANCE_KEY = "instance_url"
 
+# Absolute lifetime of a vault entry, in seconds. The password lives in process
+# memory only; this bounds how long an abandoned session keeps it there. The
+# default is 12 hours; tighten it for a stricter deployment.
+_SESSION_TTL_SECONDS: float = float(os.environ.get("ADMIN_WEB_SESSION_TTL_SECONDS", "43200"))
+# Upper bound on concurrently retained sessions (abandoned tabs must not grow
+# the vault without limit). The oldest entry is evicted when the cap is hit.
+_SESSION_MAX_ENTRIES: int = int(os.environ.get("ADMIN_WEB_SESSION_MAX_ENTRIES", "256"))
+
 
 @dataclass(frozen=True)
 class SessionCredentials:
@@ -49,9 +59,61 @@ class SessionCredentials:
     password: str
 
 
+@dataclass(frozen=True)
+class _VaultEntry:
+    """One in-memory credential entry plus its absolute expiry."""
+
+    credentials: SessionCredentials
+    expires_at: float
+
+
+def _clock() -> float:
+    """Monotonic seconds; injectable so the expiry logic is testable."""
+    return time.monotonic()
+
+
 _LOCK = threading.Lock()
-# token -> credentials. Process memory only: never serialized, never on disk.
-_VAULT: dict[str, SessionCredentials] = {}
+# token -> _VaultEntry. Process memory only: never serialized, never on disk.
+_VAULT: dict[str, _VaultEntry] = {}
+
+
+def is_expired(entry: _VaultEntry, now: float) -> bool:
+    """True when ``entry`` has reached its absolute deadline (pure)."""
+    return now >= entry.expires_at
+
+
+def store_entry(
+    vault: dict[str, _VaultEntry],
+    token: str,
+    credentials: SessionCredentials,
+    *,
+    now: float,
+    ttl_seconds: float = _SESSION_TTL_SECONDS,
+    max_entries: int = _SESSION_MAX_ENTRIES,
+) -> None:
+    """Insert one entry, dropping expired ones and evicting the oldest (pure).
+
+    Dict insertion order is the eviction order: ``remember_credentials`` always
+    appends, so the first key is the least recently created session.
+    """
+    for expired_token in [key for key, entry in vault.items() if is_expired(entry, now)]:
+        del vault[expired_token]
+    while max_entries > 0 and len(vault) >= max_entries:
+        del vault[next(iter(vault))]
+    vault[token] = _VaultEntry(credentials=credentials, expires_at=now + ttl_seconds)
+
+
+def load_entry(vault: dict[str, _VaultEntry], token: str, *, now: float) -> _VaultEntry | None:
+    """Return a live entry, deleting it when expired (pure)."""
+    if not token:
+        return None
+    entry = vault.get(token)
+    if entry is None:
+        return None
+    if is_expired(entry, now):
+        del vault[token]
+        return None
+    return entry
 
 
 def _storage() -> Any:
@@ -77,8 +139,9 @@ def remember_credentials(instance_url: str, user: str, password: str) -> None:
     Any legacy plaintext ``password`` key from an older build is dropped.
     """
     token = uuid.uuid4().hex
+    credentials = SessionCredentials(instance_url=instance_url, user=user, password=password)
     with _LOCK:
-        _VAULT[token] = SessionCredentials(instance_url=instance_url, user=user, password=password)
+        store_entry(_VAULT, token, credentials, now=_clock())
     storage = app.storage.user
     storage[_TOKEN_KEY] = token
     storage[_USER_KEY] = user
@@ -102,10 +165,9 @@ def forget_credentials() -> None:
 
 
 def _credentials_for_token(token: str) -> SessionCredentials | None:
-    if not token:
-        return None
     with _LOCK:
-        return _VAULT.get(token)
+        entry = load_entry(_VAULT, token, now=_clock())
+    return entry.credentials if entry is not None else None
 
 
 def session_credentials() -> SessionCredentials | None:
@@ -230,10 +292,13 @@ __all__ = [
     "client_is_active",
     "credentials_for_instance",
     "forget_credentials",
+    "is_expired",
+    "load_entry",
     "page_instance_url",
     "remember_credentials",
     "session_credentials",
     "session_instance_url",
     "session_is_active",
+    "store_entry",
     "session_user",
 ]

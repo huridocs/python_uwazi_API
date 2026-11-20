@@ -161,6 +161,17 @@ REVIEW_PAGE_SIZE: int = 25
 # Safety cap: refuse to execute a run whose touch set exceeds this many entities.
 MAX_ENTITIES_PER_RUN: int = 10000
 
+# Safety cap on a generated script's READ volume for one pass. A script can call
+# query_entities repeatedly; without a bound one pass can page the whole instance
+# into memory (and into the LLM's context). 20k covers a 10k-entity run with the
+# discovery reads around it.
+MAX_ENTITIES_READ_PER_PASS: int = 20_000
+
+# Safety cap on dry-run recorder rows for one pass. A runaway loop that keeps
+# writing is stopped by the wall-clock deadline too, but this bounds the memory
+# a recorded pass can accumulate before that fires.
+MAX_DRY_RUN_RECORDS: int = 200_000
+
 # Number of entities to apply per batch during execute. Consumed in Phase 5.
 EXECUTE_BATCH_SIZE: int = 50
 

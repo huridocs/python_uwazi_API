@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import MAX_ENTITIES_READ_PER_PASS
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
 from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
@@ -138,6 +139,8 @@ def _real_sync_query_entities_factory(
     it returns them straight from the search instead of re-fetching per id.
     """
 
+    seen = 0
+
     def query_entities(
         mode: str,
         language: str = "en",
@@ -148,6 +151,9 @@ def _real_sync_query_entities_factory(
         published: bool | None = None,
         shared_ids: list[str] | None = None,
     ) -> Any:
+        nonlocal seen
+        if seen >= MAX_ENTITIES_READ_PER_PASS:
+            return f"Error: read budget of {MAX_ENTITIES_READ_PER_PASS} entities exhausted for this pass."
         started = time.monotonic()
         if mode == "by_ids":
             if not shared_ids:
@@ -168,6 +174,7 @@ def _real_sync_query_entities_factory(
                     len(dumped),
                     time.monotonic() - started,
                 )
+            seen += len(dumped)
             return dumped
         if mode not in _SEARCH_MODES:
             return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
@@ -176,7 +183,9 @@ def _real_sync_query_entities_factory(
         )
         if isinstance(outcome, str):
             return outcome
-        return build_search_result_view(outcome)
+        result = build_search_result_view(outcome)
+        seen += len(result.summary.shared_ids)
+        return result
 
     return query_entities
 
@@ -198,6 +207,8 @@ def _real_full_entities_factory(
     string instead of a TypeError crash.
     """
 
+    seen = 0
+
     def query_entities_full(
         mode: str,
         language: str = "en",
@@ -208,7 +219,10 @@ def _real_full_entities_factory(
         published: bool | None = None,
         shared_ids: list[str] | None = None,
     ) -> Any:  # list[dict] (full entities) or str (error)
+        nonlocal seen
         _ = shared_ids  # ignored: by_ids reads belong to query_entities
+        if seen >= MAX_ENTITIES_READ_PER_PASS:
+            return f"Error: read budget of {MAX_ENTITIES_READ_PER_PASS} entities exhausted for this pass."
         if mode not in _SEARCH_MODES:
             return full_mode_usage_error(mode)
         outcome = _run_search_mode(
@@ -216,7 +230,9 @@ def _real_full_entities_factory(
         )
         if isinstance(outcome, str):
             return outcome
-        return build_full_entities_view(outcome)
+        entities = build_full_entities_view(outcome)
+        seen += len(entities)
+        return entities
 
     return query_entities_full
 

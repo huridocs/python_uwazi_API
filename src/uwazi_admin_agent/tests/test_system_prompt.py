@@ -769,3 +769,10 @@ def test_prompt_teaches_the_optional_basis_provenance_key() -> None:
     review window can show those properties instead of the PDF."""
     assert "'basis': ['_title', 'document_ref']" in SYSTEM_PROMPT
     assert "PROVENANCE (`basis`)" in SYSTEM_PROMPT
+
+
+def test_prompt_teaches_the_context_key() -> None:
+    """A value read from ONE passage sends that passage with the write, so the
+    review table can show it under the change row."""
+    assert "'context'" in SYSTEM_PROMPT
+    assert "SOURCE CONTEXT" in SYSTEM_PROMPT

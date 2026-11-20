@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from uwazi_admin_agent.domain.run_name import validate_run_name
+from uwazi_admin_agent.domain.run_name import free_copy_name, validate_run_name
 
 
 @pytest.mark.parametrize("name", ["merge-2026", "a", "UPPER case", "dots.in.name", "with space", "-lead"])
@@ -40,3 +40,19 @@ def test_surrounding_whitespace_is_stripped() -> None:
 def test_an_unsafe_name_is_refused(name: str) -> None:
     with pytest.raises(ValueError):
         validate_run_name(name)
+
+
+def test_copy_name_is_the_plain_suffix_when_free() -> None:
+    assert free_copy_name("merge-2026", ["other"]) == "merge-2026 copy"
+
+
+def test_copy_name_numbers_past_every_taken_copy() -> None:
+    # Duplicating the same run twice must NOT target the first copy's folder:
+    # the prefilled wizard opens on Generate, skipping the name check.
+    taken = ["merge-2026", "merge-2026 copy"]
+    assert free_copy_name("merge-2026", taken) == "merge-2026 copy 2"
+
+
+def test_copy_name_skips_gaps_and_never_reuses_a_taken_name() -> None:
+    taken = ["merge-2026 copy", "merge-2026 copy 2", "merge-2026 copy 3"]
+    assert free_copy_name("merge-2026", taken) == "merge-2026 copy 4"

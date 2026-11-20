@@ -396,58 +396,68 @@ def _change_table(state: dict[str, Any]) -> None:
                                       user-select: text;">{{ sub.label }}</div>
                         </td>
                       </tr>
-                      <tr v-else :key="sub.key">
-                        <td class="text-center">
-                          <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
-                                      @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, sub.id, v)" />
-                          <q-icon v-else name="lock" size="16px" color="grey-5"
-                                  :title="sub.note || 'not independently runnable'" />
-                        </td>
-                        <td class="q-pa-xs">
-                          <div class="text-body2">{{ sub.label }}</div>
-                          <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
-                        </td>
-                        <td class="q-pa-xs">
-                          <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
-                          <span v-else class="text-grey-6">—</span>
-                        </td>
-                        <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
-                        <td class="q-pa-xs">
-                          <template v-if="sub.select_type === 'multiselect'">
-                            <div class="row items-center q-gutter-xs">
-                              <q-chip v-for="v in sub.values" :key="v.label" dense
-                                      :color="v.accepted ? 'green-2' : 'red-2'"
-                                      :text-color="v.accepted ? 'green-10' : 'red-10'"
-                                      :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
-                            </div>
-                            <div class="text-caption text-grey-6">Will write: {{ sub.selection_text }}</div>
-                          </template>
-                          <div v-else class="text-body2">{{ sub.proposed }}</div>
-                        </td>
-                        <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
-                        <td class="q-pa-xs subs-actions">
-                          <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
-                                 title="Run this suboperation (only this property)"
-                                 @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-if="sub.has_rejected" dense flat icon="done_all" color="positive"
-                                 title="Accept every predicted value again"
-                                 @click.stop="$parent.$emit('accept_values', props.row.row_key, sub.id)" />
-                          <q-btn v-if="sub.independent && sub.status === 'discarded'"
-                                 dense flat icon="restore" color="orange"
-                                 title="Undo the discard — this suboperation goes back to the review queue"
-                                 @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-else-if="sub.selectable" dense flat icon="block" color="negative"
-                                 title="Discard this suboperation — a Run will not execute it"
-                                 @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
-                                 title="Revert this one property to its backup value"
-                                 @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
-                          <q-btn v-if="!sub.structural && !sub.is_display_only" dense flat icon="edit" color="teal"
-                                 title="Open the entity window at this language"
-                                 @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
-                        </td>
-                      </tr>
-                    </template>
+                      <template v-else>
+                        <tr :key="sub.key">
+                          <td class="text-center">
+                            <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
+                                        @update:model-value="v => $parent.$emit(
+                                            'toggle_sub', props.row.row_key, sub.id, v)" />
+                            <q-icon v-else name="lock" size="16px" color="grey-5"
+                                    :title="sub.note || 'not independently runnable'" />
+                          </td>
+                          <td class="q-pa-xs">
+                            <div class="text-body2">{{ sub.label }}</div>
+                            <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
+                          </td>
+                          <td class="q-pa-xs">
+                            <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
+                            <span v-else class="text-grey-6">—</span>
+                          </td>
+                          <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
+                          <td class="q-pa-xs">
+                            <template v-if="sub.select_type === 'multiselect'">
+                              <div class="row items-center q-gutter-xs">
+                                <q-chip v-for="v in sub.values" :key="v.label" dense
+                                        :color="v.accepted ? 'green-2' : 'red-2'"
+                                        :text-color="v.accepted ? 'green-10' : 'red-10'"
+                                        :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
+                              </div>
+                              <div class="text-caption text-grey-6">Will write: {{ sub.selection_text }}</div>
+                            </template>
+                            <div v-else class="text-body2">{{ sub.proposed }}</div>
+                          </td>
+                          <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
+                          <td class="q-pa-xs subs-actions">
+                            <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
+                                   title="Run this suboperation (only this property)"
+                                   @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-if="sub.has_rejected" dense flat icon="done_all" color="positive"
+                                   title="Accept every predicted value again"
+                                   @click.stop="$parent.$emit('accept_values', props.row.row_key, sub.id)" />
+                            <q-btn v-if="sub.independent && sub.status === 'discarded'"
+                                   dense flat icon="restore" color="orange"
+                                   title="Undo the discard — this suboperation goes back to the review queue"
+                                   @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-else-if="sub.selectable" dense flat icon="block" color="negative"
+                                   title="Discard this suboperation — a Run will not execute it"
+                                   @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
+                                   title="Revert this one property to its backup value"
+                                   @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
+                            <q-btn v-if="!sub.structural && !sub.is_display_only" dense flat icon="edit" color="teal"
+                                   title="Open the entity window at this language"
+                                   @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
+                          </td>
+                        </tr>
+                        <tr v-if="sub.context" :key="sub.key + '-context'">
+                          <td></td>
+                          <td class="q-pa-xs" colspan="6">
+                            <div class="text-body2 text-grey-7 subs-context"
+                                 style="white-space: pre-wrap; overflow-wrap: anywhere;
+                                        user-select: text;">{{ sub.context }}</div>
+                          </td>
+                        </tr>
+                      </template>
                   </tbody>
                 </table>
               </div>

@@ -387,6 +387,19 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
   Multiselect values inferred this way are still ONE update per entity; the operator
   picks the final value set in the review window before Run.
 
+  SOURCE CONTEXT (`context`) — when the value came from a specific passage of text
+  (the paragraph you classified, the segment you extracted a value from), send that
+  passage with the write so the operator can verify the proposal without opening the
+  document: `'context': 'the exact text you read'`. It is shown under the change row
+  in the review table. Use it whenever you read ONE passage to produce the value —
+  a paragraph you classified, a segment you extracted from, the sentence you matched.
+  Omit `context` when the value came from the entity's own metadata (use `basis`
+  then), from a whole document you summarised, or when there is no single passage
+  to show. Example:
+      update_entities([{'shared_id': sid, 'template_name': T,
+                        'metadata': {'topic': topic},
+                        'context': paragraph}], language)
+
   PARALLEL BULK HELPERS (auto-throttled — PREFER these for EVERY bulk set)
   The write helpers above (everything except `add_info`) send ONE HTTP REQUEST
   PER ENTITY, sequentially — a 10 000-entity update is ~30 minutes against a
@@ -579,24 +592,20 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       it as missing and continue). In validation against dummies this returns
       None (dummies carry no documents); the fetch path is only exercised live.
 
-  get_url_text(url)
-      Fetch an EXTERNAL `http(s)` URL's body and return it decoded as text (the
-      whole page — already byte-capped and UTF-8-decoded for you; do NOT decode
-      again). Use this when an entity has NO uploaded supporting file but DOES
-      carry a Source Page URL: a `link` metadata property whose READ value is
-      `{"label": ..., "url": ...}` (single) or `[{"label": ..., "url": ...},
-      ...]` (repeated) — read the `url` and pass it here, e.g.
-          link = d["metadata"]["source_page_url"]
-          url = link["url"] if isinstance(link, dict) else link[0]["url"]
-          html = get_url_text(url)
-      Returns None on ANY failure (non-http(s) scheme, DNS/timeout, non-2xx,
-      oversized body) — count it as missing and continue, never crash the bulk
-      run. Only `http`/`https` URLs are fetched; a `file://`/`ftp://`/etc URL
-      is refused (returns None). In validation against dummies this returns
-      None (dummies carry no source URLs); the fetch path is only exercised
-      live. Feed the returned text straight into your `extract(html, ctx)`
-      (and parse it with `htmlextract.*`) exactly like `get_file_bytes` bytes
-      would be decoded and parsed.
+  get_url_text(shared_id, language=None)
+      Fetch an entity's SOURCE PAGE URL and return the page body decoded as text
+      (the whole page — already byte-capped and UTF-8-decoded for you; do NOT
+      decode again). The helper is ENTITY-SCOPED on purpose: you pass the
+      entity's sharedId and the HOST resolves the URL from that entity's own
+      `link` metadata, so the script can never fetch an arbitrary URL. Use this
+      when an entity has NO uploaded supporting file but DOES carry a Source
+      Page URL. Returns None on ANY failure (no link metadata, DNS/timeout,
+      non-2xx, oversized body) — count it as missing and continue, never crash
+      the bulk run. In validation against dummies this returns None (dummies
+      carry no source URLs); the fetch path is only exercised live. Feed the
+      returned text straight into your `extract(html, ctx)` (and parse it with
+      `htmlextract.*`) exactly like `get_file_bytes` bytes would be decoded and
+      parsed.
 
   translate_text(text, language_from, language_to)
       Translate one text through Uwazi's OWN translation endpoint
@@ -631,7 +640,7 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Use this for per-entity extraction/enrichment the script itself cannot do
       in pure Python (a free-text field to fill, a classification, a summary).
       `instruction` is the task ("Extract the judgment date as ISO-8601, or ''"),
-      `text` is the source (a file's decoded bytes, `get_url_text(...)`, the
+      `text` is the source (a file's decoded bytes, `get_url_text(shared_id)`, the
       segmentation paragraphs joined). Returns the model's reply string (never
       None; an unusable reply is `""`).
 
@@ -736,6 +745,11 @@ namespaces above. Nothing else is available.
         import json          # WRONG - json is ALREADY BOUND
     Your script must contain ZERO `import` lines. The bound modules are available
     by their bare name the moment the script starts.
+    The static script gate also rejects any `import` line before the script runs.
+  - Do NOT use `str.format` or the `format` builtin (use f-strings or `%`
+    formatting): format-field traversal is refused by the script gate.
+  - Do NOT use dunder names or attributes (`__class__`, `__globals__`,
+    `__builtins__`, ...): they are refused before the script runs.
 
 HARD RULES
 1. Use ONLY the bound helpers above. Do NOT import any module (no `requests`,
@@ -1232,7 +1246,9 @@ one-document logic. Use this exact shape:
    `title` - update is partial and omitting it preserves the stored title) and
    apply them with ONE call: `update_entities_parallel(updates, language)`
    (auto-throttled; same result shape as `update_entities`). Keep the plain
-   `update_entities` only for tiny non-bulk fixes.
+   `update_entities` only for tiny non-bulk fixes. Pass the segment the value was
+   read from as a fourth key, `'context': segment`, so the operator sees that
+   passage under the change row in the review table.
 5. `result` MUST report: entities scanned, files fetched, matched, unmatched,
    missing-files, skipped-by-reason. A low match rate is visible BEFORE execute
    is run - surface it honestly in `GeneratedScript.description` so the
@@ -1249,14 +1265,11 @@ one-document logic. Use this exact shape:
 SOURCE PAGE URL (when entities carry NO supporting file but DO carry a link):
 Some entities store their source as a `link` metadata property (e.g.
 `source_page_url`) rather than an uploaded HTML file. Fetch the page and extract
-from it exactly as above, swapping the file-fetch step for a URL fetch:
-- Read the URL from the entity dict's metadata. A `link` READ value is
-  `{"label": ..., "url": ...}` (single) or `[{"label": ..., "url": ...},
-  ...]` (repeated) — unwrap it: `url = link["url"] if isinstance(link, dict)
-  else link[0]["url"]`. (You learn the property's exact name from
-  `get_templates_by_names`; it is a `link`-type property.)
-- `html = get_url_text(url)` (see EXECUTION SANDBOX) — returns None on any
-  failure, count it as missing and continue.
+from it exactly as above, swapping the file-fetch step for an entity-scoped URL fetch:
+- `html = get_url_text(shared_id, language=None)` (see EXECUTION SANDBOX) — the
+  HOST resolves the URL from that entity's own `link` metadata, so NEVER read
+  or pass a URL yourself. Returns None on any failure, count it as missing and
+  continue.
 - Feed `html` straight into `extract(html, ctx)` (NO decode — it is already
   text) and accumulate updates with `update_entities_parallel` as in steps 3-5.
 There is no `_parallel` URL helper: external fetches are already serial + fenced
@@ -1291,8 +1304,8 @@ KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 - URL ATTACHMENTS are absent from `get_entity_files` (no stored bytes), and
   their `url` is not visible in the entity dict either, so their content cannot
   be extracted. (A `link`-type SOURCE PAGE URL metadata property IS fetchable
-  via `get_url_text` — see SOURCE PAGE URL above.) Flag in `result` if that
-  matters.
+  via `get_url_text(shared_id)` — see SOURCE PAGE URL above.) Flag in `result`
+  if that matters.
 - FILE DELETES are backed up + revertable, with RESIDUAL limits: `dedupe_entity_files_parallel`
   and `delete_entity_files_parallel` persist every deleted file's bytes BEFORE
   the delete and record it on the run, so revert re-uploads them. But Uwazi

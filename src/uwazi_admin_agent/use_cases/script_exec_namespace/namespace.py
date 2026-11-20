@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import io
+import os
+import threading
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from uwazi_admin_agent.domain.llm_budget import LlmLedger
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
@@ -27,6 +30,7 @@ from uwazi_admin_agent.use_cases.parallel_script_helpers import (
     build_parallel_read_helpers,
     build_parallel_write_helpers,
 )
+from uwazi_admin_agent.use_cases.script_safety import validate_script_source
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.ports.entity_api_port import EntityApiPort
@@ -67,6 +71,42 @@ from .reads import (
     _sync_query_entities_factory,
 )
 from .scope import _scoped_entity_reads
+
+#: Wall-clock ceiling for one generated-script pass. Generous enough for a
+#: 10k-entity bulk read on a remote instance; it exists to stop an accidental
+#: ``while True:`` (or a runaway loop) from pinning a worker forever.
+_SCRIPT_TIMEOUT_SECONDS: float = float(os.environ.get("SCRIPT_TIMEOUT_SECONDS", "1800"))
+
+
+class ScriptTimeout(BaseException):
+    """Injected into a worker thread when a generated script exceeds its deadline."""
+
+
+def _run_with_deadline(fn: Callable[[], None], seconds: float) -> None:
+    """Run ``fn`` on the CURRENT thread, injecting :class:`ScriptTimeout` at the deadline.
+
+    The script already runs on a dedicated worker thread (``asyncio.to_thread``
+    in the dry run, a worker in the prediction pass), so this cannot use
+    ``signal.alarm`` (main thread only). ``PyThreadState_SetAsyncExc`` delivers
+    the exception at the next bytecode boundary; it cannot interrupt a blocking
+    C call (a catastrophic regex or a hung socket), so the timeout is
+    best-effort rather than a hard kill. A real hard kill needs a subprocess.
+    """
+    ident = threading.get_ident()
+
+    def _interrupt() -> None:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(ScriptTimeout))
+
+    timer = threading.Timer(seconds, _interrupt)
+    timer.daemon = True
+    timer.start()
+    try:
+        fn()
+    finally:
+        timer.cancel()
+        # Clear an injection that landed between ``fn`` returning and the timer
+        # being cancelled, so it cannot fire on the caller's next bytecode.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
 
 
 def build_exec_namespace(
@@ -197,7 +237,7 @@ def build_real_exec_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
-        "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
+        "get_url_text": _build_get_url_text_real_helper(entity_repository, url_fetcher, loop, default_language),
         "translate_text": _build_translate_text_real_helper(translation_port, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
@@ -301,7 +341,7 @@ def build_dry_run_namespace(
         "get_entity_files": _build_get_entity_files_real_helper(entity_repository, loop, default_language),
         "get_file_bytes": _build_get_file_bytes_real_helper(file_repository, loop),
         "get_segmentation": _build_get_segmentation_real_helper(segmentation_repository, loop, default_language),
-        "get_url_text": _build_get_url_text_real_helper(url_fetcher, loop),
+        "get_url_text": _build_get_url_text_real_helper(entity_repository, url_fetcher, loop, default_language),
         "translate_text": _build_translate_text_real_helper(translation_port, loop),
         **build_parallel_read_helpers(
             entity_repository, file_repository, default_language, executor, segmentation_repository
@@ -329,11 +369,22 @@ def run_script_sync(
     ``None`` and ``error`` is a compact ``Type: msg`` + traceback tail. Stdout
     is captured (the script's ``print``s do not leak). Pure w.r.t. the namespace
     contents; the side effects are whatever the bound helpers do.
+
+    Source is rejected by :func:`validate_script_source` BEFORE ``exec`` (the
+    static introspection gate) and the pass is bounded by a wall-clock deadline.
     """
+    rejection = validate_script_source(code)
+    if rejection is not None:
+        return None, rejection
     try:
         with _captured_stdout():
-            exec(code, namespace)  # noqa: S102 — the script is the unit of work; namespace is the safety boundary
-    except Exception as exc:  # noqa: BLE001 — surface any script error to the gate
+            _run_with_deadline(
+                lambda: exec(code, namespace),  # noqa: S102 — gated + deadline-bounded
+                _SCRIPT_TIMEOUT_SECONDS,
+            )
+    except ScriptTimeout:
+        return None, f"ScriptTimeout: script exceeded {_SCRIPT_TIMEOUT_SECONDS:g}s and was stopped."
+    except BaseException as exc:  # noqa: BLE001 — surface any script error to the gate
         tb = traceback.format_exc()
         return None, f"{type(exc).__name__}: {exc}\n\n{tb}"
     result = namespace.get("result")
@@ -343,7 +394,7 @@ def run_script_sync(
 
 
 @contextlib.contextmanager
-def _captured_stdout():
+def _captured_stdout() -> Iterator[io.StringIO]:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         yield buf

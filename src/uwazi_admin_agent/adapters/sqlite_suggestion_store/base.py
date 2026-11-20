@@ -47,6 +47,9 @@ class BaseMixin:
           so a batch of links is one row PER LINK instead of one row carrying
           the whole batch (and each link can be checked, run and discarded on
           its own). Legacy rows read NULL, which keys them exactly as before.
+        - ``context`` — the source text a recorded value was read from, shown
+          under the review table's row. Legacy rows read NULL, which the model
+          turns into None (no context to show).
 
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
@@ -77,6 +80,8 @@ class BaseMixin:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN selected_values TEXT")
             if "basis" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN basis TEXT")
+            if "context" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN context TEXT")
             if "skip_reason" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN skip_reason TEXT")
             pass_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(prediction_pass)")}

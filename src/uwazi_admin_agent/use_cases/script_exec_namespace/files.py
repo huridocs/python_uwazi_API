@@ -11,6 +11,7 @@ from loguru import logger
 from uwazi_admin_agent.configuration import AI_TRANSLATED_MARKER
 from uwazi_admin_agent.domain.file_deletion import group_deletions_by_entity
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.source_url import find_source_page_url
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
@@ -427,8 +428,8 @@ def _get_url_text_noop() -> Any:
     and the fetch path is only exercised live.
     """
 
-    def get_url_text(url: str) -> str | None:
-        del url  # ignored: dummies carry no source-page URL to fetch
+    def get_url_text(shared_id: str, language: str | None = None) -> str | None:
+        del shared_id, language  # ignored: dummies carry no source-page URL to fetch
         return None
 
     return get_url_text
@@ -481,20 +482,36 @@ def _build_get_segmentation_real_helper(
     return get_segmentation
 
 
-def _build_get_url_text_real_helper(url_fetcher: UrlFetcherPort | None, loop: asyncio.AbstractEventLoop) -> Any:
-    """Build the real ``get_url_text`` bound into the real exec namespace.
+def _build_get_url_text_real_helper(
+    entity_repository: EntityRepositoryPort | None,
+    url_fetcher: UrlFetcherPort | None,
+    loop: asyncio.AbstractEventLoop,
+    default_language: str = "en",
+) -> Any:
+    """Build the entity-scoped ``get_url_text`` bound into the exec namespace.
 
-    Fetches an external ``http(s)`` URL's body as decoded text (see
-    :class:`HttpUrlFetcherAdapter`). Returns ``None`` on any fetch failure
-    (disallowed scheme, DNS/timeout, non-2xx, oversized body) — an external
-    source page being down must never crash a bulk run; the script counts it as
-    missing and continues, mirroring ``get_file_bytes`` returning ``None`` on an
-    absent file. Unwired ``url_fetcher`` -> a stub that raises a clear
-    ``RuntimeError`` when the script calls it.
+    The script passes a ``shared_id`` (never an arbitrary URL); the helper reads
+    that entity's own ``link`` metadata and fetches ONLY the URL it finds. That
+    removes the arbitrary-URL fetch an injected script could otherwise use for
+    internal scanning or data exfiltration, while keeping Source Page extraction
+    working.
+
+    Returns ``None`` on any failure (no link, DNS/timeout, non-2xx, oversized
+    body) — an external source page being down must never crash a bulk run.
+    Unwired ports raise a clear ``RuntimeError`` when the script calls it.
     """
+    if entity_repository is None:
+
+        def get_url_text_no_repo(shared_id: str, language: str | None = None) -> str | None:
+            raise RuntimeError(
+                "get_url_text requires a wired entity repository to resolve the entity's source-page URL (got None)."
+            )
+
+        return get_url_text_no_repo
+
     if url_fetcher is None:
 
-        def get_url_text_unwired(url: str) -> str | None:
+        def get_url_text_unwired(shared_id: str, language: str | None = None) -> str | None:
             raise RuntimeError(
                 "get_url_text requires a wired url_fetcher (got None). "
                 "Wire UrlFetcherPort into the runtime/execute use case to "
@@ -503,17 +520,25 @@ def _build_get_url_text_real_helper(url_fetcher: UrlFetcherPort | None, loop: as
 
         return get_url_text_unwired
 
-    def get_url_text(url: str) -> str | None:
+    def get_url_text(shared_id: str, language: str | None = None) -> str | None:
         started = time.monotonic()
         try:
+            raw = loop.run_until_complete(entity_repository.get_raw_by_shared_id(shared_id, language or default_language))
+            url = find_source_page_url(raw)
+            if url is None:
+                return None
             text = loop.run_until_complete(url_fetcher.fetch_text(url))
         except UrlFetchError as exc:
             # debug, not info: external fetches are best-effort and a full pass
             # can touch thousands of URLs.
-            logger.debug("script get_url_text: {} failed: {} ({:.1f}s)", url, exc, time.monotonic() - started)
+            logger.debug("script get_url_text: {} failed: {} ({:.1f}s)", shared_id, exc, time.monotonic() - started)
+            return None
+        except Exception as exc:  # noqa: BLE001 — a missing/undecodable entity is "no source page"
+            logger.debug("script get_url_text: cannot read {}: {} ({:.1f}s)", shared_id, exc, time.monotonic() - started)
             return None
         logger.debug(
-            "script get_url_text: {} -> {} chars ({:.1f}s)",
+            "script get_url_text: {} -> {} -> {} chars ({:.1f}s)",
+            shared_id,
             url,
             len(text),
             time.monotonic() - started,

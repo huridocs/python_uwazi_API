@@ -471,6 +471,7 @@ def records_to_suggestions(
             "merge_source_ids": list(merge.source_shared_ids) if merge is not None else [],
             "merge_files": [dict(file) for file in merge.files] if merge is not None else [],
             "basis": basis,
+            "context": record.get("context") if isinstance(record.get("context"), str) else None,
         }
 
         if op == MOVE_OP:

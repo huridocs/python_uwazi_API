@@ -25,6 +25,7 @@ import ast
 from typing import Any
 
 from uwazi_admin_agent.use_cases.script_exec_namespace import _STDLIB, SAFE_BUILTINS
+from uwazi_admin_agent.use_cases.script_safety import validate_script_source
 
 #: The sandbox names an extractor runs with: the bound stdlib subset plus the
 #: curated builtins (no ``__import__``/``open``/``getattr``).
@@ -34,10 +35,13 @@ EXTRACTOR_BUILTINS: dict[str, Any] = SAFE_BUILTINS
 def build_extractor_namespace(source: str) -> dict[str, Any]:
     """``exec`` one extractor source in the script sandbox; return its namespace.
 
-    Call only AFTER :func:`validate_extractor_source` accepted the source (this
-    function does not re-check): the returned dict carries the ``extract``
-    function plus the bound names it closed over.
+    The static safety gate runs here as well as in the validator: this is the
+    ``exec`` choke point for the authoring/benchmark paths, so no unchecked
+    source can slip through even if a caller forgets to validate first.
     """
+    rejection = validate_script_source(source)
+    if rejection is not None:
+        raise ValueError(rejection)
     namespace: dict[str, Any] = {"__builtins__": EXTRACTOR_BUILTINS, **_STDLIB}
     exec(compile(source, "<extractor>", "exec"), namespace)  # noqa: S102 - sandboxed by SAFE_BUILTINS + _STDLIB
     return namespace
@@ -51,6 +55,9 @@ def validate_extractor_source(code: str) -> str | None:
     Returns ``None`` when valid, otherwise a rejection message the generation
     agent can act on. Pure seam (no LLM, no I/O) — unit-tested directly.
     """
+    rejection = validate_script_source(code)
+    if rejection is not None:
+        return rejection.replace("ScriptRejected:", "Rejected:", 1)
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:

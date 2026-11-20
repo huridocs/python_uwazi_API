@@ -53,6 +53,7 @@ def _suggestion(
     run_id: str = "run1",
     proposed: object = "v",
     basis: list[str] | None = None,
+    context: str | None = None,
 ) -> Suggestion:
     return Suggestion(
         run_id=run_id,
@@ -66,6 +67,7 @@ def _suggestion(
         match=match,
         status=status,
         basis=basis or [],
+        context=context,
         created_at=NOW,
     )
 
@@ -690,7 +692,7 @@ def test_store_opens_a_legacy_database_and_adds_the_missing_columns(tmp_path) ->
     store = SqliteSuggestionStore(path)
     try:
         columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(suggestion)")}  # noqa: SLF001
-        assert {"template_name", "language", "selected_values", "basis"} <= columns
+        assert {"template_name", "language", "selected_values", "basis", "context"} <= columns
         indexes = {
             row["name"]
             for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")  # noqa: SLF001
@@ -1002,4 +1004,25 @@ def test_basis_persists_and_reconcile_refreshes_a_changed_one(store: SqliteSugge
     assert _row_of(store).basis == ["_title"]
     summary = store.reconcile_suggestions("run1", [_multiselect(basis=["_title", "document_ref"])])
     assert _row_of(store).basis == ["_title", "document_ref"]
+    assert summary.refreshed == 1
+
+
+def test_context_persists_and_reads_back(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(context="the paragraph")])
+
+    assert _row_of(store).context == "the paragraph"
+
+
+def test_a_row_without_context_reads_back_context_free(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect()])
+
+    assert _row_of(store).context is None
+
+
+def test_context_refreshes_on_a_reconcile(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_multiselect(context="the old paragraph")])
+
+    summary = store.reconcile_suggestions("run1", [_multiselect(context="the new paragraph")])
+
+    assert _row_of(store).context == "the new paragraph"
     assert summary.refreshed == 1

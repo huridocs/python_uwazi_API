@@ -7,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import MAX_DRY_RUN_RECORDS
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.parallel_script_helpers import (
@@ -39,6 +40,35 @@ def _noop_record_skipped(
     return {"success": True, "shared_id": shared_id}
 
 
+def _append_record(records: list[dict[str, Any]], record: dict[str, Any]) -> None:
+    """Append one recorder row, refusing to let a pass grow without bound."""
+    if len(records) >= MAX_DRY_RUN_RECORDS:
+        raise RuntimeError(
+            f"dry-run record cap exceeded ({MAX_DRY_RUN_RECORDS} rows); "
+            "the script is recording more operations than a single pass may."
+        )
+    list.append(records, record)
+
+
+def _context_text(value: Any) -> str | None:
+    """The recorded context of a write dict, as text (pure).
+
+    The script may pass a string or a list of strings (several paragraphs read
+    together). Both become one text block; the reviewer reads it as written.
+    Each part is trimmed and empty parts are dropped, so a stray blank line in
+    a generated script does not produce a ragged block. None means no context:
+    the row then renders nothing.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value]
+        text = "\n\n".join(part for part in parts if part)
+    else:
+        text = str(value).strip()
+    return text or None
+
+
 def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the write helpers for the dry-run namespace: recorders, no I/O.
 
@@ -65,7 +95,8 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         del language  # recorded per-dict, not as a language override
         logger.info("dry-run record: create_entities x{}", len(entities_dicts))
         for i, d in enumerate(entities_dicts):
-            records.append(
+            _append_record(
+                records,
                 {
                     "op": "create",
                     # The placeholder this call returns: a later move/delete in
@@ -75,14 +106,16 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "title": d.get("title", ""),
                     "template_name": d.get("template_name", ""),
                     "metadata": d.get("metadata", {}),
-                }
+                    "context": _context_text(d.get("context")),
+                },
             )
         return [{"shared_id": f"dry-created-{i}", "success": True} for i, d in enumerate(entities_dicts)]
 
     def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         logger.info("dry-run record: update_entities x{}", len(entities_dicts))
         for d in entities_dicts:
-            records.append(
+            _append_record(
+                records,
                 {
                     "op": "update",
                     "shared_id": d.get("shared_id"),
@@ -91,39 +124,40 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "title": d.get("title"),
                     "language": language,
                     "basis": [str(b) for b in d.get("basis") or []],
-                }
+                    "context": _context_text(d.get("context")),
+                },
             )
         return [{"shared_id": d.get("shared_id"), "success": True} for d in entities_dicts]
 
     def delete_entities(shared_ids: list[str]) -> list[dict]:
         logger.info("dry-run record: delete_entities x{}", len(shared_ids))
         for sid in shared_ids:
-            records.append({"op": "delete", "shared_id": sid})
+            _append_record(records, {"op": "delete", "shared_id": sid})
         return [{"shared_id": sid, "success": True} for sid in shared_ids]
 
     def publish_entities(shared_ids: list[str]) -> dict:
         logger.info("dry-run record: publish_entities x{}", len(shared_ids))
         for sid in shared_ids:
-            records.append({"op": "publish", "shared_id": sid})
+            _append_record(records, {"op": "publish", "shared_id": sid})
         return _dry_run_publish_summary(len(shared_ids))
 
     def unpublish_entities(shared_ids: list[str]) -> dict:
         logger.info("dry-run record: unpublish_entities x{}", len(shared_ids))
         for sid in shared_ids:
-            records.append({"op": "unpublish", "shared_id": sid})
+            _append_record(records, {"op": "unpublish", "shared_id": sid})
         return _dry_run_publish_summary(len(shared_ids))
 
     def set_publish_status(shared_ids: list[str], published: bool) -> list[dict]:
         logger.info("dry-run record: set_publish_status x{} published={}", len(shared_ids), published)
         for sid in shared_ids:
-            records.append({"op": "set_publish_status", "shared_id": sid, "published": published})
+            _append_record(records, {"op": "set_publish_status", "shared_id": sid, "published": published})
         return [{"shared_id": sid, "success": True} for sid in shared_ids]
 
     def create_relationships(relationships_dicts: list[dict], language: str | None = None) -> list[dict]:
         del language
         logger.info("dry-run record: create_relationships x{}", len(relationships_dicts))
         for r in relationships_dicts:
-            records.append({"op": "create_relationships", **r})
+            _append_record(records, {"op": "create_relationships", **r})
         return [{"success": True} for _ in relationships_dicts]
 
     def record_skipped(
@@ -142,7 +176,8 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         evidence (for example the page text the extractor examined), rendered
         beneath the reason. The row is excluded from every Run/selection path.
         """
-        records.append(
+        _append_record(
+            records,
             {
                 "op": "skipped",
                 "shared_id": str(shared_id or ""),
@@ -150,7 +185,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "template_name": template_name,
                 "reason": str(reason or ""),
                 "detail": None if detail is None else str(detail),
-            }
+            },
         )
         logger.info("dry-run record: skipped {} reason={}", shared_id, reason)
         return {"success": True, "shared_id": shared_id}
@@ -188,7 +223,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         if keep:
             # Omitted when False so a plain info record keeps its old shape.
             record["keep"] = True
-        records.append(record)
+        _append_record(records, record)
         info_count += 1
         logger.info("dry-run record: add_info {}", shared_id)
         return {"success": True, "shared_id": shared_id}
@@ -277,13 +312,14 @@ def _dry_run_move_files_helper(
 
     def move_files_to_entity(from_shared_ids: list[str], to_shared_id: str, language: str | None = None) -> dict:
         logger.info("dry-run record: move_files_to_entity x{} -> {}", len(from_shared_ids), to_shared_id)
-        records.append(
+        _append_record(
+            records,
             {
                 "op": "move_files",
                 "from_shared_ids": list(from_shared_ids),
                 "to_shared_id": to_shared_id,
                 "files": _dry_run_moved_files(entity_repository, loop, default_language, list(from_shared_ids), language),
-            }
+            },
         )
         return {"moved": len(from_shared_ids), "failed": 0, "skipped": 0}
 
@@ -312,13 +348,14 @@ def _dry_run_move_files_parallel_helper(
         summaries: list[dict] = []
         for move in moves:
             from_shared_ids = list(move["from_shared_ids"])
-            records.append(
+            _append_record(
+                records,
                 {
                     "op": "move_files",
                     "from_shared_ids": from_shared_ids,
                     "to_shared_id": move["to_shared_id"],
                     "files": _dry_run_moved_files(entity_repository, loop, default_language, from_shared_ids, language),
-                }
+                },
             )
             summaries.append(
                 {

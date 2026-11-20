@@ -67,6 +67,14 @@ async def create_and_generate(
     another instance's tree, whose slug is derivable from its URL.
     """
     name = validate_run_name(name)
+    # A run folder that already holds a manifest IS a task the operator can see
+    # and review. Generating into it would overwrite that run's script and
+    # manifest without adding anything to the table — which is exactly how a
+    # repeated Duplicate looked like "the second task was never created". The
+    # retry path deletes the failed run before calling here, so it is unaffected.
+    existing = _paths(url).runs_path / name / "manifest.json"
+    if existing.exists():
+        raise GenerateError(f"A run named {name!r} already exists — pick another name.")
     _paths(url).prompts_path.mkdir(parents=True, exist_ok=True)
     (_paths(url).prompts_path / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
     _paths(url).runs_file.parent.mkdir(parents=True, exist_ok=True)
