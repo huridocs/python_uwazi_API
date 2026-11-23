@@ -54,7 +54,7 @@ each `__init__.py` re-exports the original names.
   - `drift.py` — thin wrappers over `use_cases/drift_service.py`
 - `drivers/web/app/` — the NiceGUI app:
   - `state.py`, `broadcast.py`, `login.py`, `runs_table.py`,
-    `dialogs.py`, `wizard.py`, `page.py`
+    `dialogs.py`, `wizard.py`, `guided_form.py`, `page.py`
 - `drivers/web/review_page/` — the review page:
   - `core.py` — table, filters, actions, selection, drift
   - `entity_window.py` — entity detail window, files, labels/types
