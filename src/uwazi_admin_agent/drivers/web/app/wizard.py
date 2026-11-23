@@ -13,9 +13,8 @@ from uwazi_admin_agent.configuration import (
     PREDICTION_DEFAULT_MAX_COST,
     PREDICTION_DEFAULT_MAX_REQUESTS,
     SCRIPT_DEFAULT_MAX_COST,
-    SCRIPT_DEFAULT_MAX_REQUESTS,
 )
-from uwazi_admin_agent.domain.guided_task import GOAL_CLASSIFY, GOAL_CUSTOM, GOAL_FILL, GOAL_DESCRIPTIONS, GOALS
+from uwazi_admin_agent.domain.guided_task import GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOAL_FILL, GOALS
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web import operation_gate
@@ -65,6 +64,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             _wizard_step_task(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_guided(state, dialog)
             _wizard_step_validate(state, stepper, dialog)
+            _wizard_step_caps()
             _wizard_step_generate(state, dialog, stepper)
         dialog.open()
         if prefill_name or prefill_prompt:
@@ -443,56 +443,85 @@ def _refresh_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to validate (if it ran) or to the prompt step."""
+    """Back from the generate step: to caps, validate, or the prompt step."""
     if state.get("_validation_done"):
-        target = "validate"
+        target = "caps"
     else:
         _wizard_back_to_prompt_step(state)
         return
     state["_stepper"].set_value(target)
 
 
+def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
+    """One step that explains and caps the AI allowance the finished task may use.
+
+    Written for an operator who has never seen a script or an LLM call: it says
+    what the finished thing is, when it might ask the AI, and the one money
+    limit that bounds those asks. The request-count backstop is derived here —
+    the operator only sets money.
+    """
+    with ui.step(name="caps", title="AI allowance", icon="payments"):
+        ui.label("One last decision before the task is created: how much of the AI it may use.").classes(
+            "text-body1 q-mb-md"
+        )
+        with ui.card().classes("w-full"):
+            ui.label("What is about to happen?").classes("text-subtitle1")
+            ui.label(
+                "We turn your request into a small computer program, built once and then applied "
+                "to every item you selected. That one-time build always uses the AI and is covered "
+                "by the service's own standard limits — there is nothing to set for it here."
+            ).classes("text-body2")
+            ui.label("When would the task use the AI afterwards?").classes("text-subtitle1 q-mt-sm")
+            ui.label(
+                "For most requests the program works the results out by itself, at no cost. Only "
+                "when your request asks for something a formula cannot decide — reading a document "
+                "and writing a summary, for example — it will ask the AI about each of those items, "
+                "which costs a small amount of money per item."
+            ).classes("text-body2")
+            ui.label("Your limit: the most money the task may spend on those asks").classes("text-subtitle1 q-mt-sm")
+            ui.label(
+                "The task stops as soon as this limit is reached; anything it already worked "
+                "out is kept. At 0 the task never asks the AI — if it needed to, it would stop "
+                "with an error asking you to come back and raise this limit."
+            ).classes("text-body2")
+            with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
+                state["_caps_cost_input"] = ui.number(
+                    "Maximum spend ($)",
+                    value=SCRIPT_DEFAULT_MAX_COST,
+                    min=0.0,
+                    step=0.5,
+                    format="%.2f",
+                ).classes("grow")
+            ui.label("A typical summary-style task over a few hundred items costs well under a dollar.").classes(
+                "text-body2 text-grey-7 q-mt-sm"
+            )
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_caps_back(state)).props("color=grey-7 flat")
+            ui.button(
+                "Next",
+                icon="arrow_forward",
+                on_click=lambda: stepper.set_value("generate"),
+            ).props("color=primary")
+
+
+def _wizard_caps_back(state: dict[str, Any]) -> None:
+    """Back from the caps step: to validate (if it ran) or to the prompt step."""
+    if state.get("_validation_done"):
+        state["_stepper"].set_value("validate")
+    else:
+        _wizard_back_to_prompt_step(state)
+
+
 def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> None:
     with ui.step(name="generate", title="Generate", icon="auto_awesome"):
-        ui.label("Review and generate the migration script.").classes("text-body1 q-mb-md")
+        ui.label("Review and generate the task.").classes("text-body1 q-mb-md")
         ui.label().bind_text_from(state, "name", backward=lambda v: f"Run: {v}").classes("text-h6")
         ui.label("Final prompt (sent to the LLM)").classes("text-subtitle1 text-grey-7 q-mt-md")
         prompt_display = (
             ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
         )
         state["_generate_prompt_display"] = prompt_display
-        ui.separator()
-        with ui.column().classes("w-full q-mt-sm"):
-            ui.label("LLM caps for the script's tool calls").classes("text-subtitle1 text-bold")
-            ui.label(
-                "The generated script may call the LLM to compute values (per entity). "
-                "These HARD caps apply ONLY to those calls — never to script generation itself. "
-                "A script that computes everything in pure Python costs nothing under them."
-            ).classes("text-body2 text-grey-7")
-            with ui.row().classes("w-full items-center gap-2"):
-                state["_caps_cost_input"] = ui.number(
-                    "Max cost ($)",
-                    value=SCRIPT_DEFAULT_MAX_COST,
-                    min=0.0,
-                    step=0.5,
-                    format="%.2f",
-                    on_change=lambda: _caps_opt_in(state, "cost"),
-                ).classes("grow")
-                state["_caps_requests_input"] = ui.number(
-                    "Max calls (backstop)",
-                    value=SCRIPT_DEFAULT_MAX_REQUESTS,
-                    min=0,
-                    step=1,
-                    on_change=lambda: _caps_opt_in(state, "requests"),
-                ).classes("grow")
-            ui.label(
-                "Default is 0 on both: the script's LLM calls are disabled — the pass aborts cleanly on the "
-                "first one. Raise EITHER cap to opt in; the other is filled with its standard backstop so the "
-                "allowance is actually usable."
-            ).classes("text-body2 text-grey-7")
-            ui.label("The pass aborts cleanly at the caps; rows computed before the halt are kept.").classes(
-                "text-body2 text-grey-7"
-            )
         ui.separator()
         ui.label("Last chance to change the prompt").classes("text-subtitle1 text-bold q-mt-sm")
         ui.label(
@@ -578,53 +607,20 @@ def _script_caps_model() -> str:
         return "(model not configured)"
 
 
-def _caps_opt_in(state: dict[str, Any], changed: str) -> None:
-    """Fill the missing backstop when the operator RAISES one cap (UI mirror).
+def _wizard_budget(state: dict[str, Any]) -> LlmBudget:
+    """The approved budget for the script's llm_complete/llm_map calls (caps step).
 
-    Both caps are enforced by the planning pass's ledger, so a lone positive cap
-    would deny the script's first LLM call. This writes the standard backstop
-    into the visible field, so the operator sees the budget that will apply.
-    Only a RAISE fills the sibling; clearing a field back to 0 is left alone (the
-    operator can zero both to disable LLM calls), so the mirror never fights a
-    deliberate clear.
+    The operator sets ONLY money. ``with_default_backstops`` derives the
+    request-count backstop the ledger still enforces: both at 0 keeps the
+    deny-by-default (the pass aborts on the script's first LLM call), any
+    positive cost fills the backstop with its standard default. An
+    empty/invalid cost input falls back to the configured default.
     """
     cost_widget = state.get("_caps_cost_input")
-    requests_widget = state.get("_caps_requests_input")
-    if cost_widget is None or requests_widget is None:
-        return
-    cost = _cap_float(cost_widget.value)
-    requests = _cap_int(requests_widget.value)
-    if changed == "cost" and cost is not None and cost > 0 and (requests is None or requests <= 0):
-        requests_widget.value = with_default_backstops(
-            cost,
-            0,
-            default_cost=PREDICTION_DEFAULT_MAX_COST,
-            default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
-        )[1]
-    elif changed == "requests" and requests is not None and requests > 0 and (cost is None or cost <= 0):
-        cost_widget.value = with_default_backstops(
-            0,
-            requests,
-            default_cost=PREDICTION_DEFAULT_MAX_COST,
-            default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
-        )[0]
-
-
-def _wizard_budget(state: dict[str, Any]) -> LlmBudget:
-    """The approved budget for the script's llm_complete/llm_map calls (wizard caps step).
-
-    0 on BOTH is a real, operator-visible value — the deny-by-default prefill —
-    so it is kept as-is (a 0 request cap aborts the pass on its first LLM call).
-    Raising either cap opts in: the other dimension is filled with its standard
-    backstop, because the ledger enforces both and a lone cap would otherwise
-    deny the very call the operator just allowed. Only an empty/invalid input
-    falls back to the configured default.
-    """
-    cost = _cap_float(state["_caps_cost_input"].value) if state.get("_caps_cost_input") is not None else None
-    requests = _cap_int(state["_caps_requests_input"].value) if state.get("_caps_requests_input") is not None else None
+    cost = _cap_float(cost_widget.value) if cost_widget is not None else None
     max_cost, max_requests = with_default_backstops(
         SCRIPT_DEFAULT_MAX_COST if cost is None else cost,
-        SCRIPT_DEFAULT_MAX_REQUESTS if requests is None else requests,
+        0,
         default_cost=PREDICTION_DEFAULT_MAX_COST,
         default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
     )
@@ -646,14 +642,6 @@ def _cap_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed is not None and parsed >= 0 else None
-
-
-def _cap_int(value: Any) -> int | None:
-    """Coerce a caps input to a non-negative int (None/invalid → None = 'use the default')."""
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _confirm_generation(name: str, prompt: str, validated_prompt: str | None, budget: LlmBudget) -> None:
