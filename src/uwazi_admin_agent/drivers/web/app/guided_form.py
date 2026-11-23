@@ -1,19 +1,8 @@
-"""The guided question form of the New Task wizard.
+"""One-question-at-a-time guided form for the New Task wizard.
 
-The wizard offers two ways to produce a prompt: write it directly, or answer a
-fixed set of questions that is assembled heuristically into the prompt
-(:mod:`uwazi_admin_agent.domain.guided_task`). This module is the second way's UI
-only — it collects answers, keeps the dynamic branches consistent with them,
-shows a live preview of the prompt it will build, and hands that prompt back to
-the wizard, which then follows the existing validate → generate flow.
-
-The questions are built from the instance's real templates/properties and
-configured languages, read once per account by
-:func:`uwazi_admin_agent.drivers.web.run_service.wizard_schema.load_wizard_schema`.
-When that read fails the step says so, offers a retry, and can send the operator
-back to free-text entry — it never pretends the instance has no templates.
-
-No LLM is involved anywhere in this module.
+The goal is selected in the preceding wizard step. This form derives its next
+question from the answers already given and assembles the resulting prompt
+without an LLM. Instance schema loading happens off the event loop.
 """
 
 from __future__ import annotations
@@ -24,27 +13,43 @@ from typing import Any, Callable
 from loguru import logger
 from nicegui import background_tasks, ui
 
+from uwazi_admin_agent.domain.guided_flow import (
+    ADDITIONAL_RULES_QUESTION,
+    CUSTOM_DESCRIPTION_QUESTION,
+    DOCUMENT_GUIDANCE_QUESTION,
+    EXAMPLES_QUESTION,
+    EXISTING_VALUE_MODE_QUESTION,
+    EXISTING_VALUE_RULE_QUESTION,
+    FALLBACK_MODE_QUESTION,
+    FALLBACK_VALUE_QUESTION,
+    FILL_RULES_QUESTION,
+    INPUT_LANGUAGE_MODE_QUESTION,
+    INPUT_LANGUAGES_QUESTION,
+    METADATA_PROPERTIES_QUESTION,
+    OUTPUT_LANGUAGE_MODE_QUESTION,
+    OUTPUT_LANGUAGES_QUESTION,
+    REVIEW_QUESTION,
+    SCOPE_FILTER_QUESTION,
+    SCOPE_QUESTION,
+    SOURCES_QUESTION,
+    TARGET_PROPERTY_QUESTION,
+    TEMPLATE_QUESTION,
+    guided_question_ids,
+    next_question_id,
+    previous_question_id,
+    question_error,
+)
 from uwazi_admin_agent.domain.guided_task import (
-    EXISTING_CUSTOM,
-    EXISTING_REPLACE,
     EXISTING_VALUE_LABELS,
     FALLBACK_BLANK,
     FALLBACK_LABELS,
     FALLBACK_VALUE,
     GOAL_CLASSIFY,
-    GOAL_DESCRIPTIONS,
-    GOAL_FILL,
-    GOALS,
+    GOAL_LABELS,
     INPUT_LANGUAGE_LABELS,
-    INPUT_LANGUAGE_MATCH,
     INPUT_LANGUAGE_MODES,
-    INPUT_LANGUAGE_SPECIFIC,
-    OUTPUT_ALL,
     OUTPUT_LANGUAGE_LABELS,
     OUTPUT_LANGUAGE_MODES,
-    OUTPUT_SPECIFIC,
-    SCOPE_ALL,
-    SCOPE_FILTER,
     SCOPE_LABELS,
     SCOPES,
     SOURCE_LABELS,
@@ -62,6 +67,48 @@ from uwazi_admin_agent.domain.guided_task import (
 from uwazi_admin_agent.drivers.web.run_service.wizard_schema import load_wizard_schema
 from uwazi_admin_agent.drivers.web.session import credentials_for_instance, page_instance_url
 
+_QUESTION_TITLES = {
+    TEMPLATE_QUESTION: "Which templates should be analyzed?",
+    CUSTOM_DESCRIPTION_QUESTION: "What should the task do?",
+    TARGET_PROPERTY_QUESTION: "Which property should receive the suggestion?",
+    FILL_RULES_QUESTION: "How should the value be generated?",
+    EXISTING_VALUE_MODE_QUESTION: "What if the property already has a value?",
+    EXISTING_VALUE_RULE_QUESTION: "What custom rule should apply to existing values?",
+    FALLBACK_MODE_QUESTION: "What if no topic clearly applies?",
+    FALLBACK_VALUE_QUESTION: "What fallback value should be suggested?",
+    SCOPE_QUESTION: "Which entities should be included?",
+    SCOPE_FILTER_QUESTION: "What filter or condition selects the entities?",
+    SOURCES_QUESTION: "Which information should be used as input?",
+    METADATA_PROPERTIES_QUESTION: "Which metadata properties should be read?",
+    DOCUMENT_GUIDANCE_QUESTION: "Where does the relevant information live?",
+    INPUT_LANGUAGE_MODE_QUESTION: "Which input language should be read?",
+    INPUT_LANGUAGES_QUESTION: "Which primary input languages should be used?",
+    OUTPUT_LANGUAGE_MODE_QUESTION: "How should multilingual outputs be generated?",
+    OUTPUT_LANGUAGES_QUESTION: "Which output languages should be generated?",
+    ADDITIONAL_RULES_QUESTION: "Any additional instructions or edge cases?",
+    EXAMPLES_QUESTION: "Any examples of expected results?",
+    REVIEW_QUESTION: "Review the assembled prompt",
+}
+
+
+def _radio(
+    state: dict[str, Any],
+    options: dict[str, str],
+    value: str,
+    *,
+    on_change: Callable[[], None] | None = None,
+) -> Any:
+    state["_guided_active_radio"] = radio = ui.radio(options, value=value).classes("wizard-options w-full")
+    state["_guided_radio_value"] = value
+    radio.on_value_change(lambda event: _radio_changed(state, event.value, on_change))
+    return radio
+
+
+def _radio_changed(state: dict[str, Any], value: str, on_change: Callable[[], None] | None) -> None:
+    state["_guided_radio_value"] = value
+    if on_change is not None:
+        on_change()
+
 
 def build_guided_step(
     state: dict[str, Any],
@@ -71,30 +118,32 @@ def build_guided_step(
     on_back: Callable[[], None],
     on_free_text: Callable[[], None],
 ) -> None:
-    """Create the wizard's ``guided`` step; its form loads lazily on first use."""
-    with ui.step(name="guided", title="Questions", icon="quiz"):
+    """Create the guided step; its first question loads lazily on entry."""
+    with ui.step(name="guided", title="Questions", icon="quiz") as step:
+        step.set_visibility(False)
+        state["_guided_step"] = step
         state["_guided_submit"] = on_submit
-        state["_guided_free_text"] = on_free_text
         state["_guided_dialog"] = dialog
+        state["_guided_free_text"] = on_free_text
+        state["_guided_back_to_details"] = on_back
         state["_guided_container"] = ui.column().classes("w-full")
-        with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=on_back).props("color=grey-7 flat")
-            submit = ui.button("Build prompt", icon="arrow_forward", on_click=lambda: _submit(state))
-            submit.props("color=primary")
-            state["_guided_submit_button"] = submit
+
+
+def start_guided_flow(state: dict[str, Any], goal: str) -> None:
+    """Start or resume a flow for ``goal`` without discarding existing answers."""
+    answers = state.get("_guided_answers") or GuidedAnswers()
+    if state.get("_guided_goal") != goal:
+        answers = GuidedAnswers(goal=goal)
+        state["_guided_answers"] = answers
+    state["_guided_goal"] = goal
+    state["_guided_question"] = guided_question_ids(answers)[0]
+    ensure_guided_form(state)
 
 
 def ensure_guided_form(state: dict[str, Any], *, refresh: bool = False) -> None:
-    """Load the instance schema (once) and render the questions into the step.
-
-    Callable repeatedly and from a stepper change handler: an in-flight or
-    finished load is never restarted, so returning to the step keeps the answers
-    the operator already gave. ``refresh=True`` re-reads the instance schema
-    (the error panel's Retry), because templates may have changed since the
-    cached read.
-    """
+    """Load the instance schema once, then render the current question."""
     if state.get("_guided_loading") or (state.get("_guided_built") and not refresh):
+        _render_question(state)
         return
     if refresh:
         state.pop("_guided_built", None)
@@ -102,21 +151,18 @@ def ensure_guided_form(state: dict[str, Any], *, refresh: bool = False) -> None:
     if container is None:
         return
     state["_guided_loading"] = True
-    _set_submit_enabled(state, False)
     _render_loading(container)
     background_tasks.create(_load_and_render(state, refresh=refresh), name="guided task schema")
 
 
 def _render_loading(container: Any) -> None:
     container.clear()
-    with container, ui.row().classes("w-full items-center gap-2"):
+    with container, ui.row().classes("w-full items-center gap-2 q-my-lg"):
         ui.spinner(size="lg")
         ui.label("Reading the instance's templates and languages...").classes("text-body1")
 
 
 async def _load_and_render(state: dict[str, Any], *, refresh: bool = False) -> None:
-    """Fetch the schema off the event loop, then build the questions (or degrade)."""
-    container = state["_guided_container"]
     instance = page_instance_url()
     credentials = credentials_for_instance(instance)
     if credentials is None:
@@ -130,13 +176,14 @@ async def _load_and_render(state: dict[str, Any], *, refresh: bool = False) -> N
             credentials.password,
             refresh=refresh,
         )
-    except Exception as exc:  # noqa: BLE001 — the step degrades, never blocks free-text entry
+    except Exception as exc:  # noqa: BLE001 — free-text entry remains available
         logger.warning("could not read the instance schema for the guided wizard: {}", exc)
         _render_schema_error(state, exc)
         return
     state["_guided_loading"] = False
     state["_guided_schema"] = schema
-    _render_form(state, container, schema)
+    state["_guided_built"] = True
+    _render_question(state)
 
 
 def _render_schema_error(state: dict[str, Any], exc: Exception) -> None:
@@ -146,29 +193,17 @@ def _render_schema_error(state: dict[str, Any], exc: Exception) -> None:
     with container:
         ui.label("Could not read the instance's templates").classes("text-h6 text-negative")
         ui.label(str(exc)).classes("text-body2 q-mb-sm")
-        ui.label(
-            "The questions need the template list to offer real property names. Retry, or describe "
-            "the task in your own words instead."
-        ).classes("text-body2 text-grey-7")
-        _set_submit_enabled(state, False)
-        with ui.row().classes("q-mt-md w-full justify-end"):
-            ui.button("Use free-text prompt", on_click=lambda: state["_guided_free_text"]()).props("color=grey-7 flat")
-            ui.button("Retry", icon="refresh", on_click=lambda: _retry(state)).props("color=primary")
-
-
-def _set_submit_enabled(state: dict[str, Any], enabled: bool) -> None:
-    """Show/hide the step's Build prompt button (it is meaningless without a form)."""
-    button = state.get("_guided_submit_button")
-    if button is not None:
-        button.set_visibility(enabled)
+        ui.label("Retry, or describe the task in your own words instead.").classes("text-body2 text-grey-7")
+        with ui.row().classes("q-mt-md w-full justify-between"):
+            ui.button("Back", on_click=lambda: state["_guided_back_to_details"]()).props("color=grey-7 flat")
+            with ui.row():
+                ui.button("Use custom task", on_click=lambda: state["_guided_free_text"]()).props("color=grey-7 flat")
+                ui.button("Retry", icon="refresh", on_click=lambda: _retry(state)).props("color=primary")
 
 
 def _retry(state: dict[str, Any]) -> None:
     state["_guided_loading"] = False
     ensure_guided_form(state, refresh=True)
-
-
-# --- Form construction ----------------------------------------------------
 
 
 def _multi_picker(
@@ -178,7 +213,6 @@ def _multi_picker(
     allow_custom: bool,
     placeholder: str,
 ) -> Any:
-    """A multi-select over ``choices``, or a comma-separated input when empty."""
     if choices:
         return (
             ui.select(
@@ -196,13 +230,6 @@ def _multi_picker(
 
 
 def _single_picker(label: str, choices: list[tuple[str, str]], *, placeholder: str) -> Any:
-    """A single select over ``choices``, or a text input when none are known.
-
-    Custom values are allowed: a prompt may name a property this instance does
-    not define yet (or the template selection is broader than the offered set),
-    and the operator must be able to type the slug instead of being blocked by
-    the schema's current contents.
-    """
     if choices:
         return (
             ui.select(dict(choices), label=label, with_input=True, clearable=True, new_value_mode="add-unique")
@@ -212,419 +239,310 @@ def _single_picker(label: str, choices: list[tuple[str, str]], *, placeholder: s
     return ui.input(label, placeholder=placeholder).classes("w-full")
 
 
-def _radio(options: dict[str, str], value: str) -> Any:
-    return ui.radio(options, value=value).props("dense").classes("w-full")
-
-
-def _render_form(state: dict[str, Any], container: Any, schema: WizardSchema) -> None:
-    widgets: dict[str, Any] = {}
-    state["_guided_widgets"] = widgets
+def _render_question(state: dict[str, Any]) -> None:
+    """Render one question; all other answers remain in ``_guided_answers``."""
+    if not state.get("_guided_built"):
+        return
+    answers: GuidedAnswers = state["_guided_answers"]
+    questions = guided_question_ids(answers)
+    current = state.get("_guided_question")
+    if current not in questions:
+        current = questions[0]
+        state["_guided_question"] = current
+    index = questions.index(current)
+    container = state["_guided_container"]
     container.clear()
     with container:
-        # ONE scroll region holds the questions AND the prompt preview, and it
-        # has a fixed height: an autogrowing preview made the dialog taller than
-        # the viewport as the prompt grew, pushing the step's buttons out of
-        # reach (Quasar does not scroll a dialog card that overflows).
-        with ui.scroll_area().classes("w-full").style("height: 50vh"):
-            with ui.column().classes("w-full gap-1"):
-                _render_goal_section(widgets, schema)
-                _render_input_section(widgets, schema)
-                state["_guided_branch_container"] = ui.column().classes("w-full")
-                _render_branch(state)
-                _render_output_section(widgets, schema)
-                ui.label("Prompt preview").classes("text-subtitle1 text-grey-7 q-mt-md")
-                state["_guided_preview"] = (
-                    ui.textarea().classes("w-full font-mono").props("readonly outlined").style("height: 240px")
-                )
-        state["_guided_issues"] = ui.label().classes("text-body2 text-orange-9")
-
-    # Marked built ONLY after the form exists: an exception while building must
-    # leave the step retryable instead of showing an empty panel forever.
-    state["_guided_built"] = True
-    _set_submit_enabled(state, True)
-    _wire(state)
-    _refresh_preview(state)
+        ui.label(GOAL_LABELS[answers.goal]).classes("text-overline text-primary")
+        ui.label(f"Question {index + 1} of {len(questions)}").classes("text-caption text-grey-7")
+        ui.linear_progress(value=(index + 1) / len(questions), show_value=False).classes("w-full q-mb-lg")
+        ui.label(_QUESTION_TITLES[current]).classes("text-h6 q-mb-md")
+        with ui.column().classes("w-full min-h-40"):
+            _render_question_control(state, current, answers)
+        with ui.row().classes("q-mt-lg w-full items-center justify-between no-wrap"):
+            ui.button("Cancel", on_click=lambda: state["_guided_dialog"].close()).props("color=grey-7 flat")
+            with ui.row().classes("no-wrap"):
+                ui.button("Back", on_click=lambda: _back(state)).props("color=grey-7 flat")
+                if current == REVIEW_QUESTION:
+                    ui.button("Use prompt", icon="arrow_forward", on_click=lambda: _submit(state)).props("color=primary")
+                else:
+                    ui.button("Continue", icon="arrow_forward", on_click=lambda: _next(state)).props("color=primary")
 
 
-def _render_goal_section(widgets: dict[str, Any], schema: WizardSchema) -> None:
-    ui.label("Step 1 — Goal & target entities").classes("text-subtitle1 text-bold q-mt-sm")
-    widgets["goal"] = _radio({goal: GOAL_DESCRIPTIONS[goal] for goal in GOALS}, GOAL_CLASSIFY)
-    widgets["templates"] = (
+_AUTO_ADVANCE_QUESTIONS = frozenset(
+    {
+        EXISTING_VALUE_MODE_QUESTION,
+        FALLBACK_MODE_QUESTION,
+        SCOPE_QUESTION,
+        INPUT_LANGUAGE_MODE_QUESTION,
+        OUTPUT_LANGUAGE_MODE_QUESTION,
+    }
+)
+
+
+def _render_question_control(state: dict[str, Any], question: str, answers: GuidedAnswers) -> None:
+    schema: WizardSchema = state["_guided_schema"]
+    if question == TEMPLATE_QUESTION:
+        state["_guided_draft_templates"] = list(answers.templates)
         ui.select(
             [template.name for template in schema.templates],
-            label="Template(s) to analyze",
+            label="Templates (leave empty for all)",
+            value=list(answers.templates),
             multiple=True,
             with_input=True,
             clearable=True,
             new_value_mode="add-unique",
+            on_change=lambda event: state.update(_guided_draft_templates=event.value or []),
+        ).props("outlined use-chips").classes("w-full")
+    elif question == CUSTOM_DESCRIPTION_QUESTION:
+        _textarea(state, "custom_description", answers.custom_description, min_height=160)
+    elif question == TARGET_PROPERTY_QUESTION:
+        label = "Target property for the suggested topics" if answers.goal == GOAL_CLASSIFY else "Target property"
+        placeholder = "e.g. topics" if answers.goal == GOAL_CLASSIFY else "e.g. incident_date, executive_summary"
+        ui.label(
+            "Select, multi-select and relationship properties accept thesaurus terms or linked entities."
+            if answers.goal == GOAL_CLASSIFY
+            else "The suggested value will appear in the review table before anything is written."
+        ).classes("text-body2 text-grey-7 q-mb-md")
+        widget = _single_picker(label, property_choices(schema, answers.templates, answers.goal), placeholder=placeholder)
+        widget.value = answers.target_property or None
+        widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
+        state["_guided_draft_text"] = answers.target_property
+    elif question == FILL_RULES_QUESTION:
+        _textarea(
+            state,
+            "fill_rules",
+            answers.fill_rules,
+            label="Rules or formatting for the generated value",
+            placeholder="e.g. Summarize the ruling in 3 concise bullet points.",
         )
-        .props("outlined use-chips")
-        .classes("w-full q-mt-sm")
-    )
-    ui.label("Leave empty for all templates. A name typed here is used as written.").classes(
-        "text-body2 text-grey-7"
-    )
-    widgets["scope"] = _radio({scope: SCOPE_LABELS[scope] for scope in SCOPES}, SCOPE_ALL)
-    widgets["scope_filter"] = ui.input(
-        "Filter or condition",
-        placeholder="e.g. creationDate > 2025-01-01, document_status = Adopted",
-    ).classes("w-full")
-    widgets["scope_filter"].set_visibility(False)
-
-
-def _render_input_section(widgets: dict[str, Any], schema: WizardSchema) -> None:
-    ui.label("Step 2 — Input sources & languages").classes("text-subtitle1 text-bold q-mt-lg")
-    ui.label("Which information should be used as input?").classes("text-body1 q-mt-sm")
-    widgets["sources"] = {source: ui.checkbox(SOURCE_LABELS[source]).classes("w-full") for source in SOURCES}
-    widgets["metadata_properties"] = _multi_picker(
-        "Metadata properties to read",
-        metadata_property_choices(schema, ()),
-        allow_custom=True,
-        placeholder="e.g. title, summary, description",
-    )
-    widgets["metadata_properties"].set_visibility(False)
-    widgets["document_guidance"] = (
-        ui.textarea(
-            "Where does the relevant information live? (optional)",
-            placeholder=(
-                "e.g. Look at the first 2 pages for the header, date and author. "
-                "Scan the 'Conclusions' or 'Ruling' section near the end."
-            ),
+    elif question == EXISTING_VALUE_MODE_QUESTION:
+        _radio(state, EXISTING_VALUE_LABELS, answers.existing_value_mode, on_change=lambda: _next(state))
+    elif question == EXISTING_VALUE_RULE_QUESTION:
+        _input(state, "existing_value_rule", answers.existing_value_rule, "Custom rule")
+    elif question == FALLBACK_MODE_QUESTION:
+        _radio(
+            state,
+            {mode: FALLBACK_LABELS[mode] for mode in (FALLBACK_BLANK, FALLBACK_VALUE)},
+            answers.fallback_mode,
+            on_change=lambda: _next(state),
         )
-        .classes("w-full q-mt-sm")
-        .props("autogrow")
-    )
-    ui.label("Which input language should be read when an entity has multiple versions?").classes(
-        "text-body1 q-mt-sm"
-    )
-    widgets["input_language_mode"] = _radio(
-        {mode: INPUT_LANGUAGE_LABELS[mode] for mode in INPUT_LANGUAGE_MODES},
-        INPUT_LANGUAGE_MATCH,
-    )
-    widgets["input_languages"] = _multi_picker(
-        "Primary input language(s)",
-        list(language_choices(schema).items()),
-        allow_custom=not schema.languages,
-        placeholder="e.g. en, es",
-    )
-    widgets["input_languages"].set_visibility(False)
-
-
-def _render_output_section(widgets: dict[str, Any], schema: WizardSchema) -> None:
-    ui.label("Step 4 — Output languages & instructions").classes("text-subtitle1 text-bold q-mt-lg")
-    ui.label("How should multilingual outputs be generated?").classes("text-body1 q-mt-sm")
-    widgets["output_language_mode"] = _radio(
-        {mode: OUTPUT_LANGUAGE_LABELS[mode] for mode in OUTPUT_LANGUAGE_MODES},
-        OUTPUT_ALL,
-    )
-    widgets["output_languages"] = _multi_picker(
-        "Output language(s)",
-        list(language_choices(schema).items()),
-        allow_custom=not schema.languages,
-        placeholder="e.g. en, es",
-    )
-    widgets["output_languages"].set_visibility(False)
-    ui.label(
-        "Text properties get one row per language; shared properties (dates, selects, relationships) "
-        "get a single unified suggestion."
-    ).classes("text-body2 text-grey-7")
-    widgets["additional_rules"] = (
-        ui.textarea(
-            "Additional instructions or edge cases (optional)",
-            placeholder="e.g. Keep legal terminology formal. Ignore text inside footnotes and headers.",
+    elif question == FALLBACK_VALUE_QUESTION:
+        _input(state, "fallback_value", answers.fallback_value, "Fallback value")
+    elif question == SCOPE_QUESTION:
+        _radio(state, {scope: SCOPE_LABELS[scope] for scope in SCOPES}, answers.entity_scope, on_change=lambda: _next(state))
+    elif question == SCOPE_FILTER_QUESTION:
+        _input(state, "scope_filter", answers.scope_filter, "Filter or condition")
+    elif question == SOURCES_QUESTION:
+        state["_guided_draft_sources"] = set(answers.sources)
+        ui.label("Choose all that apply.").classes("text-body2 text-grey-7 q-mb-sm")
+        for source in SOURCES:
+            ui.checkbox(
+                SOURCE_LABELS[source],
+                value=source in answers.sources,
+                on_change=lambda event, source=source: _source_changed(state, source, bool(event.value)),
+            ).classes("wizard-choice w-full")
+    elif question == METADATA_PROPERTIES_QUESTION:
+        _multi_answer(
+            state,
+            "metadata_properties",
+            metadata_property_choices(schema, answers.templates),
+            answers.metadata_properties,
+            label="Metadata properties to read",
+            placeholder="e.g. title, summary, description",
         )
-        .classes("w-full q-mt-sm")
-        .props("autogrow")
-    )
-    widgets["examples"] = (
-        ui.textarea(
-            "Examples of expected results (optional)",
+    elif question == DOCUMENT_GUIDANCE_QUESTION:
+        _textarea(
+            state,
+            "document_guidance",
+            answers.document_guidance,
+            label="Optional — continue to use the default strategy",
+            placeholder="e.g. Look at the first 2 pages for the header, date and author.",
+        )
+    elif question == INPUT_LANGUAGE_MODE_QUESTION:
+        ui.label("Applies when an entity has multiple language versions.").classes("text-body2 text-grey-7 q-mb-md")
+        _radio(
+            state,
+            {mode: INPUT_LANGUAGE_LABELS[mode] for mode in INPUT_LANGUAGE_MODES},
+            answers.input_language_mode,
+            on_change=lambda: _next(state),
+        )
+    elif question == INPUT_LANGUAGES_QUESTION:
+        _languages(state, "input_languages", answers.input_languages, "Primary input language(s)")
+    elif question == OUTPUT_LANGUAGE_MODE_QUESTION:
+        _radio(
+            state,
+            {mode: OUTPUT_LANGUAGE_LABELS[mode] for mode in OUTPUT_LANGUAGE_MODES},
+            answers.output_language_mode,
+            on_change=lambda: _next(state),
+        )
+    elif question == OUTPUT_LANGUAGES_QUESTION:
+        _languages(state, "output_languages", answers.output_languages, "Output language(s)")
+    elif question == ADDITIONAL_RULES_QUESTION:
+        _textarea(
+            state,
+            "additional_rules",
+            answers.additional_rules,
+            label="Optional",
+            placeholder="e.g. Keep legal terminology formal. Ignore footnotes.",
+        )
+    elif question == EXAMPLES_QUESTION:
+        _textarea(
+            state,
+            "examples",
+            answers.examples,
+            label="Optional",
             placeholder="e.g. 'Plaintiff was granted leave to appeal' -> 'Leave to appeal: granted'",
         )
-        .classes("w-full")
-        .props("autogrow")
-    )
+    elif question == REVIEW_QUESTION:
+        ui.label("Go back to change any answer, or continue to validation with this prompt.").classes(
+            "text-body2 text-grey-7 q-mb-md"
+        )
+        ui.textarea(value=assembled_prompt(state)).classes("w-full font-mono").props(
+            "readonly outlined input-style='min-height: 300px;'"
+        )
 
 
-def _wire(state: dict[str, Any]) -> None:
-    """Connect the controls to the reactions they need."""
-    widgets = state["_guided_widgets"]
-    widgets["goal"].on_value_change(lambda: _render_branch(state))
-    widgets["templates"].on_value_change(lambda: _templates_changed(state))
-    widgets["scope"].on_value_change(lambda: _scope_changed(state))
-    for checkbox in widgets["sources"].values():
-        checkbox.on_value_change(lambda: _sources_changed(state))
-    widgets["input_language_mode"].on_value_change(lambda: _input_language_changed(state))
-    widgets["output_language_mode"].on_value_change(lambda: _output_language_changed(state))
-    preview_only = (
-        "metadata_properties",
-        "document_guidance",
-        "input_languages",
-        "output_languages",
-        "additional_rules",
-        "examples",
-    )
-    for key in preview_only:
-        widgets[key].on_value_change(lambda: _refresh_preview(state))
+def _input(state: dict[str, Any], field: str, value: str, label: str) -> None:
+    state["_guided_draft_text"] = value
+    widget = ui.input(label, value=value).classes("w-full")
+    widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
+    state["_guided_draft_field"] = field
 
 
-def _sources_changed(state: dict[str, Any]) -> None:
-    widgets = state["_guided_widgets"]
-    widgets["metadata_properties"].set_visibility(bool(widgets["sources"][SOURCE_METADATA].value))
-    _refresh_preview(state)
+def _textarea(
+    state: dict[str, Any],
+    field: str,
+    value: str,
+    *,
+    label: str = "Your answer",
+    placeholder: str = "",
+    min_height: int = 100,
+) -> None:
+    state["_guided_draft_text"] = value
+    state["_guided_draft_field"] = field
+    widget = ui.textarea(label, value=value, placeholder=placeholder).classes("w-full")
+    widget.props(f"autogrow outlined input-style='min-height: {min_height}px;'")
+    widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
 
 
-def _scope_changed(state: dict[str, Any]) -> None:
-    widgets = state["_guided_widgets"]
-    widgets["scope_filter"].set_visibility(widgets["scope"].value == SCOPE_FILTER)
-    _refresh_preview(state)
+def _multi_answer(
+    state: dict[str, Any],
+    field: str,
+    choices: list[tuple[str, str]],
+    value: tuple[str, ...],
+    *,
+    label: str,
+    placeholder: str,
+) -> None:
+    state["_guided_draft_multi_field"] = field
+    state["_guided_draft_multi"] = list(value)
+    widget = _multi_picker(label, choices, allow_custom=True, placeholder=placeholder)
+    widget.value = list(value) if choices else ", ".join(value)
+    widget.on_value_change(lambda event: state.update(_guided_draft_multi=event.value or []))
 
 
-def _input_language_changed(state: dict[str, Any]) -> None:
-    widgets = state["_guided_widgets"]
-    widgets["input_languages"].set_visibility(widgets["input_language_mode"].value == INPUT_LANGUAGE_SPECIFIC)
-    _refresh_preview(state)
-
-
-def _output_language_changed(state: dict[str, Any]) -> None:
-    widgets = state["_guided_widgets"]
-    widgets["output_languages"].set_visibility(widgets["output_language_mode"].value == OUTPUT_SPECIFIC)
-    _refresh_preview(state)
-
-
-def _templates_changed(state: dict[str, Any]) -> None:
-    """Re-offer the property pickers for the newly selected templates."""
-    widgets = state["_guided_widgets"]
-    templates = _multi_value(widgets["templates"])
-    _replace_options(
-        widgets["metadata_properties"],
-        metadata_property_choices(state["_guided_schema"], templates),
-    )
-    _render_branch(state)
-
-
-def _replace_options(widget: Any, choices: list[tuple[str, str]]) -> None:
-    """Swap a select's options without dropping an explicit selection.
-
-    A value the operator typed (``new_value_mode``) or picked under a wider
-    template selection is KEPT as an option: narrowing the template list must
-    not silently erase an answer that will still appear in the prompt.
-    """
-    if not isinstance(widget, ui.select):
-        return
-    options = dict(choices)
-    if widget.multiple:
-        current = list(_multi_value(widget))
-        for value in current:
-            options.setdefault(value, value)
-    else:
-        current = widget.value
-        if current:
-            options.setdefault(current, current)
-    widget.set_options(options, value=current)
-
-
-# --- The dynamic Step 3 branch -------------------------------------------
-
-
-def _capture_branch(state: dict[str, Any]) -> None:
-    """Remember the branch answers before the branch is rebuilt (pure read)."""
-    previous_goal = state.get("_guided_branch_goal")
-    branch = state.get("_guided_branch") or {}
-    if previous_goal is None or not branch:
-        return
-    state.setdefault("_guided_branch_values", {})[previous_goal] = {
-        "target_property": _text(branch.get("target_property")),
-        "fallback_mode": _value(branch.get("fallback_mode"), FALLBACK_BLANK),
-        "fallback_value": _text(branch.get("fallback_value")),
-        "fill_rules": _text(branch.get("fill_rules")),
-        "existing_value_mode": _value(branch.get("existing_value_mode"), EXISTING_REPLACE),
-        "existing_value_rule": _text(branch.get("existing_value_rule")),
-        "custom_description": _text(branch.get("custom_description")),
-    }
-
-
-def _restore_branch(state: dict[str, Any], goal: str, branch: dict[str, Any]) -> None:
-    """Re-apply the answers this goal had before the branch was rebuilt."""
-    saved = (state.get("_guided_branch_values") or {}).get(goal) or {}
-    if not saved:
-        return
-    for key, value in saved.items():
-        widget = branch.get(key)
-        if widget is None or value in ("", None):
-            continue
-        if isinstance(widget, ui.select) and not widget.multiple and value not in widget.options:
-            # A property chosen before the template selection narrowed: keep
-            # the answer visible rather than silently erasing it.
-            options = dict(widget.options)
-            options[value] = value
-            widget.set_options(options)
-        widget.value = value
-    # The reveal states follow the restored answers, not the widget defaults.
-    if branch.get("fallback_mode") is not None:
-        branch["fallback_value"].set_visibility(branch["fallback_mode"].value == FALLBACK_VALUE)
-    if branch.get("existing_value_mode") is not None:
-        branch["existing_value_rule"].set_visibility(branch["existing_value_mode"].value == EXISTING_CUSTOM)
-
-
-def _render_branch(state: dict[str, Any]) -> None:
-    """Rebuild Step 3 for the selected goal, keeping answers already given."""
-    _capture_branch(state)
-    container = state["_guided_branch_container"]
-    widgets = state["_guided_widgets"]
+def _languages(state: dict[str, Any], field: str, value: tuple[str, ...], label: str) -> None:
     schema: WizardSchema = state["_guided_schema"]
-    goal = _value(widgets["goal"], GOAL_CLASSIFY)
-    templates = _multi_value(widgets["templates"])
-    branch: dict[str, Any] = {}
-    state["_guided_branch"] = branch
-    state["_guided_branch_goal"] = goal
-
-    container.clear()
-    with container:
-        ui.label("Step 3 — Task details").classes("text-subtitle1 text-bold q-mt-lg")
-        if goal == GOAL_CLASSIFY:
-            ui.label(
-                "Select, multi-select and relationship properties accept thesaurus terms or linked entities."
-            ).classes("text-body2 text-grey-7")
-            branch["target_property"] = _single_picker(
-                "Target property for the suggested topics",
-                property_choices(schema, templates, GOAL_CLASSIFY),
-                placeholder="e.g. topics",
-            )
-            branch["fallback_mode"] = _radio(
-                {mode: FALLBACK_LABELS[mode] for mode in (FALLBACK_BLANK, FALLBACK_VALUE)},
-                FALLBACK_BLANK,
-            )
-            branch["fallback_value"] = ui.input("Fallback value", placeholder="e.g. Uncategorized").classes(
-                "w-full"
-            )
-            branch["fallback_value"].set_visibility(False)
-            branch["fallback_mode"].on_value_change(
-                lambda: branch["fallback_value"].set_visibility(branch["fallback_mode"].value == FALLBACK_VALUE)
-            )
-        elif goal == GOAL_FILL:
-            branch["target_property"] = _single_picker(
-                "Target property for the suggested value",
-                property_choices(schema, templates, GOAL_FILL),
-                placeholder="e.g. incident_date, judge_name, executive_summary",
-            )
-            branch["fill_rules"] = (
-                ui.textarea(
-                    "Rules or formatting for the generated value",
-                    placeholder=(
-                        "e.g. Summarize the ruling in 3 concise bullet points. Extract the date the "
-                        "document was signed, ignoring upload or stamp dates."
-                    ),
-                )
-                .classes("w-full q-mt-sm")
-                .props("autogrow")
-            )
-            ui.label("How should suggestions behave if the property already has a value?").classes(
-                "text-body1 q-mt-sm"
-            )
-            branch["existing_value_mode"] = _radio(EXISTING_VALUE_LABELS, EXISTING_REPLACE)
-            branch["existing_value_rule"] = ui.input(
-                "Custom rule",
-                placeholder="e.g. Only replace when the existing text is under 20 words",
-            ).classes("w-full")
-            branch["existing_value_rule"].set_visibility(False)
-            branch["existing_value_mode"].on_value_change(
-                lambda: branch["existing_value_rule"].set_visibility(
-                    branch["existing_value_mode"].value == EXISTING_CUSTOM
-                )
-            )
-        else:
-            branch["custom_description"] = (
-                ui.textarea(
-                    "Describe what to analyze, extract or suggest",
-                    placeholder=(
-                        "Explain which fields or documents to inspect, what logic or criteria to apply, "
-                        "and what suggestions should appear in the review table."
-                    ),
-                )
-                .classes("w-full")
-                .props("autogrow input-style='min-height: 160px;'")
-            )
-        _restore_branch(state, goal, branch)
-        for widget in branch.values():
-            widget.on_value_change(lambda: _refresh_preview(state))
-    _refresh_preview(state)
+    _multi_answer(
+        state,
+        field,
+        list(language_choices(schema).items()),
+        value,
+        label=label,
+        placeholder="e.g. en, es",
+    )
 
 
-# --- Answers, preview and submit -----------------------------------------
+def _source_changed(state: dict[str, Any], source: str, selected: bool) -> None:
+    sources: set[str] = state["_guided_draft_sources"]
+    if selected:
+        sources.add(source)
+    else:
+        sources.discard(source)
 
 
-def _text(widget: Any) -> str:
-    if widget is None:
-        return ""
-    value = getattr(widget, "value", None)
-    return str(value).strip() if value is not None else ""
+def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
+    """Commit only the visible control; preserve answers on every other screen."""
+    answers: GuidedAnswers = state["_guided_answers"]
+    question = state["_guided_question"]
+    updates: dict[str, Any] = {}
+    if question == TEMPLATE_QUESTION:
+        updates["templates"] = tuple(str(value).strip() for value in state.get("_guided_draft_templates", []) if value)
+    elif question == SOURCES_QUESTION:
+        sources = tuple(source for source in SOURCES if source in state.get("_guided_draft_sources", set()))
+        updates["sources"] = sources
+        if SOURCE_METADATA not in sources:
+            updates["metadata_properties"] = ()
+    elif question in _AUTO_ADVANCE_QUESTIONS:
+        field = {
+            EXISTING_VALUE_MODE_QUESTION: "existing_value_mode",
+            FALLBACK_MODE_QUESTION: "fallback_mode",
+            SCOPE_QUESTION: "entity_scope",
+            INPUT_LANGUAGE_MODE_QUESTION: "input_language_mode",
+            OUTPUT_LANGUAGE_MODE_QUESTION: "output_language_mode",
+        }[question]
+        updates[field] = state["_guided_radio_value"]
+    elif question in {
+        CUSTOM_DESCRIPTION_QUESTION,
+        TARGET_PROPERTY_QUESTION,
+        FILL_RULES_QUESTION,
+        EXISTING_VALUE_RULE_QUESTION,
+        FALLBACK_VALUE_QUESTION,
+        SCOPE_FILTER_QUESTION,
+        DOCUMENT_GUIDANCE_QUESTION,
+        ADDITIONAL_RULES_QUESTION,
+        EXAMPLES_QUESTION,
+    }:
+        field = state.get("_guided_draft_field") or question
+        updates[field] = str(state.get("_guided_draft_text", "")).strip()
+    elif question in {METADATA_PROPERTIES_QUESTION, INPUT_LANGUAGES_QUESTION, OUTPUT_LANGUAGES_QUESTION}:
+        raw = state.get("_guided_draft_multi", [])
+        if not isinstance(raw, (list, tuple)):
+            raw = str(raw).split(",")
+        updates[state["_guided_draft_multi_field"]] = tuple(str(value).strip() for value in raw if str(value).strip())
+    return GuidedAnswers(**{**answers.__dict__, **updates})
 
 
-def _multi_value(widget: Any) -> tuple[str, ...]:
-    """Read a multi-select or a comma-separated input as stripped values."""
-    if widget is None:
-        return ()
-    value = getattr(widget, "value", None)
-    if value is None:
-        return ()
-    if isinstance(value, (list, tuple)):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return tuple(part.strip() for part in str(value).split(",") if part.strip())
+def _next(state: dict[str, Any]) -> None:
+    current = state["_guided_question"]
+    if current in _AUTO_ADVANCE_QUESTIONS:
+        widget = state.get("_guided_active_radio")
+        if widget is not None:
+            state["_guided_radio_value"] = widget.value
+    answers = _commit_current(state)
+    error = question_error(current, answers)
+    if error:
+        ui.notify(error, type="warning")
+        return
+    state["_guided_answers"] = answers
+    state["_guided_question"] = next_question_id(current, answers)
+    _render_question(state)
 
 
-def _value(widget: Any, default: str) -> str:
-    return str(widget.value) if widget is not None and widget.value else default
+def _back(state: dict[str, Any]) -> None:
+    answers = _commit_current(state)
+    current = state["_guided_question"]
+    state["_guided_answers"] = answers
+    if current == guided_question_ids(answers)[0]:
+        state["_guided_back_to_details"]()
+        return
+    state["_guided_question"] = previous_question_id(current, answers)
+    _render_question(state)
 
 
 def collect_guided_answers(state: dict[str, Any]) -> GuidedAnswers:
-    """Read the current form values into a :class:`GuidedAnswers`."""
-    widgets = state.get("_guided_widgets") or {}
-    branch = state.get("_guided_branch") or {}
-    sources = widgets.get("sources") or {}
-    return GuidedAnswers(
-        goal=_value(widgets.get("goal"), GOAL_CLASSIFY),
-        templates=_multi_value(widgets.get("templates")),
-        entity_scope=_value(widgets.get("scope"), SCOPE_ALL),
-        scope_filter=_text(widgets.get("scope_filter")),
-        sources=tuple(source for source in SOURCES if sources.get(source) is not None and bool(sources[source].value)),
-        metadata_properties=_multi_value(widgets.get("metadata_properties")),
-        document_guidance=_text(widgets.get("document_guidance")),
-        input_language_mode=_value(widgets.get("input_language_mode"), INPUT_LANGUAGE_MATCH),
-        input_languages=_multi_value(widgets.get("input_languages")),
-        target_property=_text(branch.get("target_property")),
-        fallback_mode=_value(branch.get("fallback_mode"), FALLBACK_BLANK),
-        fallback_value=_text(branch.get("fallback_value")),
-        fill_rules=_text(branch.get("fill_rules")),
-        existing_value_mode=_value(branch.get("existing_value_mode"), EXISTING_REPLACE),
-        existing_value_rule=_text(branch.get("existing_value_rule")),
-        custom_description=_text(branch.get("custom_description")),
-        output_language_mode=_value(widgets.get("output_language_mode"), OUTPUT_ALL),
-        output_languages=_multi_value(widgets.get("output_languages")),
-        additional_rules=_text(widgets.get("additional_rules")),
-        examples=_text(widgets.get("examples")),
-    )
+    """Return the saved answers plus any edits on the visible screen."""
+    if state.get("_guided_answers") is None:
+        return GuidedAnswers()
+    return _commit_current(state)
 
 
 def assembled_prompt(state: dict[str, Any]) -> str:
-    """The prompt the current answers produce (pure over the form state)."""
     return assemble_prompt(collect_guided_answers(state), language_label_map(state.get("_guided_schema")))
 
 
-def _refresh_preview(state: dict[str, Any]) -> None:
-    if not state.get("_guided_built"):
-        return
-    preview = state.get("_guided_preview")
-    if preview is not None:
-        preview.value = assembled_prompt(state)
-    issues = validate_answers(collect_guided_answers(state))
-    label = state.get("_guided_issues")
-    if label is not None:
-        label.set_text("; ".join(issues) if issues else "")
-
-
 def _submit(state: dict[str, Any]) -> None:
-    """Validate the answers, assemble the prompt and hand it to the wizard."""
     answers = collect_guided_answers(state)
     issues = validate_answers(answers)
     if issues:
@@ -634,4 +552,4 @@ def _submit(state: dict[str, Any]) -> None:
     state["_guided_submit"](prompt, answers)
 
 
-__all__ = ["assembled_prompt", "build_guided_step", "collect_guided_answers", "ensure_guided_form"]
+__all__ = ["assembled_prompt", "build_guided_step", "collect_guided_answers", "ensure_guided_form", "start_guided_flow"]

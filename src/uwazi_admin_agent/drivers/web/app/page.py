@@ -39,7 +39,28 @@ def _build_page() -> None:
     bind_client_instance()
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
     ui.add_head_html(
-        "<style>.q-stepper, .q-stepper__header, .q-stepper__step, .q-stepper__step-content, .q-stepper__step-inner, .q-stepper__content, .q-panel { width: 100% !important; max-width: none !important; }</style>"  # noqa: E501
+        """
+        <style>
+        .q-stepper, .q-stepper__header, .q-stepper__step, .q-stepper__step-content,
+        .q-stepper__step-inner, .q-stepper__content, .q-panel {
+          width: 100% !important; max-width: none !important;
+        }
+        .wizard-options { gap: 12px; }
+        .wizard-options .q-radio {
+          width: 100%; margin: 0; padding: 14px 16px; align-items: flex-start;
+          border: 1px solid #dfe4ea; border-radius: 10px;
+          background: #fff; transition: border-color .15s, background .15s, box-shadow .15s;
+        }
+        .wizard-options .q-radio:hover { border-color: #90a4ae; background: #f8fafc; }
+        .wizard-options .q-radio[aria-checked="true"] {
+          border-color: var(--q-primary); background: #f2f6f8;
+          box-shadow: 0 0 0 1px var(--q-primary);
+        }
+        .wizard-options .q-radio__inner { margin-top: 1px; }
+        .wizard-options .q-radio__label { line-height: 1.5; }
+        .wizard-goal-options .q-radio { min-height: 70px; }
+        </style>
+        """
     )
     with ui.header().classes("items-center justify-between"):
         with ui.row().classes("items-center"):

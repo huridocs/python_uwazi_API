@@ -15,6 +15,7 @@ from uwazi_admin_agent.configuration import (
     SCRIPT_DEFAULT_MAX_COST,
     SCRIPT_DEFAULT_MAX_REQUESTS,
 )
+from uwazi_admin_agent.domain.guided_task import GOAL_CLASSIFY, GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOALS
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web import operation_gate
@@ -37,39 +38,18 @@ from uwazi_admin_agent.drivers.web.task_dialogs import (
 )
 
 from .broadcast import _broadcast_rows
-from .guided_form import build_guided_step, ensure_guided_form
+from .guided_form import build_guided_step, ensure_guided_form, start_guided_flow
 from .state import _broadcast_notify, _busy_run_text, _notify_error, _session_ended
 
-# How the details step produces the prompt: typed by the operator, or assembled
-# from the guided questions. Both paths converge on the same prompt field, so
-# the validate/generate steps cannot tell them apart.
-_PROMPT_MODE_FREE = "free"
-_PROMPT_MODE_GUIDED = "guided"
+_PROMPT_SOURCE_GUIDED = "guided"
 
 
 def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_validated_prompt: str | None = None) -> None:
-    """Multi-step dialog to create + generate a run.
-
-    ``prefill_name``/``prefill_prompt`` pre-populate the wizard (used by the
-    Duplicate menu action); when a prefill is present the wizard opens
-    directly on the Generate review step (validation is skipped).
-
-    ``prefill_validated_prompt`` is the source run's FINAL prompt — the original
-    request plus the validation step's resolved clarifications (and, after a
-    chat Run, the whole conversation). A duplicate must generate from that, not
-    from the bare original: dropping the clarifications is what made a second
-    generation plan a weaker request and get refused. ``prefill_prompt`` stays
-    the original request, which is what the manifest records as ``prompt``.
-    """
+    """Open the task-type-first wizard, or Generate directly for a duplicate."""
     base_prompt = (prefill_validated_prompt or prefill_prompt).strip() or prefill_prompt
     state: dict[str, Any] = {"name": prefill_name, "prompt": prefill_prompt, "final_prompt": base_prompt}
-    # What the clarification pass is shown, and what a re-validation's answers
-    # get folded back into. For a fresh wizard it is the operator's request; for
-    # a duplicate it is the source run's already-resolved prompt.
     state["_clarify_base"] = base_prompt
     if prefill_name or prefill_prompt:
-        # The generate step recomputes from ``_prompt_base``; set it BEFORE the
-        # step is built or the first repaint would drop the clarifications.
         state["_prompt_base"] = base_prompt
         state["validated_prompt"] = base_prompt
 
@@ -77,17 +57,15 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
         dialog.props("persistent")
         modal_header(dialog, "New task")
         with ui.stepper().classes("w-full") as stepper:
+            # Guided questions have their own progress indicator; outer tabs
+            # would expose irrelevant branches and allow answers to be skipped.
+            stepper.props("no-header")
             state["_dialog"] = dialog
             state["_stepper"] = stepper
             _wizard_step_details(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_guided(state, dialog)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
-            # The stepper header is clickable: landing on the questions step by
-            # any route must load its form at most once.
-            stepper.on_value_change(
-                lambda: ensure_guided_form(state) if stepper.value == "guided" else None
-            )
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
@@ -101,49 +79,63 @@ def _wizard_step_details(
     prefill_name: str = "",
     prefill_prompt: str = "",
 ) -> None:
-    """Step 1: the run's name, plus how its prompt is produced.
+    """Build the opening task-type choice, run-name screen, and custom prompt."""
+    with ui.step(name="goal", title="Task type", icon="category"):
+        ui.label("What would you like to do?").classes("text-h6 q-mb-md")
+        goal_input = ui.radio(
+            {goal: GOAL_DESCRIPTIONS[goal] for goal in GOALS},
+            value=GOAL_CLASSIFY,
+        ).classes("wizard-options wizard-goal-options w-full")
+        state["_goal_input"] = goal_input
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _show_task_details(state)).props("color=primary")
 
-    Two ways in: write the prompt directly, or answer the guided questions
-    (:mod:`uwazi_admin_agent.drivers.web.app.guided_form`), which assemble the
-    prompt heuristically into this same panel. The panels share one prompt, and
-    the validate → generate flow after them is identical — a guided prompt is
-    just a prompt that was written for the operator.
-    """
-    with ui.step(name="details", title="Task", icon="edit"):
-        ui.label("Name the run (a new folder will be created under data/runs/) and describe the task.").classes(
-            "text-body1 q-mb-md"
-        )
+    with ui.step(name="details", title="Details", icon="edit"):
+        state["_details_intro"] = ui.label().classes("text-body1 q-mb-md")
         name_input = ui.input(
             "Run name",
-            placeholder="e.g. merge-entities-2026",
+            placeholder="e.g. classify-judgments-2026",
             value=prefill_name,
             validation={"Required": lambda v: bool(v and v.strip())},
         ).classes("w-full text-h6")
-        mode_input = ui.radio(
-            {
-                _PROMPT_MODE_FREE: "Write the prompt myself",
-                _PROMPT_MODE_GUIDED: "Answer a few questions (no LLM)",
-            },
-            value=_PROMPT_MODE_FREE,
-        ).props("dense").classes("q-mt-md")
+        ui.label("A new folder with this name will be created under data/runs/.").classes("text-body2 text-grey-7")
+        state["_details_name_input"] = name_input
+        with ui.row().classes("q-mt-lg w-full justify-between"):
+            ui.button("Back", on_click=lambda: stepper.set_value("goal")).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_details_next(state)).props("color=primary")
+
+    with ui.step(name="custom", title="Custom task", icon="edit_note") as custom_step:
+        state["_custom_step"] = custom_step
+        custom_step.set_visibility(False)
+        ui.label("Describe the custom analysis or data-processing rule.").classes("text-h6 q-mb-md")
         prompt_input = (
             ui.textarea(
-                "Prompt",
-                placeholder="e.g. Merge duplicate entities sharing the title 'X'...",
+                "Task description",
+                placeholder="Explain what to inspect, what logic to apply, and what suggestions to record.",
                 value=prefill_prompt,
                 validation={"Required": lambda v: bool(v and v.strip())},
             )
-            .classes("w-full q-mt-md")
-            .props("autogrow input-style='min-height: 200px;'")
-            .style("width: 100%")
+            .classes("w-full")
+            .props("outlined autogrow input-style='min-height: 220px;'")
         )
-        state["_details_name_input"] = name_input
         state["_details_prompt_input"] = prompt_input
-        state["_details_mode_input"] = mode_input
-        mode_input.on_value_change(lambda: prompt_input.set_visibility(mode_input.value == _PROMPT_MODE_FREE))
-        with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Next", on_click=lambda: _wizard_details_next(state, name_input, prompt_input, stepper))
+        with ui.row().classes("q-mt-lg w-full justify-between"):
+            ui.button("Back", on_click=lambda: stepper.set_value("details")).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _custom_prompt_next(state)).props("color=primary")
+
+
+def _show_task_details(state: dict[str, Any]) -> None:
+    """Route the selected goal to name entry; custom continues to free text."""
+    custom = state["_goal_input"].value == GOAL_CUSTOM
+    state["_custom_step"].set_visibility(custom)
+    state["_guided_step"].set_visibility(not custom)
+    state["_details_intro"].set_text(
+        "Name the run, then describe your custom task."
+        if custom
+        else "Name the run, then answer one question at a time to build the prompt."
+    )
+    state["_stepper"].set_value("details")
 
 
 def _valid_run_name(state: dict[str, Any], name_input: Any) -> str | None:
@@ -162,21 +154,26 @@ def _valid_run_name(state: dict[str, Any], name_input: Any) -> str | None:
     return name
 
 
-def _wizard_details_next(state: dict[str, Any], name_input: Any, prompt_input: Any, stepper: Any) -> None:
-    """Continue from the details step: to the questions, or on to validate."""
-    if _valid_run_name(state, name_input) is None:
+def _wizard_details_next(state: dict[str, Any]) -> None:
+    """Validate the run name, then route to guided questions or custom entry."""
+    if _valid_run_name(state, state["_details_name_input"]) is None:
         return
-    if (state.get("_details_mode_input") is not None) and state["_details_mode_input"].value == _PROMPT_MODE_GUIDED:
-        state["_prompt_source"] = _PROMPT_MODE_GUIDED
-        stepper.set_value("guided")
-        ensure_guided_form(state)
+    goal = state["_goal_input"].value
+    if goal == GOAL_CUSTOM:
+        state["_stepper"].set_value("custom")
         return
-    prompt = (prompt_input.value or "").strip()
+    state["_prompt_source"] = _PROMPT_SOURCE_GUIDED
+    state["_stepper"].set_value("guided")
+    start_guided_flow(state, goal)
+
+
+def _custom_prompt_next(state: dict[str, Any]) -> None:
+    prompt = (state["_details_prompt_input"].value or "").strip()
     if not prompt:
-        ui.notify("Prompt is required", type="warning")
+        ui.notify("Task description is required", type="warning")
         return
-    state["_prompt_source"] = _PROMPT_MODE_FREE
-    _advance_with_prompt(state, prompt, stepper)
+    state["_prompt_source"] = GOAL_CUSTOM
+    _advance_with_prompt(state, prompt, state["_stepper"])
 
 
 def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> None:
@@ -201,42 +198,31 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
 
 
 def _guided_prompt_ready(state: dict[str, Any], prompt: str) -> None:
-    """Accept the assembled prompt from the questions step and continue the flow.
-
-    The stepper header can reach this step without passing the details panel's
-    Next, so the run name is validated HERE too: an unchecked name would either
-    be empty or overwrite an existing run's folder.
-    """
-    name_input = state.get("_details_name_input")
-    if name_input is None or _valid_run_name(state, name_input) is None:
-        if name_input is not None:
-            state["_stepper"].set_value("details")
-        return
-    state["_prompt_source"] = _PROMPT_MODE_GUIDED
-    if state.get("_details_mode_input") is not None:
-        state["_details_mode_input"].value = _PROMPT_MODE_GUIDED
-    prompt_input = state.get("_details_prompt_input")
-    if prompt_input is not None:
-        prompt_input.value = prompt
+    """Accept the assembled prompt and continue to validation."""
+    state["_prompt_source"] = _PROMPT_SOURCE_GUIDED
     _advance_with_prompt(state, prompt, state["_stepper"])
 
 
 def _wizard_back_to_details(state: dict[str, Any]) -> None:
-    """Back from validate/generate: the questions step when its prompt is in use."""
-    state["_stepper"].set_value("guided" if state.get("_prompt_source") == _PROMPT_MODE_GUIDED else "details")
+    """Back from validate/generate to the screen that produced the prompt."""
+    source = state.get("_prompt_source")
+    destination = "guided" if source == _PROMPT_SOURCE_GUIDED else "custom" if source == GOAL_CUSTOM else "details"
+    state["_stepper"].set_value(destination)
+    if destination == "guided":
+        ensure_guided_form(state)
 
 
 def _guided_back_to_details(state: dict[str, Any]) -> None:
-    """Return from the questions to the details panel, keeping the chosen mode."""
     state["_stepper"].set_value("details")
 
 
 def _guided_switch_to_free_text(state: dict[str, Any]) -> None:
-    """Give up on the questions and edit the prompt directly."""
-    state["_prompt_source"] = _PROMPT_MODE_FREE
-    if state.get("_details_mode_input") is not None:
-        state["_details_mode_input"].value = _PROMPT_MODE_FREE
-    state["_stepper"].set_value("details")
+    """Fall back to custom entry when the instance schema cannot be read."""
+    state["_goal_input"].value = GOAL_CUSTOM
+    state["_prompt_source"] = GOAL_CUSTOM
+    state["_custom_step"].set_visibility(True)
+    state["_guided_step"].set_visibility(False)
+    state["_stepper"].set_value("custom")
 
 
 def _wizard_step_guided(state: dict[str, Any], dialog: Any) -> None:
@@ -474,7 +460,8 @@ def _wizard_generate_back(state: dict[str, Any]) -> None:
     if state.get("_validation_done"):
         target = "validate"
     else:
-        target = "guided" if state.get("_prompt_source") == _PROMPT_MODE_GUIDED else "details"
+        _wizard_back_to_details(state)
+        return
     state["_stepper"].set_value(target)
 
 

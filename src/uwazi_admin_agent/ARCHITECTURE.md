@@ -55,6 +55,9 @@ each `__init__.py` re-exports the original names.
 - `drivers/web/app/` — the NiceGUI app:
   - `state.py`, `broadcast.py`, `login.py`, `runs_table.py`,
     `dialogs.py`, `wizard.py`, `guided_form.py`, `page.py`
+  - The wizard opens with the task type. Guided tasks use the pure conditional
+    navigation in `domain/guided_flow.py`: one question per screen, automatic
+    advancement for radio choices, and only relevant follow-up questions.
 - `drivers/web/review_page/` — the review page:
   - `core.py` — table, filters, actions, selection, drift
   - `entity_window.py` — entity detail window, files, labels/types
