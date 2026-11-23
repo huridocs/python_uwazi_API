@@ -45,6 +45,27 @@ class AuthenticationError(DomainError):
     pass
 
 
+class MissingCredentialsError(AuthenticationError):
+    """No username and/or password was supplied — no login was attempted.
+
+    Raised BEFORE any request reaches the Uwazi instance, so a blank field
+    never turns into a login attempt (and never into a default account).
+    """
+
+
+class CredentialsRejectedError(AuthenticationError):
+    """The instance REFUSED the credentials (401/403) — a wrong password or account.
+
+    Distinct from the other :class:`AuthenticationError` cases (an unreachable
+    instance, a missing session cookie): only this one means "the credentials
+    were wrong", so only this one may count towards a failed-login lockout.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Login failed: {status_code}")
+        self.status_code = status_code
+
+
 class PageNotFoundError(DomainError):
     pass
 

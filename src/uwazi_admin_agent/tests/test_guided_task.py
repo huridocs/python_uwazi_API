@@ -81,9 +81,7 @@ def test_fallback_value_is_required_when_that_mode_is_chosen() -> None:
 
 
 def test_metadata_source_requires_listed_properties() -> None:
-    issues = validate_answers(
-        GuidedAnswers(goal=GOAL_CUSTOM, sources=(SOURCE_METADATA,), custom_description="Do something")
-    )
+    issues = validate_answers(GuidedAnswers(goal=GOAL_CUSTOM, sources=(SOURCE_METADATA,), custom_description="Do something"))
     assert any("metadata properties" in issue for issue in issues)
     ok = GuidedAnswers(
         goal=GOAL_CUSTOM,

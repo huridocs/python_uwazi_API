@@ -96,6 +96,7 @@ from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.llm_port import LlmPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
+from uwazi_api.domain.credentials import require_credentials
 
 # ``load_dotenv`` is idempotent; safe to call from every CLI invocation.
 _ENV_LOADED: bool = load_dotenv(ROOT_PATH / ".env")
@@ -260,8 +261,11 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
     serving it the first configured one would leak another instance's data.
     """
     url = _instance_url_or_default(url)
-    user = user if user is not None else os.environ["UWAZI_USER"]
-    password = password if password is not None else os.environ["UWAZI_PASSWORD"]
+    user = user if user is not None else os.environ.get("UWAZI_USER", "")
+    password = password if password is not None else os.environ.get("UWAZI_PASSWORD", "")
+    # No default account: a missing or empty credential raises here, BEFORE any
+    # request reaches the Uwazi instance.
+    user, password = require_credentials(user, password)
 
     api = UwaziApiAdapter(user=user, password=password, url=url)
     file_cache = build_file_cache(url)

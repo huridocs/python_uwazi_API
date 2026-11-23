@@ -1,5 +1,6 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
+from uwazi_api.domain.credentials import MISSING_CREDENTIALS_MESSAGE, has_credentials
 from uwazi_api.instance_urls import first_instance_url
 
 
@@ -7,6 +8,17 @@ class UwaziCredentials(BaseModel):
     url: str
     username: str
     password: str
+
+    @model_validator(mode="after")
+    def _both_credentials_required(self) -> "UwaziCredentials":
+        """Refuse an empty username or password before any login is attempted.
+
+        No default account is ever assumed: a request with a blank credential
+        is rejected here, so nothing reaches the Uwazi instance.
+        """
+        if not has_credentials(self.username, self.password):
+            raise ValueError(MISSING_CREDENTIALS_MESSAGE)
+        return self
 
     @field_validator("url")
     @classmethod

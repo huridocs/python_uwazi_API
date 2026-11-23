@@ -18,6 +18,7 @@ from uwazi_admin_agent.drivers.links import startup_login_url
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web.host_guard import assert_safe_bind
+from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS, page_target
 from uwazi_admin_agent.drivers.web.run_service import (
     fetch_entity_document_bytes,
 )
@@ -31,7 +32,7 @@ from .broadcast import _refresh_rows_client
 from .dialogs import _capabilities_dialog, _clear_cache_dialog, _invite_links_dialog
 from .login import _login_page, _logout
 from .runs_table import _build_row_menu, _build_runs_table, _selection_toolbar
-from .state import _INSTANCE_URLS, _STATIC_DIR, _is_logged_in
+from .state import _STATIC_DIR
 
 
 def _build_page() -> None:
@@ -137,9 +138,24 @@ def _index(request: Request) -> None:
 
 
 @ui.page("/app")
-def _app() -> None:
-    """Main admin app: only reachable with a validated session login."""
-    if not _is_logged_in():
+def _app(request: Request) -> None:
+    """Main admin app: only reachable with a validated session login.
+
+    The ``instance`` token must be present in the URL, and it must name the
+    instance this session is logged in to. A reload keeps working because the
+    URL still names its target: when the in-memory credentials are gone (server
+    restart, expired session) the operator lands on the LOGIN page of the same
+    instance instead of the bare-path guidance.
+    """
+    instance, redirect = page_target(
+        "/app",
+        request.query_params.get("instance", ""),
+        request.query_params.get("user", ""),
+    )
+    if redirect is not None:
+        ui.navigate.to(redirect)
+        return
+    if not instance:  # defensive: a served page always resolved one
         ui.navigate.to("/")
         return
     _build_page()
@@ -152,14 +168,19 @@ def main() -> None:
     ``ADMIN_WEB_HOST`` plus an ``https://`` ``ADMIN_WEB_PUBLIC_URL`` and a
     stable ``ADMIN_WEB_STORAGE_SECRET``; :func:`assert_safe_bind` refuses the
     cleartext/wrong-secret combinations before the server starts.
+
+    The websocket is bound to the browser session (:mod:`socket_guard`), so a
+    socket that carries no session cookie cannot drive another browser's
+    client.
     """
     _register_static_and_routes()
+    _install_socket_guard()
     port = int(os.environ.get("ADMIN_WEB_PORT", "5055"))
     host = os.environ.get("ADMIN_WEB_HOST", "127.0.0.1")
     public_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
     storage_secret = os.environ.get("ADMIN_WEB_STORAGE_SECRET")
     assert_safe_bind(host, public_url, storage_secret)
-    link = startup_login_url(_INSTANCE_URLS, public_url, port)
+    link = startup_login_url(INSTANCE_URLS, public_url, port)
     if link is not None:
         logger.info("Admin web login link (first configured instance): {}", link)
     ui.run(
@@ -169,6 +190,21 @@ def main() -> None:
         title="Uwazi Admin Agent",
         storage_secret=_storage_secret(),
     )
+
+
+def _install_socket_guard() -> None:
+    """Bind the websocket to the browser session that owns the client.
+
+    NiceGUI dispatches a browser event by ``client_id`` alone, so a socket
+    that carries no session cookie could drive another browser's client. The
+    guard refuses such a socket at connect time and refuses any event whose
+    target client belongs to a different session.
+    """
+    from nicegui import core
+
+    from uwazi_api.socket_guard import install
+
+    install(core.sio)
 
 
 def _storage_secret() -> str:

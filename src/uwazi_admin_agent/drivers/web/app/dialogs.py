@@ -15,6 +15,7 @@ from uwazi_admin_agent.drivers.web import operation_gate
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS
 from uwazi_admin_agent.drivers.web.run_service import (
     clear_cache,
     delete_run,
@@ -36,7 +37,7 @@ from uwazi_admin_agent.drivers.web.task_dialogs import (
 )
 
 from .broadcast import _broadcast_rows, _run_async
-from .state import _ABORT, _EXAMPLE_TASKS, _INSTANCE_URLS, _busy_run_text, _session_ended
+from .state import _ABORT, _EXAMPLE_TASKS, _busy_run_text, _session_ended
 
 
 def _confirm_dialog(
@@ -582,7 +583,7 @@ def _invite_links_dialog() -> None:
                             "Set ADMIN_WEB_PUBLIC_URL to this app's public address (e.g. https://admin.example.org) "
                             "so links are absolute. Until then the links below only work when opened on this host."
                         ).classes("text-body2 text-negative q-mt-sm")
-                    for url in _INSTANCE_URLS:
+                    for url in INSTANCE_URLS:
                         _invite_link_card(url, base_url)
         dialog.open()
 
@@ -596,7 +597,7 @@ def _invite_link_card(url: str, base_url: str) -> None:
         link_input = ui.input("Link").classes("w-full")
 
         def _current_link() -> str:
-            return login_link(base_url, instance_token(url, _INSTANCE_URLS), (user_input.value or "").strip())
+            return login_link(base_url, instance_token(url, INSTANCE_URLS), (user_input.value or "").strip())
 
         def _refresh_link() -> None:
             link_input.value = _current_link()

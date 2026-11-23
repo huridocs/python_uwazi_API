@@ -69,8 +69,8 @@ load_dotenv()
 # non-loopback target, and refuses a list when ANY entry is non-loopback.
 _CONFIGURED = parse_instance_urls(os.getenv("UWAZI_URL", "http://localhost:3000"))
 UWAZI_URL = _CONFIGURED[0] if _CONFIGURED else "http://localhost:3000"
-UWAZI_USER = os.getenv("UWAZI_USER", "admin")
-UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
+UWAZI_USER = os.getenv("UWAZI_USER", "")
+UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "")
 
 DEFAULT_PROPERTY = "notes"
 SECOND_PROPERTY = "summary"

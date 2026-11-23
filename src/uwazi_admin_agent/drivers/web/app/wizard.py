@@ -82,7 +82,6 @@ def _wizard_step_task(
     """Build the opening run-name screen, task-type choice, and custom prompt."""
     with ui.step(name="name", title="Name", icon="edit"):
         ui.label("Name the run").classes("text-h6 q-mb-md")
-        ui.label("A new folder with this name will be created under data/runs/.").classes("text-body2 text-grey-7 q-mb-md")
         name_input = ui.input(
             "Run name",
             placeholder="e.g. classify-judgments-2026",

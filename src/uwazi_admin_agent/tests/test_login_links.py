@@ -11,7 +11,9 @@ from uwazi_admin_agent.drivers.links import (
     login_link,
     login_links,
     match_instance,
+    page_link,
     resolve_login_target,
+    resolve_page_target,
     startup_login_url,
 )
 
@@ -165,3 +167,54 @@ def test_startup_login_url_uses_the_public_base_url() -> None:
     assert startup_login_url(["https://global-rep.uwazi.io"], "https://admin.example/", 5055) == (
         "https://admin.example/?instance=global-rep"
     )
+
+
+# --- in-app page links keep the instance ---------------------------------------
+
+
+def test_page_link_carries_the_instance_token() -> None:
+    assert page_link("/app", "http://localhost:3000", CONFIGURED) == "/app?instance=localhost%3A3000"
+
+
+def test_page_link_keeps_a_dynamic_path() -> None:
+    assert page_link("/review/run-1", "http://localhost:3000", CONFIGURED) == ("/review/run-1?instance=localhost%3A3000")
+
+
+def test_page_link_without_an_instance_returns_the_bare_path() -> None:
+    assert page_link("/app", "", CONFIGURED) == "/app"
+
+
+def test_resolve_page_target_keeps_the_session_instance_on_a_bare_url() -> None:
+    assert resolve_page_target("/app", "", "", "http://localhost:3000", CONFIGURED) == (
+        "http://localhost:3000",
+        "/app?instance=localhost%3A3000",
+    )
+
+
+def test_resolve_page_target_serves_the_matching_session_instance() -> None:
+    assert resolve_page_target("/app", "localhost:3000", "", "http://localhost:3000", CONFIGURED) == (
+        "http://localhost:3000",
+        None,
+    )
+
+
+def test_resolve_page_target_without_a_session_sends_the_token_to_the_login_gate() -> None:
+    assert resolve_page_target("/app", "localhost:3000", "admin", "", CONFIGURED) == (
+        "",
+        "/?instance=localhost%3A3000&user=admin",
+    )
+
+
+def test_resolve_page_target_without_a_session_or_token_is_the_bare_login_gate() -> None:
+    assert resolve_page_target("/app", "", "", "", CONFIGURED) == ("", "/")
+
+
+def test_resolve_page_target_refuses_a_token_for_another_instance() -> None:
+    assert resolve_page_target("/app", "global-rep", "", "http://localhost:3000", CONFIGURED) == (
+        "",
+        "/?instance=global-rep",
+    )
+
+
+def test_resolve_page_target_refuses_an_unknown_token() -> None:
+    assert resolve_page_target("/app", "nope", "", "http://localhost:3000", CONFIGURED) == ("", "/?instance=nope")

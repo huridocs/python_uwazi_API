@@ -22,12 +22,10 @@ from urllib.parse import urlencode, urlsplit
 
 from uwazi_admin_agent.domain.instance import same_instance
 
-MISSING_INSTANCE_MESSAGE = (
-    "The instance parameter is mandatory. Open the full link you were given, which names the Uwazi instance in the URL."
-)
+MISSING_INSTANCE_MESSAGE = "Open the link that was shared with you to reach the right Uwazi instance."
 UNMATCHED_INSTANCE_MESSAGE = "This link does not name a configured Uwazi instance. Check the URL you were given."
 AMBIGUOUS_INSTANCE_MESSAGE = (
-    "This link matches more than one configured Uwazi instance. Ask for a link whose instance parameter names exactly one."
+    "This link matches more than one configured Uwazi instance. Ask for a link that names exactly one."
 )
 
 
@@ -111,6 +109,56 @@ def login_link(base_url: str, instance: str, user: str) -> str:
     return f"{prefix}?{query}"
 
 
+def page_link(path: str, instance: str, configured: list[str]) -> str:
+    """An in-app page URL that carries the instance token in its query string.
+
+    ``/app``, ``/review/<id>`` and ``/task/<id>`` keep the same ``instance``
+    token the invite link used, so a reload is self-describing: with the
+    in-memory credentials gone, the page can send the operator back to the
+    LOGIN page of the same instance instead of the bare ``/`` guidance. The
+    account is NOT carried: the login page offers the username field again.
+    An empty instance yields ``path`` unchanged.
+    """
+    token = instance_token(instance, configured) if instance else ""
+    if not token:
+        return path or "/"
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}{urlencode({'instance': token})}"
+
+
+def resolve_page_target(
+    path: str,
+    instance_param: str,
+    user_param: str,
+    session_instance: str,
+    configured: list[str],
+) -> tuple[str, str | None]:
+    """Resolve an in-app page's URL to ``(instance to serve, redirect url or None)``.
+
+    The page's URL and the session must agree on ONE instance:
+
+    - no session: the page cannot serve, so redirect to the login gate and keep
+      the URL's target — the gate shows that instance (or its own banner when
+      the token is unknown/ambiguous) instead of the bare-path guidance;
+    - a session but no token in the URL: re-enter the SAME page with the token,
+      so the next reload can find its way back to this instance's login page;
+    - a token naming ANOTHER instance: this session's credentials belong to a
+      different host, so redirect to the login gate for the token's instance.
+    """
+    param = (instance_param or "").strip()
+    user = (user_param or "").strip()
+    if not session_instance:
+        return "", login_link("", param, user) if param else "/"
+    if not param:
+        return session_instance, page_link(path, session_instance, configured)
+    matched, error = match_instance(param, configured)
+    if error is not None or matched is None:
+        return "", login_link("", param, user)
+    if not same_instance(matched, session_instance):
+        return "", login_link("", param, user)
+    return session_instance, None
+
+
 def login_links(
     configured: list[str],
     base_url: str,
@@ -181,6 +229,8 @@ __all__ = [
     "login_link",
     "login_links",
     "match_instance",
+    "page_link",
     "resolve_login_target",
+    "resolve_page_target",
     "startup_login_url",
 ]

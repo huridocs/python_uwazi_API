@@ -13,6 +13,7 @@ from uwazi_admin_agent.drivers.web import operation_gate
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
     delete_run,
@@ -165,8 +166,8 @@ def _row_menu_action(action: Any) -> None:
 
 
 def _rowmenu_review(run_id: str) -> None:
-    """Jump to the run's review page."""
-    ui.navigate.to(f"/review/{run_id}")
+    """Jump to the run's review page, keeping the instance in the URL."""
+    ui.navigate.to(page_link(f"/review/{run_id}"))
 
 
 def _rowmenu_retry(run_id: str) -> None:
@@ -351,7 +352,7 @@ def _delete_selected_and_release(selected: list[str], instance: str) -> Any:
 def _on_review(e: Any) -> None:
     """Open the run's review page — the primary write path (accept writes there)."""
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    ui.navigate.to(f"/review/{run_id}")
+    ui.navigate.to(page_link(f"/review/{run_id}"))
 
 
 def _on_delete(e: Any) -> None:

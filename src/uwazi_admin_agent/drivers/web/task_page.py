@@ -15,8 +15,10 @@ from typing import Any
 
 from loguru import logger
 from nicegui import background_tasks, context, ui
+from starlette.requests import Request
 
 from uwazi_admin_agent.domain.task import StepView, TaskView
+from uwazi_admin_agent.drivers.web.instances import page_link, page_target
 from uwazi_admin_agent.drivers.web.operation_gate import (
     busy_text,
     release,
@@ -35,7 +37,6 @@ from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
     credentials_for_instance,
     page_instance_url,
-    session_credentials,
     session_is_active,
 )
 
@@ -51,9 +52,23 @@ _STEP_COLORS: dict[str, str] = {
 
 
 @ui.page("/task/{task_id}")
-def task_page(task_id: str) -> None:
-    """Render the task page (login required)."""
-    if session_credentials() is None:
+def task_page(task_id: str, request: Request) -> None:
+    """Render the task page (login required).
+
+    The URL keeps the ``instance`` token, so a reload lands on the login page
+    of the instance this task belongs to (see
+    :func:`uwazi_admin_agent.drivers.links.resolve_page_target`) instead of the
+    bare-path guidance.
+    """
+    instance, redirect = page_target(
+        f"/task/{task_id}",
+        request.query_params.get("instance", ""),
+        request.query_params.get("user", ""),
+    )
+    if redirect is not None:
+        ui.navigate.to(redirect)
+        return
+    if not instance:  # defensive: a served page always resolved one
         ui.navigate.to("/")
         return
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
@@ -68,19 +83,19 @@ def _build_page(task_id: str) -> None:
     except Exception as exc:  # noqa: BLE001 — a missing task shows an error, never a crash
         with ui.column().classes("w-full items-center justify-center min-h-screen"):
             ui.label(f"Cannot open task {task_id!r}: {exc}").classes("text-body1 text-negative")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat")
+            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat")
         return
 
     state: dict[str, Any] = {"task_id": task_id, "instance_url": instance, "view": view, "cards": {}}
 
     with ui.header().classes("items-center justify-between"):
         with ui.row().classes("items-center"):
-            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
             ui.label(view.name).classes("text-h6 q-ml-sm")
             ui.badge(view.status).props(f"color={_task_color(view.status)}").classes("q-ml-sm")
         with ui.row().classes("items-center"):
             ui.button("Revert task", icon="undo", on_click=lambda: _revert_task(state)).props("flat color=warning")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
 
     with ui.column().classes("w-full items-center"):
         ui.label(
@@ -127,12 +142,12 @@ def _step_card(state: dict[str, Any], step: StepView, view: TaskView) -> None:
                 ui.button(
                     "Review",
                     icon="fact_check",
-                    on_click=lambda s=step: ui.navigate.to(f"/review/{s.run_id}"),
+                    on_click=lambda s=step: ui.navigate.to(page_link(f"/review/{s.run_id}")),
                 ).props("dense flat color=secondary")
                 ui.button(
                     "Show run",
                     icon="open_in_new",
-                    on_click=lambda s=step: ui.navigate.to("/app"),
+                    on_click=lambda s=step: ui.navigate.to(page_link("/app")),
                 ).props("dense flat grey-8")
         if step.description:
             ui.label(step.description).classes("text-body2 text-grey-7")

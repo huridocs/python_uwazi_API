@@ -6,7 +6,9 @@ from functools import partial
 from typing import Any
 
 from nicegui import background_tasks, context, ui
+from starlette.requests import Request
 
+from uwazi_admin_agent.drivers.web.instances import page_link, page_target
 from uwazi_admin_agent.drivers.web.operation_gate import (
     set_progress,
 )
@@ -36,7 +38,6 @@ from uwazi_admin_agent.drivers.web.run_service import (
 from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
     page_instance_url,
-    session_credentials,
 )
 from uwazi_admin_agent.drivers.web.task_dialogs import script_dialog
 
@@ -64,9 +65,23 @@ from .entity_window import _merged_labels, _merged_types, _template_labels, _tem
 
 
 @ui.page("/review/{run_id}")
-def review_page(run_id: str) -> None:
-    """Render the review page for one run (login required)."""
-    if session_credentials() is None:
+def review_page(run_id: str, request: Request) -> None:
+    """Render the review page for one run (login required).
+
+    The URL keeps the ``instance`` token, so a reload lands on the login page
+    of the instance this run belongs to (see
+    :func:`uwazi_admin_agent.drivers.links.resolve_page_target`) instead of the
+    bare-path guidance.
+    """
+    instance, redirect = page_target(
+        f"/review/{run_id}",
+        request.query_params.get("instance", ""),
+        request.query_params.get("user", ""),
+    )
+    if redirect is not None:
+        ui.navigate.to(redirect)
+        return
+    if not instance:  # defensive: a served page always resolved one
         ui.navigate.to("/")
         return
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
@@ -77,14 +92,14 @@ def _build_page(run_id: str) -> None:
     bind_client_instance()
     instance = page_instance_url()
     if not instance:
-        ui.navigate.to("/")
+        ui.navigate.to(page_link("/"))
         return
     try:
         detail = get_run(instance, run_id)
     except Exception as exc:  # noqa: BLE001 — a missing run shows an error, never a crash
         with ui.column().classes("w-full items-center justify-center min-h-screen"):
             ui.label(f"Cannot open review for {run_id!r}: {exc}").classes("text-body1 text-negative")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat")
+            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat")
         return
 
     # The expansion's styling: Quasar's ``q-table--no-wrap`` turns every
@@ -171,7 +186,7 @@ def _build_page(run_id: str) -> None:
 
     with ui.header().classes("items-center justify-between"):
         with ui.row().classes("items-center"):
-            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
             ui.label(f"Review — {detail.run_id}").classes("text-h6 q-ml-sm")
             state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
         with ui.row().classes("items-center"):
@@ -182,7 +197,7 @@ def _build_page(run_id: str) -> None:
             if instance_url:
                 ui.icon("link", color="secondary").classes("q-mr-xs")
                 ui.link(instance_url, instance_url, new_tab=True).classes("text-white")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to("/app")).props("flat color=secondary")
+            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-7xl"):

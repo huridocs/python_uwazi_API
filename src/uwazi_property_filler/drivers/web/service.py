@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from uwazi_api.domain.credentials import require_credentials
 from uwazi_api.domain.search_pages import MAX_RESULT_WINDOW
 from uwazi_api.domain.selection_rectangle import SelectionRectangle
 from uwazi_api.domain.thesauri_label import qualify_label
@@ -601,6 +602,9 @@ _service: PropertyFillerService | None = None
 def build_service(user: str, password: str) -> PropertyFillerService:
     """Composition root: one adapter + store + cache per validated login."""
     url = UWAZI_URL
+    # No default account: an empty credential is refused BEFORE any request
+    # reaches the Uwazi instance.
+    user, password = require_credentials(user, password)
     uwazi = UwaziClientAdapter(user=user, password=password, url=url)
     store = PostgresStore(DATABASE_URL)
     cache = PdfCacheStore()

@@ -1034,11 +1034,15 @@ def main(argv: list[str] | None = None) -> int:
         prog="uwazi-admin-agent text-property-e2e",
         description="Exercise the per-language text-property update + revert path against the live instance.",
     )
-    parser.add_argument("--user", default=os.environ.get("UWAZI_USER", "admin"), help="Uwazi user (default: admin).")
+    parser.add_argument(
+        "--user",
+        default=os.environ.get("UWAZI_USER", ""),
+        help="Uwazi user (default: the UWAZI_USER environment variable; no default account).",
+    )
     parser.add_argument(
         "--password",
-        default=os.environ.get("UWAZI_PASSWORD", "admin"),
-        help="Uwazi password (default: admin).",
+        default=os.environ.get("UWAZI_PASSWORD", ""),
+        help="Uwazi password (default: the UWAZI_PASSWORD environment variable; no default account).",
     )
     parser.add_argument("--template", default=DEFAULT_TEMPLATE, help=f"Template to exercise (default: {DEFAULT_TEMPLATE}).")
     parser.add_argument("--property", default="", help="Text property to write (default: the template's first one).")

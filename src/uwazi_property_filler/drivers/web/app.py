@@ -22,6 +22,7 @@ from fastapi import Response
 from loguru import logger
 from nicegui import app, background_tasks, context, ui
 
+from uwazi_api.domain.credentials import MISSING_CREDENTIALS_MESSAGE, has_credentials
 from uwazi_property_filler.configuration import (
     APP_PORT,
     FILTER_PROPERTY,
@@ -267,9 +268,14 @@ def _login_page() -> None:
             error_label = ui.label().classes("text-negative text-body2")
 
             async def _submit() -> None:
-                # Empty fields default to the local admin account (admin/admin).
-                user = (user_input.value or "").strip() or "admin"
-                password = password_input.value or "admin"
+                # No default account: both fields are required and an empty one
+                # is refused WITHOUT contacting the Uwazi instance.
+                user = (user_input.value or "").strip()
+                secret = password_input.value or ""
+                if not has_credentials(user, secret):
+                    error_label.set_text(MISSING_CREDENTIALS_MESSAGE)
+                    return
+                password = secret
                 try:
                     service = svc.build_service(user, password)
                     await service.login(user, password)
@@ -1666,8 +1672,23 @@ def _labels() -> None:
     _build_label_page()
 
 
+def _install_socket_guard() -> None:
+    """Bind the websocket to the browser session that owns the client.
+
+    NiceGUI dispatches a browser event by ``client_id`` alone, so a socket
+    that carries no session cookie could drive another browser's client — and
+    the property filler's client holds the Uwazi credentials.
+    """
+    from nicegui import core
+
+    from uwazi_api.socket_guard import install
+
+    install(core.sio)
+
+
 def main() -> None:
     app.add_static_files("/static", str(_STATIC_DIR))
+    _install_socket_guard()
 
     @app.get("/pdf/{filename}")
     def _pdf(filename: str) -> Response:

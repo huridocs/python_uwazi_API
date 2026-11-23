@@ -17,8 +17,8 @@ from uwazi_api.testing.e2e_guard import require_local_e2e_target
 
 load_dotenv()
 
-UWAZI_USER = os.getenv("UWAZI_USER", "admin")
-UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "admin")
+UWAZI_USER = os.getenv("UWAZI_USER", "")
+UWAZI_PASSWORD = os.getenv("UWAZI_PASSWORD", "")
 # ``UWAZI_URL`` may be a comma-separated list of instances; E2E targets its
 # first entry, resolved (and localhost-checked) in ``setup_class``.
 UWAZI_URL = first_instance_url(os.getenv("UWAZI_URL")) or "http://localhost:3000"

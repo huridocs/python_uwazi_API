@@ -65,13 +65,14 @@ Create a `.env` file in the repo root with:
 
 ```
 UWAZI_URL=http://localhost:3000
-UWAZI_USER=admin
-UWAZI_PASSWORD=admin
+UWAZI_USER=your-admin-account
+UWAZI_PASSWORD=your-admin-password
 OLLAMA_API_KEY=<api-key>
 ```
 
 - `UWAZI_URL`, `UWAZI_USER`, `UWAZI_PASSWORD` — required; validated at the web
-  login gate.
+  login gate. **There is no default account**: an empty username or password is
+  refused without ever contacting the Uwazi instance.
 - `OLLAMA_API_KEY` — required by the LLM adapter. This is a key for the hosted
   API at `https://ollama.com/v1`, not a local Ollama install.
 - `ADMIN_WEB_PORT` (default `5055`), `ADMIN_WEB_STORAGE_SECRET`,
@@ -107,10 +108,21 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
   full link instead of a login form. A link's instance is matched against the
   configured list and the CONFIGURED url is what is used, so a parameter can
   never point the login at another host.
+- The login screen **shows where the credentials are going**: a compact card
+  above the form prints the instance's full url, and the account named by the
+  link's `user` parameter, so the operator can verify the target before typing
+  a password.
 - **Every task and run belongs to the instance that created it.** Switching
   instances shows an empty task table, because a run's shared ids only make
   sense on their own instance. To switch, log out and open the link of the
   other instance.
+- **The instance stays in every in-app URL.** After login the app navigates to
+  `/app?instance=<token>` (and the review/task pages carry the same token), so
+  a reload — including one after a restart dropped the in-memory credentials —
+  returns to the **login page of that same instance** instead of the bare
+  `http://localhost:5055/` guidance. A page whose URL names a different
+  instance than the session's is sent to that instance's login page rather
+  than serving the wrong instance's data.
 - **Isolation is enforced, not just intended.** Toasts and table refreshes
   reach only clients whose session is still logged in to that same instance;
   a page whose session logged out (in any tab) stops reading that instance's
@@ -181,6 +193,31 @@ your Uwazi credentials. The server
 binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
+
+#### Failed-login lockout
+
+Four wrong passwords lock the account (the instance + the username) out of the
+login page. A locked account is refused **without contacting the Uwazi
+instance**, and the block lasts until the admin agent service is restarted —
+the counters live in process memory, so `docker compose restart uwazi-admin-web`
+clears them. A successful login clears the account's counter.
+
+Only a **refused** credential counts: an unreachable instance, a wrong URL or a
+5xx is an operational failure and never locks anyone out.
+
+#### The websocket is bound to your session
+
+NiceGUI dispatches a browser event by `client_id` alone, so a websocket that
+carries no session cookie could otherwise drive another browser's client — and
+the server would execute it with that browser's Uwazi credentials. Every socket
+is therefore bound to the browser session that owns its client:
+
+- a websocket that carries no session cookie is refused at connect time;
+- a websocket may only drive the clients of its own session, and may only
+  join its own client's room.
+
+Both web apps install the guard (`uwazi_api.socket_guard`), so the admin agent
+and the property filler are covered.
 
 ### Invite links
 
@@ -863,14 +900,16 @@ class ThesauriValue(BaseModel):
 Create a `.env` file in your working directory (only needed for authenticated instances):
 
 ```
-UWAZI_USER=admin
-UWAZI_PASSWORD=admin
+UWAZI_USER=your-account
+UWAZI_PASSWORD=your-password
 UWAZI_URL=http://localhost:3000
 ```
 
 ### Authentication
 
 Authentication is handled automatically when `user` and `password` are provided. The client logs in via `/api/login` and stores the session cookie for subsequent requests.
+
+There is **no default account**: passing an empty username or password raises before any request is made, so a missing credential can never turn into a login attempt against an instance that still ships default credentials.
 
 For **public instances**, no credentials are needed — simply use `UwaziClient.public(url)` or `UwaziClient(url=url)`. Public endpoints like search work without authentication, while write operations will return a 401 error.
 

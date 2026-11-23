@@ -15,6 +15,7 @@ from loguru import logger
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_api.domain.constants import LANGUAGE_TO_FILE_LANGUAGE
+from uwazi_api.domain.credentials import require_credentials
 from uwazi_api.domain.reference import Reference
 from uwazi_api.domain.search_filters import SearchFilters, SelectFilter
 from uwazi_api.domain.search_pages import MAX_RESULT_WINDOW, search_page_sizes
@@ -47,7 +48,9 @@ class UwaziClientAdapter(UwaziPort):
 
     def login_sync(self, user: str, password: str) -> None:
         # Constructing UwaziApiAdapter performs the real /api/login and
-        # raises AuthenticationError on bad credentials.
+        # raises AuthenticationError on bad credentials. An empty credential is
+        # refused BEFORE any request reaches the instance.
+        user, password = require_credentials(user, password)
         adapter = UwaziApiAdapter(user=user, password=password, url=self._url)
         self._adapter = adapter
         self._user = user

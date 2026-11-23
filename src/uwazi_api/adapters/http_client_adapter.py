@@ -5,7 +5,8 @@ import requests
 from requests.cookies import merge_cookies
 
 from uwazi_api.adapters.request_retry import requests_login_session, requests_retry_session
-from uwazi_api.domain.exceptions import AuthenticationError
+from uwazi_api.domain.credentials import require_credentials
+from uwazi_api.domain.exceptions import AuthenticationError, CredentialsRejectedError
 from uwazi_api.instance_urls import first_instance_url
 from uwazi_api.iso_639_choices import iso_639_choices
 from uwazi_api.ports.http_port import HttpClientPort
@@ -28,6 +29,14 @@ class HttpClientAdapter(HttpClientPort):
             if url[-3:] == f"/{language[0]}":
                 url = url[:-3]
         self.url = url
+        # A login is attempted ONLY with both credentials present. An empty
+        # username or password raises instead of being sent to the instance, so
+        # no default account is ever assumed and no empty login is tried.
+        # A client built with NEITHER credential stays unauthenticated: the
+        # documented public-client case, where reads work and writes answer
+        # 401. An EXPLICITLY empty credential is a mistake and raises.
+        if user is not None or password is not None:
+            user, password = require_credentials(user, password)
         self.user = user
         self.password = password
         self.token = token
@@ -123,6 +132,11 @@ class HttpClientAdapter(HttpClientPort):
                     f"Check that the URL is correct and reachable from this service, and that it serves HTTPS."
                 ) from exc
             if response.status_code != 200:
+                if response.status_code in (401, 403):
+                    # The instance ANSWERED and refused the credentials: a wrong
+                    # password or account. The web login gate counts only this
+                    # case towards its failed-login lockout.
+                    raise CredentialsRejectedError(response.status_code)
                 raise AuthenticationError(f"Login failed: {response.status_code}")
             cookie = response.cookies.get("connect.sid")
             if not cookie:

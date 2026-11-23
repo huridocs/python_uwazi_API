@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -10,14 +9,13 @@ from typing import Any
 from loguru import logger
 from nicegui import app, ui
 
-from uwazi_admin_agent.domain.instance import parse_instance_urls
 from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
-from uwazi_admin_agent.drivers.web.session import client_is_active, session_credentials, session_is_active
+from uwazi_admin_agent.drivers.web.session import client_is_active, session_is_active
 
 _STATUS_COLORS: dict[str, str] = {
     "creating": "blue-grey",
@@ -43,8 +41,6 @@ _CLAIM_STATUS: dict[str, str] = {
 _IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
 
 _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.items()) + "}"
-
-_INSTANCE_URLS: list[str] = parse_instance_urls(os.environ.get("UWAZI_URL"))
 
 _EXAMPLE_TASKS = [
     (
@@ -125,17 +121,6 @@ def _release_bulk_claim(instance: str, run_ids: list[str], kind: str = "deleting
     from .broadcast import _broadcast_rows  # local: state is a lower layer than broadcast
 
     _broadcast_rows(instance)
-
-
-def _is_logged_in() -> bool:
-    """True when the session holds validated Uwazi credentials AND an instance.
-
-    A session without an instance is not logged in: every page resolves the
-    instance's own runs/tasks, so an unbound session could not serve them. The
-    credentials live in memory (see ``drivers/web/session.py``); the persisted
-    document only names the instance and the account.
-    """
-    return session_credentials() is not None
 
 
 def _session_ended(instance: str) -> bool:

@@ -37,13 +37,9 @@ GOAL_LABELS: dict[str, str] = {
 # assembled prompt: the operator must recognize in the prompt exactly what they
 # picked.
 GOAL_DESCRIPTIONS: dict[str, str] = {
-    GOAL_CLASSIFY: (
-        "Classify topics — categorize entities using existing thesaurus terms or linked "
-        "relationship entities."
-    ),
+    GOAL_CLASSIFY: ("Classify topics — categorize entities using existing thesaurus terms or linked relationship entities."),
     GOAL_FILL: (
-        "Fill a property — extract information from documents or existing fields to suggest "
-        "values for a target property."
+        "Fill a property — extract information from documents or existing fields to suggest values for a target property."
     ),
     GOAL_CUSTOM: "Custom task — describe a custom analysis or data-processing rule in your own words.",
 }
@@ -114,9 +110,7 @@ OUTPUT_LANGUAGE_LABELS: dict[str, str] = {
     OUTPUT_SOURCE: "Generate only in the language of the source document (do not translate)",
 }
 
-DEFAULT_DOCUMENT_GUIDANCE = (
-    "Determine the optimal extraction strategy based on document length and structure."
-)
+DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on document length and structure."
 
 # Property types each goal can target. A classification target must be a value
 # Uwazi can restrict to thesaurus terms or linked entities; a fill target is any
@@ -309,9 +303,7 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
     if not answers.sources:
         errors.append("Choose at least one input source to read.")
     if SOURCE_METADATA in answers.sources and not answers.metadata_properties:
-        errors.append(
-            "List the metadata properties to read, or uncheck 'Entity metadata properties' as a source."
-        )
+        errors.append("List the metadata properties to read, or uncheck 'Entity metadata properties' as a source.")
     if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
         errors.append("Choose how the input language is selected.")
     if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
@@ -385,10 +377,7 @@ def _output_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> 
     if answers.output_language_mode == OUTPUT_SPECIFIC:
         return f"Generate only for these languages: {_language_text(answers.output_languages, labels)}."
     if answers.output_language_mode == OUTPUT_SOURCE:
-        return (
-            "Generate only in the language of the source document (do not translate into "
-            "other languages)."
-        )
+        return "Generate only in the language of the source document (do not translate into other languages)."
     configured = _language_text(labels.keys(), labels)
     all_languages = "Generate for all configured Uwazi languages (translate or extract into each language)."
     return f"{all_languages} Configured languages: {configured}." if configured else all_languages
