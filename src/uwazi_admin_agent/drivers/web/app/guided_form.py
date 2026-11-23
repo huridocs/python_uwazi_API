@@ -344,8 +344,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             answers.examples,
             placeholder="e.g. 'Plaintiff was granted leave to appeal' -> 'Leave to appeal: granted'",
         )
-    elif question == INPUT_LANGUAGE_MODE_QUESTION:
-        ui.label("Applies when an entity has multiple language versions.").classes("text-body2 text-grey-7 q-mb-md")
+    elif question == EXISTING_VALUE_MODE_QUESTION:
         _radio(state, EXISTING_VALUE_LABELS, answers.existing_value_mode, on_change=lambda: _next(state))
     elif question == EXISTING_VALUE_RULE_QUESTION:
         _input(state, "existing_value_rule", answers.existing_value_rule, "Custom rule")

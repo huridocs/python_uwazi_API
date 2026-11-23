@@ -25,7 +25,7 @@ from dataclasses import dataclass
 GOAL_CLASSIFY = "classify"
 GOAL_FILL = "fill"
 GOAL_CUSTOM = "custom"
-GOALS: tuple[str, ...] = (GOAL_CLASSIFY, GOAL_FILL, GOAL_CUSTOM)
+GOALS: tuple[str, ...] = (GOAL_FILL, GOAL_CLASSIFY, GOAL_CUSTOM)
 
 GOAL_LABELS: dict[str, str] = {
     GOAL_CLASSIFY: "Classify topics",
@@ -263,7 +263,7 @@ def _goal_property_types(goal: str) -> frozenset[str]:
 class GuidedAnswers:
     """Every answer the guided wizard collects (defaults = untouched controls)."""
 
-    goal: str = GOAL_CLASSIFY
+    goal: str = GOAL_FILL
     templates: tuple[str, ...] = ()
     entity_scope: str = SCOPE_ALL
     scope_filter: str = ""

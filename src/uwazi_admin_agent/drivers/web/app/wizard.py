@@ -15,7 +15,7 @@ from uwazi_admin_agent.configuration import (
     SCRIPT_DEFAULT_MAX_COST,
     SCRIPT_DEFAULT_MAX_REQUESTS,
 )
-from uwazi_admin_agent.domain.guided_task import GOAL_CLASSIFY, GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOALS
+from uwazi_admin_agent.domain.guided_task import GOAL_CLASSIFY, GOAL_CUSTOM, GOAL_FILL, GOAL_DESCRIPTIONS, GOALS
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web import operation_gate
@@ -98,7 +98,7 @@ def _wizard_step_task(
         ui.label("What would you like to do?").classes("text-h6 q-mb-md")
         goal_input = ui.radio(
             {goal: GOAL_DESCRIPTIONS[goal] for goal in GOALS},
-            value=GOAL_CLASSIFY,
+            value=GOAL_FILL,
         ).classes("wizard-options wizard-goal-options w-full")
         state["_goal_input"] = goal_input
         with ui.row().classes("q-mt-lg w-full justify-between"):
