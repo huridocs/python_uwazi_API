@@ -223,7 +223,7 @@ def _rowmenu_duplicate(run_id: str) -> None:
 
     The name is numbered against the existing runs (``"<id> copy"``,
     ``"<id> copy 2"``, …) instead of being hardcoded: the prefilled wizard jumps
-    straight to the Generate step, which skips ``_wizard_details_next``'s
+    straight to the Generate step, which skips ``_wizard_name_next``'s
     existing-name check — so a repeated duplicate silently regenerated the SAME
     run folder instead of creating a second task.
     """

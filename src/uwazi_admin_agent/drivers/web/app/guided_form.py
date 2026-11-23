@@ -119,9 +119,7 @@ def build_guided_step(
     on_free_text: Callable[[], None],
 ) -> None:
     """Create the guided step; its first question loads lazily on entry."""
-    with ui.step(name="guided", title="Questions", icon="quiz") as step:
-        step.set_visibility(False)
-        state["_guided_step"] = step
+    with ui.step(name="guided", title="Questions", icon="quiz"):
         state["_guided_submit"] = on_submit
         state["_guided_dialog"] = dialog
         state["_guided_free_text"] = on_free_text

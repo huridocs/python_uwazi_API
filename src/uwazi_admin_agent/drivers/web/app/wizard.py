@@ -62,7 +62,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             stepper.props("no-header")
             state["_dialog"] = dialog
             state["_stepper"] = stepper
-            _wizard_step_details(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
+            _wizard_step_task(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_guided(state, dialog)
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
@@ -72,14 +72,28 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             _show_generate_prompt(state)
 
 
-def _wizard_step_details(
+def _wizard_step_task(
     state: dict[str, Any],
     stepper: Any,
     dialog: Any,
     prefill_name: str = "",
     prefill_prompt: str = "",
 ) -> None:
-    """Build the opening task-type choice, run-name screen, and custom prompt."""
+    """Build the opening run-name screen, task-type choice, and custom prompt."""
+    with ui.step(name="name", title="Name", icon="edit"):
+        ui.label("Name the run").classes("text-h6 q-mb-md")
+        ui.label("A new folder with this name will be created under data/runs/.").classes("text-body2 text-grey-7 q-mb-md")
+        name_input = ui.input(
+            "Run name",
+            placeholder="e.g. classify-judgments-2026",
+            value=prefill_name,
+            validation={"Required": lambda v: bool(v and v.strip())},
+        ).classes("w-full text-h6")
+        state["_details_name_input"] = name_input
+        with ui.row().classes("q-mt-lg w-full justify-end"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_name_next(state)).props("color=primary")
+
     with ui.step(name="goal", title="Task type", icon="category"):
         ui.label("What would you like to do?").classes("text-h6 q-mb-md")
         goal_input = ui.radio(
@@ -87,27 +101,11 @@ def _wizard_step_details(
             value=GOAL_CLASSIFY,
         ).classes("wizard-options wizard-goal-options w-full")
         state["_goal_input"] = goal_input
-        with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Next", icon="arrow_forward", on_click=lambda: _show_task_details(state)).props("color=primary")
-
-    with ui.step(name="details", title="Details", icon="edit"):
-        state["_details_intro"] = ui.label().classes("text-body1 q-mb-md")
-        name_input = ui.input(
-            "Run name",
-            placeholder="e.g. classify-judgments-2026",
-            value=prefill_name,
-            validation={"Required": lambda v: bool(v and v.strip())},
-        ).classes("w-full text-h6")
-        ui.label("A new folder with this name will be created under data/runs/.").classes("text-body2 text-grey-7")
-        state["_details_name_input"] = name_input
         with ui.row().classes("q-mt-lg w-full justify-between"):
-            ui.button("Back", on_click=lambda: stepper.set_value("goal")).props("color=grey-7 flat")
-            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_details_next(state)).props("color=primary")
+            ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_goal_next(state)).props("color=primary")
 
-    with ui.step(name="custom", title="Custom task", icon="edit_note") as custom_step:
-        state["_custom_step"] = custom_step
-        custom_step.set_visibility(False)
+    with ui.step(name="custom", title="Custom task", icon="edit_note"):
         ui.label("Describe the custom analysis or data-processing rule.").classes("text-h6 q-mb-md")
         prompt_input = (
             ui.textarea(
@@ -121,21 +119,15 @@ def _wizard_step_details(
         )
         state["_details_prompt_input"] = prompt_input
         with ui.row().classes("q-mt-lg w-full justify-between"):
-            ui.button("Back", on_click=lambda: stepper.set_value("details")).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: stepper.set_value("goal")).props("color=grey-7 flat")
             ui.button("Next", icon="arrow_forward", on_click=lambda: _custom_prompt_next(state)).props("color=primary")
 
 
-def _show_task_details(state: dict[str, Any]) -> None:
-    """Route the selected goal to name entry; custom continues to free text."""
-    custom = state["_goal_input"].value == GOAL_CUSTOM
-    state["_custom_step"].set_visibility(custom)
-    state["_guided_step"].set_visibility(not custom)
-    state["_details_intro"].set_text(
-        "Name the run, then describe your custom task."
-        if custom
-        else "Name the run, then answer one question at a time to build the prompt."
-    )
-    state["_stepper"].set_value("details")
+def _wizard_name_next(state: dict[str, Any]) -> None:
+    """Validate the run name, then ask what the task should do."""
+    if _valid_run_name(state, state["_details_name_input"]) is None:
+        return
+    state["_stepper"].set_value("goal")
 
 
 def _valid_run_name(state: dict[str, Any], name_input: Any) -> str | None:
@@ -154,10 +146,8 @@ def _valid_run_name(state: dict[str, Any], name_input: Any) -> str | None:
     return name
 
 
-def _wizard_details_next(state: dict[str, Any]) -> None:
-    """Validate the run name, then route to guided questions or custom entry."""
-    if _valid_run_name(state, state["_details_name_input"]) is None:
-        return
+def _wizard_goal_next(state: dict[str, Any]) -> None:
+    """Route the selected task type to guided questions or custom entry."""
     goal = state["_goal_input"].value
     if goal == GOAL_CUSTOM:
         state["_stepper"].set_value("custom")
@@ -203,25 +193,23 @@ def _guided_prompt_ready(state: dict[str, Any], prompt: str) -> None:
     _advance_with_prompt(state, prompt, state["_stepper"])
 
 
-def _wizard_back_to_details(state: dict[str, Any]) -> None:
+def _wizard_back_to_prompt_step(state: dict[str, Any]) -> None:
     """Back from validate/generate to the screen that produced the prompt."""
     source = state.get("_prompt_source")
-    destination = "guided" if source == _PROMPT_SOURCE_GUIDED else "custom" if source == GOAL_CUSTOM else "details"
+    destination = "guided" if source == _PROMPT_SOURCE_GUIDED else "custom" if source == GOAL_CUSTOM else "goal"
     state["_stepper"].set_value(destination)
     if destination == "guided":
         ensure_guided_form(state)
 
 
-def _guided_back_to_details(state: dict[str, Any]) -> None:
-    state["_stepper"].set_value("details")
+def _guided_back_to_goal(state: dict[str, Any]) -> None:
+    state["_stepper"].set_value("goal")
 
 
 def _guided_switch_to_free_text(state: dict[str, Any]) -> None:
     """Fall back to custom entry when the instance schema cannot be read."""
     state["_goal_input"].value = GOAL_CUSTOM
     state["_prompt_source"] = GOAL_CUSTOM
-    state["_custom_step"].set_visibility(True)
-    state["_guided_step"].set_visibility(False)
     state["_stepper"].set_value("custom")
 
 
@@ -230,7 +218,7 @@ def _wizard_step_guided(state: dict[str, Any], dialog: Any) -> None:
         state,
         dialog,
         on_submit=lambda prompt, _answers: _guided_prompt_ready(state, prompt),
-        on_back=lambda: _guided_back_to_details(state),
+        on_back=lambda: _guided_back_to_goal(state),
         on_free_text=lambda: _guided_switch_to_free_text(state),
     )
 
@@ -249,7 +237,7 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
         ui.label("Ask the LLM what it understood from your prompt before generating.").classes("text-body1 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_details(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Validate", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
 
@@ -260,7 +248,7 @@ def _start_validation(state: dict[str, Any]) -> None:
         # The stepper header can jump straight here: validating nothing would
         # ask the LLM to interpret an empty request.
         ui.notify("Write or build a prompt first", type="warning")
-        _wizard_back_to_details(state)
+        _wizard_back_to_prompt_step(state)
         return
     container = state["_validate_container"]
     container.clear()
@@ -309,7 +297,7 @@ def _render_validation_error(state: dict[str, Any], container: Any, exc: Excepti
         ui.label(str(exc)).classes("text-body2 text-red-10 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_details(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=primary")
 
 
@@ -357,7 +345,7 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
 
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_details(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("color=primary")
 
@@ -409,7 +397,7 @@ def _wizard_skip(state: dict[str, Any]) -> None:
         # Reached by a header jump before any prompt exists: generate would
         # have nothing to send.
         ui.notify("Write or build a prompt first", type="warning")
-        _wizard_back_to_details(state)
+        _wizard_back_to_prompt_step(state)
         return
     state["final_prompt"] = base
     state["_prompt_base"] = base
@@ -460,7 +448,7 @@ def _wizard_generate_back(state: dict[str, Any]) -> None:
     if state.get("_validation_done"):
         target = "validate"
     else:
-        _wizard_back_to_details(state)
+        _wizard_back_to_prompt_step(state)
         return
     state["_stepper"].set_value(target)
 
