@@ -22,6 +22,7 @@ from uwazi_admin_agent.domain.guided_flow import (
     EXISTING_VALUE_RULE_QUESTION,
     FALLBACK_MODE_QUESTION,
     FALLBACK_VALUE_QUESTION,
+    GENERATION_QUESTION,
     FILL_RULES_QUESTION,
     INPUT_LANGUAGE_MODE_QUESTION,
     INPUT_LANGUAGES_QUESTION,
@@ -71,7 +72,6 @@ _QUESTION_TITLES = {
     TEMPLATE_QUESTION: "Which templates should be analyzed?",
     CUSTOM_DESCRIPTION_QUESTION: "What should the task do?",
     TARGET_PROPERTY_QUESTION: "Which property should receive the suggestion?",
-    FILL_RULES_QUESTION: "How should the value be generated?",
     EXISTING_VALUE_MODE_QUESTION: "What if the property already has a value?",
     EXISTING_VALUE_RULE_QUESTION: "What custom rule should apply to existing values?",
     FALLBACK_MODE_QUESTION: "What if no topic clearly applies?",
@@ -80,13 +80,11 @@ _QUESTION_TITLES = {
     SCOPE_FILTER_QUESTION: "What filter or condition selects the entities?",
     SOURCES_QUESTION: "Which information should be used as input?",
     METADATA_PROPERTIES_QUESTION: "Which metadata properties should be read?",
-    DOCUMENT_GUIDANCE_QUESTION: "Where does the relevant information live?",
     INPUT_LANGUAGE_MODE_QUESTION: "Which input language should be read?",
     INPUT_LANGUAGES_QUESTION: "Which primary input languages should be used?",
     OUTPUT_LANGUAGE_MODE_QUESTION: "How should multilingual outputs be generated?",
     OUTPUT_LANGUAGES_QUESTION: "Which output languages should be generated?",
-    ADDITIONAL_RULES_QUESTION: "Any additional instructions or edge cases?",
-    EXAMPLES_QUESTION: "Any examples of expected results?",
+    GENERATION_QUESTION: "How should the value be generated?",
     REVIEW_QUESTION: "Review the assembled prompt",
 }
 
@@ -306,15 +304,48 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
         widget.value = answers.target_property or None
         widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
         state["_guided_draft_text"] = answers.target_property
-    elif question == FILL_RULES_QUESTION:
-        _textarea(
+    elif question == GENERATION_QUESTION:
+        state["_guided_draft_rules"] = {
+            FILL_RULES_QUESTION: answers.fill_rules,
+            DOCUMENT_GUIDANCE_QUESTION: answers.document_guidance,
+            ADDITIONAL_RULES_QUESTION: answers.additional_rules,
+            EXAMPLES_QUESTION: answers.examples,
+        }
+        if answers.goal == GOAL_FILL:
+            ui.label("Rules or formatting for the generated value").classes("text-subtitle1")
+            _rules_textarea(
+                state,
+                FILL_RULES_QUESTION,
+                answers.fill_rules,
+                placeholder="e.g. Summarize the ruling in 3 concise bullet points.",
+                min_height=120,
+            )
+        ui.label("Where does the relevant information live?").classes("text-subtitle1 q-mt-sm")
+        ui.label("Optional — continue to use the default strategy").classes("text-body2 text-grey-7")
+        _rules_textarea(
             state,
-            "fill_rules",
-            answers.fill_rules,
-            label="Rules or formatting for the generated value",
-            placeholder="e.g. Summarize the ruling in 3 concise bullet points.",
+            DOCUMENT_GUIDANCE_QUESTION,
+            answers.document_guidance,
+            placeholder="e.g. Look at the first 2 pages for the header, date and author.",
         )
-    elif question == EXISTING_VALUE_MODE_QUESTION:
+        ui.label("Any additional instructions or edge cases?").classes("text-subtitle1 q-mt-sm")
+        ui.label("Optional").classes("text-body2 text-grey-7")
+        _rules_textarea(
+            state,
+            ADDITIONAL_RULES_QUESTION,
+            answers.additional_rules,
+            placeholder="e.g. Keep legal terminology formal. Ignore footnotes.",
+        )
+        ui.label("Any examples of expected results?").classes("text-subtitle1 q-mt-sm")
+        ui.label("Optional").classes("text-body2 text-grey-7")
+        _rules_textarea(
+            state,
+            EXAMPLES_QUESTION,
+            answers.examples,
+            placeholder="e.g. 'Plaintiff was granted leave to appeal' -> 'Leave to appeal: granted'",
+        )
+    elif question == INPUT_LANGUAGE_MODE_QUESTION:
+        ui.label("Applies when an entity has multiple language versions.").classes("text-body2 text-grey-7 q-mb-md")
         _radio(state, EXISTING_VALUE_LABELS, answers.existing_value_mode, on_change=lambda: _next(state))
     elif question == EXISTING_VALUE_RULE_QUESTION:
         _input(state, "existing_value_rule", answers.existing_value_rule, "Custom rule")
@@ -349,14 +380,6 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             label="Metadata properties to read",
             placeholder="e.g. title, summary, description",
         )
-    elif question == DOCUMENT_GUIDANCE_QUESTION:
-        _textarea(
-            state,
-            "document_guidance",
-            answers.document_guidance,
-            label="Optional — continue to use the default strategy",
-            placeholder="e.g. Look at the first 2 pages for the header, date and author.",
-        )
     elif question == INPUT_LANGUAGE_MODE_QUESTION:
         ui.label("Applies when an entity has multiple language versions.").classes("text-body2 text-grey-7 q-mb-md")
         _radio(
@@ -376,22 +399,6 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
         )
     elif question == OUTPUT_LANGUAGES_QUESTION:
         _languages(state, "output_languages", answers.output_languages, "Output language(s)")
-    elif question == ADDITIONAL_RULES_QUESTION:
-        _textarea(
-            state,
-            "additional_rules",
-            answers.additional_rules,
-            label="Optional",
-            placeholder="e.g. Keep legal terminology formal. Ignore footnotes.",
-        )
-    elif question == EXAMPLES_QUESTION:
-        _textarea(
-            state,
-            "examples",
-            answers.examples,
-            label="Optional",
-            placeholder="e.g. 'Plaintiff was granted leave to appeal' -> 'Leave to appeal: granted'",
-        )
     elif question == REVIEW_QUESTION:
         ui.label("Go back to change any answer, or continue to validation with this prompt.").classes(
             "text-body2 text-grey-7 q-mb-md"
@@ -399,6 +406,22 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
         ui.textarea(value=assembled_prompt(state)).classes("w-full font-mono").props(
             "readonly outlined input-style='min-height: 300px;'"
         )
+
+
+def _rules_textarea(
+    state: dict[str, Any],
+    field: str,
+    value: str,
+    *,
+    placeholder: str = "",
+    min_height: int = 90,
+) -> None:
+    """Textarea on the merged generation page; writes into the per-field drafts."""
+    drafts = state.setdefault("_guided_draft_rules", {})
+    drafts[field] = value
+    widget = ui.textarea(value=value, placeholder=placeholder).classes("w-full")
+    widget.props(f"autogrow outlined input-style='min-height: {min_height}px;'")
+    widget.on_value_change(lambda event: drafts.__setitem__(field, event.value or ""))
 
 
 def _input(state: dict[str, Any], field: str, value: str, label: str) -> None:
@@ -481,16 +504,19 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
             OUTPUT_LANGUAGE_MODE_QUESTION: "output_language_mode",
         }[question]
         updates[field] = state["_guided_radio_value"]
+    elif question == GENERATION_QUESTION:
+        drafts = state.get("_guided_draft_rules", {})
+        if FILL_RULES_QUESTION in drafts:
+            updates["fill_rules"] = str(drafts.get(FILL_RULES_QUESTION, "")).strip()
+        updates["document_guidance"] = str(drafts.get(DOCUMENT_GUIDANCE_QUESTION, "")).strip()
+        updates["additional_rules"] = str(drafts.get(ADDITIONAL_RULES_QUESTION, "")).strip()
+        updates["examples"] = str(drafts.get(EXAMPLES_QUESTION, "")).strip()
     elif question in {
         CUSTOM_DESCRIPTION_QUESTION,
         TARGET_PROPERTY_QUESTION,
-        FILL_RULES_QUESTION,
         EXISTING_VALUE_RULE_QUESTION,
         FALLBACK_VALUE_QUESTION,
         SCOPE_FILTER_QUESTION,
-        DOCUMENT_GUIDANCE_QUESTION,
-        ADDITIONAL_RULES_QUESTION,
-        EXAMPLES_QUESTION,
     }:
         field = state.get("_guided_draft_field") or question
         updates[field] = str(state.get("_guided_draft_text", "")).strip()

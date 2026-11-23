@@ -41,7 +41,8 @@ def test_conditional_follow_ups_appear_only_for_answers_that_need_them() -> None
     assert questions.index("metadata_properties") == questions.index("sources") + 1
     assert questions.index("input_languages") == questions.index("input_language_mode") + 1
     assert questions.index("output_languages") == questions.index("output_language_mode") + 1
-    assert next_question_id("examples", answers) == "review"
+    assert questions.index("generation") == len(questions) - 2
+    assert next_question_id("generation", answers) == "review"
 
 
 def test_custom_task_skips_target_property_and_fill_or_classify_rules() -> None:
@@ -61,3 +62,18 @@ def test_visible_question_validation_blocks_incomplete_required_answers() -> Non
     complete = GuidedAnswers(**{**answers.__dict__, "target_property": "topics", "sources": (SOURCE_PDF,)})
     assert question_error("target_property", complete) is None
     assert question_error("sources", complete) is None
+
+
+def test_fill_rules_document_guidance_and_examples_merge_into_one_generation_page() -> None:
+    fill = GuidedAnswers(goal=GOAL_FILL, fill_rules="Summarize in bullets", sources=(SOURCE_PDF,))
+    questions = guided_question_ids(fill)
+    assert "fill_rules" not in questions
+    assert "document_guidance" not in questions
+    assert "additional_rules" not in questions
+    assert "examples" not in questions
+    assert questions[-2:] == ("generation", "review")
+    # The merged page sits after scope/sources/languages, not next to the target property.
+    assert questions.index("generation") > questions.index("scope")
+    assert question_error("generation", fill) is None
+    assert question_error("generation", GuidedAnswers(goal=GOAL_FILL)) is not None
+    assert question_error("generation", GuidedAnswers(goal=GOAL_CLASSIFY)) is None

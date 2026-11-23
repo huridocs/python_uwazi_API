@@ -34,6 +34,7 @@ OUTPUT_LANGUAGE_MODE_QUESTION = "output_language_mode"
 OUTPUT_LANGUAGES_QUESTION = "output_languages"
 ADDITIONAL_RULES_QUESTION = "additional_rules"
 EXAMPLES_QUESTION = "examples"
+GENERATION_QUESTION = "generation"
 REVIEW_QUESTION = "review"
 
 
@@ -45,7 +46,7 @@ def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
     else:
         questions.append(TARGET_PROPERTY_QUESTION)
         if answers.goal == GOAL_FILL:
-            questions.extend((FILL_RULES_QUESTION, EXISTING_VALUE_MODE_QUESTION))
+            questions.append(EXISTING_VALUE_MODE_QUESTION)
             if answers.existing_value_mode == EXISTING_CUSTOM:
                 questions.append(EXISTING_VALUE_RULE_QUESTION)
         elif answers.goal == GOAL_CLASSIFY:
@@ -59,14 +60,14 @@ def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
     questions.append(SOURCES_QUESTION)
     if SOURCE_METADATA in answers.sources:
         questions.append(METADATA_PROPERTIES_QUESTION)
-    questions.extend((DOCUMENT_GUIDANCE_QUESTION, INPUT_LANGUAGE_MODE_QUESTION))
+    questions.extend((INPUT_LANGUAGE_MODE_QUESTION,))
     if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
         questions.append(INPUT_LANGUAGES_QUESTION)
     questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
 
     if answers.output_language_mode == OUTPUT_SPECIFIC:
         questions.append(OUTPUT_LANGUAGES_QUESTION)
-    questions.extend((ADDITIONAL_RULES_QUESTION, EXAMPLES_QUESTION, REVIEW_QUESTION))
+    questions.extend((GENERATION_QUESTION, REVIEW_QUESTION))
     return tuple(questions)
 
 
@@ -92,7 +93,7 @@ def question_error(question: str, answers: GuidedAnswers) -> str | None:
         return "Describe what the task should analyze, extract or suggest."
     if question == TARGET_PROPERTY_QUESTION and not answers.target_property.strip():
         return "Choose or enter a target property."
-    if question == FILL_RULES_QUESTION and not answers.fill_rules.strip():
+    if question == GENERATION_QUESTION and answers.goal == GOAL_FILL and not answers.fill_rules.strip():
         return "Describe the rules or formatting for the generated value."
     if question == EXISTING_VALUE_RULE_QUESTION and not answers.existing_value_rule.strip():
         return "Describe the custom rule for properties that already have a value."
