@@ -410,8 +410,8 @@ def _filter_bar(state: dict[str, Any]) -> None:
                 .props("dense outlined")
                 .classes("min-w-[150px]")
             )
-            # Op and Status are MULTI-selects: an operator often wants to see
-            # two statuses (or two ops) at once. No "any" option — an empty
+            # Operation and Status are MULTI-selects: an operator often wants to
+            # see two statuses (or two operations) at once. No "any" option — an empty
             # selection is the unfiltered state, and the Reset button clears it.
             # Their options list only the values the run actually has, each with
             # its row count (see _refresh_filter_counts for the live refresh).
@@ -421,7 +421,7 @@ def _filter_bar(state: dict[str, Any]) -> None:
                     filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
                     multiple=True,
                     value=state["op"],
-                    label="Op",
+                    label="Operation",
                     on_change=lambda e: _set_filter(state, "op", e.value or []),
                 )
                 .props("dense outlined use-chips clearable")

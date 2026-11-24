@@ -1,4 +1,4 @@
-"""Invite links for the admin web login page: instance + username preselected.
+"""Login-page URL helpers: instance token + username preselected.
 
 An operator hands each instance's admins a link like
 
@@ -113,7 +113,7 @@ def page_link(path: str, instance: str, configured: list[str]) -> str:
     """An in-app page URL that carries the instance token in its query string.
 
     ``/app``, ``/review/<id>`` and ``/task/<id>`` keep the same ``instance``
-    token the invite link used, so a reload is self-describing: with the
+    token the login URL used, so a reload is self-describing: with the
     in-memory credentials gone, the page can send the operator back to the
     LOGIN page of the same instance instead of the bare ``/`` guidance. The
     account is NOT carried: the login page offers the username field again.
@@ -159,27 +159,6 @@ def resolve_page_target(
     return session_instance, None
 
 
-def login_links(
-    configured: list[str],
-    base_url: str,
-    user: str,
-    instance: str | None = None,
-) -> list[str]:
-    """The login links for the configured instances, in configured order.
-
-    ``instance`` selects ONE instance (by url or by short token); an
-    unmatched or ambiguous value yields no links at all.
-    """
-    if instance is None:
-        urls = list(configured)
-    else:
-        matched, error = match_instance(instance, configured)
-        if error is not None or matched is None:
-            return []
-        urls = [matched]
-    return [login_link(base_url, instance_token(url, configured), user) for url in urls]
-
-
 def resolve_login_target(
     instance_param: str,
     user_param: str,
@@ -205,21 +184,6 @@ def resolve_login_target(
     return matched, user, None
 
 
-def startup_login_url(configured: list[str], base_url: str, port: int) -> str | None:
-    """The login link printed at startup for the FIRST configured instance.
-
-    The username is left out: the receiving admin types their own. An empty
-    ``base_url`` yields a locally reachable absolute url (a relative link is
-    useless as a terminal message).
-    """
-    if not configured:
-        return None
-    query = urlencode({"instance": instance_token(configured[0], configured)})
-    if base_url:
-        return f"{base_url.rstrip('/')}/?{query}"
-    return f"http://localhost:{port}/?{query}"
-
-
 __all__ = [
     "AMBIGUOUS_INSTANCE_MESSAGE",
     "MISSING_INSTANCE_MESSAGE",
@@ -227,10 +191,8 @@ __all__ = [
     "instance_token",
     "instance_tokens",
     "login_link",
-    "login_links",
     "match_instance",
     "page_link",
     "resolve_login_target",
     "resolve_page_target",
-    "startup_login_url",
 ]

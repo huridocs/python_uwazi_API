@@ -955,7 +955,6 @@ def _entity_suggestions(
                     picker = ui.select(
                         {option["label"]: _option_text(option) for option in options},
                         multiple=True,
-                        with_input=True,
                         value=selected,
                         label="Values",
                         on_change=lambda e, s=suggestion: _set_selection(

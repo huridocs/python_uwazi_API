@@ -58,6 +58,10 @@ class RunClaim:
     run_id: str
     kind: str
     started_at: datetime
+    note: str = ""
+    """Operator-facing stage of the claimed work ('LLM is writing the script…',
+    'running the benchmark…'). Shown beside the task's status badge so a long
+    generation reports what it is doing instead of a bare spinner."""
 
 
 # The gated kinds, with the operator-facing words each one is shown as. Only
@@ -313,6 +317,29 @@ def release_runs(instance: str, run_ids: list[str], kind: str | None = None) -> 
         release_run(instance, run_id, kind)
 
 
+def set_claim_note(instance: str, run_id: str, note: str) -> None:
+    """Publish one operator-facing stage for a claimed run (thread-safe).
+
+    A note for an unclaimed run is ignored: the work it describes is over, and
+    a stale stage must never outlive the claim it belongs to.
+    """
+    key = _key(instance)
+    if not key or not run_id:
+        return
+    with _CLAIM_LOCK:
+        claims = _CLAIMS.get(key)
+        claim = (claims or {}).get(run_id)
+        if claim is None:
+            return
+        claims[run_id] = RunClaim(
+            instance=claim.instance,
+            run_id=claim.run_id,
+            kind=claim.kind,
+            started_at=claim.started_at,
+            note=note,
+        )
+
+
 def run_claim(instance: str, run_id: str) -> RunClaim | None:
     """The claim on ONE run, or None when it is free/unbound."""
     key = _key(instance)
@@ -346,6 +373,7 @@ __all__ = [
     "run_claim",
     "run_claim_text",
     "run_claims",
+    "set_claim_note",
     "set_note",
     "set_progress",
     "snapshot",

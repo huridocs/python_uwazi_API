@@ -396,18 +396,27 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
   Multiselect values inferred this way are still ONE update per entity; the operator
   picks the final value set in the review window before Run.
 
-  SOURCE CONTEXT (`context`) — when the value came from a specific passage of text
-  (the paragraph you classified, the segment you extracted a value from), send that
-  passage with the write so the operator can verify the proposal without opening the
-  document: `'context': 'the exact text you read'`. It is shown under the change row
-  in the review table. Use it whenever you read ONE passage to produce the value —
-  a paragraph you classified, a segment you extracted from, the sentence you matched.
-  Omit `context` when the value came from the entity's own metadata (use `basis`
-  then), from a whole document you summarised, or when there is no single passage
-  to show. Example:
+  SOURCE CONTEXT (`context`) — the EXACT passage the value was read from: the
+  paragraph you classified, the segment you extracted from, the sentence you
+  matched. Send it with the write so the operator can verify the proposal at the
+  place the extraction actually happened, without searching the document, and
+  so the review row points at the RIGHT spot in the PDF/page/HTML:
       update_entities([{'shared_id': sid, 'template_name': T,
                         'metadata': {'topic': topic},
                         'context': paragraph}], language)
+  This is REQUIRED for any value read from a document, file or URL (see the
+  DOCUMENT EXTRACTION recipe). It must be the passage the value came from — not
+  a summary of the entity, not the whole page, not a nearby unrelated block.
+  The `extract` function can return the passage under the reserved `_context`
+  key (`{prop: value, "_context": passage}`); pop it into `'context'` and do not
+  put it in `metadata`. Omit `context` ONLY when the value came from the entity's
+  own metadata (use `basis` then) or from a whole document you summarised (where
+  no single passage exists). Example:
+      out = extract(text, ctx)
+      if out:
+          passage = out.pop("_context", "")
+          updates.append({'shared_id': sid, 'template_name': T,
+                          'metadata': out, 'context': passage})
 
   PARALLEL BULK HELPERS (auto-throttled — PREFER these for EVERY bulk set)
   The write helpers above (everything except `add_info`) send ONE HTTP REQUEST
@@ -1307,6 +1316,27 @@ not hunt for it there. Same sample-derived extractor shape, different source:
    date (None = not found, never guess), and `textmatch.wratio(label, p["text"])`
    to pick the paragraph that states the field when the wording varies.
 4. Return None when the value is absent: the entity stays untouched (hard rule 3).
+5. EVERY update derived from a document MUST carry `'context'` — the EXACT text
+   that produced the value, copied from the passage you read. The operator's
+   review window shows that passage as the evidence for the proposal; a row
+   without it forces them to search the PDF themselves, and a row whose context
+   is somewhere else in the document (a summary, the whole page, a different
+   paragraph) is worse: it points at the wrong place. Build it in the SAME step
+   that computes the value:
+     - When the extractor returns the source passage too, prefer it:
+       `out = extract(text, ctx)` returning `{prop: value, "_context": passage}`
+       (an extra dict key is fine — the script pops it) and send it:
+         `updates.append({..., "metadata": {...}, "context": out.pop("_context", "")})`.
+     - Otherwise find the passage deterministically and pass THAT string:
+       `para = next((p for p in seg["paragraphs"] if <the rule that matched>), None)`
+       and use `para["text"]`. Never re-derive a different snippet later.
+     - Keep it tight: the paragraph/segment/sentence actually read, not the
+       whole document and not an unrelated nearby block. Include the page for a
+       PDF passage when it helps the operator locate it (`[page N] <text>`).
+     - One `context` per write dict: if ONE entity's value came from several
+       passages, join them with a blank line rather than guessing one.
+   The HTML/URL extraction paths above have the same rule (`'context': segment`
+   in step 4 of the HTML recipe) — apply it here identically.
 
 KNOWN LIMITATIONS (do not try to work around these in the script; note them in
 `result` if they apply):

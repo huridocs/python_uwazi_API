@@ -44,21 +44,6 @@ _IN_FLIGHT_JS = "['creating', 'regenerating', 'running', 'reverting'].includes(p
 
 _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.items()) + "}"
 
-_EXAMPLE_TASKS = [
-    (
-        "Find missing supporting files",
-        "Show entities from template DOCUMENT and Document Status to Adopted that has no supporting files",
-    ),
-    (
-        "Extract data from attachments",
-        "Fill a property from the attached HTML file",
-    ),
-    (
-        "Merge multilingual duplicates",
-        "Merge entities holding same PDF in different languages",
-    ),
-]
-
 # The web app is a PACKAGE (``drivers/web/app/``) whose static assets stayed at
 # the parent ``drivers/web/static`` when the original ``app.py`` was split, so
 # the directory is two levels up from this module. Pointing at the package
@@ -82,6 +67,18 @@ def _run_in_flight(instance: str, run_id: str) -> str | None:
     if claim is None:
         return None
     return _CLAIM_STATUS.get(claim.kind)
+
+
+def _run_stage(instance: str, run_id: str) -> str:
+    """The live stage of the work claimed on this run ('' when idle/free).
+
+    A generation publishes what it is doing ("LLM is authoring the extraction
+    function…", "Running the extraction benchmark…") on its per-run claim, so
+    the tasks table can say it beside the status badge instead of showing a
+    spinner for a minute with no explanation.
+    """
+    claim = operation_gate.run_claim(instance, run_id)
+    return (claim.note if claim is not None else "") or ""
 
 
 def _run_is_busy(instance: str, run_id: str) -> bool:

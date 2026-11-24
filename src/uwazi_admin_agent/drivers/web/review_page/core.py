@@ -253,7 +253,7 @@ def _change_table(state: dict[str, Any]) -> None:
             "sortable": False,
             "style": TEMPLATE_COLUMN,
         },
-        {"name": "ops", "label": "Ops", "field": "ops", "align": "left", "sortable": False, "style": OPS_COLUMN},
+        {"name": "ops", "label": "Operations", "field": "ops", "align": "left", "sortable": False, "style": OPS_COLUMN},
         {
             "name": "run_status",
             "label": "Status",
@@ -992,7 +992,7 @@ def _refresh_expand_button(state: dict[str, Any]) -> None:
 
 
 def _refresh_filter_counts(state: dict[str, Any]) -> None:
-    """Relabel the Op/Status options with fresh whole-run counts (best-effort).
+    """Relabel the Operation/Status options with fresh whole-run counts (best-effort).
 
     The counts move when rows change status (accept, discard, run, revert), so
     the controls are rebuilt after every refresh. ``set_options`` keeps the

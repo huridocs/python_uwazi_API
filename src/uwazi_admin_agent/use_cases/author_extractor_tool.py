@@ -82,6 +82,14 @@ Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
   4. regex over the collapsed text (htmlextract.text)
 - Return a dict of {property_name: extracted_value} when found; return None when
   nothing is found (the entity is then left untouched).
+- ALSO return the exact passage the values were read from under the reserved
+  key `"_context"` — the cell/paragraph/sentence text itself, not a summary and
+  not the whole page:
+      return {"document_ref": ref, "_context": cell_text}
+  The generated script pops that key into the write's `context`, which the
+  operator's review window shows as the evidence at the place the extraction
+  happened. A missing `_context` forces them to search the document; a wrong one
+  (the whole page, a different row) points at the wrong place.
 - Guard the whole body with try/except returning None on odd input. Fully
   deterministic: no random, no I/O, no prints.
 WORKFLOW: use the `query_entities` tool to sample ~8-12 real entities across the

@@ -32,6 +32,7 @@ from .state import (
     _notify_error,
     _run_in_flight,
     _run_is_busy,
+    _run_stage,
 )
 
 
@@ -41,6 +42,9 @@ def _summary_to_row(run: RunSummary, instance: str) -> dict[str, Any]:
         "id": run.run_id,
         "name": run.run_id,
         "status": status or run.status.value,
+        # The live work stage ("Running the extraction benchmark…"). Only an
+        # in-flight claim has one; a finished run keeps a blank caption.
+        "stage": _run_stage(instance, run.run_id) if status else "",
         "created": run.created_at.strftime("%Y-%m-%d %H:%M"),
         "last_executed": run.last_executed_at.strftime("%Y-%m-%d %H:%M") if run.last_executed_at else "—",
         "modified": run.modified,
@@ -52,12 +56,13 @@ def _summary_to_row(run: RunSummary, instance: str) -> dict[str, Any]:
     }
 
 
-def _creating_to_row(name: str) -> dict[str, Any]:
+def _creating_to_row(name: str, stage: str = "") -> dict[str, Any]:
     """A placeholder row for a run whose generation is in flight."""
     return {
         "id": name,
         "name": name,
         "status": "creating",
+        "stage": stage,
         "created": "—",
         "last_executed": "—",
         "modified": 0,
@@ -87,7 +92,7 @@ def _run_rows(instance: str | None = None) -> list[dict[str, Any]]:
     # Merge in runs whose generation is still in flight (not yet persisted).
     for claim in operation_gate.run_claims(instance):
         if claim.kind == "creating" and claim.run_id not in persisted_ids:
-            rows.append(_creating_to_row(claim.run_id))
+            rows.append(_creating_to_row(claim.run_id, claim.note))
     return rows
 
 
@@ -107,11 +112,32 @@ def _refresh_rows_client(instance: str | None = None) -> None:
         # the previous instance's rows.
         if table.rows:
             table.rows = []
+            table.selected = []
             table.update()
         return
     table.rows = _run_rows(instance)
+    _prune_table_selection(table)
     table.update()
     _sync_bulk_delete_button(instance)
+
+
+def _prune_table_selection(table: Any) -> None:
+    """Drop selected rows that are no longer in the table.
+
+    Reassigning ``table.rows`` does not clear the checkbox selection: Quasar
+    keeps rendering ``props.selected``, so a deleted run stayed counted in the
+    footer ("2 records selected") even though its row was gone. The selected
+    set is the client's ``_task_selection`` plus Quasar's own ``selected`` prop;
+    both are pruned against the rows that still exist.
+    """
+    rows = table.rows or []
+    visible = {str(row.get("id")) for row in rows if isinstance(row, dict)}
+    current = [row for row in (table.selected or []) if isinstance(row, dict) and str(row.get("id")) in visible]
+    if len(current) != len(table.selected or []):
+        table.selected = current
+    selection = getattr(context.client, "_task_selection", None)
+    if selection is not None:
+        context.client._task_selection = [run_id for run_id in selection if run_id in visible]
 
 
 def _broadcast_rows(instance: str) -> None:

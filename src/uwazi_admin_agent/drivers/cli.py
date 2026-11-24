@@ -23,14 +23,12 @@ is read from ``active_run.yaml``.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from typing import Sequence
 
 from uwazi_admin_agent.adapters.runs_config_loader import RunsConfigLoader
 from uwazi_admin_agent.drivers.step_generate import run_generate
 from uwazi_admin_agent.drivers.step_inspect_run import run_inspect_run
-from uwazi_admin_agent.drivers.step_links import run_links
 from uwazi_admin_agent.drivers.step_list_runs import run_list_runs
 from uwazi_admin_agent.drivers.step_revert import run_revert
 from uwazi_admin_agent.drivers.step_scan import run_scan
@@ -47,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{generate,scan,revert,verify,list-runs,inspect-run,links,text-property-e2e}",
+        metavar="{generate,scan,revert,verify,list-runs,inspect-run,text-property-e2e}",
     )
 
     sub.add_parser(
@@ -77,26 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect-run", help="Print a run's manifest summary (status, counts, prompt, script path).")
     p_inspect.add_argument("--run", default=None, help="Run name (default: the active run in active_run.yaml).")
-
-    p_links = sub.add_parser(
-        "links",
-        help="Print ready-made admin login links (one per configured instance, or one for --instance).",
-    )
-    p_links.add_argument(
-        "--base-url",
-        default=os.environ.get("ADMIN_WEB_PUBLIC_URL", ""),
-        help="Public address of the admin web app (default: ADMIN_WEB_PUBLIC_URL, else relative links).",
-    )
-    p_links.add_argument(
-        "--user",
-        default="",
-        help="Username to preselect in the link (default: none — the link asks for it).",
-    )
-    p_links.add_argument(
-        "--instance",
-        default=None,
-        help="A configured instance url or short token (default: all configured instances).",
-    )
 
     p_e2e = sub.add_parser(
         "text-property-e2e",
@@ -140,8 +118,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_list_runs()
     if command == "inspect-run":
         return run_inspect_run(run_id=_resolve_run_name(args.run))
-    if command == "links":
-        return run_links(args.base_url, args.user, args.instance)
     if command == "text-property-e2e":
         return run_text_property_e2e_main(
             [

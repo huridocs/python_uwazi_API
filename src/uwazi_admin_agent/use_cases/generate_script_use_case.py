@@ -31,6 +31,7 @@ Not unit-tested (needs an LLM); validated by import + agent construction with a
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from loguru import logger
@@ -41,6 +42,12 @@ from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.generation_stages import (
+    STAGE_SCRIPT,
+    STAGE_THINKING,
+    benchmark_stage,
+    tool_stage,
+)
 from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
 from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
 from uwazi_admin_agent.use_cases.instance_languages import fetch_instance_languages, system_prompt_with_languages
@@ -162,8 +169,19 @@ class GenerateScriptUseCase:
             self._budget,
         )
 
-    async def execute(self, prompt: str) -> GeneratedScript:
+    async def execute(
+        self,
+        prompt: str,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> GeneratedScript:
         """Run the agent once on ``prompt`` and return the generated script.
+
+        ``on_stage`` (optional) receives a SHORT operator-facing sentence when
+        the turn moves to a different kind of work (reading the schema,
+        sampling entities, authoring the extractor, running the benchmark,
+        emitting the script). The tasks table shows it beside the run's status
+        so a minute-long generation reports what it is doing instead of a bare
+        spinner. It must not block: the driver only writes a registry entry.
 
         Every turn starts from a FRESH conversation with the CURRENT system
         prompt. There is deliberately no history replay: a persisted
@@ -182,6 +200,7 @@ class GenerateScriptUseCase:
             prompt,
             deps=self._deps,
             usage_limits=UsageLimits(request_limit=self._max_requests),
+            event_stream_handler=_stage_handler(on_stage),
         )
         script = self._coerce_result(run)
         logger.info("generated script: lines={} preview={}", script.python_code.count("\n") + 1, script.python_code[:200])
@@ -193,3 +212,49 @@ class GenerateScriptUseCase:
         if isinstance(output, GeneratedScript):
             return output
         raise RuntimeError(f"Agent returned an unsupported output type: {type(output).__name__}")
+
+
+def _stage_handler(on_stage: Callable[[str], None] | None):
+    """The pydantic-ai ``event_stream_handler`` that reports the current stage.
+
+    Only TOOL BOUNDARIES are reported (not token deltas): a stage is a kind of
+    work, and the table would otherwise be repainted on every streamed chunk.
+    The benchmark is numbered, because re-running it is the refinement loop's
+    visible signal.
+    """
+    if on_stage is None:
+        return None
+
+    benchmarks = 0
+    last = ""
+
+    def _report(text: str) -> None:
+        nonlocal last
+        if text == last:
+            return
+        last = text
+        on_stage(text)
+
+    async def _handle(ctx: Any, events: Any) -> None:
+        nonlocal benchmarks
+        from pydantic_ai.messages import (
+            FinalResultEvent,
+            FunctionToolCallEvent,
+            OutputToolCallEvent,
+        )
+
+        async for event in events:
+            if isinstance(event, FunctionToolCallEvent):
+                name = event.part.tool_name
+                if name == "benchmark_extractor":
+                    benchmarks += 1
+                    _report(benchmark_stage(benchmarks))
+                else:
+                    _report(tool_stage(name))
+            elif isinstance(event, OutputToolCallEvent):
+                _report(STAGE_SCRIPT)
+            elif isinstance(event, FinalResultEvent):
+                _report(STAGE_SCRIPT)
+
+    _report(STAGE_THINKING)
+    return _handle

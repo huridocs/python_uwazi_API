@@ -109,6 +109,12 @@ _QUESTION_TITLES = {
     CREATE_TARGET_PROPERTIES_QUESTION: "Which properties should the new entities populate?",
     CREATE_COUNT_QUESTION: "How many entities should be created?",
     CREATE_INSTRUCTIONS_QUESTION: "What should the new entities contain?",
+    # The generation page merges several rule fields into ONE screen; these
+    # titles are only a fallback (a future flow could surface them alone).
+    FILL_RULES_QUESTION: "Which rules should the generated value follow?",
+    DOCUMENT_GUIDANCE_QUESTION: "Where does the relevant information live?",
+    ADDITIONAL_RULES_QUESTION: "Any additional instructions or edge cases?",
+    EXAMPLES_QUESTION: "Any examples of expected results?",
 }
 
 
@@ -297,7 +303,7 @@ def _render_question(state: dict[str, Any]) -> None:
         ui.label(GOAL_LABELS[answers.goal]).classes("text-overline text-primary")
         ui.label(f"Question {index + 1} of {len(questions)}").classes("text-caption text-grey-7")
         ui.linear_progress(value=(index + 1) / len(questions), show_value=False).classes("w-full q-mb-lg")
-        title = _QUESTION_TITLES[current]
+        title = _QUESTION_TITLES.get(current, "Question")
         if answers.goal == GOAL_CREATE:
             if current == TEMPLATE_QUESTION:
                 title = "Which template should the new entities use?"

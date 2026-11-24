@@ -86,7 +86,7 @@ OP_BORDER_COLORS: dict[str, str] = {
 }
 DEFAULT_BORDER_COLOR: str = "#607d8b"
 
-# Ops that a Run CANNOT execute one part at a time: their recorded rows are the
+# Operations a Run CANNOT execute one part at a time: their recorded rows are the
 # whole action (a delete is Uwazi-side one call; publishing is entity-wide; a
 # merge writes the target and deletes its sources in the same pass). Their
 # suboperations render locked, with the reason as the lock's tooltip.
@@ -176,7 +176,7 @@ def rerun_blocked(op: str, status_label: str) -> bool:
     return status_label == "reverted" and op in REVERT_RECREATES_OPS
 
 
-# Ops whose OPERATION-level undo is not an in-place restore of one live entity:
+# Operations whose OPERATION-level undo is not an in-place restore of one live entity:
 # a create's undo is a deletion, a delete's is a re-create, a create-merge's
 # target exists only as a ``dry-created-N`` placeholder, and a file copy appends
 # bytes no entity snapshot can remove. An ``update_and_delete`` merge is NOT in

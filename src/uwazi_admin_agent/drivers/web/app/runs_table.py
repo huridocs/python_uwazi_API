@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from nicegui import app, context, ui
@@ -17,6 +18,7 @@ from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
     delete_run,
+    export_tasks_csv,
     get_run,
     list_runs,
 )
@@ -53,7 +55,14 @@ def _columns() -> list[dict[str, Any]]:
             "sortable": True,
             "style": "max-width: 260px; white-space: normal; word-break: break-word",
         },
-        {"name": "status", "label": "Status", "field": "status", "align": "left", "sortable": True},
+        {
+            "name": "status",
+            "label": "Status",
+            "field": "status",
+            "align": "left",
+            "sortable": True,
+            "style": "min-width: 190px",
+        },
         {"name": "created", "label": "Created", "field": "created", "align": "left", "sortable": True},
         {"name": "last_executed", "label": "Last execution", "field": "last_executed", "align": "left", "sortable": True},
         {"name": "modified", "label": "Modified", "field": "modified", "align": "right", "sortable": True},
@@ -86,11 +95,15 @@ def _build_runs_table() -> ui.table:
         "body-cell-status",
         f"""
         <q-td :props="props">
-            <q-badge :color="({_STATUS_COLOR_JS})[props.row.status] || 'grey'"
-                     class="q-px1 q-py-2xs items-center">
-                <q-spinner v-if="{_IN_FLIGHT_JS}" size="12px" color="white" class="q-mr-xs" />
-                <span class="text-capitalize">{{{{ props.row.status }}}}</span>
-            </q-badge>
+            <div class="column items-start">
+                <q-badge :color="({_STATUS_COLOR_JS})[props.row.status] || 'grey'"
+                         class="q-px1 q-py-2xs items-center">
+                    <q-spinner v-if="{_IN_FLIGHT_JS}" size="12px" color="white" class="q-mr-xs" />
+                    <span class="text-capitalize">{{{{ props.row.status }}}}</span>
+                </q-badge>
+                <div v-if="props.row.stage" class="text-caption text-grey-7 q-mt-xs"
+                     style="max-width: 260px; white-space: normal;">{{{{ props.row.stage }}}}</div>
+            </div>
         </q-td>
         """,
     )
@@ -287,7 +300,32 @@ def _selection_toolbar() -> None:
         # Solid primary matches the review UI's Run button (`color="primary"`).
         ui.button("New Task", icon="add", on_click=_new_task_wizard).props("unelevated color=primary text-color=white")
         delete_button = ui.button("Delete", icon="delete", on_click=_bulk_delete_selected).props("dense flat color=negative")
+        # Export is a READ: it does not need a selection and never blocks on an
+        # in-flight run (the manifests it reads are already on disk).
+        ui.button("Export CSV", icon="download", on_click=_export_tasks_csv).props("dense flat color=secondary").tooltip(
+            "Download every task with its prompt and validated prompt as a CSV"
+        )
         context.client._delete_selected_button = delete_button  # noqa: SLF001 — per-client enable state
+
+
+def _export_tasks_csv() -> None:
+    """Download every task of this instance as CSV, prompts included.
+
+    The prompts are the point: the table shows counters only, and the operator
+    needs the wording outside the app (review, diff, hand-off). A failure is
+    reported as a toast — the file is generated in memory, so nothing partial
+    reaches the browser.
+    """
+    instance = page_instance_url()
+    if _session_ended(instance):
+        return
+    try:
+        content = export_tasks_csv(instance)
+    except Exception as exc:  # noqa: BLE001 — surface the failure, never a broken download
+        ui.notify(f"Export failed: {exc}", type="negative", multi_line=True)
+        return
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    ui.download.content(content.encode("utf-8"), filename=f"tasks-{stamp}.csv", media_type="text/csv")
 
 
 def _bulk_delete_selected() -> None:
@@ -343,6 +381,18 @@ def _delete_selected_and_release(selected: list[str], instance: str) -> Any:
         if deleted:
             selection = getattr(context.client, "_task_selection", [])
             context.client._task_selection = [run_id for run_id in selection if run_id not in set(selected)]
+            # Quasar's footer banner counts ``table.selected``, not our list:
+            # pruning only the ids left it saying "2 records selected" under a
+            # table that no longer had those rows. The rows here are still the
+            # STALE page payload, so ``_prune_table_selection`` cannot see the
+            # deletion — drop the removed ids explicitly.
+            table = getattr(context.client, "_runs_table", None)
+            if table is not None and not table.is_deleted:
+                removed = set(selected)
+                table.selected = [
+                    row for row in (table.selected or []) if not (isinstance(row, dict) and row.get("id") in removed)
+                ]
+                table.update()
         # Release AFTER pruning: its broadcast refreshes the toolbar from the
         # pruned selection, so the Delete button disables immediately.
         _release_bulk_claim(instance, selected)

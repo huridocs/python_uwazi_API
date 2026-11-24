@@ -401,6 +401,36 @@ def test_update_records_no_context_when_there_is_none() -> None:
     assert records[0]["context"] is None
 
 
+def test_a_reserved_context_key_inside_metadata_is_promoted_and_dropped() -> None:
+    """An extractor may return the passage under ``_context``; it must never
+    reach Uwazi as a property and must still show as the row's evidence."""
+    records: list[dict] = []
+    update_entities = _dry_run_write_helpers(records)["update_entities"]
+
+    update_entities([{"shared_id": "s1", "metadata": {"topic": ["T"], "_context": "the exact passage"}, "context": None}])
+
+    assert records[0]["metadata"] == {"topic": ["T"]}
+    assert records[0]["context"] == "the exact passage"
+
+
+def test_an_explicit_context_wins_over_the_metadata_key() -> None:
+    records: list[dict] = []
+    update_entities = _dry_run_write_helpers(records)["update_entities"]
+
+    update_entities(
+        [
+            {
+                "shared_id": "s1",
+                "metadata": {"topic": ["T"], "_context": "from metadata"},
+                "context": "explicit passage",
+            }
+        ]
+    )
+
+    assert records[0]["metadata"] == {"topic": ["T"]}
+    assert records[0]["context"] == "explicit passage"
+
+
 def test_a_list_of_paragraphs_is_joined_into_one_context() -> None:
     records: list[dict] = []
     update_entities = _dry_run_write_helpers(records)["update_entities"]

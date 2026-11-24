@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.domain.metadata_diff import PropertyChange, build_property_changes
-from uwazi_admin_agent.drivers.links import instance_token, login_link
 from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
-from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS
 from uwazi_admin_agent.drivers.web.run_service import (
-    clear_cache,
     delete_run,
     get_entity_segmentation,
     get_run,
@@ -28,16 +24,13 @@ from uwazi_admin_agent.drivers.web.run_service import (
 from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
     page_instance_url,
-    session_user,
 )
 from uwazi_admin_agent.drivers.web.task_dialogs import (
-    close_button,
-    copy_to_clipboard,
     modal_header,
 )
 
 from .broadcast import _broadcast_rows, _run_async
-from .state import _ABORT, _EXAMPLE_TASKS, _busy_run_text, _session_ended
+from .state import _ABORT, _busy_run_text, _session_ended
 
 
 def _confirm_dialog(
@@ -140,7 +133,7 @@ def _error_dialog(run_id: str) -> None:
                         columns = [
                             {"name": "time", "label": "Time (UTC)", "field": "time", "align": "left", "sortable": True},
                             {"name": "step", "label": "Step", "field": "step", "align": "left", "sortable": True},
-                            {"name": "op", "label": "Op", "field": "op", "align": "left", "sortable": True},
+                            {"name": "op", "label": "Operation", "field": "op", "align": "left", "sortable": True},
                             {"name": "outcome", "label": "Outcome", "field": "outcome", "align": "left", "sortable": True},
                             {"name": "detail", "label": "Detail", "field": "detail", "align": "left", "sortable": False},
                         ]
@@ -529,122 +522,6 @@ def _rename_confirm(dialog: Any, old_id: str, name_input: Any) -> None:
         _run_async(_do(), f"Renamed {old_id} → {new_id}", instance, old_id, "renaming"),
         name=f"rename {old_id}",
     )
-
-
-def _capabilities_dialog() -> None:
-    """Show example tasks the service can carry out.
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it.
-    """
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
-            dialog.props("maximized")
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                with ui.row().classes("w-full items-center justify-between q-mb-md"):
-                    ui.label("Example Tasks").classes("text-h6")
-                    close_button(dialog, dense=True)
-                with ui.column().classes("w-full grow q-pr-md").style("overflow-y: auto"):
-                    for title, prompt in _EXAMPLE_TASKS:
-                        with ui.card().classes("w-full"):
-                            ui.label(title).classes("text-subtitle1 text-bold")
-                            ui.label(prompt).classes("text-body2 text-grey-7")
-        dialog.open()
-
-
-def _invite_links_dialog() -> None:
-    """Show a ready-made login link per configured instance.
-
-    Each link opens the login page with that instance (and, when a username
-    is given, that account) already filled in: the admin only types their
-    Uwazi password. The link carries NO credential — the password is still
-    validated against Uwazi — and the instance is only ever the CONFIGURED
-    url, matched against the ``UWAZI_URL`` list.
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it.
-    """
-    base_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
-            dialog.props("maximized")
-            with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                with ui.row().classes("w-full items-center justify-between q-mb-md"):
-                    ui.label("Invite links").classes("text-h6")
-                    close_button(dialog, dense=True)
-                with ui.column().classes("w-full grow q-pr-md").style("overflow-y: auto"):
-                    ui.label(
-                        "Each link opens this app with the Uwazi instance filled in and, when you enter a "
-                        "username, skips the username field too. The admin still types their Uwazi password "
-                        "— the link contains no credential."
-                    ).classes("text-body1")
-                    if not base_url:
-                        ui.label(
-                            "Set ADMIN_WEB_PUBLIC_URL to this app's public address (e.g. https://admin.example.org) "
-                            "so links are absolute. Until then the links below only work when opened on this host."
-                        ).classes("text-body2 text-negative q-mt-sm")
-                    for url in INSTANCE_URLS:
-                        _invite_link_card(url, base_url)
-        dialog.open()
-
-
-def _invite_link_card(url: str, base_url: str) -> None:
-    """One instance's card: its username field, its link and a copy button."""
-    with ui.card().classes("w-full"):
-        ui.label(url).classes("text-subtitle1 text-bold")
-        user_input = ui.input("Username (optional — leave empty to let the admin type it)").classes("w-full")
-        user_input.value = session_user()
-        link_input = ui.input("Link").classes("w-full")
-
-        def _current_link() -> str:
-            return login_link(base_url, instance_token(url, INSTANCE_URLS), (user_input.value or "").strip())
-
-        def _refresh_link() -> None:
-            link_input.value = _current_link()
-
-        user_input.on_value_change(_refresh_link)
-        _refresh_link()
-        with ui.row().classes("items-center no-wrap"):
-            link_input.classes("grow")
-            copy_to_clipboard(_current_link, "Copy")
-
-
-def _clear_cache_dialog() -> None:
-    """Confirm + clear the persistent file/entity cache (forces fresh reads).
-
-    Created on the page layout (not inside the refreshable table) so the 5s
-    auto-refresh doesn't destroy it. Clearing drops every cached entity raw and
-    file byte for the configured instance, so the next task re-fetches server
-    truth instead of serving stale copies — the fix for results that don't
-    change after editing entities directly in Uwazi.
-    """
-    with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-            modal_header(dialog, "Clear cache")
-            ui.label(
-                "Clear the persistent file/entity cache? The next task will "
-                "re-fetch entity data and file bytes from Uwazi instead of "
-                "serving cached copies. Use this after editing entities "
-                "directly in Uwazi so results reflect the latest data."
-            ).classes("text-body1")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-                ui.button("Clear", color="negative", on_click=lambda: _do_clear_cache(dialog))
-    dialog.open()
-
-
-def _do_clear_cache(dialog: Any) -> None:
-    """Run the cache clear and report how many entries were removed."""
-    dialog.close()
-    instance = page_instance_url()
-    if _session_ended(instance):
-        return
-    try:
-        removed = clear_cache(instance)
-    except Exception as exc:  # noqa: BLE001 — surface every failure to the operator
-        ui.notify(f"Failed to clear cache: {exc}", type="negative", multi_line=True)
-        return
-    ui.notify(f"Cache cleared ({removed} entries removed)", type="positive")
 
 
 def _confirm_and_close(

@@ -6,7 +6,7 @@ re-exported here, so callers keep importing from the same package.
 
 from __future__ import annotations
 
-from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache, build_runtime
+from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_runtime
 
 from .apply import _apply_use_case, apply_outcomes
 from .chat import clarify_prompt, compact_chat
@@ -85,8 +85,8 @@ from .runs import (
     _resolve_titles,
     _run_level_events,
     _touch_counts,
-    clear_cache,
     delete_run,
+    export_tasks_csv,
     get_execution_history,
     get_run,
     get_run_audit,
@@ -102,7 +102,6 @@ from .wiring import _paths, _script_caps_budget, build_suggestion_store, read_ru
 __all__ = [
     "build_audit_log",
     "build_backup_store",
-    "build_file_cache",
     "build_runtime",
     "GenerateError",
     "RevertVerificationError",
@@ -128,7 +127,7 @@ __all__ = [
     "get_execution_history",
     "get_table_update_time",
     "delete_run",
-    "clear_cache",
+    "export_tasks_csv",
     "rename_run",
     "get_entity_segmentation",
     "document_language_candidates",

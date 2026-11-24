@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import yaml
 
@@ -10,7 +11,8 @@ from uwazi_admin_agent.adapters.audit_log_adapter import JsonlAuditLog
 from uwazi_admin_agent.domain.audit_record import AuditRecord, AuditStep
 from uwazi_admin_agent.domain.manifest import MigrationManifest
 from uwazi_admin_agent.domain.run_name import validate_run_name
-from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store, build_file_cache
+from uwazi_admin_agent.domain.task_export import tasks_csv
+from uwazi_admin_agent.drivers.runtime import build_audit_log, build_backup_store
 from uwazi_admin_agent.ports.audit_log_port import AuditLogPort
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 
@@ -77,6 +79,40 @@ def get_run(url: str, run_id: str) -> RunDetail:
         plan_kind=manifest.plan_kind,
         plan_description=manifest.plan_description,
     )
+
+
+def export_tasks_csv(url: str) -> str:
+    """Every run of ONE instance as CSV text, prompts included.
+
+    Reads each manifest once (the same store the table reads) so the export is
+    a snapshot taken at the click, not a live join: a run deleted mid-export
+    cannot produce a half row. An unreadable manifest is skipped, matching
+    :func:`list_runs`.
+    """
+    store = build_backup_store(url)
+    rows: list[dict[str, Any]] = []
+    for run_id in store.list_runs():
+        try:
+            manifest = store.load_manifest(run_id)
+        except FileNotFoundError:
+            continue
+        modified, deleted, created, rewired = _touch_counts(manifest)
+        rows.append(
+            {
+                "run_id": manifest.run_id,
+                "status": manifest.status.value,
+                "created_at": manifest.created_at,
+                "last_executed_at": manifest.last_executed_at,
+                "modified": modified,
+                "deleted": deleted,
+                "created": created,
+                "rewired": rewired,
+                "prompt": manifest.prompt,
+                "validated_prompt": manifest.validated_prompt,
+                "error": manifest.error,
+            }
+        )
+    return tasks_csv(rows)
 
 
 def get_run_audit(url: str, run_id: str) -> list[AuditRecord]:
@@ -187,23 +223,6 @@ def delete_run(url: str, run_id: str) -> None:
     # The suggestion DB is one shared file, so a run's rows do not disappear
     # with its folder: they are deleted explicitly here.
     build_suggestion_store(url).delete_run(run_id)
-
-
-def clear_cache(url: str) -> int:
-    """Clear the persistent file/entity cache of ONE instance.
-
-    Returns the number of entries removed (0 when the cache is disabled or
-    empty). Forces the next read to re-fetch server truth after direct human
-    edits in Uwazi, which bypass write-path invalidation and are otherwise
-    bounded only by the raw TTL. The cache is already namespaced per instance,
-    so this clears only the selected instance's cache.
-    """
-    if not url:
-        return 0
-    cache = build_file_cache(url)
-    if cache is None:
-        return 0
-    return cache.clear()
 
 
 def rename_run(url: str, old_id: str, new_id: str) -> None:

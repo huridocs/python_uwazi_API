@@ -1,4 +1,4 @@
-"""Unit tests for the invite-link helpers (pure, offline, deterministic)."""
+"""Unit tests for the login-link helpers (pure, offline, deterministic)."""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ from uwazi_admin_agent.drivers.links import (
     instance_token,
     instance_tokens,
     login_link,
-    login_links,
     match_instance,
     page_link,
     resolve_login_target,
     resolve_page_target,
-    startup_login_url,
 )
 
 CONFIGURED = ["https://global-rep.uwazi.io", "http://localhost:3000"]
@@ -131,42 +129,6 @@ def test_resolve_login_target_refuses_an_unconfigured_instance() -> None:
 
 def test_resolve_login_target_without_configured_instances() -> None:
     assert resolve_login_target("x", "u", []) == ("", "u", None)
-
-
-def test_login_links_render_one_link_per_configured_instance() -> None:
-    links = login_links(
-        ["https://a.example", "https://b.example"],
-        "https://admin.example",
-        "admin",
-        "b.example",
-    )
-    assert links == ["https://admin.example/?instance=b&user=admin"]
-
-
-def test_login_links_without_a_user_omit_the_user_parameter() -> None:
-    links = login_links(CONFIGURED, "https://admin.example", "")
-    assert links == [
-        "https://admin.example/?instance=global-rep",
-        "https://admin.example/?instance=localhost%3A3000",
-    ]
-
-
-def test_login_links_for_an_unmatched_instance_are_empty() -> None:
-    assert login_links(CONFIGURED, "https://admin.example", "admin", "nope") == []
-
-
-def test_startup_login_url_is_none_without_configured_instances() -> None:
-    assert startup_login_url([], "", 5055) is None
-
-
-def test_startup_login_url_falls_back_to_localhost() -> None:
-    assert startup_login_url(["https://global-rep.uwazi.io"], "", 5055) == ("http://localhost:5055/?instance=global-rep")
-
-
-def test_startup_login_url_uses_the_public_base_url() -> None:
-    assert startup_login_url(["https://global-rep.uwazi.io"], "https://admin.example/", 5055) == (
-        "https://admin.example/?instance=global-rep"
-    )
 
 
 # --- in-app page links keep the instance ---------------------------------------

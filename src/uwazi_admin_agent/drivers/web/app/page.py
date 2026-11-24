@@ -11,14 +11,12 @@ from loguru import logger
 from nicegui import app, context, ui
 from starlette.requests import Request
 
-from uwazi_admin_agent.drivers.links import startup_login_url
-
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
 # on import, so the runs table's Review action can navigate to it.
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web.host_guard import assert_safe_bind
-from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS, page_target
+from uwazi_admin_agent.drivers.web.instances import page_target
 from uwazi_admin_agent.drivers.web.run_service import (
     fetch_entity_document_bytes,
 )
@@ -29,7 +27,6 @@ from uwazi_admin_agent.drivers.web.session import (
 )
 
 from .broadcast import _refresh_rows_client
-from .dialogs import _capabilities_dialog, _clear_cache_dialog, _invite_links_dialog
 from .login import _login_page, _logout
 from .runs_table import _build_row_menu, _build_runs_table, _selection_toolbar
 from .state import _STATIC_DIR
@@ -72,10 +69,6 @@ def _build_page() -> None:
             with ui.row().classes("items-center q-ml-md"):
                 with ui.button(icon="menu").props("flat round color=secondary"):
                     with ui.menu():
-                        ui.menu_item("Capabilities", _capabilities_dialog)
-                        ui.menu_item("Invite links", _invite_links_dialog)
-                        ui.menu_item("Clear cache", _clear_cache_dialog)
-                        ui.separator()
                         ui.menu_item("Log out", _logout)
 
     with ui.column().classes("w-full items-center"):
@@ -126,7 +119,7 @@ def _build_page() -> None:
 def _index(request: Request) -> None:
     """Login gate: nothing renders until the Uwazi credentials validate.
 
-    The query parameters come from the invite link: the MANDATORY ``instance``
+    The query parameters come from the login URL: the MANDATORY ``instance``
     selects the Uwazi instance (matched against the configured list) and
     ``user`` preselects the account. A bare ``/`` shows guidance to open the
     full link instead of a login form.
@@ -180,9 +173,6 @@ def main() -> None:
     public_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
     storage_secret = os.environ.get("ADMIN_WEB_STORAGE_SECRET")
     assert_safe_bind(host, public_url, storage_secret)
-    link = startup_login_url(INSTANCE_URLS, public_url, port)
-    if link is not None:
-        logger.info("Admin web login link (first configured instance): {}", link)
     ui.run(
         host=host,
         port=port,

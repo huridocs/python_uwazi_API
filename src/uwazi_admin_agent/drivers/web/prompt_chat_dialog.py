@@ -43,14 +43,16 @@ clarification turn is one tool-free request and the Run is the run's normal
 planning pass, so both run on the configured default caps without asking the
 operator to review caps or estimates.
 
-The modal also serves the entity window's **Fix the prompt** action: it opens
-in CORRECTION mode with a :class:`SuggestionCorrection` attached — the entity,
-property, Uwazi's current value and the wrong proposed value — plus a field for
-the operator's explanation. Sending the explanation records
-``correction_request`` as the opening prompt and continues through the SAME
-clarification/questions/Run path; the Run then sends the run's current script
-alongside the prompt (``revise_existing_script``), so the generator revises the
-script the operator reviewed instead of recreating it.
+The modal also serves the entity window's **Fix the prompt** action. Each click
+adds a :class:`SuggestionCorrection` — the entity, property, Uwazi's current
+value and the wrong proposed value — to the chat's PENDING FIXES, so the
+operator can flag several wrong rows, reopening the chat for each. One "Add all
+fixes to the prompt" folds them into a single request
+(``combined_correction_request``), which continues through the SAME
+clarification/questions/Run path. The Run ALWAYS sends the run's current script
+alongside the prompt, so the generator revises the script the operator already
+reviewed (with the same authoring and benchmark tools available) instead of
+recreating it from the prompt alone.
 
 The modal chrome (the header with its top-right Close) is reused from
 :mod:`uwazi_admin_agent.drivers.web.task_dialogs` rather than re-implemented.
@@ -81,8 +83,9 @@ from uwazi_admin_agent.domain.prompt_chat import (
 )
 from uwazi_admin_agent.domain.prompt_revision import (
     SuggestionCorrection,
-    correction_request,
+    combined_correction_request,
     correction_summary,
+    merge_corrections,
 )
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
@@ -90,6 +93,7 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
     release_run,
     run_claim,
     run_claim_text,
+    set_claim_note,
     try_claim_run,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
@@ -203,10 +207,11 @@ def prompt_chat_dialog(
     the runs table opens the modal without one.
 
     ``correction`` opens the modal in CORRECTION mode, from the entity window's
-    "Fix the prompt" action: the flagged row is shown as an attachment below
-    the conversation, its explanation field is the only extra input, and the
-    Run sends the run's current script alongside the prompt so the generator
-    revises it.
+    "Fix the prompt" action: the flagged row joins the chat's pending fixes.
+    The operator can open the chat again for ANOTHER wrong row; each flag is
+    added to the same list, and one "Add all fixes to the prompt" turns them
+    into one request, which the Run regenerates with the current script in
+    hand (and the same authoring/benchmark tools the first turn had).
 
     ``on_run_started`` is called right after the regeneration is claimed and
     launched. The review page uses it to move to the tasks window, where the
@@ -230,16 +235,20 @@ def prompt_chat_dialog(
         "history": [],
         "busy": False,
         "dirty": False,
-        # A correction Run revises the committed script instead of recreating
-        # it (the entity window's "Fix the prompt" flow).
-        "revise_existing_script": correction is not None,
+        # The wrong rows the operator flagged for THIS run. Each "Fix the
+        # prompt" click ADDS one; nothing is sent until the operator presses
+        # "Add all fixes to the prompt", which turns them into ONE request so a
+        # single regeneration fixes them all. The list lives on the browser
+        # client (not this dialog), because flagging a second row re-opens the
+        # chat: a dialog-scoped list would lose the first fix.
+        "corrections": [],
+        "_correction_cards": [],
         "_pending_index": None,
         "_pending_request": None,
         "_pending_bubble": None,
         "_unrun_bubbles": [],
         "_run_spinner": None,
         "_run_status": None,
-        "_correction_card": None,
     }
 
     client = context.client
@@ -287,8 +296,11 @@ def prompt_chat_dialog(
             state["_run_status"] = status_label
 
             _load_initial_context(state, detail)
+            state["corrections"] = list(_pending_corrections(client, run_id))
             if correction is not None:
-                _render_correction_card(state, correction)
+                _add_correction(state, correction)
+            elif state["corrections"]:
+                _render_corrections_card(state)
 
     # Enter sends; Shift+Enter inserts a newline. The SAME handler serves the
     # button and the key, so the two paths cannot drift.
@@ -401,52 +413,102 @@ def _load_initial_context(state: dict[str, Any], detail: Any) -> None:
         _add_prompt_bubble(state, text, stamp, label=label, status=status)
 
 
-def _render_correction_card(state: dict[str, Any], correction: SuggestionCorrection) -> None:
-    """Show the flagged suggestion below the conversation (correction mode).
+def _pending_corrections(client: Any, run_id: str) -> list[SuggestionCorrection]:
+    """The fixes already flagged for ``run_id`` in this browser session (pure store read)."""
+    store = getattr(client, "_pending_corrections", None)
+    if not isinstance(store, dict):
+        return []
+    return list(store.get(run_id, []))
 
-    The base prompt and the run's context come first, then this attachment: the
-    operator reads what the run was, then the row being fixed, then answers the
-    one question only they can answer — why is this suggestion wrong. The
-    entity, property and values are already recorded on the row.
+
+def _store_pending_corrections(client: Any, run_id: str, corrections: list[SuggestionCorrection]) -> None:
+    """Persist the run's pending fixes on the browser client (survives dialog reopens)."""
+    store = getattr(client, "_pending_corrections", None)
+    if not isinstance(store, dict):
+        store = {}
+        client._pending_corrections = store  # noqa: SLF001 — per-client dialog state
+    if corrections:
+        store[run_id] = list(corrections)
+    else:
+        store.pop(run_id, None)
+
+
+def _add_correction(state: dict[str, Any], correction: SuggestionCorrection) -> None:
+    """Append one flagged row to the chat's pending fixes (the accumulation step).
+
+    The entity window's "Fix the prompt" can be used again for another wrong
+    row: every click lands here. A row flagged twice stays ONE fix (the latest
+    explanation wins), so the regeneration request has no duplicate sections.
+    The list is rendered as an attachment above the input, with one button that
+    folds them ALL into a single request.
     """
-    with state["_client"]:
+    state["corrections"] = merge_corrections(state.get("corrections", []), correction)
+    _store_pending_corrections(state["_client"], state["run_id"], state["corrections"])
+    _render_corrections_card(state)
+
+
+def _render_corrections_card(state: dict[str, Any]) -> None:
+    """(Re)draw the pending-fixes panel below the conversation."""
+    client = state["_client"]
+    for card in state.get("_correction_cards", []):
+        if card is not None and not card.is_deleted:
+            with client:
+                card.delete()
+    state["_correction_cards"] = []
+    corrections: list[SuggestionCorrection] = state.get("corrections", [])
+    if not corrections:
+        return
+    with client:
         with state["_messages"]:
             with ui.card().classes("w-full bg-orange-1") as card:
-                ui.label("Fix an incorrect suggestion").classes("text-subtitle2 text-weight-medium")
-                ui.label(correction_summary(correction)).classes("text-caption text-grey-8 w-full").style(
-                    "white-space: pre-wrap"
+                ui.label(f"Fixes to add to the prompt ({len(corrections)})").classes("text-subtitle2 text-weight-medium")
+                ui.label(
+                    "Flag as many wrong suggestions as you need, then add them all to the "
+                    "prompt at once: one Run regenerates the script and fixes every one."
+                ).classes("text-caption text-grey-8 w-full")
+                for correction in corrections:
+                    ui.label(correction_summary(correction)).classes("text-caption text-grey-8 w-full").style(
+                        "white-space: pre-wrap"
+                    )
+                explanation = ui.textarea(label="Why are these suggestions wrong? (optional, applies to all)").classes(
+                    "w-full"
                 )
-                explanation = ui.textarea(label="Why is this suggestion wrong? (optional)").classes("w-full")
                 with ui.row().classes("w-full justify-end"):
                     ui.button(
-                        "Send fix request",
+                        "Add all fixes to the prompt",
                         icon="construction",
-                        on_click=lambda: _send_correction(state, correction, explanation, card),
+                        on_click=lambda: _send_corrections(state, explanation, card),
                     ).props("color=deep-orange")
-    state["_correction_card"] = card
+    state["_correction_cards"].append(card)
 
 
-def _send_correction(
+def _send_corrections(
     state: dict[str, Any],
-    correction: SuggestionCorrection,
     explanation_input: Any,
     card: Any,
 ) -> None:
-    """Fold the explanation into a correction request and start the chat turn.
+    """Fold every pending fix into ONE request and start the chat turn.
 
     The request then follows the SAME path as a typed request (clarification →
-    questions → Run), so correction mode adds an attachment at the top, not a
-    second conversation. The attachment is removed once it was sent: its text
-    is now the first prompt bubble, and re-sending it would duplicate it.
+    questions → Run), so correction mode adds an attachment, not a second
+    conversation. The attachment is removed once it was sent: its text is now
+    the request's bubble, and re-sending it would duplicate it.
     """
     if state["busy"]:
         return
+    corrections: list[SuggestionCorrection] = state.get("corrections", [])
+    if not corrections:
+        return
     reason = (explanation_input.value or "").strip()
-    request = correction_request(correction.model_copy(update={"reason": reason}))
+    if reason:
+        corrections = [correction.model_copy(update={"reason": correction.reason or reason}) for correction in corrections]
+    request = combined_correction_request(corrections)
     with state["_client"]:
         if not card.is_deleted:
             card.delete()
-    state["_correction_card"] = None
+    state["corrections"] = []
+    state["_correction_cards"] = []
+    _store_pending_corrections(state["_client"], state["run_id"], [])
     _submit_request(state, request)
 
 
@@ -897,7 +959,11 @@ async def _do_run(
     client = state.get("_client")
 
     def _on_stage(message: str) -> None:
+        # Two audiences: the modal's own spinner line, and the tasks table's
+        # status caption (read from the run's claim), so the work is visible
+        # even after the review page navigated to the tasks window.
         _set_run_progress(state, message, visible=True)
+        set_claim_note(instance, run_id, message)
 
     try:
         credentials = credentials_for_instance(instance)
@@ -914,7 +980,6 @@ async def _do_run(
                 credentials.password,
                 budget,
                 on_stage=_on_stage,
-                revise_existing_script=bool(state.get("revise_existing_script")),
             )
         except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
             _set_busy(state, False)

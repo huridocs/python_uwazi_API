@@ -27,6 +27,13 @@ _SCHEMA_CACHE: dict[tuple[str, str], WizardSchema] = {}
 # them as input nor writing them as a target makes sense.
 _NON_VALUE_PROPERTY_TYPES = frozenset({"preview", "nested"})
 
+# Every Uwazi entity has a title, whatever its template. The API usually
+# returns it among ``commonProperties``; when an instance omits that list (or
+# the payload shape changes) the pickers would silently lose the one property
+# an operator almost always wants to extract or populate. The projection adds
+# it back so the wizard always offers it.
+_TITLE_PROPERTY = WizardProperty(name="title", label="Title", type="text")
+
 
 def clear_wizard_schema_cache() -> None:
     """Forget every cached instance schema (tests / after a schema change)."""
@@ -57,6 +64,8 @@ def wizard_schema_from_models(templates: object, languages: object) -> WizardSch
                     type=prop_type,
                 )
             )
+        if not any(prop.name == _TITLE_PROPERTY.name for prop in properties):
+            properties.insert(0, _TITLE_PROPERTY)
         wizard_templates.append(WizardTemplate(name=str(getattr(template, "name", "") or ""), properties=tuple(properties)))
 
     wizard_languages = tuple(

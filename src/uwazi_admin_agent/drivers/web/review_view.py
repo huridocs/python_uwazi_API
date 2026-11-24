@@ -62,8 +62,8 @@ OP_COLORS: dict[str, str] = {
     "skipped": "deep-orange-10",
 }
 
-# The human labels of the Op filter. Kept beside the colors so the control and
-# the badges agree on what each op is called.
+# The human labels of the Operation filter. Kept beside the colors so the control
+# and the badges agree on what each operation is called.
 OP_LABELS: dict[str, str] = {
     "update": "update",
     "create": "create",
@@ -104,12 +104,12 @@ RUN_STATUS_COLORS: dict[str, str] = {
 }
 
 
-# Ops whose entity ALREADY EXISTS in Uwazi, so the review row can link to its
+# Operations whose entity ALREADY EXISTS in Uwazi, so the review row can link to its
 # public page. A create row still holds its dry-created placeholder, so
 # opening it would land on nothing.
 OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files", MATCHED_OP, SKIPPED_OP})
 
-# Ops whose per-entity undo is NOT an in-place restore of one live entity, so
+# Operations whose per-entity undo is NOT an in-place restore of one live entity, so
 # their rows never offer the Revert icon: a `delete` row's undo is a re-create
 # (a fresh sharedId, files and connection rows), a `create` row's undo is a
 # deletion, and a `create_and_delete` merge's target is only a ``dry-created-N``
@@ -375,11 +375,11 @@ MODIFIED_COLUMN: str = "width: 142px"
 # The review table's always-visible sort control: the value is the
 # ``SuggestionFilter.sort_by`` field, the label is what the operator reads.
 OPERATION_SORT_OPTIONS: dict[str, str] = {
-    "recorded": "Recorded order",
+    "recorded": "Original order",
     "modified": "Modified",
     "title": "Target",
     "template": "Template",
-    "ops": "Ops",
+    "ops": "Operations",
     "status": "Status",
 }
 
@@ -530,7 +530,7 @@ def filter_from_controls(
     Empty selections mean "no constraint" — the single-value selects use "" for
     their "all" option and the multi-selects use an empty list, and translating
     both here keeps the page's handlers trivial. ``status``/``op`` accept one
-    value or a list (the Op and Status controls are multi-selects). ``language``
+    value or a list (the Operation and Status controls are multi-selects). ``language``
     narrows the SUBOPERATIONS to one written language (the language-independent
     rows are their own group and are not matched). ``shared_ids`` is the table's
     checkbox selection passed through verbatim (``None`` = no constraint, ``[]``
@@ -615,7 +615,7 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     checkbox-selection surface the bulk Run action reads), aggregated from the
     entity's suggestion rows by the store. Columns: Entity (the sharedId and
     the title, with the open-in-Uwazi icon at its end), Template, Language,
-    Ops, Status (applied/pending), and the Run/Edit/Revert row actions — no
+    Operations, Status (applied/pending), and the Run/Edit/Revert row actions — no
     separate sharedId column, no change-count columns, and no separate Uwazi
     column.
 

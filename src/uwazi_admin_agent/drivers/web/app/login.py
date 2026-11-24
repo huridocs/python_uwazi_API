@@ -48,7 +48,7 @@ def _login_page(instance_param: str = "", user_param: str = "") -> None:
 
     ROLE POLICY: the app authenticates AS the operator's Uwazi account and acts
     with that account's permissions for every read and write. Deploy it with
-    admin accounts only (issue invite links with ``&user=<admin>``). The client
+    admin accounts only (open the URL with ``&user=<admin>``). The client
     does not enforce a role check because the Uwazi API it uses exposes no
     current-user/role endpoint; the account's own Uwazi authorisation is the
     boundary.

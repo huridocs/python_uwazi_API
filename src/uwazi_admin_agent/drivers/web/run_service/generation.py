@@ -24,6 +24,7 @@ from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
 )
 from uwazi_admin_agent.domain.run_name import validate_run_name
+from uwazi_admin_agent.use_cases.generation_stages import STAGE_PLANNING, STAGE_SAVING
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
     INFO_OP,
@@ -51,6 +52,7 @@ async def create_and_generate(
     password: str,
     validated_prompt: str | None = None,
     budget: LlmBudget | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> None:
     """Write the prompt + active-run pointer, then generate the script + the table.
 
@@ -66,6 +68,11 @@ async def create_and_generate(
     ``name`` is validated BEFORE anything is written: it becomes the run's
     folder name, so a separator in it would write into another run's tree — or
     another instance's tree, whose slug is derivable from its URL.
+
+    ``on_stage`` (optional) receives a short operator-facing sentence as the
+    work moves (reading the schema, authoring the extractor, running the
+    benchmark, writing the script, planning the table). The web driver turns it
+    into the run row's live status caption.
     """
     name = validate_run_name(name)
     # A run folder that already holds a manifest IS a task the operator can see
@@ -115,7 +122,7 @@ async def create_and_generate(
 
     final_prompt = validated_prompt or prompt
     try:
-        script = await use_case.execute(final_prompt)
+        script = await use_case.execute(final_prompt, on_stage=on_stage)
         run_path.mkdir(parents=True, exist_ok=True)
         emit_generated_script(script, run_path)
     except Exception as exc:
@@ -150,6 +157,8 @@ async def create_and_generate(
     # LLM in this pass (it is bound no-LLM dry-run namespace), so nothing here
     # costs money — the review table's rows are simply built the moment the
     # script exists.
+    if on_stage is not None:
+        on_stage(STAGE_PLANNING)
     try:
         await run_auto_scan(url, name, user, password, budget)
     except PredictionPassError as exc:
@@ -268,7 +277,6 @@ async def regenerate_from_chat(
     password: str,
     budget: LlmBudget | None = None,
     on_stage: Callable[[str], None] | None = None,
-    revise_existing_script: bool = False,
 ) -> TableUpdateResult:
     """Regenerate the run's script from the whole chat history and reconcile the table.
 
@@ -292,10 +300,13 @@ async def regenerate_from_chat(
        are deleted). A plan whose kind contradicts its records fails the
        pass and leaves the previous table untouched.
 
-    ``revise_existing_script`` marks the run as a CORRECTION of the current
-    script (the entity window's "Fix the prompt" flow): the run's committed
-    ``script.py`` is then sent ALONGSIDE the folded prompt, so the generator
-    changes a script the operator already reviewed instead of recreating it.
+    The run's CURRENT ``script.py`` is ALWAYS sent alongside the folded prompt
+    when one exists. A chat Run adds information to a script whose review table
+    the operator has already seen; re-deriving it from the prompt alone made the
+    result worse (the original extraction logic was lost) even though the new
+    prompt carried MORE information. The generation turn therefore revises the
+    known script with the SAME authoring tools the first turn had (schema
+    reads, source sampling, ``author_html_extractor``, ``benchmark_extractor``).
     That attachment is generation-only: ``validated_prompt`` still records the
     operator's context, and the manifest's ``script`` field records the source.
 
@@ -309,16 +320,14 @@ async def regenerate_from_chat(
     manifest = runtime.backup_store.load_manifest(run_id)
     run_path = _paths(url).runs_path / run_id
     final_prompt = build_final_prompt_from_chat(history)
-    prompt_for_generation = final_prompt
-    if revise_existing_script:
-        try:
-            previous_script = read_run_script(url, run_id)
-        except OSError:
-            # A run with no committed source has nothing to revise: the folded
-            # prompt is enough, and the generation continues normally.
-            logger.info("revise request for run={} has no committed script", run_id)
-            previous_script = ""
-        prompt_for_generation = prompt_with_previous_script(final_prompt, previous_script)
+    try:
+        previous_script = read_run_script(url, run_id)
+    except OSError:
+        # A run with no committed source has nothing to revise: the folded
+        # prompt is enough, and the generation continues normally.
+        logger.info("chat regeneration for run={} has no committed script", run_id)
+        previous_script = ""
+    prompt_for_generation = prompt_with_previous_script(final_prompt, previous_script)
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
@@ -329,14 +338,14 @@ async def regenerate_from_chat(
         budget=budget or _script_caps_budget(),
     )
     if on_stage is not None:
-        on_stage("Regenerating the script from the whole prompt context…")
+        on_stage("LLM is regenerating the script from the whole prompt context…")
     try:
-        script = await use_case.execute(prompt_for_generation)
+        script = await use_case.execute(prompt_for_generation, on_stage=on_stage)
     except Exception as exc:  # noqa: BLE001 — surface as a generation error
         raise GenerateError(str(exc)) from exc
 
     if on_stage is not None:
-        on_stage("Recomputing the table from the new script…")
+        on_stage(STAGE_PLANNING)
     # PLAN FIRST, COMMIT SECOND. The regenerated script is planned straight from
     # its own source, BEFORE it replaces the run's committed script/manifest: a
     # plan that contradicts its declared kind (or crashes) must leave the
@@ -363,7 +372,7 @@ async def regenerate_from_chat(
         raise GenerateError(str(exc)) from exc
 
     if on_stage is not None:
-        on_stage("Saving the new script and prompt…")
+        on_stage(STAGE_SAVING)
     emit_generated_script(script, run_path)
     manifest.script = script.python_code
     manifest.plan_kind = script.plan_kind

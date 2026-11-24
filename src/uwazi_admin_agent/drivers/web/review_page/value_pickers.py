@@ -6,10 +6,14 @@ multiselect uses (``set_selected_values`` → the row's ``selected_values``), so
 for every pickable property type.
 
 * A ``relationship`` is always multi-valued: its picker lists the target
-  entities' TITLES (never bare sharedIds) and can search the instance, because
-  a relationship property may offer hundreds of candidates.
+  entities' TITLES (never bare sharedIds), with the property's candidate list
+  resolved up front.
 * A ``select`` holds exactly ONE value: its picker is single-choice and stores
   a one-element selection.
+
+Neither picker carries a search box: the detail window is where a proposal is
+reviewed, and the candidates it can offer are already listed. A search field
+there only added a second, slower way to find the same values.
 """
 
 from __future__ import annotations
@@ -21,7 +25,6 @@ from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.domain.relationship_values import (
     relationship_options,
-    relationship_title,
 )
 from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionStatus
@@ -31,9 +34,9 @@ from uwazi_admin_agent.drivers.web.run_service import (
 )
 from uwazi_admin_agent.drivers.web.session import credentials_for_instance, page_instance_url
 
-# How many candidates one search reads. The picker narrows server-side, so this
-# is "a page of matches", not "the whole property's value list".
-RELATIONSHIP_SEARCH_LIMIT: int = 50
+# How many candidates the picker lists. The relationship catalog is read once
+# per (template, property, language); there is no per-search narrowing.
+RELATIONSHIP_CANDIDATE_LIMIT: int = 50
 
 
 def _editable(suggestion: Suggestion, runnable: bool) -> bool:
@@ -71,12 +74,14 @@ def relationship_picker(
     titles: dict[str, str],
     runnable: bool,
 ) -> None:
-    """The relationship row's target picker: titles, search, add and remove (UI).
+    """The relationship row's target picker: titles, add and remove (UI).
 
     The picker's value is the list of target ``sharedId``s the Run will write.
     Unchecking a proposed target drops it; checking another adds it — the
     selected set is persisted verbatim, so the Run writes exactly what the
-    operator validated.
+    operator validated. There is deliberately no free-text search row: the
+    candidate list already carries the property's targets, and the detail
+    window is for reviewing a value, not for browsing the instance.
     """
     url = page_instance_url()
     credentials = credentials_for_instance(url)
@@ -84,7 +89,7 @@ def relationship_picker(
     property_name = suggestion.property_name
     language = suggestion.language
 
-    def _catalog(search: str | None) -> list[tuple[str, str]]:
+    def _catalog() -> list[tuple[str, str]]:
         if credentials is None:
             return []
         return relationship_candidates(
@@ -94,12 +99,11 @@ def relationship_picker(
             credentials.user,
             credentials.password,
             language=language,
-            search=search,
-            limit=RELATIONSHIP_SEARCH_LIMIT,
+            limit=RELATIONSHIP_CANDIDATE_LIMIT,
         )
 
     try:
-        catalog = _catalog(None)
+        catalog = _catalog()
     except Exception as exc:  # noqa: BLE001 — a candidate read never blocks the window
         logger.warning("could not list relationship candidates: {}", exc)
         catalog = []
@@ -110,13 +114,10 @@ def relationship_picker(
         catalog,
         titles,
     )
-    known: dict[str, str] = {option["id"]: option["label"] for option in options}
     selected = [option["id"] for option in options if option["selected"]]
-    recommended = {option["id"] for option in options if option["recommended"]}
     picker = ui.select(
         {option["id"]: _label_with_recommended(option["label"], option["recommended"]) for option in options},
         multiple=True,
-        with_input=True,
         value=selected,
         label="Related entities",
         on_change=lambda e, s=suggestion: _persist(
@@ -128,48 +129,10 @@ def relationship_picker(
     picker.classes("w-full")
     if not _editable(suggestion, runnable):
         picker.disable()
-
-    def _search(query: str | None) -> None:
-        try:
-            found = _catalog(query)
-        except Exception as exc:  # noqa: BLE001 — a search failure keeps the current options
-            with context.client:
-                ui.notify(f"Search failed: {exc}", type="negative")
-            return
-        added = 0
-        for shared_id, title in found:
-            if shared_id not in known:
-                known[shared_id] = title
-                added += 1
-        current = picker.value if isinstance(picker.value, list) else []
-        ids = [*known]
-        for shared_id in current:
-            if shared_id not in known:
-                known[shared_id] = relationship_title(shared_id, titles)
-                ids.append(shared_id)
-        with context.client:
-            picker.set_options(
-                {shared_id: _label_with_recommended(known[shared_id], shared_id in recommended) for shared_id in ids},
-                value=current,
-            )
-            ui.notify(
-                f"{len(found)} candidate(s) found" + (f", {added} new" if added else ""),
-                type="info",
-            )
-
-    with ui.row().classes("w-full items-center no-wrap gap-2"):
-        search_input = ui.input(placeholder="Search entities by title…").props("dense outlined").classes("grow")
-        search_input.on("keydown.enter", lambda: _search(search_input.value))
-
-        def _clicked() -> None:
-            _search(search_input.value)
-
-        ui.button("Search", icon="search", on_click=_clicked).props("dense flat")
     if not catalog:
-        ui.label(
-            "Could not list this property's candidate entities — only the values already proposed are listed. "
-            "Use Search to look them up."
-        ).classes("text-caption text-grey-7")
+        ui.label("Could not list this property's candidate entities — only the values already proposed are listed.").classes(
+            "text-caption text-grey-7"
+        )
 
 
 def single_select_picker(
@@ -196,7 +159,6 @@ def single_select_picker(
     picker = ui.select(
         {label: label for label in options},
         value=chosen,
-        with_input=True,
         clearable=True,
         label="Value",
         on_change=lambda e, s=suggestion: _persist(
@@ -249,7 +211,7 @@ def relationship_titles(suggestions: list[Suggestion]) -> dict[str, str]:
 
 
 __all__ = [
-    "RELATIONSHIP_SEARCH_LIMIT",
+    "RELATIONSHIP_CANDIDATE_LIMIT",
     "relationship_picker",
     "relationship_titles",
     "select_catalog",

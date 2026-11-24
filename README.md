@@ -80,9 +80,9 @@ OLLAMA_API_KEY=<api-key>
   disk cache, which can grow up to 4 GiB under
   `src/uwazi_admin_agent/data/file_cache/`) are all optional.
 - `ADMIN_WEB_PUBLIC_URL` is this app's public address (e.g.
-  `https://admin.example.org`). It is used to build **absolute invite links**
-  (see [Invite links](#invite-links)). When unset, the generated links are
-  relative (`/?instance=…`) and only work on the host that serves the app.
+  `https://admin.example.org`). It is the declared origin for a remote
+  deployment (the host guard refuses another host without it). When unset, the
+  app is loopback-only.
 - `ADMIN_WEB_STORAGE_SECRET` signs the session cookie. **Set it in any shared
   deployment:** the cookie's session id is the only thing naming the
   server-side session, so a well-known value would let a leaked id be replayed
@@ -103,7 +103,7 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
 ```
 
 - The login screen has **no instance picker**: the `instance` parameter is
-  **mandatory** and comes from the URL (see [Invite links](#invite-links)).
+  **mandatory** and comes from the URL.
   Opening the app bare (`http://localhost:5055/`) shows guidance to use the
   full link instead of a login form. A link's instance is matched against the
   configured list and the CONFIGURED url is what is used, so a parameter can
@@ -146,8 +146,7 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
   The old flat `data/` layout is **not** migrated — it is simply no longer
   read.
 - The CLI (`uwazi-admin-agent …`) is single-instance: it targets the **first**
-  configured URL — except `uwazi-admin-agent links`, which only PRINTS one
-  link per configured instance.
+  configured URL.
 - The **property filler** is single-instance too: it targets
   `PROPERTY_FILLER_UWAZI_URL` when set, otherwise the **first** URL (with a
   startup warning). Set `PROPERTY_FILLER_UWAZI_URL=https://one.instance` when
@@ -219,11 +218,10 @@ is therefore bound to the browser session that owns its client:
 Both web apps install the guard (`uwazi_api.socket_guard`), so the admin agent
 and the property filler are covered.
 
-### Invite links
+### Login links
 
-An **invite link** opens the login page with the Uwazi instance — and, when a
-username is given, the account — already filled in, so the admin only types
-their Uwazi **password**:
+The login page takes the Uwazi instance — and, optionally, the account — from
+its URL, so a link can open the right instance with the username prefilled:
 
 ```
 http://localhost:5055/?instance=global-rep&user=admin
@@ -240,17 +238,9 @@ http://localhost:5055/?instance=global-rep&user=admin
   is fixed by dropping `&user=…` from the URL.
 - **The link carries no credential.** The password is always typed by the
   admin and validated against Uwazi with a real `POST /api/login`.
-- Links are generated from the app's header menu (**Invite links**) — one card
-  per configured instance — or from the CLI:
-
-  ```bash
-  uv run uwazi-admin-agent links --base-url https://admin.example.org --user admin
-  uv run uwazi-admin-agent links --instance global-rep
-  ```
-
-  `--base-url` defaults to `ADMIN_WEB_PUBLIC_URL`; without it the links are
-  relative (`/?instance=…`). The server also logs the link of the first
-  configured instance at startup.
+- Links are written by hand or shared by any channel: this app no longer
+  generates or prints them (there is no invite-links dialog and no `links`
+  CLI step) — the login URL is the whole contract above.
 
 ### Reviewing: selection scan → run → revert
 

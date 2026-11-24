@@ -69,6 +69,29 @@ def _context_text(value: Any) -> str | None:
     return text or None
 
 
+def _split_context(entities_dict: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Separate a write's ``metadata`` from its recorded context (pure).
+
+    ``context`` is the normal place for the passage a value was read from, but
+    an extractor commonly returns it under the reserved ``_context`` key inside
+    the value dict (``{prop: value, "_context": passage}``). If the script
+    forgets to pop it, that key must NOT reach Uwazi as a property: it is
+    removed here and promoted to the row's context, so the operator still sees
+    the passage at the place the extraction happened. An explicit ``context``
+    key always wins.
+    """
+    metadata = entities_dict.get("metadata")
+    context = _context_text(entities_dict.get("context"))
+    if not isinstance(metadata, dict):
+        return (metadata if isinstance(metadata, dict) else {}), context
+    if "_context" not in metadata:
+        return metadata, context
+    cleaned = {key: value for key, value in metadata.items() if key != "_context"}
+    if context is None:
+        context = _context_text(metadata.get("_context"))
+    return cleaned, context
+
+
 def _source_shared_id(value: Any) -> str | None:
     """The ONE source entity a create dict names (pure).
 
@@ -113,6 +136,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         del language  # recorded per-dict, not as a language override
         logger.info("dry-run record: create_entities x{}", len(entities_dicts))
         for i, d in enumerate(entities_dicts):
+            metadata, context = _split_context(d)
             _append_record(
                 records,
                 {
@@ -123,8 +147,8 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "shared_id": f"dry-created-{i}",
                     "title": d.get("title", ""),
                     "template_name": d.get("template_name", ""),
-                    "metadata": d.get("metadata", {}),
-                    "context": _context_text(d.get("context")),
+                    "metadata": metadata,
+                    "context": context,
                     # Optional PROVENANCE: the entity whose PDF/fields the new
                     # one was derived from (`source_shared_id`, or a list of
                     # them — the FIRST id is the row's primary source). The
@@ -138,17 +162,18 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
     def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         logger.info("dry-run record: update_entities x{}", len(entities_dicts))
         for d in entities_dicts:
+            metadata, context = _split_context(d)
             _append_record(
                 records,
                 {
                     "op": "update",
                     "shared_id": d.get("shared_id"),
                     "template_name": d.get("template_name"),
-                    "metadata": d.get("metadata"),
+                    "metadata": metadata,
                     "title": d.get("title"),
                     "language": language,
                     "basis": [str(b) for b in d.get("basis") or []],
-                    "context": _context_text(d.get("context")),
+                    "context": context,
                 },
             )
         return [{"shared_id": d.get("shared_id"), "success": True} for d in entities_dicts]

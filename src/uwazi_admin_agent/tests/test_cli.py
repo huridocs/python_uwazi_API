@@ -51,7 +51,7 @@ def test_build_parser_help_lists_all_subcommands() -> None:
 def test_build_parser_rejects_removed_subcommands() -> None:
     """Whole-set script execution and the dummy/simulation gate are gone:
     runs are planned (scan) and executed as reviewed rows (the Run heuristic)."""
-    for removed in ("execute", "dry-run", "simulate", "apply"):
+    for removed in ("execute", "dry-run", "simulate", "apply", "links"):
         with pytest.raises(SystemExit):
             build_parser().parse_args([removed])
 

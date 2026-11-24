@@ -184,7 +184,10 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
     state["final_prompt"] = state.get("validated_prompt") or prompt
     state["_validation_done"] = False
     _render_validate_idle(state, state["_validate_container"])
-    stepper.set_value("validate")
+    # The allowance step sits BETWEEN the prompt and validation: its cap is
+    # folded into the clarification request, so validation must never be
+    # reached without it.
+    stepper.set_value("caps")
 
 
 def _guided_prompt_ready(state: dict[str, Any], prompt: str) -> None:
@@ -237,9 +240,18 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
         ui.label("Ask the LLM what it understood from your prompt before generating.").classes("text-body1 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Validate", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
+
+
+def _wizard_validate_back(state: dict[str, Any]) -> None:
+    """Back from validation: to the allowance step that precedes it.
+
+    The caps step is ALWAYS built (the wizard creates it before validation), so
+    Back never jumps over the operator's budget choice.
+    """
+    state["_stepper"].set_value("caps")
 
 
 def _start_validation(state: dict[str, Any]) -> None:
@@ -301,7 +313,7 @@ def _render_validation_error(state: dict[str, Any], container: Any, exc: Excepti
         ui.label(str(exc)).classes("text-body2 text-red-10 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=primary")
 
 
@@ -424,35 +436,26 @@ def _show_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _refresh_generate_prompt(state: dict[str, Any]) -> None:
-    """Recompute the prompt the Generate button will send, including last-minute notes.
+    """Sync the generate step's display with the prompt the Generate button sends.
 
-    This step is the LAST surface before generation, and the prompt it shows is
-    what the operator is approving. Typing here used to be impossible: the
-    textarea was read-only and only the validation step's notes reached the
-    prompt, so a correction made at this point ("only 5 entities") silently
-    vanished. The display now tracks the notes field, and ``_wizard_generate``
-    sends exactly what the display shows.
+    The prompt is FINAL at this point: it was assembled on the prompt step and
+    (optionally) rewritten by validation. There is deliberately no extra input
+    here, so the text the operator reviews is exactly the text that is sent.
     """
-    notes_input = state.get("_generate_notes_input")
-    notes = (notes_input.value or "").strip() if notes_input is not None else ""
-    # A STABLE base, captured once: recomputing from ``final_prompt`` (which
-    # already carries the notes) appends the same block on every keystroke.
-    base = state.get("_prompt_base")
-    if base is None:
-        base = state.get("validated_prompt") or state.get("prompt") or ""
-        state["_prompt_base"] = base
-    state["final_prompt"] = f"{base}\n\nAdditional notes:\n{notes}" if notes else base
+    state["final_prompt"] = state.get("validated_prompt") or state.get("_prompt_base") or state.get("prompt") or ""
     display = state.get("_generate_prompt_display")
     if display is not None:
         display.value = state["final_prompt"]
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to validate (if it ran) or the prompt step."""
-    if state.get("_validation_done"):
-        state["_stepper"].set_value("validate")
-    else:
-        _wizard_back_to_prompt_step(state)
+    """Back from the generate step: to validation, the step immediately before it.
+
+    Always the same destination, whether or not validation already ran: the
+    stepper's order is task → questions → allowance → validate → generate, so
+    Back never skips the allowance step that gates the AI budget.
+    """
+    state["_stepper"].set_value("validate")
 
 
 def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
@@ -506,17 +509,6 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
             ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
         )
         state["_generate_prompt_display"] = prompt_display
-        ui.separator()
-        ui.label("Last chance to change the prompt").classes("text-subtitle1 text-bold q-mt-sm")
-        ui.label(
-            "Anything you type here is appended to the final prompt above and reaches the generation "
-            "LLM. Use it for a late correction (e.g. 'only the first 5 entities') without stepping back."
-        ).classes("text-body2 text-grey-7")
-        state["_generate_notes_input"] = (
-            ui.textarea("Extra instruction (optional)", on_change=lambda: _refresh_generate_prompt(state))
-            .classes("w-full")
-            .props("autogrow")
-        )
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: _wizard_generate_back(state)).props("color=grey-7 flat")
@@ -572,8 +564,7 @@ def _wizard_generate(state: dict[str, Any], dialog: Any) -> None:
     if not name or not prompt:
         ui.notify("Name and prompt are required", type="warning")
         return
-    # Recompute first: the notes field may have changed since the last repaint
-    # (a value set programmatically does not always fire ``on_change``).
+    # Sync the display one last time so what the operator saw is what is sent.
     _refresh_generate_prompt(state)
     budget = _wizard_budget(state)
     final_prompt = state.get("final_prompt") or prompt
@@ -668,6 +659,16 @@ async def _do_generate(
     budget: LlmBudget | None = None,
     notification: Any = None,
 ) -> None:
+    def _on_stage(stage: str) -> None:
+        """Publish the generation stage on the run's claim.
+
+        Called from the WORKER thread, so it touches only the thread-safe
+        claim registry: no NiceGUI client context, no outbox write. The tasks
+        table's 5s refresh (and every explicit broadcast) reads the note and
+        shows it beside the row's status.
+        """
+        operation_gate.set_claim_note(instance, name, stage)
+
     # create_and_generate does synchronous Uwazi HTTP + LLM calls; run it on a
     # worker thread so the event loop stays free to serve the UI and websocket.
     try:
@@ -681,6 +682,7 @@ async def _do_generate(
                 password,
                 validated_prompt,
                 budget,
+                on_stage=_on_stage,
             ),
         )
         _broadcast_notify(
