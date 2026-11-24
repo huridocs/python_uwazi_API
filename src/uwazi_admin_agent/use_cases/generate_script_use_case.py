@@ -175,6 +175,9 @@ class GenerateScriptUseCase:
         (see :func:`uwazi_admin_agent.domain.prompt_chat.build_final_prompt_from_chat`).
         """
         agent = self._build_agent(self._llm.get_model(), self._max_output_tokens, await self._system_prompt())
+        # Fresh count for every turn: the refinement cap is per generation turn,
+        # and a turn starts from a fresh conversation (no history replay).
+        self._deps.benchmark_refinements_used = 0
         run = await agent.run(
             prompt,
             deps=self._deps,

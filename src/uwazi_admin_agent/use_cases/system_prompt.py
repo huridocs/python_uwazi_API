@@ -1228,10 +1228,20 @@ one-document logic. Use this exact shape:
    known values on the SAME sampled entities and reports accuracy, coverage and
    the worst mismatches. Choose the strategy with the best accuracy AND the
    lowest mismatch count — 'missing' leaves an entity untouched, while
-   'mismatched' would WRITE A WRONG VALUE. When the best candidate is still weak,
-   say so in `GeneratedScript.description` and prefer recording fewer rows over
-   a wide guess; a prompt whose result would be mostly mismatches must be
-   improved, not executed.
+   'mismatched' would WRITE A WRONG VALUE. When the report shows a REFINEMENT
+   section, you MAY go back and re-author: the report lists a manageable
+   subset of mismatch examples and a cap (at most 3 refinements per turn) -
+   re-author the `def extract` to fix the RULE the failures share (a pattern,
+   anchor, normalization or date-coercion mistake), benchmark the re-authored
+   candidate AGAINST the incumbent in the SAME call, and repeat ONLY while the
+   report keeps offering refinements. NEVER add per-entity special cases keyed
+   on the listed shared_ids, titles or exact strings: the samples are a probe,
+   so an extractor tuned to reproduce them overfits and will mismatch on the
+   rest of the corpus. When the best candidate is still weak after the cap (or
+   the report says refinement is NOT offered), say so in
+   `GeneratedScript.description` and prefer recording fewer rows over a wide
+   guess; a prompt whose result would be mostly mismatches must be improved,
+   not executed.
 2. Per entity: fetch its files with the BULK helper —
    `files_by_id = get_entity_files_parallel(shared_ids, language)` (ONE call
    for the whole target set; it returns `{shared_id: [file dicts]}`) — then

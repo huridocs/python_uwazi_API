@@ -68,3 +68,13 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
             "GenerateScriptUseCase and called by the author_html_extractor tool."
         ),
     )
+    benchmark_refinements_used: int = Field(
+        default=0,
+        description=(
+            "How many mismatch-driven extractor refinements benchmark_extractor has "
+            "reported this generation turn. The tool increments it whenever it offers "
+            "or performs a refinement step; when it reaches MAX_REFINEMENTS_PER_TURN "
+            "the tool stops offering refinements and reports the last score as final. "
+            "GenerateScriptUseCase.execute() resets it at the start of every turn."
+        ),
+    )

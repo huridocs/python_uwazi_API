@@ -55,6 +55,26 @@ MAX_BENCHMARK_SAMPLES: int = 30
 # the peek tools use, so the benchmark exercises the same inputs a script sees.
 MAX_BENCHMARK_CHARS: int = 200_000
 
+# --- mismatch-driven extractor refinement (benchmark_extractor) -----------------
+#
+# When a benchmarked strategy still mismatches, the generation agent may go back
+# and re-author the extractor. The refinement loop is BOUNDED so a turn lands in
+# a reasonable time: a refinement step consumes real sample reads (each one a
+# live raw-entity + file fetch) plus authoring LLM calls, so unbounded "improve
+# until perfect" is both slow and overfitting-prone. Hard cap per turn:
+MAX_REFINEMENTS_PER_TURN: int = 3
+# Mismatch examples fed back to the extractor author, per refinement step. The
+# evidence must stay a manageable SUBSET, not the full list: a handful of
+# varied failures is enough to diagnose a strategy, and pasting every mismatch
+# invites the author to special-case each one instead of fixing the rule.
+MAX_REFINEMENT_MISMATCHES: int = 5
+# When the samples are too few to judge a refinement at all, refinement is
+# withheld rather than offered: an "improved" extractor validated against one
+# or two entities is noise, not evidence. The full benchmark keeps running
+# (its sample size is the operator's chosen floor); this only gates the
+# refinement loop.
+MIN_SAMPLES_FOR_REFINEMENT: int = 5
+
 # --- external URL fetching (source-page HTML extraction) ---------------------
 #
 # The agent's read boundary is extended to operator-supplied ``http(s)`` URLs (an

@@ -114,6 +114,14 @@ OPTIONAL EVIDENCE: when several strategies look plausible, call
 target property names; it scores each against the values the sampled entities
 ALREADY carry. Prefer the candidate with the fewest MISMATCHES (a missing value
 leaves the entity untouched; a mismatched one writes a wrong value).
+When the report includes a REFINEMENT section with mismatch examples, use them
+to REPAIR the failing rule inside the same `extract` (an extra fallback
+strategy, a better anchor, better normalization) - never by special-casing the
+listed shared_ids, titles or exact strings: those samples are a probe, and an
+extractor tuned to reproduce them overfits. The tool offers at most 3
+refinements per turn; when it says refinement is NOT offered (budget spent, or
+too few judgeable samples), stop iterating and emit the best candidate with
+honest samples_matched numbers.
 """
 
 

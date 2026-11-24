@@ -34,7 +34,13 @@ from typing import Any, Literal
 from loguru import logger
 from pydantic_ai import RunContext
 
-from uwazi_admin_agent.configuration import MAX_BENCHMARK_CHARS, MAX_BENCHMARK_SAMPLES
+from uwazi_admin_agent.configuration import (
+    MAX_BENCHMARK_CHARS,
+    MAX_BENCHMARK_SAMPLES,
+    MAX_REFINEMENT_MISMATCHES,
+    MAX_REFINEMENTS_PER_TURN,
+    MIN_SAMPLES_FOR_REFINEMENT,
+)
 from uwazi_admin_agent.domain.extraction_eval import (
     MatchPolicy,
     SampleResult,
@@ -60,6 +66,120 @@ _SCAN_MULTIPLIER: int = 10
 def build_context(entity: AgentEntity) -> dict[str, Any]:
     """The ``ctx`` dict a generated script passes to ``extract`` (pure)."""
     return {"shared_id": entity.shared_id, "title": entity.title or "", "metadata": entity.metadata}
+
+
+def pick_refinement_mismatches(score: Any, limit: int = MAX_REFINEMENT_MISMATCHES) -> list[Any]:
+    """The mismatch SUBSET fed back to the extractor author (pure).
+
+    The goal is DIAGNOSIS, not enumeration: each example shows one
+    (expected -> predicted) pair for one entity. Selection maximizes variety
+    rather than count:
+
+    1. one mismatch per PROPERTY first, so a multi-property failure is visible
+       as a multi-property problem;
+    2. then the remaining slots go to the LARGEST expected-vs-predicted distance
+       (the most structurally informative failures first), capped at ``limit``.
+
+    A subset on purpose: pasting every mismatch invites the author to
+    special-case each entity (overfitting the benchmark sample set) instead of
+    fixing the extraction rule the failures share.
+    """
+    mismatches = list(getattr(score, "mismatches", []) or [])
+    if not mismatches:
+        return []
+    chosen: list[Any] = []
+    seen_properties: set[str] = set()
+    # Pass 1: first mismatch of each distinct property, in score order.
+    for item in mismatches:
+        if item.property_name in seen_properties:
+            continue
+        seen_properties.add(item.property_name)
+        chosen.append(item)
+        if len(chosen) >= limit:
+            return chosen
+    # Pass 2: longest expected/predicted texts first. Length is a cheap proxy
+    # for structure: long values failing usually means anchoring/normalization
+    # issues worth seeing before short truncation artifacts.
+    remaining = [item for item in mismatches if item not in chosen]
+    remaining.sort(key=lambda item: -(len(item.expected) + len(item.predicted or "")))
+    return (chosen + remaining)[: max(0, limit)]
+
+
+def refinement_guidance(
+    score: Any,
+    refinements_used: int,
+    samples_scored: int,
+) -> str:
+    """The report section that turns mismatch evidence into an action rule (pure).
+
+    Returns the text appended to the benchmark report. Empty string when no
+    refinement applies — either nothing mismatched, or the loop is exhausted or
+    under-powered (see ``MIN_SAMPLES_FOR_REFINEMENT``). The gate is INFORMATIVE:
+    the tool never rewrites the caller's script; it hands the generation agent
+    evidence + an instruction, and the agent decides whether a re-authored
+    candidate is worth another benchmark call.
+    """
+    total_mismatches = int(getattr(score, "mismatched", 0) or 0)
+    missing = int(getattr(score, "missing", 0) or 0)
+    if total_mismatches == 0:
+        if missing == 0:
+            return (
+                "\nAll judgeable samples matched. This strategy is READY to become the "
+                "generated script's extractor - re-benchmarking would add nothing."
+            )
+        return ""
+    lines = [
+        "",
+        "REFINEMENT (mismatch-driven re-authoring):",
+        f"- {total_mismatches} mismatched value(s) across the samples would be WRITTEN as wrong data.",
+    ]
+    if samples_scored < MIN_SAMPLES_FOR_REFINEMENT:
+        lines.append(
+            f"- NOT offered: only {samples_scored} judgeable sample(s) — below the "
+            f"{MIN_SAMPLES_FOR_REFINEMENT} needed to tell a real rule change from noise. "
+            "Accept the score as-is (prefer recording fewer rows over a wide guess) or "
+            "benchmark against more entities."
+        )
+        return "\n".join(lines)
+    if refinements_used >= MAX_REFINEMENTS_PER_TURN:
+        lines.append(
+            f"- NOT offered: the mismatch refinement budget for this turn is exhausted "
+            f"({MAX_REFINEMENTS_PER_TURN} refinements already used). Treat this score as "
+            "FINAL for the turn: if accuracy is still below the operator's bar, record "
+            "fewer rows (drop the mismatched shapes) rather than guess, and say so in "
+            "GeneratedScript.description."
+        )
+        return "\n".join(lines)
+    subset = pick_refinement_mismatches(score)
+    lines.append(
+        f"- RE-AUTHOR the extractor (refinement {refinements_used + 1}/{MAX_REFINEMENTS_PER_TURN}) "
+        "using ONLY these mismatch examples as the diagnosis, then benchmark the new "
+        "candidate in the SAME call as the incumbent so both see identical inputs:"
+    )
+    lines.extend(
+        f"  - {item.shared_id} [{item.property_name}]: expected {_clip_ref(repr(item.expected))} "
+        f"-> predicted {_clip_ref(item.predicted)}"
+        for item in subset
+    )
+    lines.append(
+        "- GENERALIZE: fix the RULE the failures share (pattern, anchor, normalization, "
+        "date coercion) - do NOT add per-entity special cases keyed on these "
+        "shared_ids, titles or exact strings. The benchmark sample set is a PROBE, "
+        "not the target set: an extractor tuned to reproduce these exact values "
+        "overfits and will mismatch on the rest of the corpus."
+    )
+    lines.append(
+        f"- Cap: at most {MAX_REFINEMENTS_PER_TURN} refinement(s) per generation turn "
+        "keeps the loop inside a reasonable time."
+    )
+    return "\n".join(lines)
+
+
+def _clip_ref(text: str | None, limit: int = 120) -> str:
+    """One side of a mismatch example rendered compactly (pure)."""
+    if text is None:
+        return "None"
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def call_candidate(extractor: Any, text: str, context: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -296,6 +416,20 @@ async def benchmark_extractor(
         )
         reports.append((label, score))
 
+    # One refinement slot per benchmark CALL (not per candidate): the call is
+    # the agent's decision point. Pure scoring above; this is the only mutable
+    # step, and it counts even when the answer is "do not refine" so an agent
+    # cannot farm the guidance by repeated benchmarking.
+    deps.benchmark_refinements_used += 1
+    # The agent may compare several candidates in one call; the guidance rides
+    # on the current best (the one a refinement would actually replace).
+    best_score = min(reports, key=lambda item: (-(item[1].accuracy or 0.0), item[1].mismatched, item[0]))[1]
+    guidance = refinement_guidance(
+        best_score,
+        refinements_used=deps.benchmark_refinements_used - 1,
+        samples_scored=best_score.samples_scored,
+    )
+
     # Best first: highest accuracy, then FEWEST mismatches (a wrong value is the
     # case that writes bad data), then the label so the order is stable.
     ranked = sorted(
@@ -324,6 +458,8 @@ async def benchmark_extractor(
         "before it becomes a generated script; below it, refine the extractor or leave the task to "
         "a reviewed prompt instead of a wide write."
     )
+    if guidance:
+        lines.append(guidance)
     return "\n".join(lines)
 
 
@@ -331,4 +467,6 @@ __all__ = [
     "benchmark_extractor",
     "build_context",
     "call_candidate",
+    "pick_refinement_mismatches",
+    "refinement_guidance",
 ]
