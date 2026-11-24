@@ -180,9 +180,7 @@ def test_create_from_existing_properties_requires_source_and_target_choices() ->
         create_target_properties=("title",),
     )
     assert validate_answers(ok) == []
-    issues = validate_answers(
-        GuidedAnswers(goal=GOAL_CREATE, create_source=CREATE_SOURCE_EXISTING, templates=("Order",))
-    )
+    issues = validate_answers(GuidedAnswers(goal=GOAL_CREATE, create_source=CREATE_SOURCE_EXISTING, templates=("Order",)))
     assert any("source template" in issue for issue in issues)
     assert any("source property to carry over" in issue for issue in issues)
 

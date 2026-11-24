@@ -468,11 +468,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             on_change=lambda event: state.update(_guided_draft_source_templates=event.value or []),
         ).props("outlined use-chips").classes("w-full")
     elif question == CREATE_SOURCE_PROPERTIES_QUESTION:
-        choices = [
-            choice
-            for template in answers.source_templates
-            for choice in template_property_choices(schema, template)
-        ]
+        choices = [choice for template in answers.source_templates for choice in template_property_choices(schema, template)]
         _multi_answer(
             state,
             "create_source_properties",
@@ -482,11 +478,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             placeholder="e.g. title, summary, judge",
         )
     elif question == CREATE_TARGET_PROPERTIES_QUESTION:
-        choices = [
-            choice
-            for template in answers.templates
-            for choice in template_property_choices(schema, template)
-        ]
+        choices = [choice for template in answers.templates for choice in template_property_choices(schema, template)]
         _multi_answer(
             state,
             "create_target_properties",
