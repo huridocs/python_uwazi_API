@@ -91,6 +91,7 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         or old["detail_key"] != suggestion.detail_key
         or (_value_from_json(old["basis"]) or []) != suggestion.basis
         or old["context"] != suggestion.context
+        or old["source_shared_id"] != suggestion.source_shared_id
     )
     values = (
         suggestion.op,
@@ -110,6 +111,7 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         _json_or_none(selected_values) if selected_values is not None else None,
         _json_or_none(suggestion.basis) if suggestion.basis else None,
         suggestion.context,
+        suggestion.source_shared_id,
         reviewed_at,
         int(old["id"]),
     )
@@ -155,6 +157,7 @@ class WritesMixin:
                 _json_or_none(s.selected_values) if s.selected_values is not None else None,
                 _json_or_none(s.basis) if s.basis else None,
                 s.context,
+                s.source_shared_id,
                 s.discard_reason,
                 _dt_to_text(s.reviewed_at),
                 _dt_to_text(s.created_at),
@@ -169,8 +172,8 @@ class WritesMixin:
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, skip_reason, match_state, merge_source_ids,
                      merge_files, status, edited_value, rejected_values, selected_values, basis,
-                     context, discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     context, source_shared_id, discard_reason, reviewed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
@@ -183,7 +186,8 @@ class WritesMixin:
                     merge_source_ids = excluded.merge_source_ids,
                     merge_files = excluded.merge_files,
                     basis = excluded.basis,
-                    context = excluded.context
+                    context = excluded.context,
+                    source_shared_id = excluded.source_shared_id
                 """,
                 rows,
             )
@@ -335,6 +339,7 @@ class WritesMixin:
                         old["selected_values"],
                         old["basis"],
                         old["context"],
+                        old["source_shared_id"],
                         now_text,
                         int(old["id"]),
                     )
@@ -350,7 +355,7 @@ class WritesMixin:
                                proposed_value = ?, current_value = ?, skip_reason = ?, match_state = ?,
                                merge_source_ids = ?, merge_files = ?, status = ?, edited_value = ?,
                                discard_reason = ?, rejected_values = ?, selected_values = ?, basis = ?,
-                               context = ?, reviewed_at = ?
+                               context = ?, source_shared_id = ?, reviewed_at = ?
                          WHERE id = ?
                         """,
                         updates,

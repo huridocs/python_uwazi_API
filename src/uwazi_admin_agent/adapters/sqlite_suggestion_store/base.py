@@ -50,6 +50,10 @@ class BaseMixin:
         - ``context`` — the source text a recorded value was read from, shown
           under the review table's row. Legacy rows read NULL, which the model
           turns into None (no context to show).
+        - ``source_shared_id`` — the entity a ``create`` row was derived from
+          (the script's optional ``source_shared_id`` key), so the entity
+          window can show the SOURCE entity's PDF for a placeholder row.
+          Legacy rows read NULL (no provenance).
 
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
@@ -84,6 +88,8 @@ class BaseMixin:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN context TEXT")
             if "skip_reason" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN skip_reason TEXT")
+            if "source_shared_id" not in columns:
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN source_shared_id TEXT")
             pass_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(prediction_pass)")}
             if pass_columns and "refused_commit" not in pass_columns:
                 self._conn.execute("ALTER TABLE prediction_pass ADD COLUMN refused_commit INTEGER NOT NULL DEFAULT 0")

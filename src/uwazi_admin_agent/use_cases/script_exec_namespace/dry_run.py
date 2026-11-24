@@ -69,6 +69,24 @@ def _context_text(value: Any) -> str | None:
     return text or None
 
 
+def _source_shared_id(value: Any) -> str | None:
+    """The ONE source entity a create dict names (pure).
+
+    Accepts a sharedId string or a list/tuple of them (several sources; the
+    first is the primary one whose document is shown). Anything else — empty
+    strings, blank entries, non-strings — contributes nothing: None means the
+    create carries no source provenance.
+    """
+    if isinstance(value, (list, tuple)):
+        for entry in value:
+            source = _source_shared_id(entry)
+            if source:
+                return source
+        return None
+    source = str(value).strip()
+    return source or None
+
+
 def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the write helpers for the dry-run namespace: recorders, no I/O.
 
@@ -107,6 +125,12 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "template_name": d.get("template_name", ""),
                     "metadata": d.get("metadata", {}),
                     "context": _context_text(d.get("context")),
+                    # Optional PROVENANCE: the entity whose PDF/fields the new
+                    # one was derived from (`source_shared_id`, or a list of
+                    # them — the FIRST id is the row's primary source). The
+                    # entity window uses it to show the SOURCE entity's
+                    # document, which the placeholder can never carry.
+                    "source_shared_id": _source_shared_id(d.get("source_shared_id")),
                 },
             )
         return [{"shared_id": f"dry-created-{i}", "success": True} for i, d in enumerate(entities_dicts)]

@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     selected_values TEXT,
     basis TEXT,
     context TEXT,
+    source_shared_id TEXT,
     discard_reason TEXT,
     reviewed_at TEXT,
     created_at TEXT
@@ -377,6 +378,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         selected_values=_value_from_json(row["selected_values"]),
         basis=_value_from_json(row["basis"]) or [],
         context=row["context"],
+        source_shared_id=row["source_shared_id"],
         discard_reason=row["discard_reason"],
         reviewed_at=_dt_from_text(row["reviewed_at"]),
         created_at=_dt_from_text(row["created_at"]),

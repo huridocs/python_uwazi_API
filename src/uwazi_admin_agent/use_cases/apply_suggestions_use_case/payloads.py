@@ -760,20 +760,41 @@ def build_apply_creates(
         if suggestion.template_name and not payload["template_name"]:
             payload["template_name"] = suggestion.template_name
     creates: list[dict] = []
-    for key in order:
+    for order_index, key in enumerate(order):
         shared_id, language = key
         payload = grouped[key]
         if not payload["template_name"]:
             raise ApplyRefusedError(f"create row {payload['title']!r} carries no template name; regenerate the task")
-        entry: dict = {
-            "title": payload["title"] or "",
-            "template_name": payload["template_name"],
-            "metadata": payload["metadata"],
-            "language": language,
-            "source_shared_id": shared_id,
-        }
-        creates.append(entry)
+        creates.append(
+            {
+                # Uwazi refuses a create whose title is EMPTY (``POST
+                # /api/entities``: "String must contain at least 1 character(s)"),
+                # and one placeholder-titleless row refused the whole Run.
+                # Only the entity's own identity is known here, so the fallback
+                # names what the row IS and stays editable in Uwazi afterwards:
+                # "<template> <source>" (and a 1-based position when the
+                # grouping carried no source id).
+                "title": payload["title"] or create_fallback_title(payload["template_name"], shared_id, order_index),
+                "template_name": payload["template_name"],
+                "metadata": payload["metadata"],
+                "language": language,
+                "source_shared_id": shared_id,
+            }
+        )
     return creates
+
+
+def create_fallback_title(template_name: str, source_id: str, position: int) -> str:
+    """The title a create with no title row is written under (pure).
+
+    "<Template> <source>" reads as what the entity is and where it came from
+    (the review table shows the same ids), and the 1-based position keeps two
+    placeholders from colliding when the record carried no id.
+    """
+    template = str(template_name or "").strip() or "Entity"
+    source = str(source_id or "").strip()
+    base = f"{template} {source}".strip() if source else ""
+    return base if base else f"{template} {position + 1}"
 
 
 def property_scope_ids(

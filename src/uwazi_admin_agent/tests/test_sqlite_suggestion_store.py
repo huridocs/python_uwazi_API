@@ -54,6 +54,7 @@ def _suggestion(
     proposed: object = "v",
     basis: list[str] | None = None,
     context: str | None = None,
+    source_shared_id: str | None = None,
 ) -> Suggestion:
     return Suggestion(
         run_id=run_id,
@@ -68,6 +69,7 @@ def _suggestion(
         status=status,
         basis=basis or [],
         context=context,
+        source_shared_id=source_shared_id,
         created_at=NOW,
     )
 
@@ -1026,3 +1028,22 @@ def test_context_refreshes_on_a_reconcile(store: SqliteSuggestionStore) -> None:
 
     assert _row_of(store).context == "the new paragraph"
     assert summary.refreshed == 1
+
+
+# --- source_shared_id (create provenance) -------------------------------------
+
+
+def test_the_create_source_shared_id_survives_the_store_round_trip(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_suggestion(op="create", shared_id="dry-created-0", source_shared_id="src1")])
+    rows, _ = store.query("run1", SuggestionFilter())
+    assert rows[0].source_shared_id == "src1"
+
+
+def test_a_refresh_updates_the_create_source(store: SqliteSuggestionStore) -> None:
+    store.add_suggestions([_suggestion(op="create", shared_id="dry-created-0", source_shared_id="src1")])
+    store.reconcile_suggestions(
+        "run1",
+        [_suggestion(op="create", shared_id="dry-created-0", source_shared_id="src2")],
+    )
+    rows, _ = store.query("run1", SuggestionFilter())
+    assert rows[0].source_shared_id == "src2"

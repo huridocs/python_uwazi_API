@@ -87,7 +87,7 @@ def test_build_apply_creates_groups_only_the_selected_rows() -> None:
     creates = build_apply_creates(rows, row_ids=[2])
     assert creates == [
         {
-            "title": "",
+            "title": "Template dry-created-1",
             "template_name": "Template",
             "metadata": {"p2": [{"value": "new", "language": "en"}]},
             "language": "en",

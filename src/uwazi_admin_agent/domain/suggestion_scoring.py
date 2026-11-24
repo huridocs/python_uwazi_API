@@ -460,6 +460,10 @@ def records_to_suggestions(
         title = titles.get(shared_id, "") or str(record.get("title") or "")
         recorded_basis = record.get("basis")
         basis: list[str] = [str(name) for name in recorded_basis] if isinstance(recorded_basis, list) else []
+        recorded_source = record.get("source_shared_id")
+        if isinstance(recorded_source, (list, tuple)):
+            recorded_source = next((str(one) for one in recorded_source if str(one).strip()), None)
+        recorded_source = str(recorded_source).strip() if isinstance(recorded_source, str) else ""
         base: dict[str, Any] = {
             "run_id": run_id,
             "shared_id": shared_id,
@@ -472,6 +476,13 @@ def records_to_suggestions(
             "merge_files": [dict(file) for file in merge.files] if merge is not None else [],
             "basis": basis,
             "context": record.get("context") if isinstance(record.get("context"), str) else None,
+            # The source entity a CREATE was derived from: the entity window
+            # resolves the SOURCE entity's PDF for a placeholder row. An
+            # update row names an entity that already exists (and holds its
+            # own PDF), so the key is ignored there.
+            "source_shared_id": (
+                recorded_source if recorded_source and op in CREATE_OPS else None
+            ),
         }
 
         if op == MOVE_OP:

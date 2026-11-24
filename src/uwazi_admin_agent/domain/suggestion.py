@@ -233,6 +233,16 @@ class Suggestion(BaseModel):
             "exactly what it was."
         ),
     )
+    source_shared_id: str | None = Field(
+        default=None,
+        description=(
+            "For a `create` row: the sharedId of the entity the new one was DERIVED from (the "
+            "script's optional `source_shared_id` key; a list's first entry). The entity "
+            "window uses it to show the SOURCE entity's primary document — the placeholder "
+            "the row itself carries has no files, so without this the PDF the suggestion is "
+            "based on could not be shown. None when the create names no source."
+        ),
+    )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
     current_value: Any = Field(default=None, description="Uwazi's current value for that key, when fetched.")
     skip_reason: str | None = Field(

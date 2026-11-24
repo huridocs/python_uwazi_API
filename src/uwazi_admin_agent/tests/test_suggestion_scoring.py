@@ -469,3 +469,41 @@ def test_update_record_puts_the_context_on_every_property_row() -> None:
 def test_a_record_without_a_context_leaves_the_rows_context_free() -> None:
     records = [_rec(op="update", shared_id="s1", metadata={"excerpt": [{"value": "v"}]}, title=None)]
     assert records_to_suggestions("run1", records)[0].context is None
+
+
+# --- records_to_suggestions: create source provenance -------------------------
+
+
+def test_create_record_carries_its_source_shared_id_on_every_row() -> None:
+    records = [
+        _rec(
+            op="create",
+            shared_id="dry-created-0",
+            title="New case",
+            template_name="Case",
+            metadata={"excerpt": "from the PDF", "topics": ["T"]},
+            source_shared_id="source1",
+        )
+    ]
+    rows = records_to_suggestions("run1", records)
+    assert rows
+    assert all(row.source_shared_id == "source1" for row in rows)
+
+
+def test_a_list_of_sources_collapses_to_the_first_one() -> None:
+    records = [
+        _rec(op="create", shared_id="dry-created-0", title="t", template_name="T", source_shared_id=["a", "b"])
+    ]
+    assert records_to_suggestions("run1", records)[0].source_shared_id == "a"
+
+
+def test_a_create_without_a_source_has_no_provenance() -> None:
+    records = [_rec(op="create", shared_id="dry-created-0", title="t", template_name="T")]
+    assert records_to_suggestions("run1", records)[0].source_shared_id is None
+
+
+def test_update_rows_do_not_carry_create_provenance() -> None:
+    records = [_rec(op="update", shared_id="s1", metadata={"excerpt": "v"}, title=None, source_shared_id="source1")]
+    # The key is create-only: an update record ignoring it keeps the field None
+    # (an update addresses an entity that already exists and holds its own PDF).
+    assert records_to_suggestions("run1", records)[0].source_shared_id is None

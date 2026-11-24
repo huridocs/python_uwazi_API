@@ -338,14 +338,56 @@ async def _load_document(
         document = None
     if pane.is_deleted:  # the operator moved on while we were resolving
         return
-    pane.clear()
     if document is not None:
+        pane.clear()
         with pane:
             ui.element("iframe").props(f"src={_viewer_src(state, shared_id, document.language)}").classes("w-full").style(
                 "height: 100%; border: 0"
             )
         return
+    # The entity's own rows carry no document (a `create` row's placeholder
+    # never holds files): fall back to the SOURCE entity the rows name —
+    # the entity whose PDF/fields the suggestion was derived from. Its
+    # document IS the evidence the operator needs to review this row.
+    rows = _entity_rows(state, shared_id, language)
+    source_id = _source_entity_id(rows)
+    if source_id:
+        try:
+            document = await resolve_entity_document(
+                page_instance_url(), credentials.user, credentials.password, source_id, language
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort provenance, never an error state
+            logger.info("no primary document on source {} for {}: {}", source_id, shared_id, exc)
+            document = None
+        if pane.is_deleted:
+            return
+        if document is not None:
+            pane.clear()
+            with pane:
+                ui.label("Source document — the entity this suggestion was derived from").classes(
+                    "text-caption text-grey-7"
+                )
+                ui.element("iframe").props(
+                    f"src={_viewer_src(state, source_id, document.language)}"
+                ).classes("w-full").style("height: 100%; border: 0")
+            return
     await _render_segmentation_fallback(pane, credentials, shared_id, language)
+
+
+def _source_entity_id(suggestions: list[Suggestion]) -> str | None:
+    """The SOURCE entity the rows were derived from, or None (pure).
+
+    A `create` row's ``shared_id`` is the ``dry-created-N`` placeholder — an
+    entity Uwazi has yet to mint — so a document lookup on it can only fail.
+    The script's optional ``source_shared_id`` names the entity whose PDF/fields
+    the new one was derived from; its document IS the operator's evidence. The
+    first named source wins (several sources are collapsed to the primary one).
+    """
+    for suggestion in suggestions:
+        source = (suggestion.source_shared_id or "").strip()
+        if source and source != suggestion.shared_id:
+            return source
+    return None
 
 
 def _viewer_src(state: dict[str, Any], shared_id: str, language: str) -> str:
@@ -745,20 +787,14 @@ def _fix_prompt_clicked(state: dict[str, Any], correction: SuggestionCorrection)
     """Open the prompt chat attached to this wrong suggestion (correction mode)."""
     prompt_chat_dialog(
         state["run_id"],
-        on_table_changed=lambda: _refresh_after_prompt_fix(state),
+        # The regeneration rewrites the whole review table; the operator must
+        # not keep working on a page whose rows are being replaced underneath
+        # them. Move to the tasks window, where the run's row shows the
+        # `regenerating` state until the new script and table are committed —
+        # the same behavior the page menu's prompt chat already has.
+        on_run_started=lambda: ui.navigate.to(page_link("/app")),
         correction=correction,
     )
-
-
-def _refresh_after_prompt_fix(state: dict[str, Any]) -> None:
-    """Repaint the review table AND the open entity window after a fix Run.
-
-    The fix regenerates the script and re-plans the whole table, so this
-    window's rows may be obsolete, changed, or brand new: rebuilding it is what
-    lets the operator confirm the fixed value without leaving the detail page.
-    """
-    _refresh_all(state)
-    _refresh_entity_window(state)
 
 
 def _entity_suggestions(

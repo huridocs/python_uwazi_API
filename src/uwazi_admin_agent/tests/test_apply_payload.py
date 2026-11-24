@@ -358,6 +358,26 @@ def test_a_created_entities_clear_proposal_also_becomes_an_empty_array() -> None
     assert creates[0]["metadata"]["date_published"] == []
 
 
+def test_a_create_without_a_title_row_gets_a_fallback_title() -> None:
+    """Uwazi refuses a create whose title is empty (422 "at least 1 character(s)").
+
+    A plan that only fills metadata used to refuse at Run time with that 422 on
+    EVERY placeholder. The payload now carries a readable fallback title: what
+    the entity is plus its own placeholder id.
+    """
+    creates = build_apply_creates(
+        [_s(shared_id="dry-created-3", op="create", property_name="summary", proposed="s", template_name="REPORT")]
+    )
+    assert creates[0]["title"] == "REPORT dry-created-3"
+
+
+def test_a_create_without_a_title_or_source_id_is_still_positioned() -> None:
+    from uwazi_admin_agent.use_cases.apply_suggestions_use_case.payloads import create_fallback_title
+
+    assert create_fallback_title("REPORT", "", 2) == "REPORT 3"
+    assert create_fallback_title("", "x", 0) == "Entity x"
+
+
 def test_build_apply_updates_skips_everything_unpushable() -> None:
     rows = [
         _s(shared_id="a", status=SuggestionStatus.PENDING),
@@ -414,7 +434,7 @@ def test_create_rows_never_become_update_payloads() -> None:
             "source_shared_id": "dry-created-0",
         },
         {
-            "title": "",
+            "title": "DOCUMENT dry-created-1",
             "template_name": "DOCUMENT",
             "metadata": {"excerpt": [{"value": "f"}]},
             "language": None,

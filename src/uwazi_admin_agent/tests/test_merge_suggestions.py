@@ -672,7 +672,7 @@ def test_create_merge_row_is_a_create_payload_not_an_update() -> None:
     assert build_apply_updates(rows) == []
     assert build_apply_creates(rows) == [
         {
-            "title": "",
+            "title": "Case dry-created-0",
             "template_name": "Case",
             "metadata": {"excerpt": [{"value": "new"}]},
             "language": None,

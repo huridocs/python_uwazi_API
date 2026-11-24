@@ -312,6 +312,15 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Create new entities. Each dict needs `title` and `template_name`
       (plus any `metadata`/`shared_id` you want to set). Returns a list of
       per-entity result dicts.
+      OPTIONAL `'source_shared_id'` — when the new entity is DERIVED from
+      another entity (its PDF, its segmentation, its fields), set the key to
+      that source entity's shared_id (a list of ids when there are several;
+      the FIRST one is treated as the primary source). It is display-only
+      provenance: the review window shows the SOURCE entity's primary
+      document beside the suggestion, so the operator can check the new
+      values against the very PDF they came from. Set it for every
+      create-from-source dict; omit it only for creates unrelated to any
+      existing entity. It is NOT written to Uwazi.
 
   update_entities(entities_dicts, language='en')
       Update existing entities PARTIALLY. Each dict needs `shared_id` and
