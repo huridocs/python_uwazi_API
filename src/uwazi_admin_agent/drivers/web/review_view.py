@@ -156,12 +156,17 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
         title = f"{title} ({', '.join(languages)})"
     phrases = [RUN_OP_PHRASES[op] for op in ops or [] if op in RUN_OP_PHRASES]
     action = " + ".join(dict.fromkeys(phrases)) or "Write"
+    # The per-kind breakdown: the operator sees HOW the rows split before they
+    # consent, not only a bare count ("Update ×2 · Delete ×1").
+    counts = {op: (ops or []).count(op) for op in dict.fromkeys(ops or []) if op in RUN_OP_PHRASES}
+    breakdown = " · ".join(f"{RUN_OP_PHRASES[op]} ×{n}" for op, n in counts.items())
     # A standalone file copy adds bytes to the target; Revert restores entity
     # snapshots and cannot trace those bytes back to a source this run deleted,
     # so the one thing the dialog must warn about is that they stay behind.
+    suffix = f" Breakdown: {breakdown}." if breakdown else ""
     if FILE_OPS.intersection(ops or []):
-        return title, f"{action} {count} {entities} in Uwazi now. The copied files stay on the target."
-    return title, f"{action} {count} {entities} in Uwazi now."
+        return title, f"{action} {count} {entities} in Uwazi now. The copied files stay on the target.{suffix}"
+    return title, f"{action} {count} {entities} in Uwazi now.{suffix}"
 
 
 def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = False) -> tuple[str, str]:

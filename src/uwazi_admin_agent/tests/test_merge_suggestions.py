@@ -1029,10 +1029,10 @@ def test_run_confirmation_names_the_merge_action() -> None:
     _title, message = run_confirmation(1, ["update_and_delete"])
 
     # The revert lives in the review window; the dialog only states the change.
-    assert message == "Merge (update + delete) 1 row in Uwazi now."
+    assert message == "Merge (update + delete) 1 row in Uwazi now. Breakdown: Merge (update + delete) ×1."
 
 
 def test_run_confirmation_does_not_promise_a_revert_for_a_file_copy() -> None:
     _title, message = run_confirmation(1, ["move_files"])
 
-    assert message == "Add files 1 row in Uwazi now. The copied files stay on the target."
+    assert message == "Add files 1 row in Uwazi now. The copied files stay on the target. Breakdown: Add files ×1."
