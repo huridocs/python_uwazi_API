@@ -159,14 +159,61 @@ def test_specific_language_modes_require_selections() -> None:
     assert any("output language" in issue for issue in output_issues)
 
 
-def test_property_choices_are_goal_scoped_and_deduplicated() -> None:
-    classify = property_choices(_schema(), (), GOAL_CLASSIFY)
-    assert [name for name, _ in classify] == ["related", "topics"]
-    fill = [name for name, _ in property_choices(_schema(), (), GOAL_FILL)]
-    assert "judge" in fill and fill.count("judge") == 1
+def test_create_unrelated_requires_template_count_instructions_and_properties() -> None:
+    assert validate_answers(_create_unrelated()) == []
+    issues = validate_answers(
+        GuidedAnswers(goal=GOAL_CREATE, create_source=CREATE_SOURCE_UNRELATED, templates=(), create_count="  ")
+    )
+    assert any("template the new entities should use" in issue for issue in issues)
+    assert any("how many entities" in issue for issue in issues)
+    assert any("new entities should contain" in issue for issue in issues)
+    assert any("property the new entity should populate" in issue for issue in issues)
+
+
+def test_create_from_existing_properties_requires_source_and_target_choices() -> None:
+    ok = GuidedAnswers(
+        goal=GOAL_CREATE,
+        create_source=CREATE_SOURCE_EXISTING,
+        templates=("Order",),
+        source_templates=("Judgment",),
+        create_source_properties=("title",),
+        create_target_properties=("title",),
+    )
+    assert validate_answers(ok) == []
+    issues = validate_answers(
+        GuidedAnswers(goal=GOAL_CREATE, create_source=CREATE_SOURCE_EXISTING, templates=("Order",))
+    )
+    assert any("source template" in issue for issue in issues)
+    assert any("source property to carry over" in issue for issue in issues)
+
+
+def test_create_from_documents_skips_the_source_property_requirement() -> None:
+    ok = GuidedAnswers(
+        goal=GOAL_CREATE,
+        create_source=CREATE_SOURCE_DOCUMENTS,
+        templates=("Order",),
+        source_templates=("Judgment",),
+        create_target_properties=("summary",),
+        sources=(SOURCE_PDF,),
+    )
+    issues = validate_answers(ok)
+    assert not any("source property to carry over" in issue for issue in issues)
+
+
+def test_create_does_not_read_instance_sources() -> None:
+    """The create flow validates its own answers, never the fill/custom source list."""
+    create = GuidedAnswers(goal=GOAL_CREATE, source_templates=("Judgment",))
+    issues = validate_answers(create)
+    assert not any("input source" in issue for issue in issues)
+
+
+def test_property_choices_are_fill_scoped_and_deduplicated() -> None:
+    classify = property_choices(_schema(), ())
+    names = [name for name, _ in classify]
+    assert names == ["creationDate", "judge", "related", "topics"]
     # Templates narrow the set: Order defines no multiselect property.
-    narrowed = [name for name, _ in property_choices(_schema(), ["Order"], GOAL_CLASSIFY)]
-    assert narrowed == ["related"]
+    narrowed = [name for name, _ in property_choices(_schema(), ["Order"])]
+    assert narrowed == ["judge", "related"]
 
 
 def test_template_property_choices_and_property_type_resolve_one_template() -> None:

@@ -160,6 +160,20 @@ def question_error(question: str, answers: GuidedAnswers) -> str | None:
         return "Choose or enter at least one input language."
     if question == OUTPUT_LANGUAGES_QUESTION and not answers.output_languages:
         return "Choose or enter at least one output language."
+    if question == TEMPLATE_QUESTION and answers.goal == GOAL_CREATE and not any(t.strip() for t in answers.templates):
+        return "Choose the template the new entities should use."
+    if question == SOURCE_TEMPLATES_QUESTION and not any(t.strip() for t in answers.source_templates):
+        return "Choose the source template(s) whose entities the new ones should be based on."
+    if question == CREATE_SOURCE_PROPERTIES_QUESTION and not answers.create_source_properties:
+        return "Choose at least one source property to carry over."
+    if question == CREATE_TARGET_PROPERTIES_QUESTION and not answers.create_target_properties:
+        return "Choose at least one property the new entity should populate."
+    if question == CREATE_COUNT_QUESTION:
+        count = answers.create_count.strip()
+        if not count.isdigit() or int(count) <= 0:
+            return "Enter how many entities the task should create."
+    if question == CREATE_INSTRUCTIONS_QUESTION and not answers.create_instructions.strip():
+        return "Describe what the new entities should contain."
     return None
 
 

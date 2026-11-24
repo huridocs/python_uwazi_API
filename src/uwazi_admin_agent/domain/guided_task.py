@@ -232,7 +232,6 @@ def _selected_templates(schema: WizardSchema, templates: Iterable[str]) -> list[
 def property_choices(
     schema: WizardSchema | None,
     templates: Iterable[str],
-    goal: str,
 ) -> list[tuple[str, str]]:
     """``[(name, option_text)]`` of properties the fill flow can target (pure).
 
@@ -243,13 +242,12 @@ def property_choices(
     picked here decides whether the flow classifies (select/multiselect/
     relationship) or extracts (every other type).
     """
-    allowed = _goal_property_types(goal)
     labels: dict[str, str] = {}
     if schema is None:
         return []
     for template in _selected_templates(schema, templates):
         for prop in template.properties:
-            if prop.type not in allowed:
+            if prop.type not in FILL_TARGET_PROPERTY_TYPES:
                 continue
             labels.setdefault(prop.name, prop.display)
     return sorted(labels.items(), key=lambda item: item[1].casefold())
@@ -306,8 +304,6 @@ def metadata_property_choices(
     return sorted(labels.items(), key=lambda item: item[1].casefold())
 
 
-def _goal_property_types(goal: str) -> frozenset[str]:
-    return FILL_TARGET_PROPERTY_TYPES
 def fill_is_classification(answers: GuidedAnswers, schema: WizardSchema | None = None) -> bool:
     """Whether the fill flow is classifying (pure).
 
@@ -417,6 +413,55 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
     return errors
 
 
+def _validate_create(answers: GuidedAnswers) -> list[str]:
+    """Problems specific to the create-entities flow (pure)."""
+    errors: list[str] = []
+    if not any(name.strip() for name in answers.templates):
+        errors.append("Choose the template the new entities should use.")
+    if answers.create_source not in CREATE_SOURCES:
+        errors.append("Choose what the new entities should be based on.")
+    if answers.create_source == CREATE_SOURCE_EXISTING:
+        if not any(name.strip() for name in answers.source_templates):
+            errors.append("Choose the source template(s) whose entities the new ones should be based on.")
+        if not answers.create_source_properties:
+            errors.append("Choose at least one source property to carry over.")
+        if not answers.create_target_properties:
+            errors.append("Choose at least one property the new entity should populate.")
+        if answers.entity_scope not in SCOPES:
+            errors.append("Choose which source entities to include.")
+        if answers.entity_scope == SCOPE_FILTER and not answers.scope_filter.strip():
+            errors.append("Describe the filter or condition that selects the source entities.")
+        errors.extend(_validate_input_languages(answers))
+    elif answers.create_source == CREATE_SOURCE_DOCUMENTS:
+        if not any(name.strip() for name in answers.source_templates):
+            errors.append("Choose the source template(s) whose documents should be read.")
+        if not answers.create_target_properties:
+            errors.append("Choose at least one property the new entity should populate.")
+        if answers.entity_scope not in SCOPES:
+            errors.append("Choose which source entities to include.")
+        if answers.entity_scope == SCOPE_FILTER and not answers.scope_filter.strip():
+            errors.append("Describe the filter or condition that selects the source entities.")
+        errors.extend(_validate_input_languages(answers))
+    elif answers.create_source == CREATE_SOURCE_UNRELATED:
+        count = answers.create_count.strip()
+        if not count.isdigit() or int(count) <= 0:
+            errors.append("Enter how many entities the task should create.")
+        if not answers.create_instructions.strip():
+            errors.append("Describe what the new entities should contain.")
+        if not answers.create_target_properties:
+            errors.append("Choose at least one property the new entity should populate.")
+    return errors
+
+
+def _validate_input_languages(answers: GuidedAnswers) -> list[str]:
+    errors: list[str] = []
+    if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
+        errors.append("Choose how the input language is selected.")
+    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
+        errors.append("Choose the primary input language(s), or switch to 'Match each target language'.")
+    return errors
+
+
 # --- Prompt assembly ------------------------------------------------------
 
 
@@ -519,6 +564,115 @@ def _logic_lines(answers: GuidedAnswers) -> list[str]:
     ]
 
 
+def _create_goal_lines(answers: GuidedAnswers) -> list[str]:
+    """The create flow's Task Goal lines (pure)."""
+    target = ", ".join(_code(name) for name in answers.templates if name.strip()) or "All templates"
+    if answers.create_source == CREATE_SOURCE_UNRELATED:
+        count = answers.create_count.strip() or "the requested number of"
+        return [
+            f"- **Flow:** {GOAL_DESCRIPTIONS[GOAL_CREATE]}",
+            f"- **Target Template (new entities):** {target}",
+            f"- **Entities to create:** {count}",
+        ]
+    return [
+        f"- **Flow:** {GOAL_DESCRIPTIONS[GOAL_CREATE]}",
+        f"- **Target Template (new entities):** {target}",
+        "- **Entities to create:** One new entity per matching source entity.",
+        f"- **Entity Scope (source entities):** {_scope_text(answers)}",
+    ]
+
+
+def _create_source_lines(answers: GuidedAnswers) -> list[str]:
+    """The create flow's Creation Source lines (pure)."""
+    lines = [
+        f"- **Basis:** {CREATE_SOURCE_LABELS[answers.create_source]}",
+        f"- **Reads:** {CREATE_SOURCE_DESCRIPTIONS[answers.create_source]}",
+    ]
+    if answers.create_source in (CREATE_SOURCE_EXISTING, CREATE_SOURCE_DOCUMENTS):
+        source_templates = ", ".join(_code(name) for name in answers.source_templates if name.strip()) or "All templates"
+        lines.append(f"- **Source Templates:** {source_templates}")
+    if answers.create_source == CREATE_SOURCE_EXISTING:
+        if answers.create_source_properties:
+            lines.append(
+                "- **Source properties to read:** "
+                + ", ".join(_code(name) for name in answers.create_source_properties if name.strip())
+            )
+        lines.append(
+            "- **Target properties to populate:** "
+            + ", ".join(_code(name) for name in answers.create_target_properties if name.strip())
+        )
+        lines.append(
+            "- **Creation rule:** Copy or transform the selected source properties into the new entity: a target "
+            "property that shares a source property's name takes that source value; any other target property is "
+            "derived from the selected source properties and the creation instructions."
+        )
+    elif answers.create_source == CREATE_SOURCE_DOCUMENTS:
+        lines.append(
+            "- **Target properties to populate:** "
+            + ", ".join(_code(name) for name in answers.create_target_properties if name.strip())
+        )
+        lines.append(
+            "- **Creation rule:** Read each source entity's PDF/document and populate the new entity from its content."
+        )
+    else:
+        lines.append(
+            "- **Target properties to populate:** "
+            + ", ".join(_code(name) for name in answers.create_target_properties if name.strip())
+        )
+    if answers.create_instructions.strip():
+        lines.append(f"- **Creation instructions:** {answers.create_instructions.strip()}")
+    return lines
+
+
+def _assemble_create_prompt(answers: GuidedAnswers, labels: Mapping[str, str]) -> str:
+    """Render a create-entities prompt (pure)."""
+    lines: list[str] = [
+        "### Task Goal",
+        *_create_goal_lines(answers),
+        "",
+        "### Creation Source",
+        *_create_source_lines(answers),
+        "",
+    ]
+    if answers.create_source == CREATE_SOURCE_DOCUMENTS:
+        lines.extend(
+            [
+                "### Input Data & Source Language Strategy",
+                f"- **Sources to inspect:** {SOURCE_LABELS[SOURCE_PDF]}",
+                f"- **Document reading guidance:** {answers.document_guidance.strip() or DEFAULT_DOCUMENT_GUIDANCE}",
+                f"- **Input language selection:** {_input_language_text(answers, labels)}",
+                "",
+            ]
+        )
+    elif answers.create_source == CREATE_SOURCE_EXISTING:
+        lines.extend(
+            [
+                "### Input Data & Source Language Strategy",
+                f"- **Sources to inspect:** {SOURCE_LABELS[SOURCE_METADATA]}",
+                f"- **Input language selection:** {_input_language_text(answers, labels)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "### Multilingual Output Rules",
+            f"- **Output language behavior:** {_output_language_text(answers, labels)}",
+            "- *Note: Inspect each target property's definition in Uwazi. A translatable text property "
+            "takes one value per output language; a shared property (select, multiselect, relationship, "
+            "date, numeric, geolocation) takes a single value.*",
+            "",
+            "### Custom Instructions & Few-Shot Examples",
+            f"- **Additional Rules:** {answers.additional_rules.strip() or 'None'}",
+            f"- **Examples:** {answers.examples.strip() or 'None'}",
+            "",
+            "### Output Requirement",
+            "Record each new entity as a CREATE suggestion (`create_entities`) to populate the user review "
+            "table (do not create entities in Uwazi directly).",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
 def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] | None = None) -> str:
     """Render the answers as the prompt the generation LLM receives (pure).
 
@@ -576,9 +730,15 @@ __all__ = [
     "FALLBACK_LABELS",
     "FALLBACK_MODES",
     "FALLBACK_VALUE",
+    "CREATE_SOURCES",
+    "CREATE_SOURCE_DESCRIPTIONS",
+    "CREATE_SOURCE_DOCUMENTS",
+    "CREATE_SOURCE_EXISTING",
+    "CREATE_SOURCE_LABELS",
+    "CREATE_SOURCE_UNRELATED",
     "FILL_TARGET_PROPERTY_TYPES",
     "GOALS",
-    "GOAL_CLASSIFY",
+    "GOAL_CREATE",
     "GOAL_CUSTOM",
     "GOAL_DESCRIPTIONS",
     "GOAL_FILL",
@@ -609,9 +769,12 @@ __all__ = [
     "WizardSchema",
     "WizardTemplate",
     "assemble_prompt",
+    "fill_is_classification",
     "language_choices",
     "language_label_map",
     "metadata_property_choices",
     "property_choices",
+    "property_type",
+    "template_property_choices",
     "validate_answers",
 ]
