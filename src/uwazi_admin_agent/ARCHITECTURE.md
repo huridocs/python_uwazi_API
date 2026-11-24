@@ -55,9 +55,19 @@ each `__init__.py` re-exports the original names.
 - `drivers/web/app/` — the NiceGUI app:
   - `state.py`, `broadcast.py`, `login.py`, `runs_table.py`,
     `dialogs.py`, `wizard.py`, `guided_form.py`, `page.py`
-  - The wizard opens with the task type. Guided tasks use the pure conditional
+  - The wizard opens with the task type: **Fill a property**, **Create
+    entities**, or **Custom task**. Guided tasks use the pure conditional
     navigation in `domain/guided_flow.py`: one question per screen, automatic
     advancement for radio choices, and only relevant follow-up questions.
+  - Fill a property covers classification: the target property's Uwazi type
+    (`select`/`multiselect`/`relationship`) switches the flow to the
+    classification sub-flow (existing thesaurus terms or linked entities, plus
+    the no-match fallback); any other type gets the extraction sub-flow
+    (formatting rules + existing-value policy).
+  - Create entities branches on what the new entities are based on: existing
+    entities' properties (one new entity per source entity), existing entities'
+    documents, or instructions unrelated to the instance. The last one asks for
+    a count + instructions and no source scope.
 - `drivers/web/review_page/` — the review page:
   - `core.py` — table, filters, actions, selection, drift
   - `entity_window.py` — entity detail window, files, labels/types

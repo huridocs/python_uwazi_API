@@ -22,26 +22,49 @@ from dataclasses import dataclass
 
 # --- Question vocabularies -------------------------------------------------
 
-GOAL_CLASSIFY = "classify"
 GOAL_FILL = "fill"
+GOAL_CREATE = "create"
 GOAL_CUSTOM = "custom"
-GOALS: tuple[str, ...] = (GOAL_FILL, GOAL_CLASSIFY, GOAL_CUSTOM)
+GOALS: tuple[str, ...] = (GOAL_FILL, GOAL_CREATE, GOAL_CUSTOM)
 
 GOAL_LABELS: dict[str, str] = {
-    GOAL_CLASSIFY: "Classify topics",
     GOAL_FILL: "Fill a property",
+    GOAL_CREATE: "Create entities",
     GOAL_CUSTOM: "Custom task",
 }
 
 # The full descriptions are BOTH the radio option text and the `Flow` line of the
 # assembled prompt: the operator must recognize in the prompt exactly what they
-# picked.
+# picked. A select/multiselect/relationship target IS a classification task, so
+# it needs no separate goal: the target property's type selects the sub-flow.
 GOAL_DESCRIPTIONS: dict[str, str] = {
-    GOAL_CLASSIFY: ("Classify topics — categorize entities using existing thesaurus terms or linked relationship entities."),
     GOAL_FILL: (
-        "Fill a property — extract information from documents or existing fields to suggest values for a target property."
+        "Fill a property — extract a value from documents or existing fields; select, multiselect and "
+        "relationship targets are classified with existing thesaurus terms or linked entities."
+    ),
+    GOAL_CREATE: (
+        "Create entities — build new entities under a template from existing entities' properties, their "
+        "documents, or instructions unrelated to the current instance content."
     ),
     GOAL_CUSTOM: "Custom task — describe a custom analysis or data-processing rule in your own words.",
+}
+
+CREATE_SOURCE_EXISTING = "existing_metadata"
+CREATE_SOURCE_DOCUMENTS = "existing_documents"
+CREATE_SOURCE_UNRELATED = "unrelated"
+CREATE_SOURCES: tuple[str, ...] = (CREATE_SOURCE_EXISTING, CREATE_SOURCE_DOCUMENTS, CREATE_SOURCE_UNRELATED)
+
+CREATE_SOURCE_LABELS: dict[str, str] = {
+    CREATE_SOURCE_EXISTING: "Existing entities' properties (one new entity per source entity)",
+    CREATE_SOURCE_DOCUMENTS: "Existing entities' PDFs/documents (extract their content into new entities)",
+    CREATE_SOURCE_UNRELATED: "Instructions unrelated to the current instance content (generate new entities)",
+}
+
+# What each create source reads, as stated in the assembled prompt.
+CREATE_SOURCE_DESCRIPTIONS: dict[str, str] = {
+    CREATE_SOURCE_EXISTING: "The properties of existing entities in the source template.",
+    CREATE_SOURCE_DOCUMENTS: "The PDFs/documents attached to existing entities in the source template.",
+    CREATE_SOURCE_UNRELATED: "No instance content: only the instructions provided by the operator.",
 }
 
 SCOPE_ALL = "all"
@@ -112,9 +135,11 @@ OUTPUT_LANGUAGE_LABELS: dict[str, str] = {
 
 DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on document length and structure."
 
-# Property types each goal can target. A classification target must be a value
-# Uwazi can restrict to thesaurus terms or linked entities; a fill target is any
-# property the write path can populate with a plain value.
+# Property types the fill flow can target. A select/multiselect/relationship
+# target is a CLASSIFICATION task (it can only take thesaurus terms or linked
+# entities); every other type is an extraction task (the LLM produces a plain
+# value). The target's type therefore selects the sub-flow: there is no separate
+# "classify" goal.
 CLASSIFY_TARGET_PROPERTY_TYPES: frozenset[str] = frozenset({"select", "multiselect", "relationship"})
 FILL_TARGET_PROPERTY_TYPES: frozenset[str] = frozenset(
     {
@@ -209,14 +234,14 @@ def property_choices(
     templates: Iterable[str],
     goal: str,
 ) -> list[tuple[str, str]]:
-    """``[(name, option_text)]`` of target properties valid for ``goal`` (pure).
+    """``[(name, option_text)]`` of properties the fill flow can target (pure).
 
     Properties are collected across the selected templates (all templates when
     the selection is empty). A name defined by several templates appears ONCE:
     the prompt names the property, and the generation LLM reads each target
-    template's own definition. Only the active goal's writable types are
-    offered — a classification target must be a select/multiselect/relationship
-    property, never a free-text one.
+    template's own definition. Only fill-writable types are offered; the type
+    picked here decides whether the flow classifies (select/multiselect/
+    relationship) or extracts (every other type).
     """
     allowed = _goal_property_types(goal)
     labels: dict[str, str] = {}
@@ -228,6 +253,43 @@ def property_choices(
                 continue
             labels.setdefault(prop.name, prop.display)
     return sorted(labels.items(), key=lambda item: item[1].casefold())
+
+
+def template_property_choices(
+    schema: WizardSchema | None,
+    template: str,
+) -> list[tuple[str, str]]:
+    """``[(name, option_text)]`` of every property of ONE template (pure).
+
+    Used by the create flow to offer the properties a new entity can read from
+    a source entity and the properties it can populate on the target template.
+    """
+    labels: dict[str, str] = {}
+    if schema is None:
+        return []
+    for candidate in schema.templates:
+        if candidate.name != template.strip():
+            continue
+        for prop in candidate.properties:
+            labels.setdefault(prop.name, prop.display)
+    return sorted(labels.items(), key=lambda item: item[1].casefold())
+
+
+def property_type(schema: WizardSchema | None, property_name: str) -> str:
+    """The Uwazi type of ``property_name``, or ``""`` when unknown (pure).
+
+    The first selected template that defines the property wins; an unknown or
+    operator-typed name reports ``""`` and the fill flow falls back to the
+    extraction branch.
+    """
+    name = property_name.strip()
+    if schema is None or not name:
+        return ""
+    for template in schema.templates:
+        for prop in template.properties:
+            if prop.name == name and prop.type:
+                return prop.type
+    return ""
 
 
 def metadata_property_choices(
@@ -245,9 +307,18 @@ def metadata_property_choices(
 
 
 def _goal_property_types(goal: str) -> frozenset[str]:
-    if goal == GOAL_CLASSIFY:
-        return CLASSIFY_TARGET_PROPERTY_TYPES
     return FILL_TARGET_PROPERTY_TYPES
+def fill_is_classification(answers: GuidedAnswers, schema: WizardSchema | None = None) -> bool:
+    """Whether the fill flow is classifying (pure).
+
+    An explicit ``target_property_type`` wins; otherwise the instance schema is
+    consulted. Unknown types (operator-typed name, unreadable schema) fall back
+    to extraction: a text property accepts free values, so that is the safe
+    branch.
+    """
+    property_type_name = answers.target_property_type.strip()
+    resolved = property_type_name or property_type(schema, answers.target_property)
+    return resolved in CLASSIFY_TARGET_PROPERTY_TYPES
 
 
 # --- Answers --------------------------------------------------------------
@@ -259,6 +330,7 @@ class GuidedAnswers:
 
     goal: str = GOAL_FILL
     templates: tuple[str, ...] = ()
+    source_templates: tuple[str, ...] = ()
     entity_scope: str = SCOPE_ALL
     scope_filter: str = ""
     sources: tuple[str, ...] = ()
@@ -267,12 +339,18 @@ class GuidedAnswers:
     input_language_mode: str = INPUT_LANGUAGE_MATCH
     input_languages: tuple[str, ...] = ()
     target_property: str = ""
+    target_property_type: str = ""
     fallback_mode: str = FALLBACK_BLANK
     fallback_value: str = ""
     fill_rules: str = ""
     existing_value_mode: str = EXISTING_REPLACE
     existing_value_rule: str = ""
     custom_description: str = ""
+    create_source: str = CREATE_SOURCE_EXISTING
+    create_source_properties: tuple[str, ...] = ()
+    create_target_properties: tuple[str, ...] = ()
+    create_count: str = ""
+    create_instructions: str = ""
     output_language_mode: str = OUTPUT_ALL
     output_languages: tuple[str, ...] = ()
     additional_rules: str = ""
@@ -280,7 +358,7 @@ class GuidedAnswers:
 
     def target_property_for_goal(self) -> str:
         """The target property only when the active branch defines one (pure)."""
-        return self.target_property.strip() if self.goal in (GOAL_CLASSIFY, GOAL_FILL) else ""
+        return self.target_property.strip() if self.goal == GOAL_FILL else ""
 
 
 # --- Validation -----------------------------------------------------------
@@ -296,38 +374,41 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
     errors: list[str] = []
     if answers.goal not in GOALS:
         errors.append("Choose what the task should do.")
-    if answers.entity_scope not in SCOPES:
-        errors.append("Choose which entities to include.")
-    if answers.entity_scope == SCOPE_FILTER and not answers.scope_filter.strip():
-        errors.append("Describe the filter or condition that selects the entities.")
-    if not answers.sources:
-        errors.append("Choose at least one input source to read.")
-    if SOURCE_METADATA in answers.sources and not answers.metadata_properties:
-        errors.append("List the metadata properties to read, or uncheck 'Entity metadata properties' as a source.")
-    if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
-        errors.append("Choose how the input language is selected.")
-    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
-        errors.append("Choose the primary input language(s), or switch to 'Match each target language'.")
 
-    if answers.goal == GOAL_CLASSIFY:
-        if not answers.target_property.strip():
-            errors.append("Choose the property that should receive the suggested topics.")
-        if answers.fallback_mode not in FALLBACK_MODES:
-            errors.append("Choose what to suggest when no topic clearly applies.")
-        if answers.fallback_mode == FALLBACK_VALUE and not answers.fallback_value.strip():
-            errors.append("Enter the fallback value to suggest.")
-    elif answers.goal == GOAL_FILL:
-        if not answers.target_property.strip():
-            errors.append("Choose the property that should receive the suggested value.")
-        if not answers.fill_rules.strip():
-            errors.append("Describe the rules or formatting the generated value should follow.")
-        if answers.existing_value_mode not in EXISTING_MODES:
-            errors.append("Choose how to handle a property that already has a value.")
-        if answers.existing_value_mode == EXISTING_CUSTOM and not answers.existing_value_rule.strip():
-            errors.append("Describe the custom rule for properties that already have a value.")
-    elif answers.goal == GOAL_CUSTOM:
-        if not answers.custom_description.strip():
-            errors.append("Describe what the task should analyze, extract or suggest.")
+    if answers.goal == GOAL_CREATE:
+        errors.extend(_validate_create(answers))
+    else:
+        if answers.entity_scope not in SCOPES:
+            errors.append("Choose which entities to include.")
+        if answers.entity_scope == SCOPE_FILTER and not answers.scope_filter.strip():
+            errors.append("Describe the filter or condition that selects the entities.")
+        if not answers.sources:
+            errors.append("Choose at least one input source to read.")
+        if SOURCE_METADATA in answers.sources and not answers.metadata_properties:
+            errors.append("List the metadata properties to read, or uncheck 'Entity metadata properties' as a source.")
+        if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
+            errors.append("Choose how the input language is selected.")
+        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
+            errors.append("Choose the primary input language(s), or switch to 'Match each target language'.")
+
+        if answers.goal == GOAL_FILL:
+            if not answers.target_property.strip():
+                errors.append("Choose the property that should receive the suggested value.")
+            if fill_is_classification(answers):
+                if answers.fallback_mode not in FALLBACK_MODES:
+                    errors.append("Choose what to suggest when no topic clearly applies.")
+                if answers.fallback_mode == FALLBACK_VALUE and not answers.fallback_value.strip():
+                    errors.append("Enter the fallback value to suggest.")
+            else:
+                if not answers.fill_rules.strip():
+                    errors.append("Describe the rules or formatting the generated value should follow.")
+                if answers.existing_value_mode not in EXISTING_MODES:
+                    errors.append("Choose how to handle a property that already has a value.")
+                if answers.existing_value_mode == EXISTING_CUSTOM and not answers.existing_value_rule.strip():
+                    errors.append("Describe the custom rule for properties that already have a value.")
+        elif answers.goal == GOAL_CUSTOM:
+            if not answers.custom_description.strip():
+                errors.append("Describe what the task should analyze, extract or suggest.")
 
     if answers.output_language_mode not in OUTPUT_LANGUAGE_MODES:
         errors.append("Choose how multilingual outputs should be generated.")
@@ -390,6 +471,8 @@ def _scope_text(answers: GuidedAnswers) -> str:
         return "Only entities where the target property is currently empty."
     if answers.entity_scope == SCOPE_FILTER:
         return f"Entities matching this filter/condition: {answers.scope_filter.strip()}"
+    if answers.goal == GOAL_CREATE:
+        return "All entities in the selected source template(s)."
     return "All entities in the selected template(s)."
 
 
@@ -409,7 +492,7 @@ def _logic_lines(answers: GuidedAnswers) -> list[str]:
     if answers.goal == GOAL_CUSTOM:
         return [f"- **Task Description:** {answers.custom_description.strip()}"]
     target = _code(answers.target_property_for_goal())
-    if answers.goal == GOAL_CLASSIFY:
+    if fill_is_classification(answers):
         fallback = (
             f"Suggest {_code(answers.fallback_value)} when no topic clearly applies."
             if answers.fallback_mode == FALLBACK_VALUE
@@ -417,9 +500,10 @@ def _logic_lines(answers: GuidedAnswers) -> list[str]:
         )
         return [
             f"- **Target Property:** {target}",
+            f"- **Target Property Type:** {answers.target_property_type.strip() or 'select/multiselect/relationship'}",
             "- **Classification rules:** Assign the most relevant existing thesaurus term for a "
             "select/multiselect property, or link the matching relationship entity for a "
-            "relationship property.",
+            "relationship property. Never invent a term or an entity that does not exist.",
             f"- **Fallback:** {fallback}",
         ]
     if answers.existing_value_mode == EXISTING_SKIP:
@@ -444,6 +528,8 @@ def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] |
     rendered alone — the prompt never invents a label.
     """
     labels: Mapping[str, str] = language_labels or {}
+    if answers.goal == GOAL_CREATE:
+        return _assemble_create_prompt(answers, labels)
     templates = ", ".join(name.strip() for name in answers.templates if name.strip()) or "All templates"
     guidance = answers.document_guidance.strip() or DEFAULT_DOCUMENT_GUIDANCE
 

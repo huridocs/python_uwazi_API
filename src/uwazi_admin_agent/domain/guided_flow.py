@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from .guided_task import (
+    CREATE_SOURCE_DOCUMENTS,
+    CREATE_SOURCE_EXISTING,
+    CREATE_SOURCE_UNRELATED,
     EXISTING_CUSTOM,
     FALLBACK_VALUE,
-    GOAL_CLASSIFY,
+    GOAL_CREATE,
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
@@ -13,6 +16,7 @@ from .guided_task import (
     SCOPE_FILTER,
     SOURCE_METADATA,
     GuidedAnswers,
+    fill_is_classification,
 )
 
 TEMPLATE_QUESTION = "templates"
@@ -37,34 +41,80 @@ EXAMPLES_QUESTION = "examples"
 GENERATION_QUESTION = "generation"
 REVIEW_QUESTION = "review"
 
+# Create-entities questions.
+CREATE_SOURCE_QUESTION = "create_source"
+SOURCE_TEMPLATES_QUESTION = "source_templates"
+CREATE_SOURCE_PROPERTIES_QUESTION = "create_source_properties"
+CREATE_TARGET_PROPERTIES_QUESTION = "create_target_properties"
+CREATE_COUNT_QUESTION = "create_count"
+CREATE_INSTRUCTIONS_QUESTION = "create_instructions"
+
+
+def _fill_questions(answers: GuidedAnswers) -> list[str]:
+    questions = [TEMPLATE_QUESTION, TARGET_PROPERTY_QUESTION]
+    if fill_is_classification(answers):
+        # select/multiselect/relationship targets are a classification task:
+        # no extraction rules, no existing-value policy.
+        questions.append(FALLBACK_MODE_QUESTION)
+        if answers.fallback_mode == FALLBACK_VALUE:
+            questions.append(FALLBACK_VALUE_QUESTION)
+    else:
+        questions.append(EXISTING_VALUE_MODE_QUESTION)
+        if answers.existing_value_mode == EXISTING_CUSTOM:
+            questions.append(EXISTING_VALUE_RULE_QUESTION)
+    return questions
+
+
+def _create_questions(answers: GuidedAnswers) -> list[str]:
+    questions = [TEMPLATE_QUESTION, CREATE_SOURCE_QUESTION]
+    if answers.create_source in (CREATE_SOURCE_EXISTING, CREATE_SOURCE_DOCUMENTS):
+        questions.append(SOURCE_TEMPLATES_QUESTION)
+        if answers.create_source == CREATE_SOURCE_EXISTING:
+            questions.append(CREATE_SOURCE_PROPERTIES_QUESTION)
+        questions.append(CREATE_TARGET_PROPERTIES_QUESTION)
+        questions.append(SCOPE_QUESTION)
+        if answers.entity_scope == SCOPE_FILTER:
+            questions.append(SCOPE_FILTER_QUESTION)
+        questions.append(INPUT_LANGUAGE_MODE_QUESTION)
+        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+            questions.append(INPUT_LANGUAGES_QUESTION)
+    elif answers.create_source == CREATE_SOURCE_UNRELATED:
+        questions.extend((CREATE_COUNT_QUESTION, CREATE_INSTRUCTIONS_QUESTION, CREATE_TARGET_PROPERTIES_QUESTION))
+    else:
+        questions.append(CREATE_TARGET_PROPERTIES_QUESTION)
+    return questions
+
 
 def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
     """Return only the questions relevant to the current answers, in order."""
-    questions = [TEMPLATE_QUESTION]
-    if answers.goal == GOAL_CUSTOM:
-        questions.append(CUSTOM_DESCRIPTION_QUESTION)
+    if answers.goal == GOAL_CREATE:
+        questions = _create_questions(answers)
+    elif answers.goal == GOAL_CUSTOM:
+        questions = [TEMPLATE_QUESTION, CUSTOM_DESCRIPTION_QUESTION, SCOPE_QUESTION]
     else:
-        questions.append(TARGET_PROPERTY_QUESTION)
-        if answers.goal == GOAL_FILL:
-            questions.append(EXISTING_VALUE_MODE_QUESTION)
-            if answers.existing_value_mode == EXISTING_CUSTOM:
-                questions.append(EXISTING_VALUE_RULE_QUESTION)
-        elif answers.goal == GOAL_CLASSIFY:
-            questions.append(FALLBACK_MODE_QUESTION)
-            if answers.fallback_mode == FALLBACK_VALUE:
-                questions.append(FALLBACK_VALUE_QUESTION)
+        questions = _fill_questions(answers)
 
-    questions.extend((SCOPE_QUESTION,))
-    if answers.entity_scope == SCOPE_FILTER:
-        questions.append(SCOPE_FILTER_QUESTION)
-    questions.append(SOURCES_QUESTION)
-    if SOURCE_METADATA in answers.sources:
-        questions.append(METADATA_PROPERTIES_QUESTION)
-    questions.extend((INPUT_LANGUAGE_MODE_QUESTION,))
-    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
-        questions.append(INPUT_LANGUAGES_QUESTION)
+    if answers.goal == GOAL_CUSTOM:
+        if answers.entity_scope == SCOPE_FILTER:
+            questions.append(SCOPE_FILTER_QUESTION)
+        questions.append(SOURCES_QUESTION)
+        if SOURCE_METADATA in answers.sources:
+            questions.append(METADATA_PROPERTIES_QUESTION)
+        questions.append(INPUT_LANGUAGE_MODE_QUESTION)
+        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+            questions.append(INPUT_LANGUAGES_QUESTION)
+    elif answers.goal == GOAL_FILL:
+        questions.append(SCOPE_QUESTION)
+        if answers.entity_scope == SCOPE_FILTER:
+            questions.append(SCOPE_FILTER_QUESTION)
+        questions.append(SOURCES_QUESTION)
+        if SOURCE_METADATA in answers.sources:
+            questions.append(METADATA_PROPERTIES_QUESTION)
+        questions.append(INPUT_LANGUAGE_MODE_QUESTION)
+        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+            questions.append(INPUT_LANGUAGES_QUESTION)
+
     questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
-
     if answers.output_language_mode == OUTPUT_SPECIFIC:
         questions.append(OUTPUT_LANGUAGES_QUESTION)
     questions.extend((GENERATION_QUESTION, REVIEW_QUESTION))
@@ -93,8 +143,9 @@ def question_error(question: str, answers: GuidedAnswers) -> str | None:
         return "Describe what the task should analyze, extract or suggest."
     if question == TARGET_PROPERTY_QUESTION and not answers.target_property.strip():
         return "Choose or enter a target property."
-    if question == GENERATION_QUESTION and answers.goal == GOAL_FILL and not answers.fill_rules.strip():
-        return "Describe the rules or formatting for the generated value."
+    if question == GENERATION_QUESTION and answers.goal == GOAL_FILL and not fill_is_classification(answers):
+        if not answers.fill_rules.strip():
+            return "Describe the rules or formatting for the generated value."
     if question == EXISTING_VALUE_RULE_QUESTION and not answers.existing_value_rule.strip():
         return "Describe the custom rule for properties that already have a value."
     if question == FALLBACK_VALUE_QUESTION and not answers.fallback_value.strip():
@@ -113,6 +164,12 @@ def question_error(question: str, answers: GuidedAnswers) -> str | None:
 
 
 __all__ = [
+    "CREATE_COUNT_QUESTION",
+    "CREATE_INSTRUCTIONS_QUESTION",
+    "CREATE_SOURCE_PROPERTIES_QUESTION",
+    "CREATE_SOURCE_QUESTION",
+    "CREATE_TARGET_PROPERTIES_QUESTION",
+    "SOURCE_TEMPLATES_QUESTION",
     "guided_question_ids",
     "next_question_id",
     "previous_question_id",
