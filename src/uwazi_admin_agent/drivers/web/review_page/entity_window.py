@@ -364,12 +364,10 @@ async def _load_document(
         if document is not None:
             pane.clear()
             with pane:
-                ui.label("Source document — the entity this suggestion was derived from").classes(
-                    "text-caption text-grey-7"
-                )
-                ui.element("iframe").props(
-                    f"src={_viewer_src(state, source_id, document.language)}"
-                ).classes("w-full").style("height: 100%; border: 0")
+                ui.label("Source document — the entity this suggestion was derived from").classes("text-caption text-grey-7")
+                ui.element("iframe").props(f"src={_viewer_src(state, source_id, document.language)}").classes(
+                    "w-full"
+                ).style("height: 100%; border: 0")
             return
     await _render_segmentation_fallback(pane, credentials, shared_id, language)
 

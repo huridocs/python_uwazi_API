@@ -491,9 +491,7 @@ def test_create_record_carries_its_source_shared_id_on_every_row() -> None:
 
 
 def test_a_list_of_sources_collapses_to_the_first_one() -> None:
-    records = [
-        _rec(op="create", shared_id="dry-created-0", title="t", template_name="T", source_shared_id=["a", "b"])
-    ]
+    records = [_rec(op="create", shared_id="dry-created-0", title="t", template_name="T", source_shared_id=["a", "b"])]
     assert records_to_suggestions("run1", records)[0].source_shared_id == "a"
 
 

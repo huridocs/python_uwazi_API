@@ -480,9 +480,7 @@ def records_to_suggestions(
             # resolves the SOURCE entity's PDF for a placeholder row. An
             # update row names an entity that already exists (and holds its
             # own PDF), so the key is ignored there.
-            "source_shared_id": (
-                recorded_source if recorded_source and op in CREATE_OPS else None
-            ),
+            "source_shared_id": (recorded_source if recorded_source and op in CREATE_OPS else None),
         }
 
         if op == MOVE_OP:
