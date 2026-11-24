@@ -519,7 +519,7 @@ for d in query_entities_full(mode="by_template", template_name="Case"):
 result = "ok"
 """
     asyncio.run(_use_case(store).run(usable, "run1", _budget(), plan_kind="changes"))
-    before = store.query("run1", SuggestionFilter(include_obsolete=True))[1]
+    before = store.query("run1", SuggestionFilter())[1]
     assert before == 3
 
     gave_up = """
@@ -529,7 +529,7 @@ result = "0 extracted"
     with pytest.raises(PredictionPassError, match="plan_kind='changes'"):
         asyncio.run(_use_case(store).run(gave_up, "run1", _budget(), plan_kind="changes"))
 
-    rows, total = store.query("run1", SuggestionFilter(include_obsolete=True))
+    rows, total = store.query("run1", SuggestionFilter())
     assert total == 3
     assert all(row.proposed_value == "kept" for row in rows)
     pass_row = store.get_pass("run1")

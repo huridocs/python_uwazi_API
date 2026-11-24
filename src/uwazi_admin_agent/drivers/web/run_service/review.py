@@ -148,8 +148,8 @@ def set_selected_values(url: str, run_id: str, row_id: int, selected: list[str] 
     the Run writes (not a delta); ``None``
     drops the explicit selection so the proposal minus ``rejected_values``
     applies again. The same guards as :func:`set_rejected_values` hold: APPLIED
-    rows raise "already applied — revert it first", OBSOLETE rows "refresh the
-    table", and a row discarded for another reason "restore it first". An empty
+    rows raise "already applied — revert it first", and a row discarded for
+    another reason "restore it first". An empty
     list means "nothing selected": the row becomes DISCARDED with
     ``ALL_VALUES_REJECTED_REASON`` (a Run writes nothing); any non-empty
     selection — or clearing it — puts a row discarded by that sentinel back
@@ -158,15 +158,13 @@ def set_selected_values(url: str, run_id: str, row_id: int, selected: list[str] 
     store = build_suggestion_store(url)
     found, _total = store.query(
         run_id,
-        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+        SuggestionFilter(suggestion_ids=[row_id], limit=1, offset=0),
     )
     if not found:
         raise ValueError(f"row {row_id} not found in run {run_id}")
     row = found[0]
     if row.status is SuggestionStatus.APPLIED:
         raise ValueError("already applied — revert it first")
-    if row.status is SuggestionStatus.OBSOLETE:
-        raise ValueError("refresh the table")
     if row.discard_reason not in (None, ALL_VALUES_REJECTED_REASON):
         raise ValueError("restore it first")
     sentinel_discarded = row.status is SuggestionStatus.DISCARDED and row.discard_reason == ALL_VALUES_REJECTED_REASON
@@ -181,7 +179,7 @@ def set_selected_values(url: str, run_id: str, row_id: int, selected: list[str] 
     store.set_selected_values(row_id, selected, status, reason)
     fresh, _total = store.query(
         run_id,
-        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+        SuggestionFilter(suggestion_ids=[row_id], limit=1, offset=0),
     )
     if not fresh:
         raise ValueError(f"row {row_id} not found in run {run_id}")
@@ -424,9 +422,8 @@ def set_rejected_values(url: str, run_id: str, row_id: int, rejected: list[str])
 
     Rules: only runnable rows and rows discarded BY this mechanism
     (``discard_reason == ALL_VALUES_REJECTED_REASON``) may be edited; APPLIED
-    rows raise ``ValueError`` "already applied — revert it first", OBSOLETE rows
-    "refresh the table", and a row discarded for another reason raises
-    ``ValueError`` "restore it first". When
+    rows raise ``ValueError`` "already applied — revert it first", and a row
+    discarded for another reason raises ``ValueError`` "restore it first". When
     ``all_values_rejected(proposal, rejected)`` the row becomes DISCARDED with
     reason ``ALL_VALUES_REJECTED_REASON`` (a Run then writes nothing); when
     values are accepted again and the row's discard reason is that same
@@ -436,15 +433,13 @@ def set_rejected_values(url: str, run_id: str, row_id: int, rejected: list[str])
     store = build_suggestion_store(url)
     found, _total = store.query(
         run_id,
-        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+        SuggestionFilter(suggestion_ids=[row_id], limit=1, offset=0),
     )
     if not found:
         raise ValueError(f"row {row_id} not found in run {run_id}")
     row = found[0]
     if row.status is SuggestionStatus.APPLIED:
         raise ValueError("already applied — revert it first")
-    if row.status is SuggestionStatus.OBSOLETE:
-        raise ValueError("refresh the table")
     if row.discard_reason not in (None, ALL_VALUES_REJECTED_REASON):
         raise ValueError("restore it first")
     status: SuggestionStatus | None = None
@@ -458,7 +453,7 @@ def set_rejected_values(url: str, run_id: str, row_id: int, rejected: list[str])
     store.set_rejected_values(row_id, rejected, status, reason)
     fresh, _total = store.query(
         run_id,
-        SuggestionFilter(suggestion_ids=[row_id], include_obsolete=True, limit=1, offset=0),
+        SuggestionFilter(suggestion_ids=[row_id], limit=1, offset=0),
     )
     if not fresh:
         raise ValueError(f"row {row_id} not found in run {run_id}")

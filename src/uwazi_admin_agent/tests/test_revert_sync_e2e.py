@@ -83,7 +83,7 @@ def test_sync_returns_a_reverted_merge_to_pending_and_it_runs_again(workspace: A
 
     result = ws.update_table(run_id)
     assert result.reconciliation.status_reset >= 1
-    assert result.reconciliation.obsolete == 0
+    assert result.reconciliation.removed == 0
 
     synced_rows = ws.suggestions(run_id)
     synced_merge = next(row for row in synced_rows if row.op == "update_and_delete")
@@ -101,7 +101,7 @@ def test_sync_returns_a_reverted_merge_to_pending_and_it_runs_again(workspace: A
 
 
 def test_sync_makes_a_reverted_delete_runnable_under_the_new_shared_id(workspace: AdminE2EWorkspace) -> None:
-    """A delete's revert re-creates the entity; sync retires the old row and
+    """A delete's revert re-creates the entity; sync drops the old row and
     inserts the new one as PENDING, so the operation can run again."""
     ws = workspace
     shared_id = ws.entity_ids[0]
@@ -126,11 +126,12 @@ def test_sync_makes_a_reverted_delete_runnable_under_the_new_shared_id(workspace
 
     result = ws.update_table(run_id)
     assert result.reconciliation.inserted >= 1
-    assert result.reconciliation.obsolete >= 1
+    assert result.reconciliation.removed >= 1
 
-    rows = ws.suggestions(run_id, include_obsolete=True)
+    rows = ws.suggestions(run_id)
     by_id = {row.shared_id: row for row in rows}
-    assert by_id[shared_id].status is SuggestionStatus.OBSOLETE
+    # The old shared id's row is gone: the entity it named was re-created.
+    assert shared_id not in by_id
     assert by_id[restored_id].status is SuggestionStatus.PENDING
     assert by_id[restored_id].op == "delete"
 

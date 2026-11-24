@@ -76,10 +76,11 @@ class SuggestionStorePort(ABC):
 
         New identities insert PENDING; unchanged proposals keep the operator's
         status; changed proposals reset PENDING except EDITED/DISCARDED; rows
-        the script no longer produces keep APPLIED or become OBSOLETE.
+        the script no longer produces are DELETED, except an APPLIED write which
+        is kept as the run's history.
 
         ``entity_scope`` narrows the merge to the entities the pass actually
-        covered (None = the whole run). A scope-limited pass does NOT retire the
+        covered (None = the whole run). A scope-limited pass does NOT delete the
         rows of the entities it never visited — it only says nothing about them.
         """
         ...
@@ -314,8 +315,8 @@ class SuggestionStorePort(ABC):
         """Rows that carry a file snapshot (merge/move sources + their files).
 
         Used by the targeted file-drift check: only these rows name source
-        entities whose live file set the review table displays. Obsolete and
-        discarded rows are excluded — they no longer describe planned work.
+        entities whose live file set the review table displays. Discarded rows
+        are excluded — they no longer describe planned work.
         """
         ...
 

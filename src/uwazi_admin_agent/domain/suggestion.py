@@ -136,7 +136,14 @@ TITLE_PROPERTY: str = "_title"
 
 
 class SuggestionStatus(str, Enum):
-    """Review lifecycle of one suggestion."""
+    """Review lifecycle of one suggestion.
+
+    A row the refreshed script no longer produces is DELETED (the store drops
+    it), never parked in a "no longer matches" state: a retired row still counts
+    in the header cards and the Op/Status filters, so it reads as work that is
+    not there. An APPLIED write is the one exception — it really happened, so it
+    stays as the run's history.
+    """
 
     PENDING = "pending"
     ACCEPTED = "accepted"
@@ -144,7 +151,6 @@ class SuggestionStatus(str, Enum):
     DISCARDED = "discarded"
     APPLIED = "applied"
     REVERTED = "reverted"
-    OBSOLETE = "obsolete"
 
 
 class PredictionAttemptStatus(str, Enum):
@@ -439,14 +445,6 @@ class SuggestionFilter(BaseModel):
         description=(
             "Only rows in these statuses (the review table's multi-select Status filter). "
             "An explicit empty list matches NOTHING."
-        ),
-    )
-    include_obsolete: bool = Field(
-        default=False,
-        description=(
-            "Include OBSOLETE rows when no explicit status filter is set. They are hidden "
-            "by default because a refresh can retire many rows at once; picking the "
-            "obsolete status explicitly always shows them."
         ),
     )
     op: list[str] | None = Field(

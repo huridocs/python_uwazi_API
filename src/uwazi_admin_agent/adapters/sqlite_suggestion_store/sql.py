@@ -275,12 +275,6 @@ def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
         else:
             clause.append(f"status IN ({', '.join('?' for _ in f.status)})")
             params.extend(s.value for s in f.status)
-    elif not f.include_obsolete:
-        # A refresh retires rows in bulk; hiding them by default keeps the
-        # table focused on work that can still run. Selecting the OBSOLETE
-        # status explicitly is the way to inspect them.
-        clause.append("status != ?")
-        params.append(SuggestionStatus.OBSOLETE.value)
     if f.accepted_only:
         clause.append(f"status IN ({', '.join('?' for _ in APPLYABLE_STATUSES)})")
         params.extend(APPLYABLE_STATUSES)

@@ -181,7 +181,8 @@ async def run_auto_scan(
     script-caps defaults. A breach aborts the pass cleanly, keeping earlier
     rows. There is ONE live table per run: the pass MERGES its rows into it
     (rows the script still produces keep their identity and status, changed
-    rows go back to pending, rows it no longer produces become obsolete).
+    rows go back to pending, rows it no longer produces are deleted — except an
+    APPLIED write, kept as history).
     Errors propagate: the same path the wizard shows a toast for. Returns the
     reconciliation summary of the merge into the live table.
     """
@@ -288,7 +289,7 @@ async def regenerate_from_chat(
     5. re-scan: the planning pass runs the NEW script and MERGES its rows into
        the ONE live table (rows the script still produces keep their identity
        and status, changed rows go back to pending, rows it no longer produces
-       become obsolete). A plan whose kind contradicts its records fails the
+       are deleted). A plan whose kind contradicts its records fails the
        pass and leaves the previous table untouched.
 
     ``revise_existing_script`` marks the run as a CORRECTION of the current
@@ -395,13 +396,13 @@ def _plan_outcome_of(url: str, run_id: str) -> PlanOutcome | None:
     all (nothing was ever planned).
     """
     store = build_suggestion_store(url)
-    rows, total = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=1))
+    rows, total = store.query(run_id, SuggestionFilter(limit=1))
     if total == 0 and not rows:
         return None
     pass_row = store.get_pass(run_id)
     if pass_row is None:
         return None
-    rows_all, _ = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=100000))
+    rows_all, _ = store.query(run_id, SuggestionFilter(limit=100000))
     info_parents = sum(1 for row in rows_all if row.op == INFO_OP and row.detail_key is None)
     change_rows = sum(1 for row in rows_all if row.op not in DISPLAY_ONLY_OPS)
     has_up_to_date_note = any(

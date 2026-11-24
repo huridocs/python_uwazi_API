@@ -226,7 +226,6 @@ class ReadsMixin:
                     WHEN COUNT(*) = SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) THEN 'applied'
                     WHEN COUNT(*) = SUM(CASE WHEN status = 'reverted' THEN 1 ELSE 0 END) THEN 'reverted'
                     WHEN COUNT(*) = SUM(CASE WHEN status = 'discarded' THEN 1 ELSE 0 END) THEN 'discarded'
-                    WHEN COUNT(*) = SUM(CASE WHEN status = 'obsolete' THEN 1 ELSE 0 END) THEN 'obsolete'
                     ELSE 'pending'
                 END AS status_sort,
                 MAX(julianday(COALESCE(reviewed_at, created_at))) AS modified_sort
@@ -473,12 +472,11 @@ class ReadsMixin:
             SELECT * FROM suggestion
              WHERE run_id = ?
                AND (ifnull(merge_source_ids, '') != '' OR ifnull(merge_files, '') != '')
-               AND status NOT IN (?, ?)
+               AND status != ?
              ORDER BY id
             """,
             (
                 run_id,
-                SuggestionStatus.OBSOLETE.value,
                 SuggestionStatus.DISCARDED.value,
             ),
         )
@@ -560,8 +558,8 @@ class ReadsMixin:
                 counts["match_mismatch"] += int(row["n"])
         total_rows = self._query(
             "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? "
-            "AND status != ? AND op NOT IN ('info', 'matched', 'skipped') GROUP BY shared_id, language)",
-            (run_id, SuggestionStatus.OBSOLETE.value),
+            "AND op NOT IN ('info', 'matched', 'skipped') GROUP BY shared_id, language)",
+            (run_id,),
         )
         counts["total"] = int(total_rows[0]["n"]) if total_rows else 0
         # The header cards count SUBOPERATIONS (the table's real content: one
@@ -589,22 +587,21 @@ class ReadsMixin:
             (run_id,),
         ):
             count = int(row["n"])
-            if row["status"] != SuggestionStatus.OBSOLETE.value:
-                counts["subs_total"] += count
+            counts["subs_total"] += count
             counts[f"subs_{row['status']}"] = count
         operation_rows = self._query(
             "SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion "
-            "WHERE run_id = ? AND status != ? AND op NOT IN ('info', 'matched', 'skipped')",
-            (run_id, SuggestionStatus.OBSOLETE.value),
+            "WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped')",
+            (run_id,),
         )
         counts["operations_total"] = int(operation_rows[0]["n"]) if operation_rows else 0
         # Result outcomes are display-only evidence, NOT runnable work. They get
         # their own counters so the header can say "192 matched / 256 skipped"
         # without inflating Pending/Operations. ``result_entities`` counts every
-        # distinct entity represented by any non-obsolete row.
+        # distinct entity the run's rows represent.
         result_rows = self._query(
-            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? AND status != ? GROUP BY shared_id)",
-            (run_id, SuggestionStatus.OBSOLETE.value),
+            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? GROUP BY shared_id)",
+            (run_id,),
         )
         counts["result_entities"] = int(result_rows[0]["n"]) if result_rows else 0
         return counts

@@ -24,8 +24,9 @@ After the last bubble a single **Run modifications** button appears, and only
 when the chat has changes. It regenerates the run's script from the WHOLE
 user-and-clarifications conversation and reconciles the result into the ONE
 live review table — the rows the new script still produces keep their identity
-and status, changed rows go back to pending, rows it no longer produces become
-obsolete. While that runs, the modal shows a spinner with the backend's current
+and status, changed rows go back to pending, and rows it no longer produces are
+deleted (only an APPLIED write stays, as the run's history). While that runs, the
+modal shows a spinner with the backend's current
 stage (regenerating the script, saving it, recomputing the table) and a start
 toast; the closing toast reports the reconciliation counts.
 

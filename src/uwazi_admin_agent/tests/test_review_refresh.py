@@ -7,8 +7,8 @@ restore-value lookup. No store, no network, no mocks.
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
     evaluate_preflight,
+    keeps_after_refresh,
     matched_swap_pairs,
-    missing_status,
     reconciled_status,
     restored_value,
 )
@@ -59,10 +59,6 @@ def test_changed_proposal_keeps_deliberate_operator_decisions() -> None:
     assert reconciled_status(SuggestionStatus.DISCARDED, same=False) is SuggestionStatus.DISCARDED
 
 
-def test_returning_obsolete_row_becomes_pending() -> None:
-    assert reconciled_status(SuggestionStatus.OBSOLETE, same=True) is SuggestionStatus.PENDING
-
-
 def test_a_refreshed_reverted_recreating_row_becomes_runnable_again() -> None:
     """A delete/merge undo re-creates entities; a live refresh resolves them."""
     assert reconciled_status(SuggestionStatus.REVERTED, same=True, rerun_after_refresh=True) is SuggestionStatus.PENDING
@@ -74,21 +70,31 @@ def test_a_refreshed_reverted_recreating_row_becomes_runnable_again() -> None:
 
 
 def test_missing_applied_row_is_kept_as_history() -> None:
-    assert missing_status(SuggestionStatus.APPLIED) is SuggestionStatus.APPLIED
+    assert keeps_after_refresh(SuggestionStatus.APPLIED) is True
 
 
-def test_missing_non_applied_row_is_obsolete() -> None:
-    assert missing_status(SuggestionStatus.PENDING) is SuggestionStatus.OBSOLETE
-    assert missing_status(SuggestionStatus.REVERTED) is SuggestionStatus.OBSOLETE
+def test_missing_non_applied_row_is_deleted() -> None:
+    """A stale row that never got written is deleted, not parked as a placeholder.
+
+    A retired row still counts in the header cards and the Op/Status filters, so
+    leaving it behind made one entity read as two rows (the earlier pass's
+    ``skipped`` row under a language the entity no longer writes, plus the new
+    proposal).
+    """
+    assert keeps_after_refresh(SuggestionStatus.PENDING) is False
+    assert keeps_after_refresh(SuggestionStatus.ACCEPTED) is False
+    assert keeps_after_refresh(SuggestionStatus.EDITED) is False
+    assert keeps_after_refresh(SuggestionStatus.DISCARDED) is False
+    assert keeps_after_refresh(SuggestionStatus.REVERTED) is False
 
 
 def test_reconciliation_summary_mentions_the_operator_facing_counts() -> None:
-    summary = ReconciliationSummary(inserted=2, refreshed=1, status_reset=3, obsolete=4, kept_applied=1)
+    summary = ReconciliationSummary(inserted=2, refreshed=1, status_reset=3, removed=4, kept_applied=1)
     text = summary.summary_text()
     assert "2 new" in text
     assert "1 refreshed" in text
     assert "3 reset" in text
-    assert "4 obsolete" in text
+    assert "4 removed" in text
     assert "1 applied kept" in text
 
 
@@ -140,7 +146,7 @@ def test_preflight_accepts_an_absent_language_when_the_row_recorded_none() -> No
 
 
 def test_a_matched_row_is_paired_with_the_update_that_replaces_it() -> None:
-    """The row keeps its identity slot instead of becoming obsolete + a duplicate."""
+    """The row keeps its identity slot instead of being deleted + a duplicate."""
     matched = ("entity-1", "matched", "en", "excerpt", "excerpt")
     update = ("entity-1", "update", "en", "excerpt", "")
     pairs = matched_swap_pairs([(matched, "matched", "en", "excerpt")], [(update, "update", "en", "excerpt")])
@@ -155,7 +161,7 @@ def test_a_property_that_now_matches_is_paired_with_its_stored_update() -> None:
 
 
 def test_no_swap_when_the_table_already_holds_both_rows_for_one_property() -> None:
-    """A legacy obsolete matched row + its update must not collide on promotion."""
+    """A stored matched row + its update must not collide on promotion."""
     matched = ("entity-1", "matched", "en", "excerpt", "excerpt")
     update = ("entity-1", "update", "en", "excerpt", "")
     pairs = matched_swap_pairs(

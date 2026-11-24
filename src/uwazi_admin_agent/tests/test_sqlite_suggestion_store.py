@@ -78,7 +78,7 @@ def _suggestion(
 
 
 def test_build_where_always_scopes_to_run() -> None:
-    sql, params = build_where(SuggestionFilter(include_obsolete=True), "run1")
+    sql, params = build_where(SuggestionFilter(), "run1")
     assert sql == "run_id = ?"
     assert params == ["run1"]
 
@@ -99,7 +99,7 @@ def test_build_where_appends_only_set_predicates() -> None:
 
 
 def test_build_where_accepted_only_uses_an_in_list() -> None:
-    sql, params = build_where(SuggestionFilter(accepted_only=True, include_obsolete=True), "run1")
+    sql, params = build_where(SuggestionFilter(accepted_only=True), "run1")
     assert sql.endswith("status IN (?, ?)")
     assert params == ["run1", "accepted", "edited"]
 
@@ -433,13 +433,12 @@ def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: Sqli
             _suggestion(shared_id="reverted", status=SuggestionStatus.REVERTED),
             _suggestion(shared_id="applied", status=SuggestionStatus.APPLIED),
             _suggestion(shared_id="discarded", status=SuggestionStatus.DISCARDED),
-            _suggestion(shared_id="obsolete", status=SuggestionStatus.OBSOLETE),
             _suggestion(shared_id="info", op="info", property_name=None),
         ]
     )
 
-    every = store.selection_rows("run1", SuggestionFilter(include_obsolete=True))
-    runnable = store.selection_rows("run1", SuggestionFilter(include_obsolete=True), runnable_only=True)
+    every = store.selection_rows("run1", SuggestionFilter())
+    runnable = store.selection_rows("run1", SuggestionFilter(), runnable_only=True)
 
     assert {ref[1] for ref in every} == {
         "pending",
@@ -448,7 +447,6 @@ def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: Sqli
         "reverted",
         "applied",
         "discarded",
-        "obsolete",
     }
     assert {ref[1] for ref in runnable} == {"pending", "accepted", "edited", "reverted"}
 
@@ -479,8 +477,8 @@ def test_selection_rows_runnable_only_skips_a_reverted_recreating_op(store: Sqli
     assert {ref[1] for ref in runnable} == {"update-reverted", "delete-pending"}
 
 
-def test_sync_retires_a_reverted_delete_and_inserts_the_recreated_entity(store: SqliteSuggestionStore) -> None:
-    """A recreated entity arrives under its NEW sharedId; the old row is retired."""
+def test_sync_removes_a_reverted_delete_and_inserts_the_recreated_entity(store: SqliteSuggestionStore) -> None:
+    """A recreated entity arrives under its NEW sharedId; the old row is deleted."""
     old = _suggestion(
         shared_id="OLD",
         op="delete",
@@ -494,11 +492,8 @@ def test_sync_retires_a_reverted_delete_and_inserts_the_recreated_entity(store: 
         [_suggestion(shared_id="NEW", op="delete", property_name=None)],
     )
 
-    rows = store.query("run1", SuggestionFilter(include_obsolete=True))[0]
-    assert {(row.shared_id, row.status) for row in rows} == {
-        ("OLD", SuggestionStatus.OBSOLETE),
-        ("NEW", SuggestionStatus.PENDING),
-    }
+    rows = store.query("run1", SuggestionFilter())[0]
+    assert {(row.shared_id, row.status) for row in rows} == {("NEW", SuggestionStatus.PENDING)}
 
 
 def test_sync_returns_a_reverted_merge_to_pending_with_fresh_sources(store: SqliteSuggestionStore) -> None:
@@ -792,7 +787,7 @@ def _multiselect(
 
 
 def _row_of(store: SqliteSuggestionStore, run_id: str = "run1") -> Suggestion:
-    rows, _total = store.query(run_id, SuggestionFilter(include_obsolete=True))
+    rows, _total = store.query(run_id, SuggestionFilter())
     assert rows, "expected one row"
     return rows[0]
 

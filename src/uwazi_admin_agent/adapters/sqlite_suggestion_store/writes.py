@@ -11,9 +11,8 @@ from loguru import logger
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
     identity_of,
+    keeps_after_refresh,
     matched_swap_pairs,
-    missing_status,
-    property_row_key,
     reconciled_status,
     same_proposal,
     suggestion_identity,
@@ -22,7 +21,6 @@ from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
     MATCHED_OP,
-    PROPERTY_OPS,
     REVERT_RECREATES_OPS,
     Suggestion,
     SuggestionFilter,
@@ -44,7 +42,6 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
     status = reconciled_status(
         old_status,
         same=same,
-        reappearing=old_status is SuggestionStatus.OBSOLETE,
         # A delete/merge undo re-created an entity, so the reverted row
         # could not be run again. The refresh has just re-read the
         # operation from live Uwazi (and replaced a merge's source ids),
@@ -118,7 +115,6 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
     return values, {
         "refreshed": refreshed,
         "status_reset": status is SuggestionStatus.PENDING and status is not old_status,
-        "reappeared": old_status is SuggestionStatus.OBSOLETE,
     }
 
 
@@ -212,24 +208,30 @@ class WritesMixin:
           columns (including ``current_value``);
         - changed proposal → PENDING unless the row is EDITED/DISCARDED;
         - a property that starts/stops matching Uwazi → the SAME row becomes the
-          incoming ``update``/``matched`` row (one row, never an obsolete
-          duplicate beside the new one);
-        - missing → APPLIED stays APPLIED, everything else becomes OBSOLETE;
-        - a returning OBSOLETE row → PENDING.
+          incoming ``update``/``matched`` row (one row, one identity slot);
+        - missing → APPLIED stays APPLIED (it really happened: the run's
+          history), everything else is DELETED.
+
+        Deleting beats parking a retired row: a stale row still counts in the
+        header cards and in the Op/Status filter options, so it reads as work
+        the table does not contain. That is exactly how a re-plan used to leave
+        TWO rows for one entity — the earlier pass's ``skipped`` row beside the
+        new proposal, one of them under a language group the entity no longer
+        writes.
 
         ``entity_scope`` narrows the merge to the entities the pass covered
         (None = the whole run). A scope-limited pass says NOTHING about the
         entities it never visited, so their rows are left exactly as they are —
-        only the rows of the covered entities can be retired. INFO rows are the
+        only the rows of the covered entities can be removed. INFO rows are the
         exception: their synthetic ``info-N`` id names no entity, and the pass
-        always re-decides them, so a scoped refresh can retire a stale info row
+        always re-decides them, so a scoped refresh removes a stale info row
         instead of leaving it in the table forever.
         """
         scope = set(entity_scope) if entity_scope is not None else None
         existing = self._query("SELECT * FROM suggestion WHERE run_id = ?", (run_id,))
         if scope is not None:
             # INFO rows have synthetic ids that name no entity, and the pass
-            # always re-decides them, so a scoped refresh can retire a stale one
+            # always re-decides them, so a scoped refresh can drop a stale one
             # instead of leaving it in the table forever. Matched/skipped rows
             # DO name real entities, so they follow the same scope rule as
             # changes: an unscoped entity's result stays untouched.
@@ -250,13 +252,14 @@ class WritesMixin:
         now_text = _dt_to_text(datetime.now().astimezone())
         inserts: list[Suggestion] = []
         updates: list[tuple[Any, ...]] = []
-        refreshed = status_reset = reappeared = 0
+        refreshed = status_reset = 0
 
         # A property can flip between "already equal to Uwazi" (a display-only
         # MATCHED row) and a real change (an UPDATE row). Their store identities
-        # differ, so without this pairing the merge would retire the matched row
-        # and insert a duplicate update for the same property. Pair them and
-        # rewrite the stored row in place instead: one row, the new op.
+        # differ, so without this pairing the merge would delete the matched row
+        # and insert a fresh update for the same property: the operator's status
+        # on that row would be lost for no reason. Pair them and rewrite the
+        # stored row in place instead.
         swaps = matched_swap_pairs(
             [(key, str(row["op"]), row["language"], row["property_name"]) for key, row in existing_by_key.items()],
             [
@@ -272,7 +275,6 @@ class WritesMixin:
             updates.append(values)
             refreshed += int(meta["refreshed"])
             status_reset += int(meta["status_reset"])
-            reappeared += int(meta["reappeared"])
 
         for key, suggestion in incoming_by_key.items():
             if key in swapped_incoming:
@@ -285,67 +287,18 @@ class WritesMixin:
             updates.append(values)
             refreshed += int(meta["refreshed"])
             status_reset += int(meta["status_reset"])
-            reappeared += int(meta["reappeared"])
 
-        # Legacy tables (refreshed before the swap rule existed) can already
-        # hold an OBSOLETE matched row NEXT TO the update row for the same
-        # property. The matched evidence is fully superseded, so drop it rather
-        # than keep a phantom "obsolete"/"matched" count for work the table does
-        # not show. Only an OBSOLETE matched row whose property the script now
-        # reports as a real change is removed; anything the script no longer
-        # produces keeps its normal refresh verdict.
-        incoming_change_keys = {
-            property_row_key(suggestion.shared_id, suggestion.language, suggestion.property_name)
-            for suggestion in incoming_by_key.values()
-            if suggestion.op in PROPERTY_OPS and suggestion.property_name is not None
-        }
-        stale_matched_ids: list[int] = []
+        removal_ids: list[int] = []
+        kept_applied = 0
         for key, old in existing_by_key.items():
-            if key in swapped_existing or str(old["op"]) != MATCHED_OP:
+            if key in incoming_by_key or key in swapped_existing:
                 continue
-            if SuggestionStatus(str(old["status"])) is not SuggestionStatus.OBSOLETE:
-                continue
-            if property_row_key(str(old["shared_id"]), old["language"], old["property_name"]) in incoming_change_keys:
-                stale_matched_ids.append(int(old["id"]))
-        stale_matched = set(stale_matched_ids)
-
-        obsolete = kept_applied = 0
-        for key, old in existing_by_key.items():
-            if key in incoming_by_key or key in swapped_existing or int(old["id"]) in stale_matched:
-                continue
-            old_status = SuggestionStatus(str(old["status"]))
-            status = missing_status(old_status)
-            if status is SuggestionStatus.OBSOLETE:
-                obsolete += 1
-            else:
+            if keeps_after_refresh(SuggestionStatus(str(old["status"]))):
                 kept_applied += 1
-            if status is not old_status or status is SuggestionStatus.OBSOLETE:
-                updates.append(
-                    (
-                        old["op"],
-                        old["detail_key"],
-                        old["entity_title"],
-                        old["template_name"],
-                        old["proposed_value"],
-                        old["current_value"],
-                        old["skip_reason"],
-                        old["match_state"],
-                        old["merge_source_ids"],
-                        old["merge_files"],
-                        status.value,
-                        None if status is not SuggestionStatus.EDITED else old["edited_value"],
-                        None if status is not SuggestionStatus.DISCARDED else old["discard_reason"],
-                        _json_or_none(_value_from_json(old["rejected_values"]) or []),
-                        old["selected_values"],
-                        old["basis"],
-                        old["context"],
-                        old["source_shared_id"],
-                        now_text,
-                        int(old["id"]),
-                    )
-                )
+                continue
+            removal_ids.append(int(old["id"]))
 
-        if updates or stale_matched_ids:
+        if updates or removal_ids:
             with self._lock:
                 if updates:
                     self._conn.executemany(
@@ -360,10 +313,10 @@ class WritesMixin:
                         """,
                         updates,
                     )
-                if stale_matched_ids:
+                if removal_ids:
                     self._conn.executemany(
                         "DELETE FROM suggestion WHERE id = ?",
-                        [(suggestion_id,) for suggestion_id in stale_matched_ids],
+                        [(suggestion_id,) for suggestion_id in removal_ids],
                     )
                 self._conn.commit()
         if inserts:
@@ -372,8 +325,7 @@ class WritesMixin:
             inserted=len(inserts),
             refreshed=refreshed,
             status_reset=status_reset,
-            reappeared=reappeared,
-            obsolete=obsolete,
+            removed=len(removal_ids),
             kept_applied=kept_applied,
         )
         logger.info(

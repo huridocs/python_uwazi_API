@@ -55,6 +55,15 @@ class BaseMixin:
           window can show the SOURCE entity's PDF for a placeholder row.
           Legacy rows read NULL (no provenance).
 
+        It also DROPS legacy ``status = 'obsolete'`` rows. A refresh used to
+        park rows the script no longer produced in that state instead of
+        deleting them, and they double-counted in the header cards and the
+        Op/Status filters (a re-plan left the earlier ``skipped`` row beside the
+        new proposal, so one entity read as two rows). The status no longer
+        exists, so the rows would fail to parse; and they were never written to
+        Uwazi (only APPLIED rows survive a refresh), so deleting them loses no
+        history.
+
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
         express a column added later — and ``suggestion_entity_language`` names
@@ -94,6 +103,9 @@ class BaseMixin:
             if pass_columns and "refused_commit" not in pass_columns:
                 self._conn.execute("ALTER TABLE prediction_pass ADD COLUMN refused_commit INTEGER NOT NULL DEFAULT 0")
             self._migrate_attempts_to_single_pass()
+            # Retired rows the current lifecycle does not have at all (see the
+            # docstring): they cannot be read back and no longer describe work.
+            self._conn.execute("DELETE FROM suggestion WHERE status = 'obsolete'")
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
             # one: drop and let _INDEXES recreate it.

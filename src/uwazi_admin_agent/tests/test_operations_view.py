@@ -136,21 +136,18 @@ def test_operation_status_is_derived_from_its_parts() -> None:
 
 
 def test_only_pending_and_reverted_parts_are_selectable() -> None:
-    """An applied/discarded/obsolete part is visible but cannot inflate Run (N)."""
+    """An applied/discarded part is visible but cannot inflate Run (N)."""
     pending = view.suboperation_row(_sub(1, status=SuggestionStatus.PENDING), checked=True, in_place=True)
     reverted = view.suboperation_row(_sub(2, status=SuggestionStatus.REVERTED), checked=True, in_place=True)
     applied = view.suboperation_row(_sub(3, status=SuggestionStatus.APPLIED), checked=True, in_place=True)
     discarded = view.suboperation_row(_sub(4, status=SuggestionStatus.DISCARDED), checked=True, in_place=True)
-    obsolete = view.suboperation_row(_sub(5, status=SuggestionStatus.OBSOLETE), checked=True, in_place=True)
 
     assert (pending["runnable"], pending["selectable"], pending["checked"]) == (True, True, True)
     assert (reverted["runnable"], reverted["selectable"], reverted["checked"]) == (True, True, True)
     assert (applied["runnable"], applied["selectable"], applied["checked"]) == (False, False, False)
     assert (discarded["runnable"], discarded["selectable"], discarded["checked"]) == (False, False, False)
-    assert (obsolete["runnable"], obsolete["selectable"], obsolete["checked"]) == (False, False, False)
     assert applied["note"] == "already applied — revert it first"
     assert discarded["note"] == "discarded — restore it first"
-    assert obsolete["note"] == "obsolete — refresh the table"
 
 
 def test_a_locked_part_stays_independently_unselectable() -> None:

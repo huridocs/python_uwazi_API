@@ -38,8 +38,7 @@ def test_refresh_without_external_changes_keeps_the_table(workspace: AdminE2EWor
     assert result.reconciliation.inserted == 0
     assert result.reconciliation.refreshed == 0
     assert result.reconciliation.status_reset == 0
-    assert result.reconciliation.reappeared == 0
-    assert result.reconciliation.obsolete == 0
+    assert result.reconciliation.removed == 0
     assert result.reconciliation.kept_applied == 0
     assert ws.table_update_time(run_id) is not None
 
@@ -68,7 +67,7 @@ def test_external_change_blocks_preflight_until_refresh(workspace: AdminE2EWorks
     assert result.changed_in_uwazi >= 1
     assert result.reconciliation.refreshed >= 1
     assert result.reconciliation.inserted == 0
-    assert result.reconciliation.obsolete == 0
+    assert result.reconciliation.removed == 0
 
     refreshed_rows = ws.suggestions(run_id)
     assert len(refreshed_rows) == 1
@@ -83,8 +82,8 @@ def test_external_change_blocks_preflight_until_refresh(workspace: AdminE2EWorks
     assert after.ok, [issue.describe() for issue in after.issues]
 
 
-def test_external_delete_marks_the_row_obsolete(workspace: AdminE2EWorkspace) -> None:
-    """An entity deleted in Uwazi disappears from the runnable table as an obsolete row."""
+def test_external_delete_removes_the_row(workspace: AdminE2EWorkspace) -> None:
+    """An entity deleted in Uwazi loses its review row: the row names nothing live."""
     ws = workspace
     deleted_id = ws.entity_ids[0]
     run_id = ws.new_run(
@@ -94,17 +93,12 @@ def test_external_delete_marks_the_row_obsolete(workspace: AdminE2EWorkspace) ->
 
     ws.external_delete(deleted_id)
     result = ws.update_table(run_id)
-    assert result.reconciliation.obsolete >= 1
+    assert result.reconciliation.removed >= 1
     assert result.changed_in_uwazi is not None
 
-    visible = ws.suggestions(run_id)
-    assert deleted_id not in {row.shared_id for row in visible}
-    assert len(visible) == len(ws.entity_ids) - 1
-
-    all_rows = ws.suggestions(run_id, include_obsolete=True)
-    obsolete = [row for row in all_rows if row.shared_id == deleted_id]
-    assert len(obsolete) == 1
-    assert obsolete[0].status == SuggestionStatus.OBSOLETE
+    rows = ws.suggestions(run_id)
+    assert deleted_id not in {row.shared_id for row in rows}
+    assert len(rows) == len(ws.entity_ids) - 1
 
 
 def test_external_new_entity_is_inserted(workspace: AdminE2EWorkspace) -> None:
@@ -142,7 +136,7 @@ def test_double_refresh_is_idempotent(workspace: AdminE2EWorkspace) -> None:
     first = ws.update_table(run_id)
     assert first.reconciliation.inserted == 0
     assert first.reconciliation.refreshed == 0
-    assert first.reconciliation.obsolete == 0
+    assert first.reconciliation.removed == 0
     after_first = _row_snapshot(ws.suggestions(run_id))
 
     second = ws.update_table(run_id)
@@ -150,8 +144,7 @@ def test_double_refresh_is_idempotent(workspace: AdminE2EWorkspace) -> None:
     assert second.reconciliation.inserted == 0
     assert second.reconciliation.refreshed == 0
     assert second.reconciliation.status_reset == 0
-    assert second.reconciliation.reappeared == 0
-    assert second.reconciliation.obsolete == 0
+    assert second.reconciliation.removed == 0
     assert second.reconciliation.kept_applied == 0
 
     after_second = _row_snapshot(ws.suggestions(run_id))

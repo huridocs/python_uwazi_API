@@ -182,8 +182,7 @@ def update_template_script(
     """A planning script that discovers the template's entities and updates them.
 
     Unlike :func:`update_script`, a target that disappears from the template is
-    not written any more, which is what lets the table refresh mark its old row
-    obsolete.
+    not written any more, which is what lets the table refresh drop its old row.
     """
     return (
         f"rows = query_entities_full(mode='by_template', template_name={_as_repr(template_name)}, "
@@ -646,13 +645,12 @@ class AdminE2EWorkspace:
         self,
         run_id: str,
         *,
-        include_obsolete: bool = False,
         property_name: str | None = None,
         language: str | None = None,
     ) -> list[Suggestion]:
         rows, _total = build_suggestion_store(UWAZI_URL).query(
             run_id,
-            SuggestionFilter(limit=1000, include_obsolete=include_obsolete),
+            SuggestionFilter(limit=1000),
         )
         if property_name is not None:
             rows = [row for row in rows if row.property_name == property_name]

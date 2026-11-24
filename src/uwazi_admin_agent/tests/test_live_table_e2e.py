@@ -2,7 +2,8 @@
 
 The chat's Run button regenerates the run's script and re-plans it. The rows
 the new script still produces keep their identity and status, changed rows go
-back to pending, and rows the new script no longer produces become obsolete.
+back to pending, and rows the new script no longer produces are deleted (an
+APPLIED write stays, as the run's history).
 
 This exercises that against a live instance through the service layer (no UI).
 """
@@ -55,7 +56,7 @@ def test_a_replan_merges_into_the_same_live_table(workspace: AdminE2EWorkspace) 
     asyncio.run(run_auto_scan(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
     store = build_suggestion_store(UWAZI_URL)
-    rows, total = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=100))
+    rows, total = store.query(run_id, SuggestionFilter(limit=100))
     assert total == len(ws.entity_ids)  # no duplicates, no second table
     # The rows kept their identity — the same row ids, not new ones.
     assert {row.id for row in rows} == first_ids
@@ -70,8 +71,8 @@ def test_a_replan_merges_into_the_same_live_table(workspace: AdminE2EWorkspace) 
     assert pass_row.entities_total == len(ws.entity_ids)
 
 
-def test_a_row_the_new_script_drops_becomes_obsolete(workspace: AdminE2EWorkspace) -> None:
-    """A row the regenerated script no longer produces is retired, not deleted."""
+def test_a_row_the_new_script_drops_is_deleted(workspace: AdminE2EWorkspace) -> None:
+    """A row the regenerated script no longer produces leaves the table."""
     ws = workspace
     keep = ws.entity_ids[0]
     drop = ws.entity_ids[1]
@@ -84,10 +85,6 @@ def test_a_row_the_new_script_drops_becomes_obsolete(workspace: AdminE2EWorkspac
     asyncio.run(run_auto_scan(UWAZI_URL, run_id, UWAZI_USER, UWAZI_PASSWORD))
 
     store = build_suggestion_store(UWAZI_URL)
-    visible, visible_total = store.query(run_id, SuggestionFilter(limit=100))
-    all_rows, all_total = store.query(run_id, SuggestionFilter(include_obsolete=True, limit=100))
-    assert visible_total == 1
-    assert all_total == 2
-    assert visible[0].shared_id == keep
-    dropped = [row for row in all_rows if row.shared_id == drop]
-    assert dropped and dropped[0].status is SuggestionStatus.OBSOLETE
+    rows, total = store.query(run_id, SuggestionFilter(limit=100))
+    assert total == 1
+    assert rows[0].shared_id == keep

@@ -44,7 +44,6 @@ STATUS_COLORS: dict[str, str] = {
     "discarded": "red-9",
     "applied": "blue-9",
     "reverted": "indigo",
-    "obsolete": "grey-7",
 }
 
 OP_COLORS: dict[str, str] = {
@@ -99,7 +98,6 @@ RUN_STATUS_COLORS: dict[str, str] = {
     "reverted": "indigo",
     "pending": "grey-8",
     "discarded": "red-9",
-    "obsolete": "grey-7",
     "info": "blue-grey-8",
     "matched": "green-9",
     "skipped": "deep-orange-10",

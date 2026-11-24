@@ -69,7 +69,7 @@ async def update_table_from_uwazi(url: str, run_id: str, user: str, password: st
         # Without a scan we cannot name what changed. Invalidate everything the
         # run already knows about (rows + baseline) so no stale raw can be
         # mistaken for live state; new entities would not be cached anyway.
-        changed_ids = set(store.shared_ids(run_id, SuggestionFilter(include_obsolete=True)))
+        changed_ids = set(store.shared_ids(run_id, SuggestionFilter()))
         changed_ids.update(row.shared_id for row in store.drift_baseline(run_id))
         changed_in_uwazi = None
     # The file operations' sources are ALWAYS re-read: attaching a supporting

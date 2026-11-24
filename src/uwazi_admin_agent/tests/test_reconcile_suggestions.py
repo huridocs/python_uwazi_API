@@ -26,9 +26,13 @@ def _suggestion(property_name: str, proposed: str, **kwargs: object) -> Suggesti
     return Suggestion(**base)
 
 
+def _rows(store: SqliteSuggestionStore) -> list[Suggestion]:
+    rows, _total = store.query("r", SuggestionFilter(limit=100))
+    return rows
+
+
 def _statuses(store: SqliteSuggestionStore) -> dict[str, SuggestionStatus]:
-    rows, _total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
-    return {str(row.property_name): row.status for row in rows}
+    return {str(row.property_name): row.status for row in _rows(store)}
 
 
 def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
@@ -40,8 +44,7 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
                 _suggestion("accepted", "old", status=SuggestionStatus.ACCEPTED),
                 _suggestion("edited", "old", status=SuggestionStatus.EDITED, edited_value='[{"value": "mine"}]'),
                 _suggestion("applied_missing", "old", status=SuggestionStatus.APPLIED),
-                _suggestion("obsolete_returning", "old", status=SuggestionStatus.OBSOLETE),
-                _suggestion("obsolete_missing", "old", status=SuggestionStatus.OBSOLETE),
+                _suggestion("dropped", "old"),
             ]
         )
         summary = store.reconcile_suggestions(
@@ -50,7 +53,6 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
                 _suggestion("same", "unchanged"),
                 _suggestion("accepted", "new"),
                 _suggestion("edited", "new", status=SuggestionStatus.EDITED),
-                _suggestion("obsolete_returning", "old"),
                 _suggestion("new_row", "fresh"),
             ],
         )
@@ -58,14 +60,57 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
         assert statuses["same"] is SuggestionStatus.PENDING
         assert statuses["accepted"] is SuggestionStatus.PENDING
         assert statuses["edited"] is SuggestionStatus.EDITED
+        # An APPLIED write really happened: it stays as the run's history.
         assert statuses["applied_missing"] is SuggestionStatus.APPLIED
-        assert statuses["obsolete_returning"] is SuggestionStatus.PENDING
-        assert statuses["obsolete_missing"] is SuggestionStatus.OBSOLETE
+        # Every other stale row is GONE — no retired placeholder in the table.
+        assert "dropped" not in statuses
         assert statuses["new_row"] is SuggestionStatus.PENDING
         assert summary.inserted == 1
-        assert summary.obsolete == 1
+        assert summary.removed == 1
         assert summary.kept_applied == 1
-        assert summary.reappeared == 1
+    finally:
+        store.close()
+
+
+def test_a_stale_row_is_deleted_so_one_entity_keeps_one_row() -> None:
+    """The reported bug: a re-plan left the old ``skipped`` row beside the proposal.
+
+    A skipped record carries ``language=None`` while the new proposal carries the
+    document's language, so the two landed in DIFFERENT review groups: the table
+    showed the entity twice (once "not processed", once "matched"), and the
+    header cards counted the dead row.
+    """
+    store = SqliteSuggestionStore(Path(":memory:"))
+    try:
+        store.add_suggestions(
+            [
+                Suggestion(
+                    run_id="r",
+                    shared_id="entity-1",
+                    op="skipped",
+                    property_name=None,
+                    language=None,
+                    skip_reason="no_segmentation",
+                    status=SuggestionStatus.PENDING,
+                )
+            ]
+        )
+        store.reconcile_suggestions(
+            "r",
+            [
+                _suggestion(
+                    "document_ref",
+                    "A/HRC/37/NGO/188",
+                    op="matched",
+                    language="en",
+                    detail_key="document_ref",
+                    match=True,
+                )
+            ],
+        )
+
+        rows = _rows(store)
+        assert [(row.shared_id, row.language, row.op) for row in rows] == [("entity-1", "en", "matched")]
     finally:
         store.close()
 
@@ -73,9 +118,10 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
 def test_a_matched_row_that_becomes_a_change_becomes_that_update_row() -> None:
     """A refresh that turns "already in Uwazi" into a real change keeps ONE row.
 
-    The old code retired the matched row as OBSOLETE and inserted a duplicate
-    update for the same property: the filter showed one obsolete row while the
-    table showed an update row for the same entity.
+    The store identities differ (``matched`` vs ``update``), so an unpaired
+    merge would delete the matched row and insert a fresh update: the table
+    would still show ONE change, but its row id and the operator's status on it
+    would be lost.
     """
     store = SqliteSuggestionStore(Path(":memory:"))
     try:
@@ -92,7 +138,7 @@ def test_a_matched_row_that_becomes_a_change_becomes_that_update_row() -> None:
         )
         summary = store.reconcile_suggestions("r", [_suggestion("excerpt", "new")])
 
-        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        rows, total = store.query("r", SuggestionFilter(limit=100))
         assert total == 1
         assert rows[0].op == "update"
         assert rows[0].property_name == "excerpt"
@@ -100,7 +146,7 @@ def test_a_matched_row_that_becomes_a_change_becomes_that_update_row() -> None:
         assert rows[0].status is SuggestionStatus.PENDING
         assert rows[0].proposed_value == [{"value": "new"}]
         assert summary.inserted == 0
-        assert summary.obsolete == 0
+        assert summary.removed == 0
     finally:
         store.close()
 
@@ -119,43 +165,30 @@ def test_an_update_that_now_matches_becomes_the_matched_row_in_place() -> None:
         )
         summary = store.reconcile_suggestions("r", [incoming])
 
-        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
+        rows, total = store.query("r", SuggestionFilter(limit=100))
         assert total == 1
         assert rows[0].op == "matched"
         assert rows[0].status is SuggestionStatus.PENDING
         assert summary.inserted == 0
-        assert summary.obsolete == 0
+        assert summary.removed == 0
     finally:
         store.close()
 
 
-def test_a_legacy_duplicate_matched_row_is_dropped_on_refresh() -> None:
-    """Old tables can hold an OBSOLETE matched row beside its update row.
+def test_a_property_that_stops_being_proposed_is_removed_entirely() -> None:
+    """Dropping a property from the script drops its row: nothing is parked.
 
-    Once the script reports the property as a change, the matched evidence is
-    superseded; keeping it would leave a phantom "obsolete"/"matched" count for
-    a row the table never shows.
+    A leftover matched/update row kept a stale property visible in the Property
+    filter and in the accuracy figure of a plan that no longer writes it.
     """
     store = SqliteSuggestionStore(Path(":memory:"))
     try:
-        store.add_suggestions(
-            [
-                _suggestion(
-                    "excerpt",
-                    "before",
-                    op="matched",
-                    detail_key="excerpt",
-                    status=SuggestionStatus.OBSOLETE,
-                ),
-                _suggestion("excerpt", "new"),
-            ]
-        )
+        store.add_suggestions([_suggestion("excerpt", "new"), _suggestion("summary", "text")])
         summary = store.reconcile_suggestions("r", [_suggestion("excerpt", "new")])
 
-        rows, total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
-        assert total == 1
-        assert rows[0].op == "update"
-        assert summary.obsolete == 0
+        rows = _rows(store)
+        assert [row.property_name for row in rows] == ["excerpt"]
+        assert summary.removed == 1
         assert summary.inserted == 0
     finally:
         store.close()
@@ -185,28 +218,30 @@ def test_a_scoped_refresh_retires_a_stale_info_row() -> None:
 
         summary = store.reconcile_suggestions("r", [_suggestion("a", "v")], entity_scope=["entity-1"])
 
-        rows, _total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
-        statuses = {(row.op, row.shared_id): row.status for row in rows}
-        assert statuses[("info", "info-0")] is SuggestionStatus.OBSOLETE
-        assert summary.obsolete == 1
+        rows = _rows(store)
+        assert [(row.op, row.shared_id) for row in rows] == [("update", "entity-1")]
+        assert summary.removed == 1
     finally:
         store.close()
 
 
-def test_obsolete_rows_are_hidden_unless_requested() -> None:
+def test_the_table_holds_every_row_the_run_really_has() -> None:
+    """No status is hidden by default: a deleted stale row leaves nothing behind.
+
+    The default filter used to hide OBSOLETE rows, which is what made the
+    Op/Status counters (which counted them) disagree with the table.
+    """
     store = SqliteSuggestionStore(Path(":memory:"))
     try:
         store.add_suggestions(
             [
                 _suggestion("visible", "v"),
-                _suggestion("retired", "r", status=SuggestionStatus.OBSOLETE),
+                _suggestion("applied", "a", status=SuggestionStatus.APPLIED),
+                _suggestion("discarded", "d", status=SuggestionStatus.DISCARDED),
             ]
         )
-        visible, visible_total = store.query("r", SuggestionFilter(limit=100))
-        all_rows, all_total = store.query("r", SuggestionFilter(include_obsolete=True, limit=100))
-        assert visible_total == 1
-        assert [row.property_name for row in visible] == ["visible"]
-        assert all_total == 2
-        assert {row.property_name for row in all_rows} == {"visible", "retired"}
+        rows, total = store.query("r", SuggestionFilter(limit=100))
+        assert total == 3
+        assert {row.property_name for row in rows} == {"visible", "applied", "discarded"}
     finally:
         store.close()

@@ -5,6 +5,13 @@ against current state and merges its rows into the SAME attempt instead of
 replacing the table. These functions decide what survives that merge, what a
 stale Run looks like, and which snapshot value an undo restores. The store and
 the UI consume them; neither re-decides the rules.
+
+A row the refreshed script no longer produces is DELETED, not kept as a retired
+placeholder: a dead row still counts in the header cards and the Op/Status
+filters, so it reads as work that is not there (a re-plan that turns an earlier
+``skipped`` row into a proposal used to leave both behind — two rows for one
+entity). The one exception is an APPLIED write, which really happened and is
+kept as the run's history.
 """
 
 from __future__ import annotations
@@ -25,8 +32,7 @@ from uwazi_admin_agent.domain.suggestion import (
 from uwazi_admin_agent.domain.suggestion_scoring import value_in_language
 
 # Rows a Run may still execute. APPLIED/DISCARDED rows are excluded by their
-# own actions; OBSOLETE rows no longer match live Uwazi and must be refreshed
-# before they can be run.
+# own actions.
 RUNNABLE_STATUSES: frozenset[SuggestionStatus] = frozenset(
     {
         SuggestionStatus.PENDING,
@@ -45,8 +51,7 @@ class ReconciliationSummary(BaseModel):
     inserted: int = Field(default=0, ge=0, description="New proposal rows added.")
     refreshed: int = Field(default=0, ge=0, description="Existing rows whose proposal columns changed.")
     status_reset: int = Field(default=0, ge=0, description="Existing rows returned to pending.")
-    reappeared: int = Field(default=0, ge=0, description="Obsolete rows that are produced again.")
-    obsolete: int = Field(default=0, ge=0, description="Rows no longer produced by the script.")
+    removed: int = Field(default=0, ge=0, description="Stale rows the refreshed script no longer produces, deleted.")
     kept_applied: int = Field(default=0, ge=0, description="Applied rows no longer produced but kept as history.")
 
     def summary_text(self) -> str:
@@ -54,8 +59,8 @@ class ReconciliationSummary(BaseModel):
         parts = [f"{self.inserted} new", f"{self.refreshed} refreshed"]
         if self.status_reset:
             parts.append(f"{self.status_reset} reset")
-        if self.obsolete:
-            parts.append(f"{self.obsolete} obsolete")
+        if self.removed:
+            parts.append(f"{self.removed} removed")
         if self.kept_applied:
             parts.append(f"{self.kept_applied} applied kept")
         return ", ".join(parts)
@@ -111,10 +116,10 @@ def matched_swap_pairs(
     A refresh re-runs the script, so a property that used to equal Uwazi's value
     can become a real ``update`` (Uwazi changed underneath) — and the reverse.
     Because a ``matched`` row is a DIFFERENT identity than the update it came
-    from, the naive merge would retire the matched row as OBSOLETE and insert a
-    duplicate update row for the same property, leaving the operator with two
-    rows (and a phantom "obsolete" count) for one change. Pairing them rewrites
-    the stored row in place instead: one row, the new op.
+    from, the naive merge would delete the matched row and insert a duplicate
+    update row for the same property, losing the operator's status on a row that
+    describes the same change. Pairing them rewrites the stored row in place
+    instead: one row, the new op.
 
     Each input item is ``(identity, op, language, property_name)``. Returns
     ``(existing_identity, incoming_identity)`` pairs. A pair is only formed when
@@ -175,12 +180,10 @@ def reconciled_status(
     current: SuggestionStatus,
     *,
     same: bool,
-    reappearing: bool = False,
     rerun_after_refresh: bool = False,
 ) -> SuggestionStatus:
     """The status an existing row keeps after a refresh (pure).
 
-    - a row that reappears after being OBSOLETE becomes PENDING again;
     - a REVERTED row whose undo re-created an entity (a delete/merge) becomes
       PENDING again once the refresh still produces it: the refresh has just
       re-read that row from live Uwazi, and a merge's source ids are replaced
@@ -192,8 +195,6 @@ def reconciled_status(
     - APPLIED is NOT special here: if the proposal changed, the old write no
       longer describes the table, so the row must be reviewed again.
     """
-    if current is SuggestionStatus.OBSOLETE or reappearing:
-        return SuggestionStatus.PENDING
     if rerun_after_refresh and current is SuggestionStatus.REVERTED:
         return SuggestionStatus.PENDING
     if same:
@@ -203,13 +204,17 @@ def reconciled_status(
     return SuggestionStatus.PENDING
 
 
-def missing_status(current: SuggestionStatus) -> SuggestionStatus:
-    """The status of a row the refreshed script no longer produces (pure).
+def keeps_after_refresh(current: SuggestionStatus) -> bool:
+    """Whether a row the refreshed script no longer produces survives it (pure).
 
-    An APPLIED write really happened and stays visible as history; everything
-    else is retired as OBSOLETE because it can no longer be run against Uwazi.
+    Only an APPLIED write survives: it really happened, so the review table
+    keeps it as the run's history (and Revert still needs it). Every other stale
+    row is DELETED by the store — a retired placeholder would keep counting in
+    the header cards and the Op/Status filters, so the table would show work
+    that no longer exists (a re-plan that turns an earlier ``skipped`` row into
+    a proposal used to leave both behind: two rows for one entity).
     """
-    return SuggestionStatus.APPLIED if current is SuggestionStatus.APPLIED else SuggestionStatus.OBSOLETE
+    return current is SuggestionStatus.APPLIED
 
 
 def current_value_of(raw: dict[str, Any], property_name: str, language: str | None) -> Any:
@@ -299,8 +304,7 @@ def evaluate_preflight(
     Creates have no live entity yet and are skipped. Every other row must still
     exist; a property row additionally compares the value it recorded at
     prediction time with the live value in its own language. Rows that are not
-    runnable (applied/discarded/obsolete) are ignored — the Run would not push
-    them.
+    runnable (applied/discarded) are ignored — the Run would not push them.
     """
     issues: list[PreflightIssue] = []
     for row in rows:
@@ -350,8 +354,8 @@ __all__ = [
     "display_equal",
     "evaluate_preflight",
     "identity_of",
+    "keeps_after_refresh",
     "matched_swap_pairs",
-    "missing_status",
     "property_row_key",
     "raw_answered_other_language",
     "reconciled_status",

@@ -109,8 +109,8 @@ LOCKED_SUB_OPS: dict[str, str] = {
 #              workflow into the badge.
 #   applied  — APPLIED, i.e. written to Uwazi.
 #   reverted — its write was undone, so it can be run again.
-# DISCARDED/OBSOLETE stay distinct: the operator refused them (Restore exists)
-# and a stale row must not look runnable.
+# DISCARDED stays distinct: the operator refused it (Restore exists), so it must
+# not look runnable.
 SUB_STATUS_LABELS: dict[str, str] = {
     SuggestionStatus.PENDING.value: "pending",
     SuggestionStatus.ACCEPTED.value: "pending",
@@ -118,7 +118,6 @@ SUB_STATUS_LABELS: dict[str, str] = {
     SuggestionStatus.APPLIED.value: "applied",
     SuggestionStatus.REVERTED.value: "reverted",
     SuggestionStatus.DISCARDED.value: "discarded",
-    SuggestionStatus.OBSOLETE.value: "obsolete",
 }
 
 SUB_STATUS_COLORS: dict[str, str] = {
@@ -127,9 +126,9 @@ SUB_STATUS_COLORS: dict[str, str] = {
 }
 
 # The suboperation states a Run may write again. ``applied`` is already in
-# Uwazi, ``discarded`` was refused (Restore is its undo), and ``obsolete`` no
-# longer describes the script's work — none of them may enter a selection, or
-# the Run/Discard counters would include parts the action cannot write.
+# Uwazi and ``discarded`` was refused (Restore is its undo) — neither may enter
+# a selection, or the Run/Discard counters would include parts the action
+# cannot write.
 _RUNNABLE_SUB_STATUSES: frozenset[str] = frozenset({"pending", "reverted"})
 
 
@@ -143,7 +142,6 @@ def non_runnable_note(status_label: str) -> str:
     return {
         "applied": "already applied — revert it first",
         "discarded": "discarded — restore it first",
-        "obsolete": "obsolete — refresh the table",
     }.get(status_label, "not independently runnable")
 
 
@@ -430,10 +428,10 @@ def suboperation_row(
         "match_color": MATCH_COLORS.get(match, "grey-4"),
         "status": status_label,
         "status_color": status_color,
-        # A part is selectable only while a Run can still write it. APPLIED,
-        # DISCARDED and OBSOLETE parts stay visible (and revertable/restorable)
-        # but must not inflate Run (N) / Discard (N). A REVERTED delete/merge is
-        # visible too, but its old sharedId cannot be written again.
+        # A part is selectable only while a Run can still write it. APPLIED and
+        # DISCARDED parts stay visible (and revertable/restorable) but must not
+        # inflate Run (N) / Discard (N). A REVERTED delete/merge is visible too,
+        # but its old sharedId cannot be written again.
         "runnable": runnable,
         "rerun_blocked": blocked,
         "rerun_blocked_reason": rerun_blocked_reason(sub.op) if blocked else "",
@@ -716,8 +714,6 @@ def operation_status(subs: Iterable[dict[str, Any]]) -> str:
         return "reverted"
     if states == {"discarded"}:
         return "discarded"
-    if states == {"obsolete"}:
-        return "obsolete"
     return "pending"
 
 

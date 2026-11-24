@@ -47,24 +47,10 @@ def test_an_empty_suggestion_id_list_matches_nothing() -> None:
     assert "1 = 0" in where
 
 
-def test_no_constraints_means_the_run_and_hides_obsolete() -> None:
+def test_no_constraints_means_the_whole_run() -> None:
     where, params = build_where(SuggestionFilter(limit=10, offset=0), "run-1")
-    assert where == "run_id = ? AND status != ?"
-    assert params == ["run-1", "obsolete"]
-
-
-def test_include_obsolete_drops_only_the_default_status_exclusion() -> None:
-    where, params = build_where(SuggestionFilter(include_obsolete=True, limit=10, offset=0), "run-1")
     assert where == "run_id = ?"
     assert params == ["run-1"]
-
-
-def test_an_explicit_obsolete_status_filter_shows_them() -> None:
-    from uwazi_admin_agent.domain.suggestion import SuggestionStatus
-
-    where, params = build_where(SuggestionFilter(status=[SuggestionStatus.OBSOLETE]), "run-1")
-    assert where == "run_id = ? AND status IN (?)"
-    assert params == ["run-1", "obsolete"]
 
 
 def test_the_multi_status_filter_adds_one_in_clause() -> None:
@@ -80,8 +66,8 @@ def test_the_multi_status_filter_adds_one_in_clause() -> None:
 
 def test_the_multi_op_filter_adds_one_in_clause() -> None:
     where, params = build_where(SuggestionFilter(op=["update", "delete"]), "run-1")
-    assert where == "run_id = ? AND status != ? AND op IN (?, ?)"
-    assert params == ["run-1", "obsolete", "update", "delete"]
+    assert where == "run_id = ? AND op IN (?, ?)"
+    assert params == ["run-1", "update", "delete"]
 
 
 def test_an_empty_status_or_op_selection_matches_nothing() -> None:
@@ -104,7 +90,7 @@ def test_a_large_pair_selection_collapses_into_one_term_per_language() -> None:
     """
     pairs = [(f"s{i}", None) for i in range(5007)]
     where, params = build_where(
-        SuggestionFilter(entity_languages=pairs, include_obsolete=True),
+        SuggestionFilter(entity_languages=pairs),
         "run-1",
     )
     assert " OR " not in where
@@ -117,7 +103,6 @@ def test_pair_selection_groups_ids_per_language_and_dedupes() -> None:
     where, params = build_where(
         SuggestionFilter(
             entity_languages=[("a", None), ("b", None), ("a", None), ("c", "es")],
-            include_obsolete=True,
         ),
         "run-1",
     )
@@ -146,7 +131,6 @@ def test_the_pair_selection_matches_exactly_the_selected_pairs() -> None:
         where, params = build_where(
             SuggestionFilter(
                 entity_languages=[("a", "es"), ("b", None), ("c", None)],
-                include_obsolete=True,
             ),
             "run-1",
         )

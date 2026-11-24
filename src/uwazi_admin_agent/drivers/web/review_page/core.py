@@ -1675,9 +1675,9 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
     if row.get("is_display_only") or row.get("is_info"):
         return
     # Only parts a Run can still write enter the selection. An applied part
-    # (already in Uwazi), a discarded one (restore first) or an obsolete one
-    # must never inflate Run (N) / Discard (N); locked parts of a RUNNABLE
-    # operation still ride their operation's tick.
+    # (already in Uwazi) or a discarded one (restore first) must never inflate
+    # Run (N) / Discard (N); locked parts of a RUNNABLE operation still ride
+    # their operation's tick.
     ids = [
         int(sub["id"])
         for sub in (row.get("subs") or [])
@@ -1820,8 +1820,8 @@ def _toggle_select_all(state: dict[str, Any]) -> None:
         return
     # The projection is a row-id list, not a page: selection_rows ignores
     # limit/offset, so this covers every operation the filter matches. Only
-    # runnable rows are selected: applied/discarded/obsolete parts cannot be
-    # written by a Run and must not inflate the action counts.
+    # runnable rows are selected: applied/discarded parts cannot be written by a
+    # Run and must not inflate the action counts.
     refs = get_selection_rows(
         page_instance_url(),
         state["run_id"],
