@@ -100,7 +100,7 @@ GUARD: LoginGuard = LoginGuard()
 
 def blocked_message(user: str) -> str:
     """The message shown to a blocked account."""
-    return f"Too many failed login attempts for {user!r}. This account is locked until the admin agent service is restarted."
+    return f"Too many failed login attempts for {user!r}. This account is locked. Please contact the admin"
 
 
 __all__ = [

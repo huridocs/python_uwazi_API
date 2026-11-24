@@ -19,6 +19,7 @@ from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.plan_intent import PlanOutcome
 from uwazi_admin_agent.domain.prompt_chat import ChatMessage, build_final_prompt_from_chat
+from uwazi_admin_agent.domain.prompt_revision import prompt_with_previous_script
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
 )
@@ -266,6 +267,7 @@ async def regenerate_from_chat(
     password: str,
     budget: LlmBudget | None = None,
     on_stage: Callable[[str], None] | None = None,
+    revise_existing_script: bool = False,
 ) -> TableUpdateResult:
     """Regenerate the run's script from the whole chat history and reconcile the table.
 
@@ -289,6 +291,13 @@ async def regenerate_from_chat(
        become obsolete). A plan whose kind contradicts its records fails the
        pass and leaves the previous table untouched.
 
+    ``revise_existing_script`` marks the run as a CORRECTION of the current
+    script (the entity window's "Fix the prompt" flow): the run's committed
+    ``script.py`` is then sent ALONGSIDE the folded prompt, so the generator
+    changes a script the operator already reviewed instead of recreating it.
+    That attachment is generation-only: ``validated_prompt`` still records the
+    operator's context, and the manifest's ``script`` field records the source.
+
     ``on_stage`` (optional) is called with a human-readable stage description
     before each long step, so the caller can show progress instead of a silent
     modal. It must not block: the driver only forwards text to the UI.
@@ -299,6 +308,16 @@ async def regenerate_from_chat(
     manifest = runtime.backup_store.load_manifest(run_id)
     run_path = _paths(url).runs_path / run_id
     final_prompt = build_final_prompt_from_chat(history)
+    prompt_for_generation = final_prompt
+    if revise_existing_script:
+        try:
+            previous_script = read_run_script(url, run_id)
+        except OSError:
+            # A run with no committed source has nothing to revise: the folded
+            # prompt is enough, and the generation continues normally.
+            logger.info("revise request for run={} has no committed script", run_id)
+            previous_script = ""
+        prompt_for_generation = prompt_with_previous_script(final_prompt, previous_script)
     use_case = GenerateScriptUseCase(
         llm=runtime.llm,
         deps=runtime.deps,
@@ -311,7 +330,7 @@ async def regenerate_from_chat(
     if on_stage is not None:
         on_stage("Regenerating the script from the whole prompt context…")
     try:
-        script = await use_case.execute(final_prompt)
+        script = await use_case.execute(prompt_for_generation)
     except Exception as exc:  # noqa: BLE001 — surface as a generation error
         raise GenerateError(str(exc)) from exc
 

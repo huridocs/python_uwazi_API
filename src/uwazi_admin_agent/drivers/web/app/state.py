@@ -19,6 +19,7 @@ from uwazi_admin_agent.drivers.web.session import client_is_active, session_is_a
 
 _STATUS_COLORS: dict[str, str] = {
     "creating": "blue-grey",
+    "regenerating": "cyan",
     "planned": "grey",
     "snapshotted": "orange",
     "running": "blue",
@@ -34,11 +35,12 @@ _ABORT: object = object()
 
 _CLAIM_STATUS: dict[str, str] = {
     "creating": "creating",
+    "regenerating": "regenerating",
     "run": "running",
     "revert": "reverting",
 }
 
-_IN_FLIGHT_JS = "['creating', 'running', 'reverting'].includes(props.row.status)"
+_IN_FLIGHT_JS = "['creating', 'regenerating', 'running', 'reverting'].includes(props.row.status)"
 
 _STATUS_COLOR_JS = "{" + ", ".join(f"'{k}': '{v}'" for k, v in _STATUS_COLORS.items()) + "}"
 

@@ -294,6 +294,39 @@ def prune_selection(selected: list[Any], rows: list[dict[str, Any]]) -> list[dic
     return [row for row in selected if isinstance(row, dict) and str(row.get("row_key")) in visible]
 
 
+def expansion_mode(rows: list[Any], expanded: set[str]) -> str:
+    """The page's expansion as ``"all"``, ``"none"`` or ``"mixed"`` (pure).
+
+    ``rows`` is the table's current page and ``expanded`` the table's
+    ``expanded`` prop (row keys). ``"all"`` and ``"none"`` are the page-wide
+    states Expand all / Collapse all produce; those are the modes a page flip
+    carries forward. ``"mixed"`` is a per-row state, which stays with the page
+    it was made on.
+    """
+    keys = {str(row["row_key"]) for row in rows if isinstance(row, dict) and "row_key" in row}
+    if keys and keys <= expanded:
+        return "all"
+    return "mixed" if keys & expanded else "none"
+
+
+def expanded_keys_for(rows: list[Any], mode: str, current: set[str] = frozenset()) -> set[str]:
+    """The ``expanded`` prop a freshly loaded page starts with (pure).
+
+    ``"all"`` expands every row of the new page, so pressing Next after Expand
+    all lands on a fully expanded page; ``"none"`` collapses them all, so
+    Collapse all carries across pages the same way. ``"mixed"`` is a per-row
+    state: the rows of the SAME page keep their expansion (a poll reload must
+    not close an open row), while keys that are not on the new page — like the
+    previous page's — drop out.
+    """
+    keys = {str(row["row_key"]) for row in rows if isinstance(row, dict) and "row_key" in row}
+    if mode == "all":
+        return keys
+    if mode == "none":
+        return set()
+    return keys & set(current)
+
+
 def truncate(value: Any, limit: int = 80, property_type: str | None = None) -> str:
     """Render any value as one display line, truncated with an ellipsis (pure).
 
@@ -850,6 +883,8 @@ __all__ = [
     "bulk_revert_label",
     "property_heading",
     "pending_suboperation_count",
+    "expanded_keys_for",
+    "expansion_mode",
     "prune_selection",
     "revert_entity_confirmation",
     "rows_excluding_keys",

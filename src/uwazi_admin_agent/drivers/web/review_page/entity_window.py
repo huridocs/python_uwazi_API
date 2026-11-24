@@ -10,6 +10,7 @@ from loguru import logger
 from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
+from uwazi_admin_agent.domain.prompt_revision import SuggestionCorrection
 from uwazi_admin_agent.domain.select_values import (
     ALL_VALUES_REJECTED_REASON,
     MULTISELECT_TYPE,
@@ -32,6 +33,7 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
     release,
     release_run,
 )
+from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operations_view import (
     NON_IN_PLACE_OPS,
     file_move_detail_rows,
@@ -46,6 +48,7 @@ from uwazi_admin_agent.drivers.web.operations_view import (
     sub_status_color,
     sub_status_label,
 )
+from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
     MATCH_COLORS,
     RUN_STATUS_COLORS,
@@ -640,6 +643,66 @@ def _entity_value_label(text: str, classes: str) -> None:
     ui.label(text).classes(classes).style("white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word")
 
 
+# The rows that show a value the operator can judge as WRONG: a property write,
+# a value that matched Uwazi's current one, or an explicit skip with evidence.
+# Whole-entity ops and file copies show no proposed property value, so there is
+# nothing to attach to a prompt correction.
+_CORRECTABLE_OPS: frozenset[str] = PROPERTY_OPS | {MATCHED_OP, SKIPPED_OP}
+
+
+def _can_fix_prompt(suggestion: Suggestion) -> bool:
+    """Whether this row carries a value the operator can flag as wrong (pure)."""
+    return suggestion.op in _CORRECTABLE_OPS
+
+
+def _suggestion_correction(
+    suggestion: Suggestion,
+    labels: dict[str, str],
+    types: dict[str, str],
+) -> SuggestionCorrection:
+    """The attached-row context for the prompt chat's correction mode (pure).
+
+    The values are rendered HERE, with the template's property type, so a date
+    reads as a calendar date and a paragraph keeps its line breaks — exactly the
+    text the operator is looking at when they say the value is wrong.
+    """
+    property_type = types.get(suggestion.property_name or "")
+    evidence = (suggestion.context or "").strip()
+    if not evidence and suggestion.op == SKIPPED_OP:
+        evidence = skip_reason_label(suggestion.skip_reason)
+    return SuggestionCorrection(
+        shared_id=suggestion.shared_id,
+        entity_title=suggestion.entity_title or "",
+        template_name=suggestion.template_name,
+        language=suggestion.language,
+        property_name=suggestion.property_name,
+        property_label=property_heading(suggestion.property_name, suggestion.op, labels),
+        current_value=full_value(suggestion.current_value, property_type),
+        proposed_value=full_value(suggestion.proposed_value, property_type),
+        evidence=evidence,
+    )
+
+
+def _fix_prompt_clicked(state: dict[str, Any], correction: SuggestionCorrection) -> None:
+    """Open the prompt chat attached to this wrong suggestion (correction mode)."""
+    prompt_chat_dialog(
+        state["run_id"],
+        on_table_changed=lambda: _refresh_after_prompt_fix(state),
+        correction=correction,
+    )
+
+
+def _refresh_after_prompt_fix(state: dict[str, Any]) -> None:
+    """Repaint the review table AND the open entity window after a fix Run.
+
+    The fix regenerates the script and re-plans the whole table, so this
+    window's rows may be obsolete, changed, or brand new: rebuilding it is what
+    lets the operator confirm the fixed value without leaving the detail page.
+    """
+    _refresh_all(state)
+    _refresh_entity_window(state)
+
+
 def _entity_suggestions(
     state: dict[str, Any],
     suggestions: list[Suggestion],
@@ -809,6 +872,21 @@ def _entity_suggestions(
                     )
             if suggestion.edited_value is not None:
                 _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
+            if _can_fix_prompt(suggestion):
+                # A full-width standalone action BELOW the values: the operator
+                # reads the wrong value first, then flags it. It is deliberately
+                # not a small icon in the header row — this is the entry point of
+                # the correction loop, and it must be obvious at a glance.
+                ui.button(
+                    "Fix the prompt",
+                    icon="edit_note",
+                    on_click=lambda s=suggestion: _fix_prompt_clicked(
+                        state,
+                        _suggestion_correction(s, resolved, property_types),
+                    ),
+                ).props("outline color=deep-orange size=lg").classes("w-full q-mt-sm").tooltip(
+                    "Explain why this value is wrong and regenerate the script from the correction"
+                )
     if merge_rows:
         status = operation_status([{"status": sub_status_label(row.status)} for row in merge_rows])
         status_color = RUN_STATUS_COLORS.get(status, "grey-7")

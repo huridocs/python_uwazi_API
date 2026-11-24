@@ -176,8 +176,12 @@ def _build_page(run_id: str) -> None:
         "_select_all": False,
         "_global_refs": {},
         # Which operations are expanded (the table's ``expanded`` prop is the
-        # source of truth, which is what makes "Expand all" possible).
+        # source of truth, which is what makes "Expand all" possible), and the
+        # page-wide MODE ("all"/"none"/"mixed") that a page flip carries over:
+        # Expand all then Next must land expanded, Collapse all then Next
+        # collapsed.
         "_expanded": set(),
+        "_expand_mode": "none",
         # Set while a filter control is reset programmatically: assigning a
         # control's value fires its own change handler, and the reset must not
         # re-enter the filter logic.
@@ -289,7 +293,14 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
             _menu_item(
                 "description",
                 "Show prompt",
-                lambda: prompt_chat_dialog(run_id, on_table_changed=lambda: _refresh_all(state)),
+                lambda: prompt_chat_dialog(
+                    run_id,
+                    on_table_changed=lambda: _refresh_all(state),
+                    # A regeneration rewrites the table in place. Move to the
+                    # tasks window, where the run's row shows `regenerating`
+                    # until the new script and table are committed.
+                    on_run_started=lambda: ui.navigate.to(page_link("/app")),
+                ),
             )
             if has_script:
                 # The script item exists only for a run that HAS one — the same

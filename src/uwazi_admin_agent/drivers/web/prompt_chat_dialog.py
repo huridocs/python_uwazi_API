@@ -42,6 +42,15 @@ clarification turn is one tool-free request and the Run is the run's normal
 planning pass, so both run on the configured default caps without asking the
 operator to review caps or estimates.
 
+The modal also serves the entity window's **Fix the prompt** action: it opens
+in CORRECTION mode with a :class:`SuggestionCorrection` attached — the entity,
+property, Uwazi's current value and the wrong proposed value — plus a field for
+the operator's explanation. Sending the explanation records
+``correction_request`` as the opening prompt and continues through the SAME
+clarification/questions/Run path; the Run then sends the run's current script
+alongside the prompt (``revise_existing_script``), so the generator revises the
+script the operator reviewed instead of recreating it.
+
 The modal chrome (the header with its top-right Close) is reused from
 :mod:`uwazi_admin_agent.drivers.web.task_dialogs` rather than re-implemented.
 """
@@ -69,8 +78,19 @@ from uwazi_admin_agent.domain.prompt_chat import (
     mark_prompts_applied,
     reconstruct_chat,
 )
+from uwazi_admin_agent.domain.prompt_revision import (
+    SuggestionCorrection,
+    correction_request,
+    correction_summary,
+)
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.drivers.web.cost_dialog import SpendEstimate, build_budget
+from uwazi_admin_agent.drivers.web.operation_gate import (
+    release_run,
+    run_claim,
+    run_claim_text,
+    try_claim_run,
+)
 from uwazi_admin_agent.drivers.web.run_service import (
     clarify_prompt,
     compact_chat,
@@ -142,12 +162,54 @@ def _regeneration_estimate(run_id: str) -> SpendEstimate:
     )
 
 
-def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None = None) -> None:
+def _notify_instance(instance: str, message: str, type_: str = "positive", **kwargs: Any) -> None:
+    """Toast every client of ``instance`` (background-safe, dead clients skipped).
+
+    The Run's background task outlives the modal: when the page navigates to
+    the tasks table the dialog's client is deleted, so a ``ui.notify`` against
+    it would warn ("Client has been deleted"). The instance broadcast reaches
+    whichever page is still open instead.
+    """
+    if not instance:
+        return
+    # Local import: the app package imports this module, so a top-level import
+    # would close the cycle.
+    from uwazi_admin_agent.drivers.web.app.state import _broadcast_notify
+
+    _broadcast_notify(instance, message, type=type_, **kwargs)
+
+
+def _broadcast_run_rows(instance: str) -> None:
+    """Push fresh task rows so the run's ``regenerating`` badge appears at once."""
+    if not instance:
+        return
+    from uwazi_admin_agent.drivers.web.app.broadcast import _broadcast_rows
+
+    _broadcast_rows(instance)
+
+
+def prompt_chat_dialog(
+    run_id: str,
+    on_table_changed: Callable[[], None] | None = None,
+    *,
+    correction: SuggestionCorrection | None = None,
+    on_run_started: Callable[[], None] | None = None,
+) -> None:
     """Open the prompt-improvement chat for ``run_id``.
 
     ``on_table_changed`` is called after the chat's Run button rewrote the
     review table, so the page behind the modal can repaint it. It is optional:
     the runs table opens the modal without one.
+
+    ``correction`` opens the modal in CORRECTION mode, from the entity window's
+    "Fix the prompt" action: the flagged row is shown as an attachment below
+    the conversation, its explanation field is the only extra input, and the
+    Run sends the run's current script alongside the prompt so the generator
+    revises it.
+
+    ``on_run_started`` is called right after the regeneration is claimed and
+    launched. The review page uses it to move to the tasks window, where the
+    run's row shows the ``regenerating`` state while the script is rebuilt.
     """
     try:
         detail = get_run(page_instance_url(), run_id)
@@ -167,12 +229,16 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
         "history": [],
         "busy": False,
         "dirty": False,
+        # A correction Run revises the committed script instead of recreating
+        # it (the entity window's "Fix the prompt" flow).
+        "revise_existing_script": correction is not None,
         "_pending_index": None,
         "_pending_request": None,
         "_pending_bubble": None,
         "_unrun_bubbles": [],
         "_run_spinner": None,
         "_run_status": None,
+        "_correction_card": None,
     }
 
     client = context.client
@@ -181,7 +247,7 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
     with context.client.layout:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl").props("style=height:85dvh"):
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
-                modal_header(dialog, f"Prompt — {run_id}")
+                modal_header(dialog, f"Fix prompt — {run_id}" if correction is not None else f"Prompt — {run_id}")
                 ui.separator().classes("shrink-0")
                 scroll = ui.scroll_area().classes("w-full grow")
                 with scroll:
@@ -211,7 +277,7 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
                 run_button = ui.button(
                     "Run modifications",
                     icon="play_arrow",
-                    on_click=lambda: _run_clicked(state, on_table_changed),
+                    on_click=lambda: _run_clicked(state, on_table_changed, on_run_started),
                 ).props("color=primary")
             run_button.set_visibility(False)
             spinner.set_visibility(False)
@@ -220,6 +286,8 @@ def prompt_chat_dialog(run_id: str, on_table_changed: Callable[[], None] | None 
             state["_run_status"] = status_label
 
             _load_initial_context(state, detail)
+            if correction is not None:
+                _render_correction_card(state, correction)
 
     # Enter sends; Shift+Enter inserts a newline. The SAME handler serves the
     # button and the key, so the two paths cannot drift.
@@ -330,6 +398,55 @@ def _load_initial_context(state: dict[str, Any], detail: Any) -> None:
     state["history"].extend(history)
     for label, text, stamp, status in _initial_bubbles(baseline, history):
         _add_prompt_bubble(state, text, stamp, label=label, status=status)
+
+
+def _render_correction_card(state: dict[str, Any], correction: SuggestionCorrection) -> None:
+    """Show the flagged suggestion below the conversation (correction mode).
+
+    The base prompt and the run's context come first, then this attachment: the
+    operator reads what the run was, then the row being fixed, then answers the
+    one question only they can answer — why is this suggestion wrong. The
+    entity, property and values are already recorded on the row.
+    """
+    with state["_client"]:
+        with state["_messages"]:
+            with ui.card().classes("w-full bg-orange-1") as card:
+                ui.label("Fix an incorrect suggestion").classes("text-subtitle2 text-weight-medium")
+                ui.label(correction_summary(correction)).classes("text-caption text-grey-8 w-full").style(
+                    "white-space: pre-wrap"
+                )
+                explanation = ui.textarea(label="Why is this suggestion wrong? (optional)").classes("w-full")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button(
+                        "Send fix request",
+                        icon="construction",
+                        on_click=lambda: _send_correction(state, correction, explanation, card),
+                    ).props("color=deep-orange")
+    state["_correction_card"] = card
+
+
+def _send_correction(
+    state: dict[str, Any],
+    correction: SuggestionCorrection,
+    explanation_input: Any,
+    card: Any,
+) -> None:
+    """Fold the explanation into a correction request and start the chat turn.
+
+    The request then follows the SAME path as a typed request (clarification →
+    questions → Run), so correction mode adds an attachment at the top, not a
+    second conversation. The attachment is removed once it was sent: its text
+    is now the first prompt bubble, and re-sending it would duplicate it.
+    """
+    if state["busy"]:
+        return
+    reason = (explanation_input.value or "").strip()
+    request = correction_request(correction.model_copy(update={"reason": reason}))
+    with state["_client"]:
+        if not card.is_deleted:
+            card.delete()
+    state["_correction_card"] = None
+    _submit_request(state, request)
 
 
 def _send(state: dict[str, Any], request_input: Any) -> None:
@@ -709,75 +826,108 @@ def _scroll_to_bottom(state: dict[str, Any]) -> None:
             scroll.scroll_to(percent=100, axis="vertical", duration=0.2)
 
 
-def _run_clicked(state: dict[str, Any], on_table_changed: Callable[[], None] | None) -> None:
+def _run_clicked(
+    state: dict[str, Any],
+    on_table_changed: Callable[[], None] | None,
+    on_run_started: Callable[[], None] | None = None,
+) -> None:
     """The Run button: regenerate the script from the whole chat and reconcile."""
     if state["busy"] or not state["dirty"]:
         return
     budget = build_budget(_regeneration_estimate(state["run_id"]))
-    _start_run(state, on_table_changed, budget)
+    _start_run(state, on_table_changed, budget, on_run_started)
 
 
 def _start_run(
     state: dict[str, Any],
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
+    on_run_started: Callable[[], None] | None = None,
 ) -> None:
-    """Regenerate in the background (no spend confirmation), with visible progress."""
+    """Regenerate in the background (no spend confirmation), with visible progress.
+
+    The run is CLAIMED before the background task starts, with the same
+    per-run claim every other local operation takes. That is what makes the
+    tasks table show ``regenerating`` and refuses a discard/restore/Run on the
+    same run while the planning pass rewrites its table; other runs and other
+    instances stay untouched.
+    """
+    instance = page_instance_url()
+    run_id = state["run_id"]
+    if not try_claim_run(instance, run_id, "regenerating"):
+        _notify_instance(instance, run_claim_text(run_claim(instance, run_id)), type_="warning", multi_line=True)
+        return
+    # Push the claim into every tasks table BEFORE the optional navigation, so
+    # a client that is already showing the row repaints it, and the page we
+    # navigate to reads the claim when it builds.
+    _broadcast_run_rows(instance)
     _set_busy(state, True, "Regenerating the script from the chat…")
     _scroll_to_bottom(state)
     # A toast covers the case where the operator is scrolled away from the
     # in-modal indicator; it auto-hides, and the final result gets its own toast.
-    with state.get("_client"):
-        ui.notify(
-            "Regenerating the script and recomputing the table…",
-            type="ongoing",
-            timeout=8000,
-        )
-    background_tasks.create(
-        _do_run(state, on_table_changed, budget),
-        name=f"chat regeneration {state['run_id']}",
+    _notify_instance(
+        instance,
+        "Regenerating the script and recomputing the table…",
+        type_="ongoing",
+        timeout=8000,
     )
+    background_tasks.create(
+        _do_run(state, on_table_changed, budget, instance),
+        name=f"chat regeneration {run_id}",
+    )
+    if on_run_started is not None:
+        on_run_started()
 
 
 async def _do_run(
     state: dict[str, Any],
     on_table_changed: Callable[[], None] | None,
     budget: LlmBudget,
+    instance: str,
 ) -> None:
-    """Regenerate the script from the chat and reconcile the live table."""
+    """Regenerate the script from the chat and reconcile the live table.
+
+    The dialog may be gone by the time this finishes (the review page navigates
+    to the tasks window when the Run starts), so every notification goes to the
+    instance's live clients and the page refresh is skipped for a deleted one.
+    The claim is ALWAYS released, whatever the outcome.
+    """
+    run_id = state["run_id"]
+    client = state.get("_client")
 
     def _on_stage(message: str) -> None:
         _set_run_progress(state, message, visible=True)
 
-    instance = page_instance_url()
-    credentials = credentials_for_instance(instance)
-    if credentials is None:
-        _set_busy(state, False)
-        with state.get("_client"):
-            ui.notify("Not logged in to Uwazi — log in again", type="negative")
-        return
     try:
-        result = await regenerate_from_chat(
-            instance,
-            state["run_id"],
-            state["history"],
-            credentials.user,
-            credentials.password,
-            budget,
-            on_stage=_on_stage,
-        )
-    except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
+        credentials = credentials_for_instance(instance)
+        if credentials is None:
+            _set_busy(state, False)
+            _notify_instance(instance, "Not logged in to Uwazi — log in again", type_="negative")
+            return
+        try:
+            result = await regenerate_from_chat(
+                instance,
+                run_id,
+                state["history"],
+                credentials.user,
+                credentials.password,
+                budget,
+                on_stage=_on_stage,
+                revise_existing_script=bool(state.get("revise_existing_script")),
+            )
+        except Exception as exc:  # noqa: BLE001 — the chat reports; the modal stays open
+            _set_busy(state, False)
+            _notify_instance(instance, f"Regeneration failed: {exc}", type_="negative", multi_line=True)
+            return
+        state["dirty"] = False
+        _mark_prompts_run(state)
         _set_busy(state, False)
-        with state.get("_client"):
-            ui.notify(f"Regeneration failed: {exc}", type="negative", multi_line=True)
-        return
-    state["dirty"] = False
-    _mark_prompts_run(state)
-    _set_busy(state, False)
-    with state.get("_client"):
-        ui.notify(result.message(), type="positive", multi_line=True)
-    if on_table_changed is not None:
-        on_table_changed()
+        _notify_instance(instance, result.message(), type_="positive", multi_line=True)
+        if on_table_changed is not None and client is not None and not client.is_deleted:
+            on_table_changed()
+    finally:
+        release_run(instance, run_id, "regenerating")
+        _broadcast_run_rows(instance)
 
 
 __all__ = ["prompt_chat_dialog"]

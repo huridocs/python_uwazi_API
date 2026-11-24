@@ -57,6 +57,8 @@ from uwazi_admin_agent.drivers.web.review_view import (
     drift_banner_text,
     drift_banner_time,
     drift_text_classes,
+    expanded_keys_for,
+    expansion_mode,
     filter_from_controls,
     filter_options,
     pending_suboperation_count,
@@ -822,6 +824,9 @@ def _expanded_changed(state: dict[str, Any], event: Any) -> None:
     table = state.get("_table")
     if table is not None and not table.is_deleted:
         table.props["expanded"] = list(state["_expanded"])
+        # A per-row toggle replaces the page-wide mode: "mixed" is not carried
+        # to the next page, only a uniform Expand all / Collapse all is.
+        state["_expand_mode"] = expansion_mode(table.rows or [], state["_expanded"])
         table.update()
     _refresh_expand_button(state)
 
@@ -1122,6 +1127,15 @@ def _reload_table(state: dict[str, Any]) -> None:
         table = state.get("_table")
         if table is not None and not table.is_deleted:
             table.rows = payloads
+            # The page-wide expansion (Expand all / Collapse all) is a MODE, not
+            # a list of the current page's keys: applying it here is what makes
+            # the next page open with the same rows expanded (or collapsed).
+            state["_expanded"] = expanded_keys_for(
+                payloads,
+                state.get("_expand_mode", "none"),
+                state.get("_expanded") or set(),
+            )
+            table.props["expanded"] = list(state["_expanded"])
             if not state.get("_select_all"):
                 # Page selection: drop checked ids that are no longer visible,
                 # so the count (and Run) describe what the operator can see.
@@ -1746,17 +1760,25 @@ def _sync_selection(state: dict[str, Any]) -> None:
 
 
 def _toggle_expand_all(state: dict[str, Any]) -> None:
-    """Expand every operation — or collapse them all when they all are expanded."""
+    """Expand every operation — or collapse them all when they all are expanded.
+
+    The choice is stored as the page's expansion MODE, so the pages the
+    operator flips to next open in the same state instead of collapsing.
+    """
     table = state.get("_table")
     if table is None or table.is_deleted:
         return
     rows = table.rows or []
     keys = [str(row["row_key"]) for row in rows if isinstance(row, dict)]
+    if not keys:
+        return
     expanded = set(state.get("_expanded") or set())
-    if rows and all(key in expanded for key in keys):
+    if all(key in expanded for key in keys):
         expanded = set()
+        state["_expand_mode"] = "none"
     else:
         expanded = set(keys)
+        state["_expand_mode"] = "all"
     table.props["expanded"] = list(expanded)
     state["_expanded"] = expanded
     table.update()
