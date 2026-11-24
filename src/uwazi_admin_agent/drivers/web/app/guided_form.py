@@ -15,6 +15,11 @@ from nicegui import background_tasks, ui
 
 from uwazi_admin_agent.domain.guided_flow import (
     ADDITIONAL_RULES_QUESTION,
+    CREATE_COUNT_QUESTION,
+    CREATE_INSTRUCTIONS_QUESTION,
+    CREATE_SOURCE_PROPERTIES_QUESTION,
+    CREATE_SOURCE_QUESTION,
+    CREATE_TARGET_PROPERTIES_QUESTION,
     CUSTOM_DESCRIPTION_QUESTION,
     DOCUMENT_GUIDANCE_QUESTION,
     EXAMPLES_QUESTION,
@@ -32,6 +37,7 @@ from uwazi_admin_agent.domain.guided_flow import (
     REVIEW_QUESTION,
     SCOPE_FILTER_QUESTION,
     SCOPE_QUESTION,
+    SOURCE_TEMPLATES_QUESTION,
     SOURCES_QUESTION,
     TARGET_PROPERTY_QUESTION,
     TEMPLATE_QUESTION,
@@ -41,29 +47,38 @@ from uwazi_admin_agent.domain.guided_flow import (
     question_error,
 )
 from uwazi_admin_agent.domain.guided_task import (
+    CREATE_SOURCE_DOCUMENTS,
+    CREATE_SOURCE_LABELS,
     EXISTING_VALUE_LABELS,
     FALLBACK_BLANK,
     FALLBACK_LABELS,
     FALLBACK_VALUE,
-    GOAL_CLASSIFY,
+    GOAL_CREATE,
     GOAL_FILL,
     GOAL_LABELS,
     INPUT_LANGUAGE_LABELS,
     INPUT_LANGUAGE_MODES,
     OUTPUT_LANGUAGE_LABELS,
     OUTPUT_LANGUAGE_MODES,
+    SCOPE_ALL,
+    SCOPE_FILTER,
     SCOPE_LABELS,
     SCOPES,
+    SOURCE_ATTACHMENTS,
     SOURCE_LABELS,
     SOURCE_METADATA,
+    SOURCE_PDF,
     SOURCES,
     GuidedAnswers,
     WizardSchema,
     assemble_prompt,
+    fill_is_classification,
     language_choices,
     language_label_map,
     metadata_property_choices,
     property_choices,
+    property_type,
+    template_property_choices,
     validate_answers,
 )
 from uwazi_admin_agent.drivers.web.run_service.wizard_schema import load_wizard_schema
@@ -87,6 +102,12 @@ _QUESTION_TITLES = {
     OUTPUT_LANGUAGES_QUESTION: "Which output languages should be generated?",
     GENERATION_QUESTION: "How should the value be generated?",
     REVIEW_QUESTION: "Review the assembled prompt",
+    CREATE_SOURCE_QUESTION: "What should the new entities be based on?",
+    SOURCE_TEMPLATES_QUESTION: "Which templates hold the source entities?",
+    CREATE_SOURCE_PROPERTIES_QUESTION: "Which source properties should the new entities carry over?",
+    CREATE_TARGET_PROPERTIES_QUESTION: "Which properties should the new entities populate?",
+    CREATE_COUNT_QUESTION: "How many entities should be created?",
+    CREATE_INSTRUCTIONS_QUESTION: "What should the new entities contain?",
 }
 
 
@@ -226,6 +247,14 @@ def _multi_picker(
     return ui.input(label, placeholder=placeholder).classes("w-full")
 
 
+def _dedupe(choices: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """One option per property name across several templates (first label wins)."""
+    seen: dict[str, str] = {}
+    for name, display in choices:
+        seen.setdefault(name, display)
+    return sorted(seen.items(), key=lambda item: item[1].casefold())
+
+
 def _single_picker(label: str, choices: list[tuple[str, str]], *, placeholder: str) -> Any:
     if choices:
         return (
@@ -253,7 +282,13 @@ def _render_question(state: dict[str, Any]) -> None:
         ui.label(GOAL_LABELS[answers.goal]).classes("text-overline text-primary")
         ui.label(f"Question {index + 1} of {len(questions)}").classes("text-caption text-grey-7")
         ui.linear_progress(value=(index + 1) / len(questions), show_value=False).classes("w-full q-mb-lg")
-        ui.label(_QUESTION_TITLES[current]).classes("text-h6 q-mb-md")
+        title = _QUESTION_TITLES[current]
+        if answers.goal == GOAL_CREATE:
+            if current == TEMPLATE_QUESTION:
+                title = "Which template should the new entities use?"
+            elif current == SCOPE_FILTER_QUESTION:
+                title = "What filter or condition selects the source entities?"
+        ui.label(title).classes("text-h6 q-mb-md")
         with ui.column().classes("w-full min-h-40"):
             _render_question_control(state, current, answers)
         with ui.row().classes("q-mt-lg w-full items-center justify-between no-wrap"):
@@ -273,6 +308,7 @@ _AUTO_ADVANCE_QUESTIONS = frozenset(
         SCOPE_QUESTION,
         INPUT_LANGUAGE_MODE_QUESTION,
         OUTPUT_LANGUAGE_MODE_QUESTION,
+        CREATE_SOURCE_QUESTION,
     }
 )
 
@@ -283,7 +319,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
         state["_guided_draft_templates"] = list(answers.templates)
         ui.select(
             [template.name for template in schema.templates],
-            label="Templates (leave empty for all)",
+            label="Target template(s)" if answers.goal == GOAL_CREATE else "Templates (leave empty for all)",
             value=list(answers.templates),
             multiple=True,
             with_input=True,
@@ -294,17 +330,24 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
     elif question == CUSTOM_DESCRIPTION_QUESTION:
         _textarea(state, "custom_description", answers.custom_description, min_height=160)
     elif question == TARGET_PROPERTY_QUESTION:
-        label = "Target property for the suggested topics" if answers.goal == GOAL_CLASSIFY else "Target property"
-        placeholder = "e.g. topics" if answers.goal == GOAL_CLASSIFY else "e.g. incident_date, executive_summary"
-        ui.label(
-            "Select, multi-select and relationship properties accept thesaurus terms or linked entities."
-            if answers.goal == GOAL_CLASSIFY
-            else "The suggested value will appear in the review table before anything is written."
-        ).classes("text-body2 text-grey-7 q-mb-md")
-        widget = _single_picker(label, property_choices(schema, answers.templates, answers.goal), placeholder=placeholder)
+        widget = _single_picker(
+            "Target property",
+            property_choices(schema, answers.templates),
+            placeholder="e.g. topics, incident_date, executive_summary",
+        )
         widget.value = answers.target_property or None
-        widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
+
+        def _target_changed(event: Any) -> None:
+            name = str(event.value or "")
+            state.update(_guided_draft_text=name, _guided_draft_type=property_type(schema, name))
+
+        widget.on_value_change(_target_changed)
         state["_guided_draft_text"] = answers.target_property
+        state["_guided_draft_type"] = answers.target_property_type or property_type(schema, answers.target_property)
+        ui.label(
+            "Select, multiselect and relationship targets are classified with existing thesaurus terms or "
+            "linked entities; every other type is extracted from the sources."
+        ).classes("text-body2 text-grey-7 q-mt-md")
     elif question == GENERATION_QUESTION:
         state["_guided_draft_rules"] = {
             FILL_RULES_QUESTION: answers.fill_rules,
@@ -312,7 +355,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             ADDITIONAL_RULES_QUESTION: answers.additional_rules,
             EXAMPLES_QUESTION: answers.examples,
         }
-        if answers.goal == GOAL_FILL:
+        if answers.goal == GOAL_FILL and not fill_is_classification(answers):
             ui.label("Rules or formatting for the generated value").classes("text-subtitle1")
             _rules_textarea(
                 state,
@@ -321,14 +364,20 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
                 placeholder="e.g. Summarize the ruling in 3 concise bullet points.",
                 min_height=120,
             )
-        ui.label("Where does the relevant information live?").classes("text-subtitle1 q-mt-sm")
-        ui.label("Optional — continue to use the default strategy").classes("text-body2 text-grey-7")
-        _rules_textarea(
-            state,
-            DOCUMENT_GUIDANCE_QUESTION,
-            answers.document_guidance,
-            placeholder="e.g. Look at the first 2 pages for the header, date and author.",
+        reads_documents = (
+            answers.create_source == CREATE_SOURCE_DOCUMENTS
+            if answers.goal == GOAL_CREATE
+            else SOURCE_PDF in answers.sources or SOURCE_ATTACHMENTS in answers.sources
         )
+        if reads_documents:
+            ui.label("Where does the relevant information live?").classes("text-subtitle1 q-mt-sm")
+            ui.label("Optional — continue to use the default strategy").classes("text-body2 text-grey-7")
+            _rules_textarea(
+                state,
+                DOCUMENT_GUIDANCE_QUESTION,
+                answers.document_guidance,
+                placeholder="e.g. Look at the first 2 pages for the header, date and author.",
+            )
         ui.label("Any additional instructions or edge cases?").classes("text-subtitle1 q-mt-sm")
         ui.label("Optional").classes("text-body2 text-grey-7")
         _rules_textarea(
@@ -359,7 +408,12 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
     elif question == FALLBACK_VALUE_QUESTION:
         _input(state, "fallback_value", answers.fallback_value, "Fallback value")
     elif question == SCOPE_QUESTION:
-        _radio(state, {scope: SCOPE_LABELS[scope] for scope in SCOPES}, answers.entity_scope, on_change=lambda: _next(state))
+        # A create task scopes SOURCE entities: "target property empty" is meaningless there.
+        scopes = (SCOPE_ALL, SCOPE_FILTER) if answers.goal == GOAL_CREATE else SCOPES
+        labels = dict(SCOPE_LABELS)
+        if answers.goal == GOAL_CREATE:
+            labels[SCOPE_ALL] = "All entities in the selected source template(s)"
+        _radio(state, {scope: labels[scope] for scope in scopes}, answers.entity_scope, on_change=lambda: _next(state))
     elif question == SCOPE_FILTER_QUESTION:
         _input(state, "scope_filter", answers.scope_filter, "Filter or condition")
     elif question == SOURCES_QUESTION:
@@ -399,6 +453,59 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
         )
     elif question == OUTPUT_LANGUAGES_QUESTION:
         _languages(state, "output_languages", answers.output_languages, "Output language(s)")
+    elif question == CREATE_SOURCE_QUESTION:
+        _radio(state, CREATE_SOURCE_LABELS, answers.create_source, on_change=lambda: _next(state))
+    elif question == SOURCE_TEMPLATES_QUESTION:
+        state["_guided_draft_source_templates"] = list(answers.source_templates)
+        ui.select(
+            [template.name for template in schema.templates],
+            label="Source template(s)",
+            value=list(answers.source_templates),
+            multiple=True,
+            with_input=True,
+            clearable=True,
+            new_value_mode="add-unique",
+            on_change=lambda event: state.update(_guided_draft_source_templates=event.value or []),
+        ).props("outlined use-chips").classes("w-full")
+    elif question == CREATE_SOURCE_PROPERTIES_QUESTION:
+        choices = [
+            choice
+            for template in answers.source_templates
+            for choice in template_property_choices(schema, template)
+        ]
+        _multi_answer(
+            state,
+            "create_source_properties",
+            _dedupe(choices),
+            answers.create_source_properties,
+            label="Source properties to carry over",
+            placeholder="e.g. title, summary, judge",
+        )
+    elif question == CREATE_TARGET_PROPERTIES_QUESTION:
+        choices = [
+            choice
+            for template in answers.templates
+            for choice in template_property_choices(schema, template)
+        ]
+        _multi_answer(
+            state,
+            "create_target_properties",
+            _dedupe(choices),
+            answers.create_target_properties,
+            label="Properties the new entity should populate",
+            placeholder="e.g. title, topics, date",
+        )
+    elif question == CREATE_COUNT_QUESTION:
+        _input(state, "create_count", answers.create_count, "Number of entities to create")
+    elif question == CREATE_INSTRUCTIONS_QUESTION:
+        _textarea(
+            state,
+            "create_instructions",
+            answers.create_instructions,
+            label="What each new entity should contain",
+            placeholder="e.g. 50 fictional court decisions from 2025 with a random judge and a 2-paragraph summary.",
+            min_height=140,
+        )
     elif question == REVIEW_QUESTION:
         ui.label("Go back to change any answer, or continue to validation with this prompt.").classes(
             "text-body2 text-grey-7 q-mb-md"
@@ -490,6 +597,10 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
     updates: dict[str, Any] = {}
     if question == TEMPLATE_QUESTION:
         updates["templates"] = tuple(str(value).strip() for value in state.get("_guided_draft_templates", []) if value)
+    elif question == SOURCE_TEMPLATES_QUESTION:
+        updates["source_templates"] = tuple(
+            str(value).strip() for value in state.get("_guided_draft_source_templates", []) if value
+        )
     elif question == SOURCES_QUESTION:
         sources = tuple(source for source in SOURCES if source in state.get("_guided_draft_sources", set()))
         updates["sources"] = sources
@@ -502,6 +613,7 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
             SCOPE_QUESTION: "entity_scope",
             INPUT_LANGUAGE_MODE_QUESTION: "input_language_mode",
             OUTPUT_LANGUAGE_MODE_QUESTION: "output_language_mode",
+            CREATE_SOURCE_QUESTION: "create_source",
         }[question]
         updates[field] = state["_guided_radio_value"]
     elif question == GENERATION_QUESTION:
@@ -511,16 +623,33 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
         updates["document_guidance"] = str(drafts.get(DOCUMENT_GUIDANCE_QUESTION, "")).strip()
         updates["additional_rules"] = str(drafts.get(ADDITIONAL_RULES_QUESTION, "")).strip()
         updates["examples"] = str(drafts.get(EXAMPLES_QUESTION, "")).strip()
+    elif question == TARGET_PROPERTY_QUESTION:
+        updates["target_property"] = str(state.get("_guided_draft_text", "")).strip()
+        updates["target_property_type"] = str(state.get("_guided_draft_type", "")).strip()
+        # A different target type switches the sub-flow: a stale classification
+        # fallback must not leak into an extraction prompt (and vice versa).
+        if not fill_is_classification(
+            GuidedAnswers(**{**answers.__dict__, **updates}),
+            state.get("_guided_schema"),
+        ):
+            updates["fallback_value"] = ""
     elif question in {
         CUSTOM_DESCRIPTION_QUESTION,
-        TARGET_PROPERTY_QUESTION,
         EXISTING_VALUE_RULE_QUESTION,
         FALLBACK_VALUE_QUESTION,
         SCOPE_FILTER_QUESTION,
+        CREATE_COUNT_QUESTION,
+        CREATE_INSTRUCTIONS_QUESTION,
     }:
         field = state.get("_guided_draft_field") or question
         updates[field] = str(state.get("_guided_draft_text", "")).strip()
-    elif question in {METADATA_PROPERTIES_QUESTION, INPUT_LANGUAGES_QUESTION, OUTPUT_LANGUAGES_QUESTION}:
+    elif question in {
+        METADATA_PROPERTIES_QUESTION,
+        INPUT_LANGUAGES_QUESTION,
+        OUTPUT_LANGUAGES_QUESTION,
+        CREATE_SOURCE_PROPERTIES_QUESTION,
+        CREATE_TARGET_PROPERTIES_QUESTION,
+    }:
         raw = state.get("_guided_draft_multi", [])
         if not isinstance(raw, (list, tuple)):
             raw = str(raw).split(",")
