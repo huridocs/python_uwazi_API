@@ -11,6 +11,7 @@ from uwazi_admin_agent.domain.guided_task import (
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
+    OUTPUT_SOURCE,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
@@ -61,9 +62,33 @@ def test_conditional_follow_ups_appear_only_for_answers_that_need_them() -> None
     assert questions.index("scope_filter") == questions.index("scope") + 1
     assert questions.index("metadata_properties") == questions.index("sources") + 1
     assert questions.index("input_languages") == questions.index("input_language_mode") + 1
-    assert questions.index("output_languages") == questions.index("output_language_mode") + 1
+    # The output-language questions are no longer offered on the fill flow:
+    # the prompt extracts in the source document's language.
+    assert "output_language_mode" not in questions
+    assert "output_languages" not in questions
     assert questions.index("generation") == len(questions) - 2
     assert next_question_id("generation", answers) == "review"
+
+
+def test_create_flow_keeps_the_specific_output_languages_question() -> None:
+    answers = GuidedAnswers(
+        goal=GOAL_CREATE,
+        create_source=CREATE_SOURCE_DOCUMENTS,
+        output_language_mode=OUTPUT_SPECIFIC,
+    )
+    questions = guided_question_ids(answers)
+    assert questions.index("output_languages") == questions.index("output_language_mode") + 1
+    all_mode = GuidedAnswers(goal=GOAL_CREATE, create_source=CREATE_SOURCE_DOCUMENTS)
+    # The "all configured languages" (translation-tool) mode is not offered:
+    # the create flow's choice collapses to source-language by default.
+    assert "output_languages" not in guided_question_ids(all_mode)
+
+
+def test_guided_flow_never_asks_output_language_questions_for_fill_or_custom() -> None:
+    assert "output_language_mode" not in guided_question_ids(GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,)))
+    assert "output_language_mode" not in guided_question_ids(
+        GuidedAnswers(goal=GOAL_CUSTOM, sources=(SOURCE_PDF,), output_language_mode=OUTPUT_SPECIFIC)
+    )
 
 
 def test_custom_task_skips_target_property_and_fill_or_classify_rules() -> None:

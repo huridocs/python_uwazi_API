@@ -12,6 +12,7 @@ from .guided_task import (
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
+    OUTPUT_SOURCE,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
@@ -114,9 +115,14 @@ def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
         if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
             questions.append(INPUT_LANGUAGES_QUESTION)
 
-    questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
-    if answers.output_language_mode == OUTPUT_SPECIFIC:
-        questions.append(OUTPUT_LANGUAGES_QUESTION)
+    # The output-language behavior is NOT offered as a question (see the guided
+    # form): the fill/custom flows extract in the source document's language,
+    # so their prompts stay in the answer's default source mode. The create
+    # flow keeps a specific-languages choice.
+    if answers.goal == GOAL_CREATE:
+        questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
+        if answers.output_language_mode == OUTPUT_SPECIFIC:
+            questions.append(OUTPUT_LANGUAGES_QUESTION)
     questions.extend((GENERATION_QUESTION, REVIEW_QUESTION))
     return tuple(questions)
 

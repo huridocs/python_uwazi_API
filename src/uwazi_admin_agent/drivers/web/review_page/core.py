@@ -1145,6 +1145,14 @@ def _reload_table(state: dict[str, Any]) -> None:
         table = state.get("_table")
         if table is not None and not table.is_deleted:
             table.rows = payloads
+            # The default header checkbox selects the current PAGE. When
+            # nothing on the page (or at all: an empty result) is selectable,
+            # it is dead weight and it does nothing — hide it (see the CSS on
+            # the review page).
+            if any(isinstance(payload, dict) and payload.get("has_runnable") for payload in payloads):
+                table.classes(remove="review-no-selectable")
+            else:
+                table.classes(add="review-no-selectable")
             # The page-wide expansion (Expand all / Collapse all) is a MODE, not
             # a list of the current page's keys: applying it here is what makes
             # the next page open with the same rows expanded (or collapsed).

@@ -59,7 +59,8 @@ from uwazi_admin_agent.domain.guided_task import (
     INPUT_LANGUAGE_LABELS,
     INPUT_LANGUAGE_MODES,
     OUTPUT_LANGUAGE_LABELS,
-    OUTPUT_LANGUAGE_MODES,
+    OUTPUT_SOURCE,
+    OUTPUT_SPECIFIC,
     SCOPE_ALL,
     SCOPE_FILTER,
     SCOPE_LABELS,
@@ -98,8 +99,8 @@ _QUESTION_TITLES = {
     METADATA_PROPERTIES_QUESTION: "Which metadata properties should be read?",
     INPUT_LANGUAGE_MODE_QUESTION: "Which input language should be read?",
     INPUT_LANGUAGES_QUESTION: "Which primary input languages should be used?",
-    OUTPUT_LANGUAGE_MODE_QUESTION: "How should multilingual outputs be generated?",
-    OUTPUT_LANGUAGES_QUESTION: "Which output languages should be generated?",
+    OUTPUT_LANGUAGE_MODE_QUESTION: "Which output languages should the new entities be written in?",
+    OUTPUT_LANGUAGES_QUESTION: "Which output languages should the new entities be written in?",
     GENERATION_QUESTION: "How should the value be generated?",
     REVIEW_QUESTION: "Review the assembled prompt",
     CREATE_SOURCE_QUESTION: "What should the new entities be based on?",
@@ -171,6 +172,20 @@ def ensure_guided_form(state: dict[str, Any], *, refresh: bool = False) -> None:
     state["_guided_loading"] = True
     _render_loading(container)
     background_tasks.create(_load_and_render(state, refresh=refresh), name="guided task schema")
+
+
+def _refresh_schema(state: dict[str, Any]) -> None:
+    """Commit the visible answer, then reload the instance schema and re-render.
+
+    The cached schema the questions read from may predate templates or
+    properties added in Uwazi while the wizard was open; the operator presses
+    this to pull the fresh list. The current answer is committed first so the
+    refresh never loses a draft, and the re-render keeps the same question.
+    """
+    if state.get("_guided_loading"):
+        return
+    state["_guided_answers"] = _commit_current(state)
+    ensure_guided_form(state, refresh=True)
 
 
 def _render_loading(container: Any) -> None:
@@ -288,7 +303,14 @@ def _render_question(state: dict[str, Any]) -> None:
                 title = "Which template should the new entities use?"
             elif current == SCOPE_FILTER_QUESTION:
                 title = "What filter or condition selects the source entities?"
-        ui.label(title).classes("text-h6 q-mb-md")
+        with ui.row().classes("w-full items-center no-wrap"):
+            ui.label(title).classes("text-h6 q-mb-none")
+            # The template/property questions read the instance's LIVE schema
+            # (cached): a template or property added in Uwazi since the wizard
+            # opened will not be in the options until this is pressed.
+            ui.button("Refresh list", icon="refresh", on_click=lambda: _refresh_schema(state)).props(
+                "dense flat size=sm"
+            ).classes("q-ml-auto").tooltip("Reload the instance's templates and properties from Uwazi")
         with ui.column().classes("w-full min-h-40"):
             _render_question_control(state, current, answers)
         with ui.row().classes("q-mt-lg w-full items-center justify-between no-wrap"):
@@ -445,10 +467,18 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
     elif question == INPUT_LANGUAGES_QUESTION:
         _languages(state, "input_languages", answers.input_languages, "Primary input language(s)")
     elif question == OUTPUT_LANGUAGE_MODE_QUESTION:
+        # The create flow's only output choice: which languages the new
+        # entities' per-language text properties are written in. The
+        # instance's machine-translation tool is NOT an option here (it is
+        # only available on some instances): a translation task is described
+        # as a CUSTOM task, where the prompt can call for it directly.
         _radio(
             state,
-            {mode: OUTPUT_LANGUAGE_LABELS[mode] for mode in OUTPUT_LANGUAGE_MODES},
-            answers.output_language_mode,
+            {
+                OUTPUT_SPECIFIC: OUTPUT_LANGUAGE_LABELS[OUTPUT_SPECIFIC],
+                OUTPUT_SOURCE: "The language of the source entity",
+            },
+            OUTPUT_SPECIFIC if answers.output_language_mode != OUTPUT_SOURCE else OUTPUT_SOURCE,
             on_change=lambda: _next(state),
         )
     elif question == OUTPUT_LANGUAGES_QUESTION:

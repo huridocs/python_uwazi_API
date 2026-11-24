@@ -127,6 +127,7 @@ def _build_page(run_id: str) -> None:
         .subs-table td.subs-actions .q-btn {{ margin: 0; }}
         .subs-context {{ border-left: 3px solid rgba(0,0,0,0.12); padding-left: 8px; }}
         body.body--dark .subs-context {{ border-left-color: rgba(255,255,255,0.15); }}
+        .review-no-selectable thead th:first-child {{ visibility: hidden; }}
         {SHARED_ID_CSS}
         </style>
         """

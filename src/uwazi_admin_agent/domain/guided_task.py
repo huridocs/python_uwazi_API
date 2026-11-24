@@ -127,10 +127,15 @@ OUTPUT_SPECIFIC = "specific"
 OUTPUT_SOURCE = "source"
 OUTPUT_LANGUAGE_MODES: tuple[str, ...] = (OUTPUT_ALL, OUTPUT_SPECIFIC, OUTPUT_SOURCE)
 
+# The wizard offers only SPECIFIC and SOURCE: per-language text extraction is
+# what an operator can plan deliberately. The "all" mode (with the machine
+# translation tool behind it) is deliberately NOT offered — an instance that
+# wants it describes the whole task as a custom task instead. The mode stays
+# in the vocabulary so previously saved answers still validate and assemble.
 OUTPUT_LANGUAGE_LABELS: dict[str, str] = {
-    OUTPUT_ALL: "Generate for all configured Uwazi languages (translate or extract into each language)",
+    OUTPUT_ALL: "Generate for all configured Uwazi languages (extract into each language)",
     OUTPUT_SPECIFIC: "Generate only for specific language(s)",
-    OUTPUT_SOURCE: "Generate only in the language of the source document (do not translate)",
+    OUTPUT_SOURCE: "Generate only in the language of the source document",
 }
 
 DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on document length and structure."
@@ -347,7 +352,7 @@ class GuidedAnswers:
     create_target_properties: tuple[str, ...] = ()
     create_count: str = ""
     create_instructions: str = ""
-    output_language_mode: str = OUTPUT_ALL
+    output_language_mode: str = OUTPUT_SOURCE
     output_languages: tuple[str, ...] = ()
     additional_rules: str = ""
     examples: str = ""
@@ -409,7 +414,7 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
     if answers.output_language_mode not in OUTPUT_LANGUAGE_MODES:
         errors.append("Choose how multilingual outputs should be generated.")
     if answers.output_language_mode == OUTPUT_SPECIFIC and not answers.output_languages:
-        errors.append("Choose the output language(s), or switch to 'Generate for all configured languages'.")
+        errors.append("Choose the output language(s), or switch to 'Generate only in the language of the source document'.")
     return errors
 
 
@@ -503,9 +508,9 @@ def _output_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> 
     if answers.output_language_mode == OUTPUT_SPECIFIC:
         return f"Generate only for these languages: {_language_text(answers.output_languages, labels)}."
     if answers.output_language_mode == OUTPUT_SOURCE:
-        return "Generate only in the language of the source document (do not translate into other languages)."
+        return "Generate only in the language of the source document."
     configured = _language_text(labels.keys(), labels)
-    all_languages = "Generate for all configured Uwazi languages (translate or extract into each language)."
+    all_languages = "Generate for all configured Uwazi languages (extract into each language)."
     return f"{all_languages} Configured languages: {configured}." if configured else all_languages
 
 
@@ -657,7 +662,7 @@ def _assemble_create_prompt(answers: GuidedAnswers, labels: Mapping[str, str]) -
         [
             "### Multilingual Output Rules",
             f"- **Output language behavior:** {_output_language_text(answers, labels)}",
-            "- *Note: Inspect each target property's definition in Uwazi. A translatable text property "
+            "- *Note: Inspect each target property's definition in Uwazi. A per-language text property "
             "takes one value per output language; a shared property (select, multiselect, relationship, "
             "date, numeric, geolocation) takes a single value.*",
             "",
@@ -703,7 +708,7 @@ def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] |
         "",
         "### Multilingual Output Rules",
         f"- **Output language behavior:** {_output_language_text(answers, labels)}",
-        "- *Note: Inspect the target property definition in Uwazi. If it is a translatable text "
+        "- *Note: Inspect the target property definition in Uwazi. If it is a per-language text "
         "property, generate language-specific suggestions per the rule above. If it is a shared "
         "property (select, multiselect, relationship, date, numeric, geolocation), generate a "
         "single unified suggestion.*",
