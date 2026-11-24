@@ -14,6 +14,7 @@ from __future__ import annotations
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
 
+from uwazi_admin_agent.domain.allowance_note import allowance_note_to_user_block
 from uwazi_admin_agent.domain.prompt_understanding import PromptUnderstanding
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.clarify_schema_context import fetch_schema_context
@@ -40,11 +41,18 @@ class ClarifyPromptUseCase:
             output_type=PromptUnderstanding,
         )
 
-    async def execute(self, prompt: str) -> PromptUnderstanding:
-        """Run the agent once on ``prompt`` and return its understanding."""
+    async def execute(self, prompt: str, allowance_note: str = "") -> PromptUnderstanding:
+        """Run the agent once on ``prompt`` and return its understanding.
+
+        ``allowance_note`` — the operator-approved AI caps (the wizard's caps
+        step, which runs before validation) — is appended to the user prompt so
+        the restatement and the clarifying questions match what the task can
+        actually afford. Empty when unset (e.g. the chat flow runs on the
+        configured default caps).
+        """
         system_prompt = CLARIFY_SYSTEM_PROMPT_TEMPLATE.replace("{instance_schema}", await fetch_schema_context(self._deps))
         agent = self._build_agent(self._llm.get_model(), system_prompt)
-        run = await agent.run(prompt)
+        run = await agent.run(prompt + allowance_note_to_user_block(allowance_note))
         output = run.output
         if not isinstance(output, PromptUnderstanding):
             raise RuntimeError(f"Agent returned an unsupported output type: {type(output).__name__}")

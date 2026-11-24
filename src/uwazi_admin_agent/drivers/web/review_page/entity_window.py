@@ -872,21 +872,6 @@ def _entity_suggestions(
                     )
             if suggestion.edited_value is not None:
                 _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
-            if _can_fix_prompt(suggestion):
-                # A full-width standalone action BELOW the values: the operator
-                # reads the wrong value first, then flags it. It is deliberately
-                # not a small icon in the header row — this is the entry point of
-                # the correction loop, and it must be obvious at a glance.
-                ui.button(
-                    "Fix the prompt",
-                    icon="edit_note",
-                    on_click=lambda s=suggestion: _fix_prompt_clicked(
-                        state,
-                        _suggestion_correction(s, resolved, property_types),
-                    ),
-                ).props("outline color=deep-orange size=lg").classes("w-full q-mt-sm").tooltip(
-                    "Explain why this value is wrong and regenerate the script from the correction"
-                )
     if merge_rows:
         status = operation_status([{"status": sub_status_label(row.status)} for row in merge_rows])
         status_color = RUN_STATUS_COLORS.get(status, "grey-7")
@@ -895,6 +880,43 @@ def _entity_suggestions(
     if move_rows:
         for detail in file_move_detail_rows(move_rows):
             _entity_structural_card(detail)
+    corrections = [_suggestion_correction(s, resolved, property_types) for s in suggestions if _can_fix_prompt(s)]
+    if corrections:
+        _entity_fix_prompt_button(state, corrections)
+
+
+def _entity_fix_prompt_button(state: dict[str, Any], corrections: list[SuggestionCorrection]) -> None:
+    """The window's ONE "Fix the prompt" action: a grey button floating at the
+    bottom right of the screen, above every suggestion card, so the correction
+    loop's entry point never scrolls away with the values.
+
+    With a single correctable row it opens the prompt chat directly; with
+    several, a small menu lets the operator pick which wrong value to flag.
+    """
+    with (
+        ui.row()
+        .classes("fixed bottom-4 right-4 z-40 q-pa-sm q-gutter-x-sm items-center")
+        .style("background: rgba(255, 255, 255, 0.9); border-radius: 8px")
+    ):
+        if len(corrections) == 1:
+            ui.button(
+                "Fix the prompt",
+                icon="edit_note",
+                on_click=lambda: _fix_prompt_clicked(state, corrections[0]),
+            ).props("unelevated color=grey-8 size=md").tooltip(
+                "Explain why this value is wrong and regenerate the script from the correction"
+            )
+        else:
+            with ui.dropdown_button(
+                "Fix the prompt",
+                icon="edit_note",
+                auto_close=True,
+            ).props("unelevated color=grey-8 size=md"):
+                for correction in corrections:
+                    ui.item(
+                        correction.property_label or correction.property_name or "(row)",
+                        on_click=lambda c=correction: _fix_prompt_clicked(state, c),
+                    ).props("clickable").tooltip("Flag this value as wrong")
 
 
 def _entity_structural_card(detail: dict[str, Any]) -> None:

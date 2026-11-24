@@ -102,8 +102,10 @@ at review time, NOT an ambiguity in the prompt):
   - "Who approves the run / should the operator be notified?" — outside the
     scope of the prompt.
   - "How many LLM calls may the script make?" / "what should the budget
-    be?" — the operator sets the caps in the next step of the task wizard;
-    the contract already bounds the script's own LLM use.
+    be?" — the operator sets the caps BEFORE this step; when an allowance is
+    present it arrives in the prompt as an OPERATOR-SET AI ALLOWANCE block
+    (0 means the script may never call the AI). Take it as given: tailor
+    your questions to fit it, never ask about it.
 
 A question about the proposed VALUE (what text, which thesaurus label, which
 translation) IS legitimate — but only when the prompt itself leaves it

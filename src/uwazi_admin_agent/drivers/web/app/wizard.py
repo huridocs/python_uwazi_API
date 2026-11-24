@@ -14,6 +14,7 @@ from uwazi_admin_agent.configuration import (
     PREDICTION_DEFAULT_MAX_REQUESTS,
     SCRIPT_DEFAULT_MAX_COST,
 )
+from uwazi_admin_agent.domain.allowance_note import allowance_note_to_user_block
 from uwazi_admin_agent.domain.guided_task import GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOAL_FILL, GOALS
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
@@ -63,8 +64,8 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             state["_stepper"] = stepper
             _wizard_step_task(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_guided(state, dialog)
+            _wizard_step_caps(state, stepper, dialog)
             _wizard_step_validate(state, stepper, dialog)
-            _wizard_step_caps()
             _wizard_step_generate(state, dialog, stepper)
         dialog.open()
         if prefill_name or prefill_prompt:
@@ -271,6 +272,9 @@ async def _do_clarify(state: dict[str, Any], container: Any) -> None:
         _render_validation_error(state, container, RuntimeError("your session ended — log in again"))
         return
     try:
+        # The caps step runs BEFORE validation, so the operator's approved AI
+        # allowance is folded into the clarify prompt: the LLM tailors its
+        # restatement and its questions to what the task can actually afford.
         understanding = await asyncio.to_thread(
             asyncio.run,
             clarify_prompt(
@@ -278,6 +282,7 @@ async def _do_clarify(state: dict[str, Any], container: Any) -> None:
                 prompt,
                 credentials.user,
                 credentials.password,
+                allowance_note=allowance_note_to_user_block(_wizard_budget(state)),
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -443,13 +448,11 @@ def _refresh_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to caps, validate, or the prompt step."""
+    """Back from the generate step: to validate (if it ran) or the prompt step."""
     if state.get("_validation_done"):
-        target = "caps"
+        state["_stepper"].set_value("validate")
     else:
         _wizard_back_to_prompt_step(state)
-        return
-    state["_stepper"].set_value(target)
 
 
 def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
@@ -461,29 +464,9 @@ def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
     the operator only sets money.
     """
     with ui.step(name="caps", title="AI allowance", icon="payments"):
-        ui.label("One last decision before the task is created: how much of the AI it may use.").classes(
-            "text-body1 q-mb-md"
-        )
+        ui.label("Before the last checks: how much of the AI may the task use?").classes("text-body1 q-mb-md")
         with ui.card().classes("w-full"):
-            ui.label("What is about to happen?").classes("text-subtitle1")
-            ui.label(
-                "We turn your request into a small computer program, built once and then applied "
-                "to every item you selected. That one-time build always uses the AI and is covered "
-                "by the service's own standard limits — there is nothing to set for it here."
-            ).classes("text-body2")
-            ui.label("When would the task use the AI afterwards?").classes("text-subtitle1 q-mt-sm")
-            ui.label(
-                "For most requests the program works the results out by itself, at no cost. Only "
-                "when your request asks for something a formula cannot decide — reading a document "
-                "and writing a summary, for example — it will ask the AI about each of those items, "
-                "which costs a small amount of money per item."
-            ).classes("text-body2")
-            ui.label("Your limit: the most money the task may spend on those asks").classes("text-subtitle1 q-mt-sm")
-            ui.label(
-                "The task stops as soon as this limit is reached; anything it already worked "
-                "out is kept. At 0 the task never asks the AI — if it needed to, it would stop "
-                "with an error asking you to come back and raise this limit."
-            ).classes("text-body2")
+            ui.label("Allow the task to use the AI, and set a cap on how much money it may spend.").classes("text-body2")
             with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
                 state["_caps_cost_input"] = ui.number(
                     "Maximum spend ($)",
@@ -495,22 +478,23 @@ def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
             ui.label("A typical summary-style task over a few hundred items costs well under a dollar.").classes(
                 "text-body2 text-grey-7 q-mt-sm"
             )
+        ui.label(
+            "The next step's validation is informed by this allowance: the LLM tailors its "
+            "questions (and its restatement) to what the task can actually afford."
+        ).classes("text-body2 text-grey-7 q-mt-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: _wizard_caps_back(state)).props("color=grey-7 flat")
             ui.button(
                 "Next",
                 icon="arrow_forward",
-                on_click=lambda: stepper.set_value("generate"),
+                on_click=lambda: stepper.set_value("validate"),
             ).props("color=primary")
 
 
 def _wizard_caps_back(state: dict[str, Any]) -> None:
-    """Back from the caps step: to validate (if it ran) or to the prompt step."""
-    if state.get("_validation_done"):
-        state["_stepper"].set_value("validate")
-    else:
-        _wizard_back_to_prompt_step(state)
+    """Back from the caps step: it precedes validation, so to the prompt step."""
+    _wizard_back_to_prompt_step(state)
 
 
 def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> None:
