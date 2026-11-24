@@ -10,6 +10,7 @@ from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
+from uwazi_admin_agent.domain.relationship_values import RELATIONSHIP_TYPE
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
     FILE_OPS,
@@ -417,14 +418,17 @@ def _change_table(state: dict[str, Any]) -> None:
                           </td>
                           <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
                           <td class="q-pa-xs">
-                            <template v-if="sub.select_type === 'multiselect'">
+                            <template v-if="sub.select_type">
                               <div class="row items-center q-gutter-xs">
-                                <q-chip v-for="v in sub.values" :key="v.label" dense
+                                <q-chip v-for="(v, i) in sub.values" :key="v.label + '-' + i" dense
                                         :color="v.accepted ? 'green-2' : 'red-2'"
                                         :text-color="v.accepted ? 'green-10' : 'red-10'"
                                         :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
                               </div>
-                              <div class="text-caption text-grey-6">Will write: {{ sub.selection_text }}</div>
+                              <div class="text-caption text-grey-6">
+                                {{ sub.select_type === 'relationship' ? 'Related entities to write' : 'Will write' }}:
+                                {{ sub.selection_text }}
+                              </div>
                             </template>
                             <div v-else class="text-body2">{{ sub.proposed }}</div>
                           </td>
@@ -1093,6 +1097,7 @@ def _reload_table(state: dict[str, Any]) -> None:
     (read once here, so the table costs no extra request for it).
     """
     from .entity_window import _labels_for_operation, _types_for_operation
+    from .value_pickers import relationship_titles
 
     if state.get("loading"):
         return
@@ -1109,13 +1114,26 @@ def _reload_table(state: dict[str, Any]) -> None:
         state["_backup_dates"] = tooltips
         labels_by_template = state.get("_template_labels") or {}
         types_by_template = state.get("_template_types") or {}
+        labels_for = {id(item): _labels_for_operation(item, labels_by_template, state.get("_labels") or {}) for item in rows}
+        types_for = {id(item): _types_for_operation(item, types_by_template, state.get("_types") or {}) for item in rows}
+        # Relationship values store TARGET sharedIds; the table shows titles.
+        # One lookup for every relationship row of the page (cached per
+        # instance+language), so a page costs at most one batch of id reads.
+        relationship_rows = [
+            sub
+            for item in rows
+            for sub in item.subs
+            if types_for[id(item)].get(sub.property_name or "") == RELATIONSHIP_TYPE
+        ]
+        titles = relationship_titles(relationship_rows) if relationship_rows else {}
         payloads = [
             operation_row(
                 item,
                 checked_ids=state.get("_checked") or (),
                 uwazi_url=base_url,
-                labels=_labels_for_operation(item, labels_by_template, state.get("_labels") or {}),
-                types=_types_for_operation(item, types_by_template, state.get("_types") or {}),
+                labels=labels_for[id(item)],
+                types=types_for[id(item)],
+                titles=titles,
             )
             for item in rows
         ]

@@ -170,7 +170,9 @@ class ApplySuggestionsUseCase:
         scoped_ids = property_scope_ids(updates, whole_entity_rows, merges)
         updates = self._enrich(updates, skip=scoped_ids)
         creates = (
-            build_apply_creates(rows, selection, row_ids) if any(r.op in _CREATE_OPS for r in whole_entity_rows) else []
+            build_apply_creates(rows, selection, row_ids, property_types=types)
+            if any(r.op in _CREATE_OPS for r in whole_entity_rows)
+            else []
         )
         # A standalone move_files row copies its sources' files onto the target
         # and leaves the source entities untouched.

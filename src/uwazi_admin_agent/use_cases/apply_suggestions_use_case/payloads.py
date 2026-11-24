@@ -6,6 +6,11 @@ import json
 from typing import Any
 
 from uwazi_admin_agent.domain.date_values import coerce_date_property_value, is_date_property_type
+from uwazi_admin_agent.domain.relationship_values import (
+    RELATIONSHIP_TYPE,
+    relationship_selection,
+    single_value,
+)
 from uwazi_admin_agent.domain.select_values import (
     SELECT_TYPES,
     UnknownThesaurusValue,
@@ -39,7 +44,7 @@ ProgressCallback = Any
 
 _DATE_PROPERTY_TYPES: frozenset[str] = frozenset({"date", "multidate", "daterange", "multidaterange"})
 
-_RELATIONSHIP_PROPERTY_TYPE = "relationship"
+_RELATIONSHIP_PROPERTY_TYPE = RELATIONSHIP_TYPE
 
 _GEOLOCATION_PROPERTY_TYPE = "geolocation"
 
@@ -87,6 +92,23 @@ def select_labels(suggestion: Suggestion) -> list[str]:
     if suggestion.selected_values is not None:
         return labels_of(suggestion.selected_values)
     return labels_of(accepted_value(suggestion.proposed_value, suggestion.rejected_values))
+
+
+def relationship_targets(suggestion: Suggestion) -> list[str]:
+    """The related sharedIds a relationship Run writes (pure).
+
+    An ``EDITED`` row writes its decoded edit; otherwise the operator's explicit
+    ``selected_values`` wins (an empty list writes nothing — but such a row is
+    sentinel-discarded and never pushed); a plain row writes the proposal minus
+    the rejected targets.
+    """
+    if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
+        return relationship_selection(_decode_edited(suggestion.edited_value), suggestion.rejected_values, None)
+    return relationship_selection(
+        suggestion.proposed_value,
+        suggestion.rejected_values,
+        suggestion.selected_values,
+    )
 
 
 def _decode_edited(text: str) -> object:
@@ -658,10 +680,18 @@ def build_apply_updates(
                     )
                 try:
                     payload["metadata"][suggestion.property_name] = select_value_envelope(
-                        select_labels(suggestion), ids_by_label, suggestion.property_name
+                        single_value(prop_type, select_labels(suggestion)),
+                        ids_by_label,
+                        suggestion.property_name,
                     )
                 except UnknownThesaurusValue as exc:
                     raise ApplyRefusedError(str(exc)) from exc
+            elif prop_type == RELATIONSHIP_TYPE:
+                # A relationship is always MULTI-valued, and its value is the
+                # set of target sharedIds (``[{"value": <sharedId>}]``). The
+                # operator's explicit selection — or the proposal minus the
+                # rejected targets — is what the Run writes.
+                payload["metadata"][suggestion.property_name] = _relationship_entries(relationship_targets(suggestion))
             else:
                 raw_value = coerce_date_property_value(value, prop_type if is_date_property_type(prop_type) else None)
                 payload["metadata"][suggestion.property_name] = metadata_value(raw_value, suggestion.language, prop_type)
@@ -684,6 +714,7 @@ def build_apply_creates(
     suggestions: list[Suggestion],
     selection: EntitySelection | None = None,
     row_ids: list[int] | None = None,
+    property_types: dict[str, str] | None = None,
 ) -> list[dict]:
     """Group pushable create suggestions into per-entity-LANGUAGE create payloads (pure).
 
@@ -702,6 +733,11 @@ def build_apply_creates(
 
     Rows whose ``template_name`` is missing raise :class:`ApplyRefusedError` — a
     create cannot be written without a template.
+
+    ``property_types`` (optional) makes a relationship row write the operator's
+    explicit target selection — or the proposal minus the rejected targets —
+    exactly like an update. Without it the recorded value is written as-is,
+    which is what a create through the entity mapper expects (bare shared ids).
     """
     grouped: dict[tuple[str, str | None], dict] = {}
     order: list[tuple[str, str | None]] = []
@@ -714,8 +750,11 @@ def build_apply_creates(
             order.append(key)
         payload = grouped[key]
         value = effective_value(suggestion)
+        prop_type = (property_types or {}).get(suggestion.property_name or "")
         if suggestion.property_name == TITLE_PROPERTY:
             payload["title"] = value
+        elif suggestion.property_name is not None and prop_type == RELATIONSHIP_TYPE:
+            payload["metadata"][suggestion.property_name] = relationship_targets(suggestion)
         elif suggestion.property_name is not None:
             payload["metadata"][suggestion.property_name] = metadata_value(value, suggestion.language)
         if suggestion.template_name and not payload["template_name"]:

@@ -897,3 +897,60 @@ def test_apply_updates_write_an_operator_added_and_drop_a_removed_label() -> Non
         select_value_ids={("Case", "keywords"): {"Alpha": "u1", "Beta": "u2", "Gamma": "u3"}},
     )
     assert updates[0]["metadata"]["keywords"] == [{"value": "u1"}, {"value": "u3"}]
+
+
+# --- relationship targets and single-value selects ----------------------------
+
+
+def test_apply_updates_write_a_relationship_as_target_ids() -> None:
+    """A relationship stores ``[{"value": <sharedId>}]``; the proposal is used as-is."""
+    row = _s(property_name="related", proposed=[{"value": "a"}, {"value": "b"}])
+    updates = build_apply_updates([row], property_types={"related": "relationship"})
+    assert updates[0]["metadata"]["related"] == [{"value": "a"}, {"value": "b"}]
+
+
+def test_apply_updates_write_the_operators_relationship_selection() -> None:
+    """Adding a target and dropping a proposed one writes exactly the new set."""
+    row = _s(property_name="related", proposed=[{"value": "a"}, {"value": "b"}])
+    row = row.model_copy(update={"selected_values": ["a", "c"]})
+    updates = build_apply_updates([row], property_types={"related": "relationship"})
+    assert updates[0]["metadata"]["related"] == [{"value": "a"}, {"value": "c"}]
+
+
+def test_apply_updates_drop_a_rejected_relationship_target() -> None:
+    row = _s(property_name="related", proposed=[{"value": "a"}, {"value": "b"}])
+    row = row.model_copy(update={"rejected_values": ["b"]})
+    updates = build_apply_updates([row], property_types={"related": "relationship"})
+    assert updates[0]["metadata"]["related"] == [{"value": "a"}]
+
+
+def test_apply_updates_write_only_one_value_for_a_select() -> None:
+    """An explicit multi-pick on a single-valued select collapses to its first value."""
+    row = _s(property_name="topic", template_name="Case", proposed=["Alpha"])
+    row = row.model_copy(update={"selected_values": ["Beta", "Gamma"]})
+    updates = build_apply_updates(
+        [row],
+        property_types={"topic": "select"},
+        select_value_ids={("Case", "topic"): {"Alpha": "u1", "Beta": "u2", "Gamma": "u3"}},
+    )
+    assert updates[0]["metadata"]["topic"] == [{"value": "u2"}]
+
+
+def test_apply_creates_write_the_relationship_selection() -> None:
+    row = _s(
+        shared_id="dry-created-0",
+        op="create",
+        property_name="related",
+        proposed=[{"value": "a"}],
+        template_name="Case",
+    )
+    row = row.model_copy(update={"selected_values": ["x", "y"]})
+    creates = build_apply_creates([row], property_types={"related": "relationship"})
+    # A create runs through the entity mapper, which wraps the ids itself.
+    assert creates[0]["metadata"]["related"] == ["x", "y"]
+
+
+def test_an_edited_relationship_row_writes_its_typed_targets() -> None:
+    row = _s(property_name="related", proposed=[{"value": "a"}], status=SuggestionStatus.EDITED, edited='["x", "y"]')
+    updates = build_apply_updates([row], property_types={"related": "relationship"})
+    assert updates[0]["metadata"]["related"] == [{"value": "x"}, {"value": "y"}]

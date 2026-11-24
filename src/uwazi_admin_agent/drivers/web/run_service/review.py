@@ -26,6 +26,16 @@ _PROPERTY_TYPES: dict[tuple[str, str, str], dict[str, str]] = {}
 _SELECT_CATALOG: dict[tuple[str, str, str, str], dict[str, str]] = {}
 
 
+# ``{sharedId: title}`` per instance+language, filled by the review surfaces.
+_RELATIONSHIP_TITLES: dict[tuple[str, str], dict[str, str]] = {}
+
+
+# ``[(sharedId, title)]`` per (instance, template, property, language, search, limit).
+# The entity window re-renders after every value change, so without this the
+# same candidate search would run once per keystroke-driven refresh.
+_RELATIONSHIP_CANDIDATES: dict[tuple[str, str, str, str, str, int], list[tuple[str, str]]] = {}
+
+
 def get_suggestions(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[Suggestion], int]:
     """Return a page of suggestions + the filter's total (the review grid's read)."""
     return build_suggestion_store(url).query(run_id, f)
@@ -130,9 +140,12 @@ def property_types_for(url: str, template_name: str | None, user: str, password:
 
 
 def set_selected_values(url: str, run_id: str, row_id: int, selected: list[str] | None) -> Suggestion:
-    """Persist one multiselect row's explicit selection and its derived status; return the fresh row.
+    """Persist one pickable row's explicit selection and its derived status; return the fresh row.
 
-    ``selected`` is the FULL set of labels the Run writes (not a delta); ``None``
+    "Pickable" is a multiselect (thesaurus labels), a select (ONE label) and a
+    relationship (target sharedIds); the store holds whichever list the caller
+    validates, and the Run writes exactly that set. ``selected`` is the FULL set
+    the Run writes (not a delta); ``None``
     drops the explicit selection so the proposal minus ``rejected_values``
     applies again. The same guards as :func:`set_rejected_values` hold: APPLIED
     rows raise "already applied — revert it first", OBSOLETE rows "refresh the
@@ -210,6 +223,81 @@ def select_value_catalog(
         )
     _SELECT_CATALOG[key] = ids
     return ids
+
+
+def relationship_titles_for(
+    url: str,
+    shared_ids: list[str],
+    user: str,
+    password: str,
+    language: str | None = None,
+) -> dict[str, str]:
+    """``{sharedId: title}`` for relationship targets, cached per (instance, language).
+
+    A relationship value stores the related entity's ``sharedId``; the review
+    surfaces must show the entity's TITLE (an operator cannot judge "6g14bm8ub1a").
+    Titles are resolved here, once per id, and remembered for the process so
+    re-rendering the table or a window costs no extra request. An instance that
+    cannot be reached, or an id that no longer resolves, is simply absent from
+    the map — the caller falls back to the raw id, so a display path never
+    depends on the lookup.
+    """
+    key = (url, language or "")
+    cached = _RELATIONSHIP_TITLES.setdefault(key, {})
+    wanted = [shared_id for shared_id in dict.fromkeys(shared_ids) if shared_id and shared_id not in cached]
+    if wanted:
+        try:
+            runtime = build_runtime(user=user, password=password, url=url)
+            resolved = runtime.relationship_catalog.titles_for(wanted, language) if runtime.relationship_catalog else {}
+        except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the table
+            logger.warning("could not resolve relationship titles on {}: {}", url, exc)
+            resolved = {}
+        cached.update(resolved)
+    return {shared_id: cached[shared_id] for shared_id in dict.fromkeys(shared_ids) if shared_id in cached}
+
+
+def relationship_candidates(
+    url: str,
+    template_name: str | None,
+    property_name: str | None,
+    user: str,
+    password: str,
+    language: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+) -> list[tuple[str, str]]:
+    """``[(sharedId, title)]`` a relationship property may link to, filtered by ``search``.
+
+    The entity window's picker lists the property's candidate targets, not just
+    the ones the script proposed, so the operator can add one. An instance can
+    carry hundreds of candidates, so ``search`` narrows the read server-side
+    instead of shipping every title. Degrades to ``[]`` whenever the instance
+    cannot be reached or the property is not a relationship — a display lookup
+    never blocks the window.
+    """
+    if not template_name or not property_name:
+        return []
+    key = (url, template_name, property_name, language or "", (search or "").strip().lower(), int(limit))
+    cached = _RELATIONSHIP_CANDIDATES.get(key)
+    if cached is not None:
+        return cached
+    try:
+        runtime = build_runtime(user=user, password=password, url=url)
+        catalog = runtime.relationship_catalog
+        if catalog is None:
+            return []
+        found = catalog.candidates(
+            template_name,
+            property_name,
+            search=search,
+            limit=limit,
+            language=language,
+        )
+    except Exception as exc:  # noqa: BLE001 — a display lookup never blocks the window
+        logger.warning("could not resolve relationship candidates for {}.{}: {}", template_name, property_name, exc)
+        return []
+    _RELATIONSHIP_CANDIDATES[key] = found
+    return found
 
 
 def get_entity_rows(url: str, run_id: str, f: SuggestionFilter) -> tuple[list[EntityReviewRow], int]:

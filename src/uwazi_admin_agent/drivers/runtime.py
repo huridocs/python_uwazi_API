@@ -50,6 +50,7 @@ from uwazi_admin_agent.adapters.file_cache_store import FileCacheStore
 from uwazi_admin_agent.adapters.file_repository_adapter import UwaziFileRepository
 from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAdapter
 from uwazi_admin_agent.adapters.publish_state_adapter import UwaziPublishStateRepository
+from uwazi_admin_agent.adapters.relationship_catalog_adapter import UwaziRelationshipCatalog
 from uwazi_admin_agent.adapters.relationship_hub_adapter import UwaziRelationshipHubs
 from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
@@ -81,6 +82,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.property_type_port import PropertyTypeLookupPort
 from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
+from uwazi_admin_agent.ports.relationship_catalog_port import RelationshipCatalogPort
 from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
 from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
@@ -130,6 +132,7 @@ class Runtime:
         drift_probe: DriftProbePort | None = None,
         publish_state: PublishStatePort | None = None,
         relationship_hubs: RelationshipHubPort | None = None,
+        relationship_catalog: RelationshipCatalogPort | None = None,
     ) -> None:
         # The Uwazi instance this runtime talks to. Every consumer resolves the
         # instance's own on-disk paths from it, so no one has to re-read the env.
@@ -176,6 +179,8 @@ class Runtime:
         self.publish_state: PublishStatePort | None = publish_state
         # Non-property connection rows (file-cited / text citations).
         self.relationship_hubs: RelationshipHubPort | None = relationship_hubs
+        # Relationship-property candidates + titles (the review pickers).
+        self.relationship_catalog: RelationshipCatalogPort | None = relationship_catalog
 
 
 def default_instance_url() -> str:
@@ -283,6 +288,9 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
     template_property_lookup = UwaziTemplatePropertyLookup(api.client)
     template_labels: TemplateLabelPort = UwaziTemplateLabels(api.client)
     thesaurus_values: ThesaurusValueLookupPort = UwaziThesaurusValues(api.client)
+    # Relationship-property candidates/titles for the review surfaces. Same
+    # cached /api/templates read as the label/type lookups.
+    relationship_catalog: RelationshipCatalogPort = UwaziRelationshipCatalog(api.client)
     # The template property TYPES: what tells the recording path whether a
     # change is per-language (the free-text types) or one shared value. The
     # same cached /api/templates read the label lookup uses.
@@ -380,4 +388,5 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
         drift_probe=UwaziDriftProbe(api.client),
         publish_state=UwaziPublishStateRepository(api.client),
         relationship_hubs=UwaziRelationshipHubs(api.client),
+        relationship_catalog=relationship_catalog,
     )

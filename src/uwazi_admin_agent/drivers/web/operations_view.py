@@ -23,6 +23,12 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
+from uwazi_admin_agent.domain.relationship_values import (
+    RELATIONSHIP_TYPE,
+    SELECT_TYPE,
+    relationship_selection,
+    render_relationship,
+)
 from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, effective_selection, labels_of
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
@@ -252,21 +258,32 @@ def _relationship_proposed(sub: Suggestion) -> str:
     return f"{text} ({kind})" if kind else text
 
 
-def sub_values(sub: Suggestion, types: dict[str, str] | None = None) -> tuple[str, str]:
+def sub_values(
+    sub: Suggestion,
+    types: dict[str, str] | None = None,
+    titles: dict[str, str] | None = None,
+) -> tuple[str, str]:
     """One suboperation's ``(current, proposed)`` display pair (pure).
 
     The values are Uwazi's stored shapes rendered for a one-line cell — the
     same rendering the entity window uses. A whole-entity op has no current
     value to show (publishing/deleting is not a property), so it reads "—".
     ``types`` maps property names to their template type so a date property
-    renders as a calendar date instead of its raw epoch timestamp.
+    renders as a calendar date instead of its raw epoch timestamp; ``titles``
+    maps related-entity sharedIds to their display titles, so a relationship
+    value reads as the target entities' titles instead of bare ids.
     """
     if sub.op == INFO_OP:
         return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
     if sub.op == SKIPPED_OP:
         return "—", "" if sub.proposed_value is None else truncate(sub.proposed_value)
+    property_type = (types or {}).get(sub.property_name or "")
     if sub.op == MATCHED_OP:
-        property_type = (types or {}).get(sub.property_name or "")
+        if property_type == RELATIONSHIP_TYPE:
+            return (
+                truncate(render_relationship(sub.current_value, titles), 120),
+                truncate(render_relationship(sub.proposed_value, titles), 120),
+            )
         return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
     if sub.op == "create_relationships":
         return "—", _relationship_proposed(sub)
@@ -280,7 +297,11 @@ def sub_values(sub: Suggestion, types: dict[str, str] | None = None) -> tuple[st
         return "—", RUN_OP_PHRASES.get(sub.op, sub.op)
     if sub.op == MOVE_OP:
         return "—", _move_files_summary(sub)
-    property_type = (types or {}).get(sub.property_name or "")
+    if property_type == RELATIONSHIP_TYPE:
+        return (
+            truncate(render_relationship(sub.current_value, titles), 120),
+            truncate(render_relationship(sub.proposed_value, titles), 120),
+        )
     return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
 
 
@@ -334,15 +355,20 @@ def suboperation_row(
     in_place: bool,
     labels: dict[str, str] | None = None,
     types: dict[str, str] | None = None,
+    titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """One suboperation's table payload (pure). Colors are resolved here, not in Vue."""
+    """One suboperation's table payload (pure). Colors are resolved here, not in Vue.
+
+    ``titles`` maps related-entity sharedIds to titles so a relationship row
+    reads as the target entities — the same map the entity window uses.
+    """
     status_label = sub_status_label(sub.status)
     status_color = sub_status_color(sub.status)
     if sub.op == MATCHED_OP:
         status_label, status_color = "matched", "green-9"
     elif sub.op == SKIPPED_OP:
         status_label, status_color = "not processed", "deep-orange-10"
-    current, proposed = sub_values(sub, types)
+    current, proposed = sub_values(sub, types, titles)
     match = sub_match(sub)
     blocked = rerun_blocked(sub.op, status_label)
     runnable = is_runnable_status(status_label) and not blocked and sub.op not in DISPLAY_ONLY_OPS
@@ -351,16 +377,44 @@ def suboperation_row(
         note = rerun_blocked_reason(sub.op)
     else:
         note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
-    select_type = "multiselect" if (types or {}).get(sub.property_name or "") == MULTISELECT_TYPE else None
-    selected = effective_selection(sub.proposed_value, sub.rejected_values, sub.selected_values) if select_type else []
-    # One chip per DISTINCT proposed label; accepted == the operator's own
-    # selection, which may add catalog values and drop proposed ones.
-    proposal_labels: list[str] = []
-    if select_type:
-        for label in labels_of(sub.proposed_value):
-            if label not in proposal_labels:
-                proposal_labels.append(label)
-    decisions = [{"label": label, "accepted": label in selected} for label in proposal_labels]
+    property_type = (types or {}).get(sub.property_name or "")
+    # A multiselect and a relationship are both value SETS: one chip per
+    # proposed value, marked accepted when the operator's selection keeps it.
+    # A relationship chip is the target entity's title, so the table never asks
+    # the operator to read bare sharedIds.
+    select_type = (
+        "relationship"
+        if property_type == RELATIONSHIP_TYPE
+        else "select"
+        if property_type == SELECT_TYPE
+        else "multiselect"
+        if property_type == MULTISELECT_TYPE
+        else None
+    )
+    if select_type == "relationship":
+        selected = relationship_selection(sub.proposed_value, sub.rejected_values, sub.selected_values)
+        chosen = set(selected)
+        decisions = [
+            {
+                "label": render_relationship([shared_id], titles),
+                "accepted": shared_id in chosen,
+            }
+            for shared_id in relationship_selection(sub.proposed_value, [], None)
+        ]
+        selection_text = ", ".join(render_relationship([shared_id], titles) for shared_id in selected) or (
+            "— nothing (the row is discarded)"
+        )
+    else:
+        selected = effective_selection(sub.proposed_value, sub.rejected_values, sub.selected_values) if select_type else []
+        # One chip per DISTINCT proposed label; accepted == the operator's own
+        # selection, which may add catalog values and drop proposed ones.
+        proposal_labels: list[str] = []
+        if select_type:
+            for label in labels_of(sub.proposed_value):
+                if label not in proposal_labels:
+                    proposal_labels.append(label)
+        decisions = [{"label": label, "accepted": label in selected} for label in proposal_labels]
+        selection_text = ", ".join(selected) or "— nothing (the row is discarded)"
     return {
         "id": sub.id,
         "key": f"sub-{sub.id}",
@@ -401,7 +455,7 @@ def suboperation_row(
         # existing payload consumers are unaffected).
         "values": decisions,
         "has_rejected": any(not decision["accepted"] for decision in decisions),
-        "selection_text": ", ".join(selected) or "— nothing (the row is discarded)",
+        "selection_text": selection_text,
         "select_type": select_type,
     }
 
@@ -720,6 +774,7 @@ def operation_row(
     uwazi_url: str | None = None,
     labels: dict[str, str] | None = None,
     types: dict[str, str] | None = None,
+    titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One operation's table payload, with its suboperations (pure).
 
@@ -759,6 +814,7 @@ def operation_row(
                 in_place=sub_in_place,
                 labels=labels,
                 types=types,
+                titles=titles,
             ),
         )
         for sub in submodels

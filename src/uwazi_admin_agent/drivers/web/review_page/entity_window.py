@@ -11,6 +11,12 @@ from nicegui import background_tasks, context, ui
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.prompt_revision import SuggestionCorrection
+from uwazi_admin_agent.domain.relationship_values import (
+    RELATIONSHIP_TYPE,
+    SELECT_TYPE,
+    relationship_selection,
+    render_relationship,
+)
 from uwazi_admin_agent.domain.select_values import (
     ALL_VALUES_REJECTED_REASON,
     MULTISELECT_TYPE,
@@ -221,12 +227,14 @@ def _render_entity_details(
         if not suggestions:
             ui.label("No properties of this entity match the current filter.").classes("text-body2 text-grey-7 q-pa-sm")
             return
+        types = _property_types_for_suggestions(suggestions)
         _entity_suggestions(
             state,
             suggestions,
             _property_labels(suggestions),
             focus_property=focus_property,
-            types=_property_types_for_suggestions(suggestions),
+            types=types,
+            titles=_relationship_titles_for(suggestions, types),
         )
 
 
@@ -614,6 +622,22 @@ def _types_for_operation(
     return merged or fallback
 
 
+def _relationship_titles_for(
+    suggestions: list[Suggestion],
+    types: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """``{sharedId: title}`` for the relationship targets these rows name (cached, best-effort).
+
+    Only rows whose property is a ``relationship`` contribute ids, so a task
+    with no relationship row costs no lookup at all.
+    """
+    from .value_pickers import relationship_titles
+
+    resolved_types = types if types is not None else _property_types_for_suggestions(suggestions)
+    relationship_rows = [s for s in suggestions if resolved_types.get(s.property_name or "") == RELATIONSHIP_TYPE]
+    return relationship_titles(relationship_rows) if relationship_rows else {}
+
+
 def _property_types_for_suggestions(suggestions: list[Suggestion]) -> dict[str, str]:
     """The entity's template property types for the window's value rendering.
 
@@ -630,6 +654,39 @@ def _property_types_for_suggestions(suggestions: list[Suggestion]) -> dict[str, 
     if credentials is None:
         return {}
     return property_types_for(url, template_name, credentials.user, credentials.password)
+
+
+def _render_value(value: Any, property_type: str | None, titles: dict[str, str] | None = None) -> str:
+    """Render one value for the window, using its TITLE map for relationships (pure)."""
+    if property_type == RELATIONSHIP_TYPE:
+        return render_relationship(value, titles)
+    return full_value(value, property_type)
+
+
+def _relationship_summary(suggestion: Suggestion, titles: dict[str, str] | None = None) -> None:
+    """The relationship row's write summary: the accepted target titles (pure)."""
+    selected = relationship_selection(suggestion.proposed_value, suggestion.rejected_values, suggestion.selected_values)
+    unpredicted = [
+        shared_id
+        for shared_id in relationship_selection(suggestion.current_value, [], None)
+        if shared_id not in set(selected)
+    ]
+    if unpredicted:
+        _entity_value_label(
+            "Not predicted, will be removed by this Run: "
+            + ", ".join(render_relationship([shared_id], titles) for shared_id in unpredicted),
+            "text-body2 text-orange-9",
+        )
+    recommended = relationship_selection(suggestion.proposed_value, [], None)
+    if recommended:
+        _entity_value_label(
+            "Recommended: " + ", ".join(render_relationship([shared_id], titles) for shared_id in recommended),
+            "text-caption text-grey-7",
+        )
+    _entity_value_label(
+        "Will write: " + (", ".join(render_relationship([shared_id], titles) for shared_id in selected) or "— (nothing)"),
+        "text-body2 text-teal",
+    )
 
 
 def _entity_value_label(text: str, classes: str) -> None:
@@ -659,6 +716,7 @@ def _suggestion_correction(
     suggestion: Suggestion,
     labels: dict[str, str],
     types: dict[str, str],
+    titles: dict[str, str] | None = None,
 ) -> SuggestionCorrection:
     """The attached-row context for the prompt chat's correction mode (pure).
 
@@ -677,8 +735,8 @@ def _suggestion_correction(
         language=suggestion.language,
         property_name=suggestion.property_name,
         property_label=property_heading(suggestion.property_name, suggestion.op, labels),
-        current_value=full_value(suggestion.current_value, property_type),
-        proposed_value=full_value(suggestion.proposed_value, property_type),
+        current_value=_render_value(suggestion.current_value, property_type, titles),
+        proposed_value=_render_value(suggestion.proposed_value, property_type, titles),
         evidence=evidence,
     )
 
@@ -709,6 +767,7 @@ def _entity_suggestions(
     labels: dict[str, str] | None = None,
     focus_property: str | None = None,
     types: dict[str, str] | None = None,
+    titles: dict[str, str] | None = None,
 ) -> None:
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
@@ -726,10 +785,13 @@ def _entity_suggestions(
     ``focus_property`` highlights the property the window was opened from (a
     suboperation's Edit icon) without hiding the entity's other rows.
     ``types`` maps property names to their template type so a date value reads
-    as a calendar date rather than a raw epoch timestamp.
+    as a calendar date rather than a raw epoch timestamp. ``titles`` maps
+    related-entity sharedIds to their display titles, so a relationship value
+    reads as the target entities instead of bare ids.
     """
     resolved = labels or {}
     property_types = types or {}
+    titles = titles or {}
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in suggestions)
     merge_rows = [s for s in suggestions if s.op in MERGE_OPS]
     # A merge's PARTS are never revertable on their own: putting one target
@@ -792,11 +854,11 @@ def _entity_suggestions(
             if suggestion.op == MATCHED_OP:
                 property_type = property_types.get(suggestion.property_name or "")
                 _entity_value_label(
-                    f"Current value in Uwazi: {full_value(suggestion.current_value, property_type)}",
+                    f"Current value in Uwazi: {_render_value(suggestion.current_value, property_type, titles)}",
                     "text-body2 text-grey-7",
                 )
                 _entity_value_label(
-                    f"Extracted value: {full_value(suggestion.proposed_value, property_type)}",
+                    f"Extracted value: {_render_value(suggestion.proposed_value, property_type, titles)}",
                     "text-body2 text-teal-9",
                 )
             if suggestion.op == SKIPPED_OP and suggestion.proposed_value:
@@ -807,9 +869,38 @@ def _entity_suggestions(
             if suggestion.op in PROPERTY_OPS:
                 property_type = property_types.get(suggestion.property_name or "")
                 _entity_value_label(
-                    f"Value: {full_value(suggestion.current_value, property_type)}", "text-body2 text-grey-7"
+                    f"Value: {_render_value(suggestion.current_value, property_type, titles)}",
+                    "text-body2 text-grey-7",
                 )
-                if property_type == MULTISELECT_TYPE:
+                if property_type == RELATIONSHIP_TYPE:
+                    from .value_pickers import relationship_picker
+
+                    relationship_picker(state, suggestion, titles, _suggestion_is_runnable(suggestion))
+                    _relationship_summary(suggestion, titles)
+                elif property_type == SELECT_TYPE:
+                    from .value_pickers import select_catalog, single_select_picker
+
+                    selected = effective_selection(
+                        suggestion.proposed_value, suggestion.rejected_values, suggestion.selected_values
+                    )
+                    single_select_picker(
+                        state,
+                        suggestion,
+                        select_catalog(suggestion),
+                        selected,
+                        _suggestion_is_runnable(suggestion),
+                    )
+                    unpredicted = unpredicted_values(suggestion.current_value, selected)
+                    if unpredicted:
+                        _entity_value_label(
+                            f"Not predicted, will be removed by this Run: {', '.join(unpredicted)}",
+                            "text-body2 text-orange-9",
+                        )
+                    _entity_value_label(
+                        f"Will write: {', '.join(selected) or '— (nothing)'}",
+                        "text-body2 text-teal",
+                    )
+                elif property_type == MULTISELECT_TYPE:
                     selected = effective_selection(
                         suggestion.proposed_value, suggestion.rejected_values, suggestion.selected_values
                     )
@@ -862,7 +953,7 @@ def _entity_suggestions(
                     )
                 else:
                     _entity_value_label(
-                        f"Proposed: {full_value(suggestion.proposed_value, property_type)}",
+                        f"Proposed: {_render_value(suggestion.proposed_value, property_type, titles)}",
                         "text-body2",
                     )
                 if suggestion.context:
@@ -880,7 +971,7 @@ def _entity_suggestions(
     if move_rows:
         for detail in file_move_detail_rows(move_rows):
             _entity_structural_card(detail)
-    corrections = [_suggestion_correction(s, resolved, property_types) for s in suggestions if _can_fix_prompt(s)]
+    corrections = [_suggestion_correction(s, resolved, property_types, titles) for s in suggestions if _can_fix_prompt(s)]
     if corrections:
         _entity_fix_prompt_button(state, corrections)
 

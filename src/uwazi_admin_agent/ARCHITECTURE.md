@@ -61,6 +61,7 @@ each `__init__.py` re-exports the original names.
 - `drivers/web/review_page/` — the review page:
   - `core.py` — table, filters, actions, selection, drift
   - `entity_window.py` — entity detail window, files, labels/types
+  - `value_pickers.py` — select/relationship value pickers (titles + search)
   - `page.py` — route + page layout
   - `dialogs.py` — confirm/reason dialogs
 
