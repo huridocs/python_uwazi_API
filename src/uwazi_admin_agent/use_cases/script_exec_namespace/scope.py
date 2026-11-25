@@ -92,9 +92,74 @@ def _scoped_read_wrapper(base: Any, scope: set[str]) -> Any:
     return scoped
 
 
+def exclude_read_result(result: Any, excluded: set[str]) -> Any:
+    """Post-filter a bound read helper's result to DROP ``excluded`` ids (pure).
+
+    The deny-list counterpart of :func:`scope_read_result`: a production pass
+    with no allow-list still must not see the run's holdout entities, so the
+    same shapes are filtered with the opposite predicate.
+    """
+    if not excluded:
+        return result
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict) and str(item.get("shared_id") or "") not in excluded]
+    if isinstance(result, SimpleNamespace):
+        examples = [
+            example
+            for example in (result.examples or [])
+            if isinstance(example, dict) and str(example.get("shared_id") or "") not in excluded
+        ]
+        summary = result.summary
+        ids = [sid for sid in summary.shared_ids if sid not in excluded]
+        return SimpleNamespace(summary=summary.model_copy(update={"shared_ids": ids, "count": len(ids)}), examples=examples)
+    return result
+
+
+def _excluding_read_wrapper(base: Any, excluded: set[str]) -> Any:
+    """Wrap a bound read helper so its result DROPS the excluded ids."""
+
+    def filtered(*args: Any, **kwargs: Any) -> Any:
+        return exclude_read_result(base(*args, **kwargs), excluded)
+
+    return filtered
+
+
+def _excluded_entity_reads(namespace: dict[str, Any], excluded: set[str]) -> None:
+    """Hide ``excluded`` entities from a namespace that has NO allow-list.
+
+    Exactly the helpers :func:`_scoped_entity_reads` rewrites, with the deny
+    predicate instead: discovery drops the held-out ids, and the per-entity
+    readers report the same "missing" answer they give for an entity without
+    files/segmentation, so a script's own per-entity loop skips them.
+    """
+    namespace["query_entities"] = _excluding_read_wrapper(namespace["query_entities"], excluded)
+    namespace["query_entities_full"] = _excluding_read_wrapper(namespace["query_entities_full"], excluded)
+
+    base_files = namespace["get_entity_files"]
+
+    def get_entity_files(shared_id: str, language: str | None = None) -> Any:
+        if shared_id in excluded:
+            return []
+        return base_files(shared_id, language)
+
+    namespace["get_entity_files"] = get_entity_files
+
+    base_segmentation = namespace["get_segmentation"]
+
+    def get_segmentation(shared_id: str, language: str | None = None) -> Any:
+        if shared_id in excluded:
+            return None
+        return base_segmentation(shared_id, language)
+
+    namespace["get_segmentation"] = get_segmentation
+
+
 def _scoped_entity_reads(
     namespace: dict[str, Any],
     scope: set[str],
+    exclude: set[str] | None = None,
 ) -> None:
     """Post-filter a dry-run namespace's entity reads to ``scope`` IN PLACE.
 
@@ -109,13 +174,14 @@ def _scoped_entity_reads(
     - ``get_segmentation``: ``None`` for a sharedId outside the scope (same
       "missing, continue" contract the helper already documents).
     """
-    namespace["query_entities"] = _scoped_read_wrapper(namespace["query_entities"], scope)
-    namespace["query_entities_full"] = _scoped_read_wrapper(namespace["query_entities_full"], scope)
+    excluded = exclude or set()
+    namespace["query_entities"] = _scoped_read_wrapper(namespace["query_entities"], scope - excluded)
+    namespace["query_entities_full"] = _scoped_read_wrapper(namespace["query_entities_full"], scope - excluded)
 
     base_files = namespace["get_entity_files"]
 
     def get_entity_files(shared_id: str, language: str | None = None) -> Any:
-        if shared_id not in scope:
+        if shared_id not in scope or shared_id in excluded:
             return []
         return base_files(shared_id, language)
 
@@ -124,7 +190,7 @@ def _scoped_entity_reads(
     base_segmentation = namespace["get_segmentation"]
 
     def get_segmentation(shared_id: str, language: str | None = None) -> Any:
-        if shared_id not in scope:
+        if shared_id not in scope or shared_id in excluded:
             return None
         return base_segmentation(shared_id, language)
 

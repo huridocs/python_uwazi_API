@@ -109,6 +109,7 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         _json_or_none(suggestion.basis) if suggestion.basis else None,
         suggestion.context,
         suggestion.source_shared_id,
+        1 if suggestion.is_validation else 0,
         reviewed_at,
         int(old["id"]),
     )
@@ -148,6 +149,7 @@ class WritesMixin:
                 _json_or_none(s.merge_source_ids) if s.merge_source_ids else None,
                 _json_or_none(s.merge_files) if s.merge_files else None,
                 s.status.value,
+                1 if s.is_validation else 0,
                 s.edited_value,
                 _json_or_none(s.rejected_values) if s.rejected_values else None,
                 _json_or_none(s.selected_values) if s.selected_values is not None else None,
@@ -167,9 +169,9 @@ class WritesMixin:
                 INSERT INTO suggestion
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, skip_reason, match_state, merge_source_ids,
-                     merge_files, status, edited_value, rejected_values, selected_values, basis,
+                     merge_files, status, is_validation, edited_value, rejected_values, selected_values, basis,
                      context, source_shared_id, discard_reason, reviewed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
                 DO UPDATE SET
@@ -183,7 +185,8 @@ class WritesMixin:
                     merge_files = excluded.merge_files,
                     basis = excluded.basis,
                     context = excluded.context,
-                    source_shared_id = excluded.source_shared_id
+                    source_shared_id = excluded.source_shared_id,
+                    is_validation = excluded.is_validation
                 """,
                 rows,
             )
@@ -296,6 +299,13 @@ class WritesMixin:
             if keeps_after_refresh(SuggestionStatus(str(old["status"]))):
                 kept_applied += 1
                 continue
+            if int(old["is_validation"] or 0):
+                # Holdout evidence is not the production pass's to retire: a
+                # production pass never visits these entities (they are excluded
+                # from its reads), so "the script no longer produces this row"
+                # means the WRONG pass is reconciling it. The validation pass
+                # owns these rows inside its own scope.
+                continue
             removal_ids.append(int(old["id"]))
 
         if updates or removal_ids:
@@ -308,7 +318,7 @@ class WritesMixin:
                                proposed_value = ?, current_value = ?, skip_reason = ?, match_state = ?,
                                merge_source_ids = ?, merge_files = ?, status = ?, edited_value = ?,
                                discard_reason = ?, rejected_values = ?, selected_values = ?, basis = ?,
-                               context = ?, source_shared_id = ?, reviewed_at = ?
+                               context = ?, source_shared_id = ?, is_validation = ?, reviewed_at = ?
                          WHERE id = ?
                         """,
                         updates,
@@ -335,6 +345,78 @@ class WritesMixin:
             summary.summary_text(),
         )
         return summary
+
+    def replace_validation_rows(self, run_id: str, suggestions: list[Suggestion]) -> None:
+        """Make the run's validation rows exactly ``suggestions`` (one script version).
+
+        The evaluation pass re-runs the script over the SAME frozen entities, so
+        its rows refresh by identity. Rows the NEW script no longer produces
+        describe a script that no longer exists: they are deleted — but only
+        inside the holdout (``is_validation = 1``), so a promoted entity's
+        regular rows are never touched.
+
+        ``is_validation`` is forced on every incoming row here: this is the
+        validation pass's write path, so it cannot be used to slip work in.
+        """
+        incoming = [row.model_copy(update={"is_validation": True}) for row in suggestions]
+        keep = {
+            suggestion_identity(row.shared_id, row.op, row.language, row.property_name, row.detail_key) for row in incoming
+        }
+        existing = self.query(run_id, SuggestionFilter(is_validation=True, limit=100000))[0]
+        stale = [
+            row.id
+            for row in existing
+            if row.id is not None
+            and suggestion_identity(row.shared_id, row.op, row.language, row.property_name, row.detail_key) not in keep
+        ]
+        if stale:
+            placeholders = ", ".join("?" for _ in stale)
+            self._execute(
+                f"DELETE FROM suggestion WHERE id IN ({placeholders}) AND is_validation = 1",
+                list(stale),
+            )
+        if incoming:
+            self.add_suggestions(incoming)
+        logger.info(
+            "validation rows replaced run={}: {} written, {} removed",
+            run_id,
+            len(incoming),
+            len(stale),
+        )
+
+    def promote_to_regular(self, run_id: str, shared_id: str) -> int:
+        """Turn one entity's validation rows into regular reviewable work.
+
+        The rows keep their proposal and become PENDING with their review
+        columns cleared: the entity just LEFT the holdout, so any earlier
+        decision about it is meaningless. The set's own bookkeeping (shrinking
+        and version bump) belongs to the caller.
+        """
+        cursor = self._execute(
+            """
+            UPDATE suggestion
+               SET is_validation = 0, status = ?, edited_value = NULL, discard_reason = NULL,
+                   rejected_values = NULL, selected_values = NULL, reviewed_at = ?
+             WHERE run_id = ? AND shared_id = ? AND is_validation = 1
+            """,
+            [
+                SuggestionStatus.PENDING.value,
+                _dt_to_text(datetime.now().astimezone()),
+                run_id,
+                shared_id,
+            ],
+        )
+        logger.info("promoted validation rows run={} shared_id={}: {}", run_id, shared_id, cursor.rowcount)
+        return int(cursor.rowcount)
+
+    def drop_validation_rows(self, run_id: str, shared_id: str) -> int:
+        """Delete one entity's validation rows (it left the holdout without promotion)."""
+        cursor = self._execute(
+            "DELETE FROM suggestion WHERE run_id = ? AND shared_id = ? AND is_validation = 1",
+            [run_id, shared_id],
+        )
+        logger.info("dropped validation rows run={} shared_id={}: {}", run_id, shared_id, cursor.rowcount)
+        return int(cursor.rowcount)
 
     def set_current_values(self, updates: list[tuple[int, Any, bool | None]]) -> None:
         """Refresh rows' before-state in place after a revert (bulk).

@@ -137,11 +137,6 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def property_scores(self, run_id: str) -> dict[str, tuple[int, int]]:
-        """``property -> (exact, mismatch)`` verdict counts for the whole run (the Property filter)."""
-        ...
-
-    @abstractmethod
     def languages(self, run_id: str) -> list[str]:
         """The distinct written languages of the run — the Language filter's options."""
         ...

@@ -18,6 +18,40 @@ Dependency direction is one-way: `domain ← ports ← adapters/use_cases ← dr
 Do not import upward. `drivers/web` may import use cases and adapters; use cases
 must not import drivers or adapters.
 
+## Validation set (holdout performance score)
+
+A run may carry a **validation set**: a frozen sample of entities the authoring
+side must never read, used to score the script honestly.
+
+- `domain/validation.py` — the pure model: `ValidationSet` (ids + labels frozen
+  at creation), `ValidationScore`, the metric rule (micro-F1 for
+  `multiselect`/`relationship`, normalized accuracy otherwise), and
+  `score_validation`.
+- `adapters/validation_store.py` — `validation.yaml` + `validation_score.json`
+  beside the run's manifest.
+- `adapters/validation_holdout.py` — the deny-list wrappers. `build_runtime`
+  mounts them on the AUTHORING ports (`deps.entity_api`,
+  `deps.entity_repository`, `deps.segmentation_repository`) when the run has a
+  holdout; the runtime's own ports stay raw for the evaluation and apply paths.
+- `use_cases/validation_sampling.py` — the one read that DEFINES the set
+  (automatic sample or custom search), run before generation.
+- `use_cases/evaluate_validation_use_case.py` — scores the committed script in a
+  dry-run namespace scoped to the held-out ids; writes are recorded, never
+  applied, and no LLM helper is bound (the number must be reproducible).
+- `use_cases/script_exec_namespace/scope.py` — `_scoped_entity_reads(...,
+  exclude=...)` and `_excluded_entity_reads`: the PRODUCTION planning pass also
+  drops the held-out ids, so the review table never proposes writes for them.
+
+Rows of the validation pass carry `Suggestion.is_validation`. They are evidence,
+never work: `payloads.pushable_rows`, the store's selection projection, the
+checkboxes and the table's Run all refuse them. The ONE way out is an explicit
+promotion (`promote_validation_row`), which shrinks the set (bumping its
+version, so the stored score reads `stale`) and relabels the entity's rows as
+regular PENDING work. A production reconcile never deletes a validation row.
+
+The measured property is ONE per run: the score card says which, and the review
+table's property filter carries no score at all (two numbers would compete).
+
 ## End-to-end flow
 
 ```

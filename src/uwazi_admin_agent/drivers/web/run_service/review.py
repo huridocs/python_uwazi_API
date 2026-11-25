@@ -317,11 +317,6 @@ def get_operation_rows(url: str, run_id: str, f: SuggestionFilter) -> tuple[list
     return build_suggestion_store(url).operations(run_id, f)
 
 
-def get_property_scores(url: str, run_id: str) -> dict[str, tuple[int, int]]:
-    """``property -> (exact, mismatch)`` over the whole run (the Property filter)."""
-    return build_suggestion_store(url).property_scores(run_id)
-
-
 def get_templates(url: str, run_id: str) -> list[str]:
     """The distinct template names of the run — the property-label lookup."""
     return build_suggestion_store(url).templates(run_id)

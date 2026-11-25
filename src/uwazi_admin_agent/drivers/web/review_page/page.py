@@ -12,14 +12,9 @@ from uwazi_admin_agent.drivers.web.instances import page_link, page_target
 from uwazi_admin_agent.drivers.web.operation_gate import (
     set_progress,
 )
-from uwazi_admin_agent.drivers.web.operations_view import (
-    any_property_option,
-    property_options,
-)
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
     OP_LABELS,
-    OPERATION_SORT_OPTIONS,
     SHARED_ID_CSS,
     bulk_discard_label,
     bulk_revert_label,
@@ -31,9 +26,9 @@ from uwazi_admin_agent.drivers.web.review_view import (
 from uwazi_admin_agent.drivers.web.run_service import (
     current_pass,
     get_op_status_counts,
-    get_property_scores,
     get_run,
     get_suggestion_languages,
+    get_suggestion_properties,
 )
 from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
@@ -50,15 +45,12 @@ from .core import (
     _poll_gate_toast,
     _poll_progress,
     _refresh_all,
-    _refresh_sort_controls,
     _reset_global_selection,
     _revert_from_state,
     _run_from_state,
-    _set_sort,
     _summary_row,
     _toggle_expand_all,
     _toggle_select_all,
-    _toggle_sort_direction,
     _update_table_now,
 )
 from .entity_window import _merged_labels, _merged_types, _template_labels, _template_types
@@ -148,15 +140,22 @@ def _build_page(run_id: str) -> None:
         "property": "",
         "language": "",
         "text": "",
+        # The Validation filter: "" shows everything, "only" shows the holdout
+        # evidence, "hide" shows regular work. A SELECT, not a checkbox: the
+        # default (everything) is what keeps validation rows visible at all.
+        "validation": "",
         # The collapsible sections' initial state: the FILTERS are ON when the
         # page opens (narrowing the table is the first thing an operator does),
-        # the stats stay behind the menu. The menu items and the containers read
-        # these flags, so the label always states the next click.
+        # the stats and the free-text search stay behind the menu. The menu
+        # items and the containers read these flags, so each label states the
+        # next click.
         "_filters_visible": True,
         "_stats_visible": False,
-        # The table's always-visible sort. 'recorded' keeps the script's order;
-        # 'modified' (descending by default) puts the latest review activity on
-        # top. The store orders the WHOLE filtered set, not just this page.
+        "_search_visible": False,
+        # The table's sort lives in the COLUMN HEADERS. 'recorded' keeps the
+        # script's order until a header is clicked; a new column starts
+        # Modified newest-first / others A→Z, and clicking it again reverses.
+        # The store orders the WHOLE filtered set, not just this page.
         "sort_by": "recorded",
         "sort_desc": False,
         "loading": False,
@@ -211,15 +210,18 @@ def _build_page(run_id: str) -> None:
             # of sharing a row with the actions.
             with ui.row().classes("w-full items-center justify-end q-mb-sm"):
                 _header_menu(state, run_id, has_script=bool(detail.script))
-            # The two collapsible sections: the stats (the header cards) and
-            # the filters. The FILTERS are visible when the page opens — they
-            # narrow the table, which is the operator's first job — while the
-            # stats start hidden. The menu toggles both in and out. The stats
-            # sit ABOVE the filters: the counters describe the whole, the
-            # filters narrow it.
+            # The three collapsible sections: the stats (the header cards), the
+            # free-text search and the filters. The FILTERS are visible when
+            # the page opens — they narrow the table, which is the operator's
+            # first job — while the stats and the search start hidden. The menu
+            # toggles each independently: the search sits OUTSIDE the filters
+            # section so showing it works even when the filters are collapsed.
             with ui.column().classes("w-full") as stats_section:
                 state["_stats_section"] = stats_section
                 _summary_row(state)
+            with ui.column().classes("w-full q-mb-sm") as search_section:
+                state["_search_section"] = search_section
+                _search_bar(state)
             with ui.column().classes("w-full") as filters_section:
                 state["_filters_section"] = filters_section
                 _filter_bar(state)
@@ -234,13 +236,14 @@ def _build_page(run_id: str) -> None:
             # It is NOT hidden: a stale table is a safety warning, not a
             # statistic.
             _drift_banner(state)
-            _sort_bar(state)
             _change_table(state)
             # Apply the initial visibility the menu labels already advertise:
-            # the filters ON, the stats off. Entering the page ALWAYS resets to
-            # this — the filters are there to be used, not discovered.
+            # the filters ON, the stats and the search off. Entering the page
+            # ALWAYS resets to this — the filters are there to be used, while
+            # the search and the counters are reached from the menu.
             state["_stats_section"].set_visibility(state["_stats_visible"])
             state["_filters_section"].set_visibility(state["_filters_visible"])
+            state["_search_section"].set_visibility(state["_search_visible"])
 
     if current_pass(page_instance_url(), run_id) is None:
         ui.notify(
@@ -259,14 +262,16 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
     """The page's hamburger menu: every control that is read on demand.
 
     One menu in the card's top right holds the controls the operator reaches
-    for occasionally — the two collapsible sections (stats and filters), the
-    drift check, the table refresh, and the run's prompt and script. The page
-    itself is the table; the filters open WITH the page, and the rest is one
-    click away.
+    for occasionally — the three collapsible sections (stats, filters and the
+    free-text search), the drift check, the table refresh, and the run's prompt
+    and script. The page itself is the table; the filters open WITH the page,
+    and the rest is one click away.
 
     The section items state what the click WILL do ("Show filters" /
     "Hide filters"), so the label is the item's own contract — the filters
-    item opens reading "Hide filters" because the section starts visible.
+    item opens reading "Hide filters" because the section starts visible, and
+    the search item opens reading "Show search" because the search starts
+    hidden.
     """
     # The menu is nested INSIDE the button: Quasar anchors a menu to its
     # parent element, so a sibling menu would hang off the whole toolbar row
@@ -282,6 +287,14 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 "insights",
                 section_toggle_label("stats", bool(state.get("_stats_visible", False))),
                 lambda: _toggle_section(state, "stats"),
+            )
+            # The free-text search starts hidden: the dropdowns are the usual
+            # way to narrow a run, while a text scan is an occasional tool the
+            # operator reaches for from this menu.
+            state["_search_item"], state["_search_label"] = _menu_item(
+                "search",
+                section_toggle_label("search", bool(state.get("_search_visible", False))),
+                lambda: _toggle_section(state, "search"),
             )
             ui.separator()
             _menu_item(
@@ -343,38 +356,39 @@ def _update_table_clicked(state: dict[str, Any]) -> None:
     background_tasks.create(_update_table_now(state, client=context.client))
 
 
-def _filter_bar(state: dict[str, Any]) -> None:
-    """The filters, in TWO rows: the search above, the filters below.
+def _search_bar(state: dict[str, Any]) -> None:
+    """The free-text search, hidden until the hamburger menu reveals it.
 
-    The search gets a row of its own because it is a different kind of
-    control: the dropdowns below pick a value out of a known set, while the
-    search is free text over the whole table. Splitting them keeps the
-    dropdown row from wrapping.
+    It lives in its OWN section, not inside the filter bar: the dropdowns are
+    the normal way to narrow a run, while a text scan is an occasional tool, so
+    it opens on demand and can be shown even while the filters are collapsed.
+    """
+    state["_text_input"] = (
+        ui.input(
+            "Search title / sharedId",
+            value=state["text"],
+            on_change=lambda e: _set_filter(state, "text", e.value or ""),
+        )
+        .props("dense outlined clearable")
+        .classes("w-full")
+    )
+
+
+def _filter_bar(state: dict[str, Any]) -> None:
+    """The filters, in one row of selects plus the Reset button at the right.
 
     The whole bar is aligned LEFT, under the stats: the filters narrow what
     the table shows, and the operator reads them from the same side as the
-    rows they narrow.
+    rows they narrow. The free-text search has its own, independently toggled
+    section (see :func:`_search_bar`).
     """
     with ui.column().classes("w-full q-mb-sm"):
-        # Row 1: the search on its own.
         with ui.row().classes("w-full items-center gap-2"):
-            state["_text_input"] = (
-                ui.input(
-                    "Search title / sharedId",
-                    value=state["text"],
-                    on_change=lambda e: _set_filter(state, "text", e.value or ""),
-                )
-                .props("dense outlined clearable")
-                .classes("w-full")
-            )
-        # Row 2: the filters, with the clear (Reset) button LAST on the right.
-        with ui.row().classes("w-full items-center gap-2"):
-            # The Property filter comes FIRST: it is the one that decides WHAT
-            # the table shows (every property the task writes is an option, and
-            # picking one narrows the table to the suboperations writing that
-            # property). Each option carries its own accuracy, and "any
-            # property" carries the average of the properties that HAVE one.
-            scores = get_property_scores(page_instance_url(), state["run_id"])
+            # The Property filter comes FIRST: it decides WHAT the table shows
+            # (every property the task writes is an option, and picking one
+            # narrows the table to the suboperations writing that property).
+            # Options carry NO score: the run's ONE performance number lives in
+            # the validation card, so the two cannot compete or disagree.
             labels_by_template = _template_labels(state["run_id"])
             state["_template_labels"] = labels_by_template
             state["_labels"] = _merged_labels(labels_by_template)
@@ -385,7 +399,13 @@ def _filter_bar(state: dict[str, Any]) -> None:
             state["_types"] = _merged_types(types_by_template)
             state["_property_select"] = (
                 ui.select(
-                    {"": any_property_option(scores), **property_options(scores, state["_labels"])},
+                    {
+                        "": "any property",
+                        **{
+                            name: state["_labels"].get(name, name)
+                            for name in get_suggestion_properties(page_instance_url(), state["run_id"])
+                        },
+                    },
                     value=state["property"],
                     label="Property",
                     on_change=lambda e: _set_filter(state, "property", e.value or ""),
@@ -409,6 +429,16 @@ def _filter_bar(state: dict[str, Any]) -> None:
                 )
                 .props("dense outlined")
                 .classes("min-w-[150px]")
+            )
+            state["_validation_select"] = (
+                ui.select(
+                    {"": "regular + validation", "hide": "regular rows only", "only": "validation rows only"},
+                    value=state["validation"],
+                    label="Validation",
+                    on_change=lambda e: _set_filter(state, "validation", e.value or ""),
+                )
+                .props("dense outlined")
+                .classes("min-w-[200px]")
             )
             # Operation and Status are MULTI-selects: an operator often wants to
             # see two statuses (or two operations) at once. No "any" option — an empty
@@ -471,6 +501,7 @@ def _reset_filters(state: dict[str, Any]) -> None:
             "op": [],
             "property": "",
             "language": "",
+            "validation": "",
             "text": "",
             "offset": 0,
         }
@@ -478,6 +509,7 @@ def _reset_filters(state: dict[str, Any]) -> None:
     widgets = {
         "property": "",
         "language": "",
+        "validation": "",
         "op": [],
         "status": [],
     }
@@ -532,30 +564,3 @@ def _action_bar(state: dict[str, Any]) -> None:
             icon="unfold_more",
             on_click=lambda: _toggle_expand_all(state),
         ).props("dense flat")
-
-
-def _sort_bar(state: dict[str, Any]) -> None:
-    """The always-visible sort control above the review table.
-
-    It lives outside the collapsible filters: changing what the table READS
-    (the filters) is optional, but every operator needs to see the order and
-    change it — especially "Modified", which brings the last-touched rows to
-    the top. The direction toggle names the order it is showing.
-    """
-    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
-        ui.icon("sort").classes("text-grey-7")
-        state["_sort_select"] = (
-            ui.select(
-                OPERATION_SORT_OPTIONS,
-                value=state["sort_by"],
-                label="Sort by",
-                on_change=lambda e: _set_sort(state, e.value or "recorded"),
-            )
-            .props("dense outlined")
-            .classes("min-w-[180px]")
-        )
-        state["_sort_direction_button"] = ui.button(
-            icon="arrow_upward",
-            on_click=lambda: _toggle_sort_direction(state),
-        ).props("flat dense")
-        _refresh_sort_controls(state)

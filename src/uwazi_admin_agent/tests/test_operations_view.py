@@ -272,36 +272,6 @@ def test_refs_helpers_deduplicate_and_keep_order() -> None:
     assert view.entities_of_refs(refs) == ["entity-a"]
 
 
-def test_property_accuracy_leaves_unscored_properties_out_of_the_average() -> None:
-    scores = view.property_accuracy({"a": (3, 1), "b": (0, 0)})
-    assert scores == {"a": 75.0, "b": None}
-    assert view.average_accuracy(scores) == 75.0
-    assert view.accuracy_label(None) == "n/a"
-    assert view.accuracy_label(75.0) == "75.0%"
-
-
-def test_property_options_carry_each_property_accuracy() -> None:
-    options = view.property_options({"document_ref": (3, 1), "not_scored": (0, 0)}, {"document_ref": "Document Ref"})
-    assert options["document_ref"] == "Document Ref — 75.0% accuracy"
-    assert options["not_scored"] == "not_scored"
-
-
-def test_the_any_property_option_carries_the_average_accuracy() -> None:
-    """The 'any property' option shows the mean of the SCORED properties."""
-    # "a" scores 75% and "b" scores 50%, so the mean is 62.5%.
-    assert view.any_property_option({"a": (3, 1), "b": (1, 1)}) == "any property — 62.5% accuracy"
-
-
-def test_the_any_property_option_leaves_out_the_unscored_properties() -> None:
-    """A property with nothing to compare is unscored, not inaccurate."""
-    assert view.any_property_option({"a": (3, 1), "unscored": (0, 0)}) == "any property — 75.0% accuracy"
-
-
-def test_the_any_property_option_reads_plainly_with_no_scored_property() -> None:
-    assert view.any_property_option({}) == "any property"
-    assert view.any_property_option({"unscored": (0, 0)}) == "any property"
-
-
 def test_merge_operation_offers_the_operation_revert_but_no_per_part_revert() -> None:
     """A merge row is undone as ONE operation; its parts stay non-revertable."""
     subs = [

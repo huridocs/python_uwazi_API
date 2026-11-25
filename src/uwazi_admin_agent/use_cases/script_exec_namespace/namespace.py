@@ -70,7 +70,7 @@ from .reads import (
     _sync_full_entities_factory,
     _sync_query_entities_factory,
 )
-from .scope import _scoped_entity_reads
+from .scope import _excluded_entity_reads, _scoped_entity_reads
 
 #: Wall-clock ceiling for one generated-script pass. Generous enough for a
 #: 10k-entity bulk read on a remote instance; it exists to stop an accidental
@@ -268,6 +268,7 @@ def build_dry_run_namespace(
     llm_progress: Callable[[int], None] | None = None,
     llm_cache: TextCachePort | None = None,
     entity_scope: set[str] | None = None,
+    exclude_scope: set[str] | None = None,
     target_shared_id: str | None = None,
     apply_mode: bool = False,
 ) -> dict[str, Any]:
@@ -351,7 +352,12 @@ def build_dry_run_namespace(
         "__builtins__": SAFE_BUILTINS,
     }
     if entity_scope is not None:
-        _scoped_entity_reads(namespace, set(entity_scope))
+        _scoped_entity_reads(namespace, set(entity_scope), exclude_scope)
+    elif exclude_scope:
+        # Production pass WITHOUT an allow-list (the script discovers its own
+        # target set): the holdout entities are still hidden, so the review
+        # table never proposes a write for them.
+        _excluded_entity_reads(namespace, set(exclude_scope))
     if target_shared_id is not None:
         _scoped_entity_reads(namespace, {target_shared_id})
     namespace["TARGET_SHARED_ID"] = target_shared_id

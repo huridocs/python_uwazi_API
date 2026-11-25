@@ -6,6 +6,7 @@ import asyncio
 import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 import yaml
 from loguru import logger
@@ -24,7 +25,6 @@ from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
 )
 from uwazi_admin_agent.domain.run_name import validate_run_name
-from uwazi_admin_agent.use_cases.generation_stages import STAGE_PLANNING, STAGE_SAVING
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
     INFO_OP,
@@ -38,6 +38,7 @@ from uwazi_admin_agent.use_cases.generate_predictions_use_case import (
     PredictionPassError,
 )
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
+from uwazi_admin_agent.use_cases.generation_stages import STAGE_PLANNING, STAGE_SAVING
 
 from .drift import refresh_baseline_after_run
 from .models import GenerateError, TableUpdateResult
@@ -53,6 +54,7 @@ async def create_and_generate(
     validated_prompt: str | None = None,
     budget: LlmBudget | None = None,
     on_stage: Callable[[str], None] | None = None,
+    validation_config: Any | None = None,
 ) -> None:
     """Write the prompt + active-run pointer, then generate the script + the table.
 
@@ -83,6 +85,17 @@ async def create_and_generate(
     existing = _paths(url).runs_path / name / "manifest.json"
     if existing.exists():
         raise GenerateError(f"A run named {name!r} already exists — pick another name.")
+    # The holdout is resolved and frozen BEFORE the generation turn: sampling
+    # reads the instance once, and from the moment the set exists every
+    # authoring read through build_runtime excludes those entities. AFTER the
+    # existence check: a refused duplicate must not overwrite another run's set.
+    if validation_config is not None:
+        try:
+            from .validation import build_validation_set
+
+            build_validation_set(url, name, validation_config, user, password)
+        except Exception as exc:  # noqa: BLE001 — never lose the run over an optional set
+            logger.warning("validation sampling failed for run {}: {}", name, exc)
     _paths(url).prompts_path.mkdir(parents=True, exist_ok=True)
     (_paths(url).prompts_path / f"{name}.yaml").write_text(yaml.dump({"prompt": prompt}), encoding="utf-8")
     _paths(url).runs_file.parent.mkdir(parents=True, exist_ok=True)
@@ -103,7 +116,9 @@ async def create_and_generate(
     # before the try below exists and before any manifest is written. Without the
     # log the operator saw only the toast and the terminal stayed silent.
     try:
-        runtime = build_runtime(user=user, password=password, url=url)
+        from .validation import holdout_ids
+
+        runtime = build_runtime(user=user, password=password, url=url, holdout_ids=holdout_ids(url, name) or None)
     except Exception as exc:
         logger.exception("run {}: could not build the Uwazi runtime", name)
         raise GenerateError(
@@ -171,6 +186,15 @@ async def create_and_generate(
         manifest.error_step = "plan"
         runtime.backup_store.save_manifest(name, manifest)
         raise GenerateError(str(exc)) from exc
+
+    # The script is committed and planned: score it against the holdout (if the
+    # run has one). A scoring failure must never lose a usable run.
+    try:
+        from .validation import evaluate_run
+
+        evaluate_run(url, name, user, password)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("validation scoring failed for run {}: {}", name, exc)
 
 
 async def run_auto_scan(
@@ -248,6 +272,9 @@ async def generate_predictions(
     plan_kind = (
         plan_kind_override if plan_kind_override is not None else runtime.backup_store.load_manifest(run_id).plan_kind
     )
+    from .validation import holdout_ids
+
+    holdout = holdout_ids(url, run_id)
     use_case = GeneratePredictionsUseCase(
         entity_api=runtime.entity_api,
         entity_repository=runtime.entity_repository,
@@ -265,7 +292,17 @@ async def generate_predictions(
         property_types=runtime.property_types,
         llm_cache=runtime.file_cache,
     )
-    await use_case.run(script, run_id=run_id, budget=budget, entity_scope=shared_ids, plan_kind=plan_kind)
+    await use_case.run(
+        script,
+        run_id=run_id,
+        budget=budget,
+        entity_scope=shared_ids,
+        plan_kind=plan_kind,
+        # The production pass never reads the run's holdout entities: the review
+        # table must not propose writes for them. A subset pass narrows further;
+        # the store protects the validation rows from being retired meanwhile.
+        exclude_scope=holdout or None,
+    )
     return use_case.last_reconciliation or ReconciliationSummary()
 
 
@@ -388,6 +425,15 @@ async def regenerate_from_chat(
         len(final_prompt),
         script.plan_kind,
     )
+    # The committed script changed: the stored score describes the OLD one. The
+    # new script is scored against the same frozen holdout; a scoring failure
+    # never loses a usable table.
+    try:
+        from .validation import evaluate_run
+
+        evaluate_run(url, run_id, user, password)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("validation scoring after regeneration failed for run {}: {}", run_id, exc)
     return TableUpdateResult(
         run_id=run_id,
         changed_in_uwazi=None,

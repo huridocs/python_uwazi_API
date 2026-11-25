@@ -249,6 +249,16 @@ class Suggestion(BaseModel):
             "based on could not be shown. None when the create names no source."
         ),
     )
+    is_validation: bool = Field(
+        default=False,
+        description=(
+            "True when this row belongs to the run's HOLDOUT validation set: it is "
+            "evidence for the performance score, never work. A validation row is "
+            "never selectable, never pushed by a Run, and never counted as pending "
+            "work. The operator may promote its entity out of the set (and then the "
+            "rows become regular, runnable rows)."
+        ),
+    )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
     current_value: Any = Field(default=None, description="Uwazi's current value for that key, when fetched.")
     skip_reason: str | None = Field(
@@ -399,6 +409,14 @@ class OperationReviewRow(BaseModel):
     reverted: int = Field(ge=0, description="Written rows whose writes a revert undid (runnable again).")
     discarded: int = Field(ge=0, description="Rows rejected/discarded.")
     edited: int = Field(ge=0, description="Rows carrying an operator edit.")
+    validation: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many of the matching rows belong to the run's holdout validation set. The table "
+            "marks a row 'validation' and never offers Run/Discard on those parts."
+        ),
+    )
     match_summary: str = Field(
         description=(
             "One of 'exact' | 'mismatch' | 'new' | 'mixed' | 'n/a': the single match verdict of the "
@@ -501,6 +519,14 @@ class SuggestionFilter(BaseModel):
             "Restrict to these suggestion row ids — the SUBOPERATION selection, which is "
             "how the review table's checked parts reach the store. An explicit empty list "
             "matches NOTHING (nothing checked is distinct from no constraint)."
+        ),
+    )
+    is_validation: bool | None = Field(
+        default=None,
+        description=(
+            "Restrict to holdout validation rows (True) or regular rows (False). None = no "
+            "constraint. The review table's 'Validation' filter sets it; the apply path sets "
+            "it to False so a Run can never push a validation row whatever its status."
         ),
     )
     limit: int = Field(default=25, ge=1, description="Page size (ignored by aggregate/projection queries).")

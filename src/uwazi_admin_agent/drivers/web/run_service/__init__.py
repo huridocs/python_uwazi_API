@@ -63,7 +63,6 @@ from .review import (
     get_entity_suggestions,
     get_op_status_counts,
     get_operation_rows,
-    get_property_scores,
     get_selection_rows,
     get_suggestion_counts,
     get_suggestion_entity_languages,
@@ -73,10 +72,10 @@ from .review import (
     get_templates,
     property_labels_for,
     property_types_for,
-    restore_ids,
-    restore_rows,
     relationship_candidates,
     relationship_titles_for,
+    restore_ids,
+    restore_rows,
     select_value_catalog,
     set_rejected_values,
     set_selected_values,
@@ -97,6 +96,17 @@ from .runs import (
 )
 from .table import _scan_drift_report, preflight_selection, update_table_from_uwazi
 from .tasks import _task_use_case, build_task_store, task_view
+from .validation import (
+    add_validation_sample,
+    build_validation_set,
+    entity_is_validation,
+    evaluate_run,
+    holdout_ids,
+    promote_validation_row,
+    remove_validation_row,
+    validation_store,
+    validation_summary,
+)
 from .wiring import _paths, _script_caps_budget, build_suggestion_store, read_run_script
 
 __all__ = [
@@ -160,7 +170,6 @@ __all__ = [
     "property_types_for",
     "get_entity_rows",
     "get_operation_rows",
-    "get_property_scores",
     "get_templates",
     "get_suggestion_languages",
     "get_op_status_counts",
@@ -178,7 +187,16 @@ __all__ = [
     "get_entity_basis",
     "_apply_use_case",
     "apply_outcomes",
+    "add_validation_sample",
     "build_task_store",
+    "build_validation_set",
+    "entity_is_validation",
+    "evaluate_run",
+    "holdout_ids",
+    "promote_validation_row",
+    "remove_validation_row",
+    "validation_store",
+    "validation_summary",
     "_task_use_case",
     "task_view",
     "entity_backup_info",

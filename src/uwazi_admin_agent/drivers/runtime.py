@@ -63,6 +63,11 @@ from uwazi_admin_agent.adapters.translation_repository_adapter import (
     CachedTranslationRepository,
     UwaziTranslationRepository,
 )
+from uwazi_admin_agent.adapters.validation_holdout import (
+    ValidationExcludingEntityApi,
+    ValidationExcludingEntityRepository,
+    ValidationExcludingSegmentationRepository,
+)
 from uwazi_admin_agent.configuration import (
     ENTITY_CACHE_TTL_SECONDS,
     FILE_CACHE_DIR,
@@ -256,7 +261,12 @@ def _cache_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
-def build_runtime(user: str | None = None, password: str | None = None, url: str | None = None) -> Runtime:
+def build_runtime(
+    user: str | None = None,
+    password: str | None = None,
+    url: str | None = None,
+    holdout_ids: set[str] | None = None,
+) -> Runtime:
     """Construct the live ports + deps from env (the composition root).
 
     Explicit ``user``/``password``/``url`` win when given; otherwise the
@@ -264,6 +274,13 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
     :func:`default_instance_url` (the CLI's single-instance default). An
     explicitly EMPTY url raises: a logged-out web session has no instance, and
     serving it the first configured one would leak another instance's data.
+
+    ``holdout_ids`` is the run's validation set. When given, the AUTHORING-facing
+    ports on ``deps`` (and ``deps.entity_api``) hide those entities: every
+    generation tool and the nested extractor subagent reach the instance through
+    them, so one wrap here is what makes the holdout real. The runtime's own
+    ``entity_api``/``entity_repository`` stay raw — the validation pass and the
+    apply path must see everything.
     """
     url = _instance_url_or_default(url)
     user = user if user is not None else os.environ.get("UWAZI_USER", "")
@@ -311,11 +328,25 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
         CachedTranslationRepository(base_translation, file_cache) if file_cache is not None else base_translation
     )
 
+    # The holdout is enforced at the PORT SEAM, not in the wizard: every
+    # authoring tool (query_entities, peek_*, benchmark_extractor) and the
+    # nested extractor subagent read through these ports, whatever ids the LLM
+    # asks for.
+    authoring_entity_api = ValidationExcludingEntityApi(api, holdout_ids) if holdout_ids else api
+    authoring_entity_repository = (
+        ValidationExcludingEntityRepository(entity_repository, holdout_ids) if holdout_ids else entity_repository
+    )
+    authoring_segmentation_repository = (
+        ValidationExcludingSegmentationRepository(segmentation_repository, holdout_ids)
+        if holdout_ids
+        else segmentation_repository
+    )
+
     deps = AdminAgentDeps(
         thesauri_api=api,
         template_api=api,
         template_mapper=api.template_mapper,
-        entity_api=api,
+        entity_api=authoring_entity_api,
         relationship_api=api,
         # The clarification pass embeds the instance's configured languages so
         # it never asks which languages exist.
@@ -325,9 +356,9 @@ def build_runtime(user: str | None = None, password: str | None = None, url: str
         # reads the RAW entity rows (the validated AgentEntity strips documents /
         # attachments), so this repository must be on the deps — without it both
         # tools degrade to "not wired" and an extraction task cannot sample.
-        entity_repository=entity_repository,
+        entity_repository=authoring_entity_repository,
         file_repository=file_repository,
-        segmentation_repository=segmentation_repository,
+        segmentation_repository=authoring_segmentation_repository,
         url_fetcher=url_fetcher,
     )
 

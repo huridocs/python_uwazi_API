@@ -383,6 +383,54 @@ OPERATION_SORT_OPTIONS: dict[str, str] = {
     "status": "Status",
 }
 
+# The review table's sortable headers. Quasar reports a header click with the
+# COLUMN NAME, while the store sorts on a SuggestionFilter key; this is the
+# bridge between the two. "recorded" (the script's order) has no column header:
+# the table starts in that order, and the other five headers cover every other
+# sort key the store supports.
+SORT_KEY_BY_COLUMN: dict[str, str] = {
+    "title": "title",
+    "template": "template",
+    "ops": "ops",
+    "run_status": "status",
+    "modified": "modified",
+}
+COLUMN_BY_SORT_KEY: dict[str, str] = {key: column for column, key in SORT_KEY_BY_COLUMN.items()}
+
+
+def sort_from_header_click(sort_by: str, sort_desc: bool, column: str) -> tuple[str, bool] | None:
+    """The new (sort_by, sort_desc) after clicking a table header (pure).
+
+    A click on a NEW column picks that column's natural first direction —
+    Modified newest-first, every other column A→Z — and a click on the CURRENT
+    column flips the direction. There is no third, unsorted state: clicking the
+    same header again and again keeps reversing the order. Headers that are not
+    sortable (and unknown column names) return None and leave the order alone.
+    """
+    key = SORT_KEY_BY_COLUMN.get(column)
+    if key is None:
+        return None
+    if key == sort_by:
+        return key, not sort_desc
+    return key, key == "modified"
+
+
+def review_sort_pagination(sort_by: str, sort_desc: bool, rows_number: int = 0) -> dict[str, Any]:
+    """The QTable pagination object that mirrors the server-side sort (pure).
+
+    ``rowsNumber`` puts Quasar in server mode: it then trusts the rows we hand
+    it (already ordered by SQL across the WHOLE filtered set) and draws the sort
+    arrow from ``sortBy``/``descending`` without re-sorting the current page
+    locally. A local re-sort would disagree with the store's status/op ranking.
+    """
+    return {
+        "rowsPerPage": 0,
+        "rowsNumber": rows_number,
+        "sortBy": COLUMN_BY_SORT_KEY.get(sort_by, ""),
+        "descending": bool(sort_desc),
+    }
+
+
 # Four flat icon buttons (Discard/Undo, Revert, Run, Edit) at ~32px each.
 ACTIONS_COLUMN: str = "width: 150px"
 # The Target column takes the remainder: ``max-width: 0`` is what lets the column
@@ -524,6 +572,7 @@ def filter_from_controls(
     shared_ids: list[str] | None = None,
     sort_by: str = "recorded",
     sort_desc: bool = False,
+    validation: str = "",
 ) -> SuggestionFilter:
     """Build the server-side filter from the page's raw control values (pure).
 
@@ -541,6 +590,10 @@ def filter_from_controls(
     statuses = _selection(status)
     ops = _selection(op)
     return SuggestionFilter(
+        # The Validation control: "" = every row, "only" = holdout evidence,
+        # "hide" = regular work only. Two booleans and the absent case, so the
+        # store's existing is_validation predicate does the work.
+        is_validation=True if validation == "only" else False if validation == "hide" else None,
         status=[SuggestionStatus(s) for s in statuses] if statuses else None,
         op=ops,
         property_name=property_name or None,
@@ -674,12 +727,6 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
         "revertable": in_place_revertable,  # drives the Revert icon's visibility
         "revert_tooltip": revert_tooltip,  # drives the Revert icon's tooltip
     }
-
-
-def accuracy_label(exact: int, mismatch: int) -> str:
-    """The accuracy figure shown in the header, or 'n/a' when nothing compares (pure)."""
-    denominator = exact + mismatch
-    return f"{100 * exact / denominator:.1f}%" if denominator else "n/a"
 
 
 # The currency the LLM costs are denominated in: the same money the cost
@@ -854,6 +901,8 @@ __all__ = [
     "OP_COLORS",
     "OP_LABELS",
     "OPERATION_SORT_OPTIONS",
+    "COLUMN_BY_SORT_KEY",
+    "SORT_KEY_BY_COLUMN",
     "OPS_COLUMN",
     "RUN_OP_PHRASES",
     "RUN_STATUS_COLORS",
@@ -866,7 +915,6 @@ __all__ = [
     "TEMPLATE_COLUMN",
     "TITLE_CELL_CHARS",
     "TITLE_COLUMN",
-    "accuracy_label",
     "bulk_discard_label",
     "cost_card_value",
     "discard_confirmation",
@@ -896,10 +944,12 @@ __all__ = [
     "run_button_label",
     "run_confirmation",
     "run_status",
+    "review_sort_pagination",
     "section_toggle_label",
     "select_all_label",
     "selection_count",
     "sort_direction_label",
+    "sort_from_header_click",
     "suggestion_to_row",
     "table_update_label",
     "truncate",

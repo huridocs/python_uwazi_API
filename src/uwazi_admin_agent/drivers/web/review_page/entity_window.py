@@ -35,11 +35,11 @@ from uwazi_admin_agent.domain.suggestion import (
     SuggestionStatus,
     skip_reason_label,
 )
+from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operation_gate import (
     release,
     release_run,
 )
-from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operations_view import (
     NON_IN_PLACE_OPS,
     file_move_detail_rows,
@@ -782,7 +782,22 @@ def _suggestion_correction(
 
 
 def _fix_prompt_clicked(state: dict[str, Any], correction: SuggestionCorrection) -> None:
-    """Open the prompt chat attached to this wrong suggestion (correction mode)."""
+    """Open the prompt chat attached to this wrong suggestion (correction mode).
+
+    When the flagged row is HOLDOUT evidence, the fix is derived from the test
+    set: the stored score stops being a fair unseen estimate and the card says
+    so. The correction is still offered — an operator fixing a visible failure
+    is the point of showing them — but the number is relabelled honestly.
+    """
+    try:
+        from uwazi_admin_agent.drivers.web.run_service import validation_store
+
+        store = validation_store(state["instance_url"], state["run_id"])
+        validation = store.load_set()
+        if validation is not None and correction.shared_id in validation.shared_ids:
+            store.mark_contaminated(validation)
+    except Exception as exc:  # noqa: BLE001 — the fix flow must not depend on the set
+        logger.warning("could not mark the validation set contaminated: {}", exc)
     prompt_chat_dialog(
         state["run_id"],
         # The regeneration rewrites the whole review table; the operator must
@@ -1005,11 +1020,15 @@ def _entity_suggestions(
         for detail in file_move_detail_rows(move_rows):
             _entity_structural_card(detail)
     corrections = [_suggestion_correction(s, resolved, property_types, titles) for s in suggestions if _can_fix_prompt(s)]
-    if corrections:
-        _entity_fix_prompt_button(state, corrections)
+    if corrections or suggestions:
+        _entity_fix_prompt_button(state, corrections, suggestions)
 
 
-def _entity_fix_prompt_button(state: dict[str, Any], corrections: list[SuggestionCorrection]) -> None:
+def _entity_fix_prompt_button(
+    state: dict[str, Any],
+    corrections: list[SuggestionCorrection],
+    suggestions: list[Suggestion] | None = None,
+) -> None:
     """The window's ONE "Fix the prompt" action: a grey button floating at the
     bottom right of the screen, above every suggestion card, so the correction
     loop's entry point never scrolls away with the values.
@@ -1022,6 +1041,7 @@ def _entity_fix_prompt_button(state: dict[str, Any], corrections: list[Suggestio
         .classes("fixed bottom-4 right-4 z-40 q-pa-sm q-gutter-x-sm items-center")
         .style("background: rgba(255, 255, 255, 0.9); border-radius: 8px")
     ):
+        _entity_validation_button(state, suggestions or [])
         if len(corrections) == 1:
             ui.button(
                 "Fix the prompt",
@@ -1041,6 +1061,97 @@ def _entity_fix_prompt_button(state: dict[str, Any], corrections: list[Suggestio
                         correction.property_label or correction.property_name or "(row)",
                         on_click=lambda c=correction: _fix_prompt_clicked(state, c),
                     ).props("clickable").tooltip("Flag this value as wrong")
+
+
+def _entity_validation_button(state: dict[str, Any], suggestions: list[Suggestion]) -> None:
+    """Add/remove THIS entity from the validation set (sits left of Fix the prompt).
+
+    Removing is the promotion path: the entity leaves the holdout and its rows
+    become regular, runnable work. Adding is offered only when the run HAS a set
+    (the sample, its property and its labels were chosen at creation); adding an
+    entity the generation turn already read contaminates the score and the card
+    says so afterwards.
+    """
+    if not suggestions:
+        return
+    shared_id = suggestions[0].shared_id
+    if not shared_id or shared_id.startswith("dry-created-"):
+        return
+    try:
+        from uwazi_admin_agent.drivers.web.run_service import entity_is_validation, validation_summary
+
+        summary = validation_summary(state["instance_url"], state["run_id"])
+    except Exception as exc:  # noqa: BLE001 — a missing set never blocks the window
+        logger.warning("validation toggle unavailable: {}", exc)
+        return
+    if summary["state"] == "none":
+        return
+    try:
+        in_set = entity_is_validation(state["instance_url"], state["run_id"], shared_id)
+    except Exception:  # noqa: BLE001
+        return
+    if in_set:
+        ui.button(
+            "Remove from validation",
+            icon="science",
+            on_click=lambda: _remove_validation_clicked(state, shared_id),
+        ).props("unelevated color=purple size=md").tooltip(
+            "Take this entity out of the test set; its rows become regular, runnable work"
+        )
+    else:
+        ui.button(
+            "Add to validation",
+            icon="science",
+            on_click=lambda: _add_validation_clicked(state, shared_id),
+        ).props("unelevated color=grey-8 size=md").tooltip(
+            "Include this entity in the test set (marks the score as a regression score: the AI already read it)"
+        )
+
+
+def _remove_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
+    from uwazi_admin_agent.drivers.web.run_service import promote_validation_row
+
+    try:
+        count = len(promote_validation_row(state["instance_url"], state["run_id"], shared_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("remove from validation failed")
+        ui.notify(f"Could not remove {shared_id} from validation: {exc}", type="negative", multi_line=True)
+        return
+    ui.notify(f"{shared_id} left the validation set — {count} row(s) are now runnable.", type="positive")
+    _refresh_entity_window(state)
+    _refresh_all(state)
+
+
+def _add_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
+    from uwazi_admin_agent.drivers.web.run_service import add_validation_sample
+
+    credentials = credentials_for_instance(state["instance_url"])
+    if credentials is None:
+        ui.notify("Not logged in to Uwazi", type="negative")
+        return
+
+    def _confirm() -> None:
+        try:
+            add_validation_sample(state["instance_url"], state["run_id"], shared_id, credentials.user, credentials.password)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("add to validation failed")
+            ui.notify(f"Could not add {shared_id} to validation: {exc}", type="negative", multi_line=True)
+            return
+        ui.notify(
+            f"{shared_id} added — re-run the score to include it. The AI already read it, so this is a "
+            "regression score, not a fair unseen estimate.",
+            type="positive",
+            multi_line=True,
+        )
+        _refresh_entity_window(state)
+        _refresh_all(state)
+
+    _simple_confirm(
+        "Add this entity to the validation set?",
+        f"{shared_id} was read by the AI while it authoring this script. Adding it now turns the score "
+        "into a regression score, not a fair estimate on unseen data.",
+        _confirm,
+    )
 
 
 def _entity_structural_card(detail: dict[str, Any]) -> None:

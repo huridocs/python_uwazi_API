@@ -66,6 +66,7 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             _wizard_step_guided(state, dialog)
             _wizard_step_caps(state, stepper, dialog)
             _wizard_step_validate(state, stepper, dialog)
+            _wizard_step_validation(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
         dialog.open()
         if prefill_name or prefill_prompt:
@@ -246,7 +247,7 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
 
 
 def _wizard_validate_back(state: dict[str, Any]) -> None:
-    """Back from validation: to the allowance step that precedes it.
+    """Back from prompt validation: to the allowance step that precedes it.
 
     The caps step is ALWAYS built (the wizard creates it before validation), so
     Back never jumps over the operator's budget choice.
@@ -418,7 +419,7 @@ def _wizard_skip(state: dict[str, Any]) -> None:
     state["final_prompt"] = base
     state["_prompt_base"] = base
     _show_generate_prompt(state)
-    state["_stepper"].set_value("generate")
+    state["_stepper"].set_value("validation")
 
 
 def _wizard_confirm(state: dict[str, Any]) -> None:
@@ -427,7 +428,7 @@ def _wizard_confirm(state: dict[str, Any]) -> None:
     state["validated_prompt"] = state["final_prompt"]
     state["_prompt_base"] = state["validated_prompt"]
     _show_generate_prompt(state)
-    state["_stepper"].set_value("generate")
+    state["_stepper"].set_value("validation")
 
 
 def _show_generate_prompt(state: dict[str, Any]) -> None:
@@ -449,13 +450,221 @@ def _refresh_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to validation, the step immediately before it.
+    """Back from the generate step: to the validation-set step before it.
 
-    Always the same destination, whether or not validation already ran: the
-    stepper's order is task → questions → allowance → validate → generate, so
-    Back never skips the allowance step that gates the AI budget.
+    The stepper's order is task → questions → allowance → validate → validation
+    → generate, so Back never skips the step that decides whether a holdout
+    exists (it must be chosen BEFORE generation reads the instance).
     """
-    state["_stepper"].set_value("validate")
+    state["_stepper"].set_value("validation")
+
+
+def _wizard_step_validation(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
+    """The holdout step: pick whether to keep a fair test set, and of what.
+
+    The wording is for operators who have never heard of a held-out set: it says
+    what the set is FOR (a fair score on entities the AI never sees) and what it
+    costs (those entities are not changed by the task until promoted). One
+    property is measured — the task itself may still change others.
+    """
+    with ui.step(name="validation", title="Validation", icon="science"):
+        ui.label("Keep a fair test set?").classes("text-h6 q-mb-sm")
+        ui.label(
+            "A test set is a few entities kept away from the AI. The finished task is scored on them, "
+            "so you see how well it really works instead of how well it fits the examples the AI read. "
+            "Those entities are not changed by the task unless you promote them later."
+        ).classes("text-body2 text-grey-7 q-mb-md")
+        state["_validation_mode"] = ui.radio(
+            {
+                "none": "No test set — just run the task",
+                "automatic": "Pick a sample automatically (recommended)",
+                "custom": "Pick a sample by a search/filter",
+            },
+            value="automatic",
+            on_change=lambda e: _render_validation_fields(state),
+        ).classes("wizard-options w-full")
+        with ui.column().classes("w-full") as fields:
+            state["_validation_fields"] = fields
+        with ui.row().classes("q-mt-lg w-full justify-between"):
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_validation_back(state, stepper)).props("color=grey-7 flat")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_validation_next(state, stepper)).props(
+                "color=primary"
+            )
+        _render_validation_fields(state)
+
+
+def _wizard_validation_back(state: dict[str, Any], stepper: Any) -> None:
+    """Back from validation: the prompt validation step precedes it."""
+    stepper.set_value("validate")
+
+
+def _wizard_validation_next(state: dict[str, Any], stepper: Any) -> None:
+    """Validate the answers, then move on to generation."""
+    config = _wizard_validation_config(state)
+    if config is not None and config.mode != "none":
+        if not config.property_name.strip():
+            ui.notify("Choose which property the score should measure, or turn the test set off", type="warning")
+            return
+        if not config.template_names:
+            ui.notify(
+                "The test set sample needs a template: pick one in the questions step, or turn the test set off",
+                type="warning",
+            )
+            return
+        if config.mode == "custom" and not config.filter_text.strip():
+            ui.notify("Describe the search that selects the test entities, or use the automatic sample", type="warning")
+            return
+    stepper.set_value("generate")
+    _show_generate_prompt(state)
+
+
+def _render_validation_fields(state: dict[str, Any]) -> None:
+    """Show the fields the selected mode needs (one property + sample size/search)."""
+    container = state.get("_validation_fields")
+    if container is None or container.is_deleted:
+        return
+    mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
+    container.clear()
+    if mode == "none":
+        ui.label("No score will be shown for this run. You can add a test set later from the review page.").classes(
+            "text-body2 text-grey-7"
+        )
+        return
+    schema = state.get("_guided_schema")
+    answers = state.get("_guided_answers")
+    goal = getattr(answers, "goal", "")
+    templates = list(getattr(answers, "templates", ()) or ())
+    if not templates:
+        source_templates = list(getattr(answers, "source_templates", ()) or ())
+        templates = source_templates
+    options: dict[str, str] = {}
+    if goal == "fill" and getattr(answers, "target_property", ""):
+        target = str(answers.target_property).strip()
+        options[target] = _validation_property_label(state, target)
+    else:
+        try:
+            from uwazi_admin_agent.domain.guided_task import property_choices
+
+            options.update(dict(property_choices(schema, templates)))
+        except Exception:  # noqa: BLE001 — the schema is best-effort
+            options = {}
+        target = str(getattr(answers, "target_property", "") or "").strip()
+        if target:
+            options[target] = _validation_property_label(state, target)
+    if not options:
+        ui.label(
+            "The score needs one measured property. Type its name (the wizard could not read the instance's "
+            "templates for this prompt), or turn the test set off."
+        ).classes("text-body2 text-grey-7")
+        state["_validation_property"] = ui.input(
+            "Property to measure (name)",
+            value=state.get("_validation_property") or "",
+        ).classes("w-full")
+        return
+    selected = state.get("_validation_property") or next(iter(options))
+    if selected not in options:
+        selected = next(iter(options))
+    state["_validation_property"] = (
+        ui.select(
+            options,
+            value=selected,
+            label="Property to measure",
+            on_change=lambda e: state.update({"_validation_property": e.value}),
+        )
+        .props("dense outlined")
+        .classes("w-full")
+    )
+    ui.label(
+        "The score covers this one property. The task may still change others; this is what the number measures."
+    ).classes("text-caption text-grey-7 q-mb-sm")
+    state["_validation_size"] = ui.number("Test entities", value=30, min=5, max=200, precision=0).classes("w-48")
+    if mode == "custom":
+        state["_validation_filter"] = ui.input(
+            "Search that selects the test entities (title or text)",
+            placeholder="e.g. judgment 2024",
+        ).classes("w-full")
+    if not templates:
+        # The sample is drawn per template; with no template there is no
+        # population to sample from. Saying so is honest — silently creating no
+        # set would look like the feature did nothing.
+        ui.label(
+            "A test set is drawn from the templates this task targets. Go back to the questions step and pick a "
+            "template, or turn the test set off."
+        ).classes("text-body2 text-warning")
+
+
+def _validation_property_label(state: dict[str, Any], name: str) -> str:
+    """``Label (name) — type`` for one property, from the wizard's schema (pure-ish)."""
+    schema = state.get("_guided_schema")
+    try:
+        for template in getattr(schema, "templates", ()) or ():
+            for prop in template.properties:
+                if prop.name == name:
+                    return prop.display
+    except Exception:  # noqa: BLE001
+        pass
+    return name
+
+
+def _wizard_validation_config(state: dict[str, Any]):
+    """The wizard's validation answer as a :class:`ValidationConfig` (or None)."""
+    try:
+        from uwazi_admin_agent.domain.validation import (
+            VALIDATION_CUSTOM,
+            VALIDATION_NONE,
+            ValidationConfig,
+            validation_property_name,
+        )
+    except Exception:  # noqa: BLE001 — an import failure must not block generation
+        return None
+    mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
+    if mode == VALIDATION_NONE:
+        return ValidationConfig(mode=VALIDATION_NONE)
+    property_widget = state.get("_validation_property")
+    raw_value = getattr(property_widget, "value", "") or ""
+    # The picker's value is the property NAME; when no picker exists (custom
+    # prompt), the operator's typed name IS the value.
+    property_name = str(raw_value).strip()
+    if not property_name:
+        return ValidationConfig(mode=VALIDATION_NONE)
+    answers = state.get("_guided_answers")
+    templates = list(getattr(answers, "templates", ()) or ())
+    if not templates:
+        templates = list(getattr(answers, "source_templates", ()) or ())
+    size_widget = state.get("_validation_size")
+    try:
+        size = int(getattr(size_widget, "value", 30) or 30)
+    except (TypeError, ValueError):
+        size = 30
+    filter_widget = state.get("_validation_filter")
+    filter_text = str(getattr(filter_widget, "value", "") or "").strip() if mode == VALIDATION_CUSTOM else ""
+    return ValidationConfig(
+        mode=mode,
+        property_name=validation_property_name(property_name),
+        property_type=_validation_property_type(state, property_name),
+        template_names=templates,
+        sample_size=max(5, min(200, size)),
+        filter_text=filter_text,
+        language=_wizard_default_language(answers),
+    )
+
+
+def _validation_property_type(state: dict[str, Any], name: str) -> str:
+    """The measured property's Uwazi type (pure-ish, best effort)."""
+    schema = state.get("_guided_schema")
+    try:
+        from uwazi_admin_agent.domain.guided_task import property_type
+
+        return property_type(schema, name)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _wizard_default_language(answers: Any) -> str:
+    """The row locale the sample is read in: the task's first input language."""
+    languages = list(getattr(answers, "input_languages", ()) or ())
+    return str(languages[0]) if languages else "en"
 
 
 def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
@@ -528,6 +737,7 @@ def _start_generation(
     validated_prompt: str | None = None,
     claimed: bool = False,
     budget: LlmBudget | None = None,
+    validation_config: Any | None = None,
 ) -> None:
     """Register the in-flight placeholder + notification and launch generation.
 
@@ -553,7 +763,17 @@ def _start_generation(
         timeout=None,
     )
     background_tasks.create(
-        _do_generate(name, prompt, user, password, instance, validated_prompt, budget, notification),
+        _do_generate(
+            name,
+            prompt,
+            user,
+            password,
+            instance,
+            validated_prompt,
+            budget,
+            notification,
+            validation_config,
+        ),
         name=f"generate {name}",
     )
 
@@ -569,7 +789,7 @@ def _wizard_generate(state: dict[str, Any], dialog: Any) -> None:
     budget = _wizard_budget(state)
     final_prompt = state.get("final_prompt") or prompt
     dialog.close()
-    _confirm_generation(name, prompt, final_prompt, budget)
+    _confirm_generation(name, prompt, final_prompt, budget, validation_config=_wizard_validation_config(state))
 
 
 def _script_caps_model() -> str:
@@ -619,7 +839,13 @@ def _cap_float(value: Any) -> float | None:
     return parsed if parsed is not None and parsed >= 0 else None
 
 
-def _confirm_generation(name: str, prompt: str, validated_prompt: str | None, budget: LlmBudget) -> None:
+def _confirm_generation(
+    name: str,
+    prompt: str,
+    validated_prompt: str | None,
+    budget: LlmBudget,
+    validation_config: Any | None = None,
+) -> None:
     """A plain go/no-go confirm, then launch generation.
 
     Generation itself is bounded by the built-in caps (``MAX_LLM_CALLS``
@@ -646,6 +872,7 @@ def _confirm_generation(name: str, prompt: str, validated_prompt: str | None, bu
         instance=instance,
         validated_prompt=validated_prompt,
         budget=budget,
+        validation_config=validation_config,
     )
 
 
@@ -658,6 +885,7 @@ async def _do_generate(
     validated_prompt: str | None = None,
     budget: LlmBudget | None = None,
     notification: Any = None,
+    validation_config: Any | None = None,
 ) -> None:
     def _on_stage(stage: str) -> None:
         """Publish the generation stage on the run's claim.
@@ -683,6 +911,7 @@ async def _do_generate(
                 validated_prompt,
                 budget,
                 on_stage=_on_stage,
+                validation_config=validation_config,
             ),
         )
         _broadcast_notify(

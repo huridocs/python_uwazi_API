@@ -96,11 +96,14 @@ async def update_table_from_uwazi(url: str, run_id: str, user: str, password: st
         property_types=runtime.property_types,
         llm_cache=runtime.file_cache,
     )
-    _final, summary = await use_case.refresh(
+    from .validation import holdout_ids
+
+    _final, summary = await use_case.run(
         script,
         run_id=run_id,
         budget=pass_row.budget or _script_caps_budget(),
         plan_kind=runtime.backup_store.load_manifest(run_id).plan_kind,
+        exclude_scope=holdout_ids(url, run_id) or None,
     )
 
     baseline_rows = await asyncio.to_thread(

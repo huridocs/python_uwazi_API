@@ -47,7 +47,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
     DRIFT_STATUS_COLORS,
     MODIFIED_COLUMN,
     OP_LABELS,
-    OPERATION_SORT_OPTIONS,
     OPS_COLUMN,
     STATUS_COLORS,
     TEMPLATE_COLUMN,
@@ -63,10 +62,11 @@ from uwazi_admin_agent.drivers.web.review_view import (
     filter_from_controls,
     filter_options,
     pending_suboperation_count,
+    review_sort_pagination,
     run_button_label,
     run_confirmation,
     select_all_label,
-    sort_direction_label,
+    sort_from_header_click,
     table_update_label,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
@@ -242,24 +242,27 @@ def _change_table(state: dict[str, Any]) -> None:
     """
     from .entity_window import _revert_entity_clicked
 
+    # The five data headers are sortable: a click orders the WHOLE filtered set
+    # in SQL (see ``sort_from_header_click``), not just the visible page. The
+    # expand and Actions columns are not data, so they never sort.
     columns = [
         {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": EXPAND_COLUMN},
-        {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": False, "style": TITLE_COLUMN},
+        {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": True, "style": TITLE_COLUMN},
         {
             "name": "template",
             "label": "Template",
             "field": "template",
             "align": "left",
-            "sortable": False,
+            "sortable": True,
             "style": TEMPLATE_COLUMN,
         },
-        {"name": "ops", "label": "Operations", "field": "ops", "align": "left", "sortable": False, "style": OPS_COLUMN},
+        {"name": "ops", "label": "Operations", "field": "ops", "align": "left", "sortable": True, "style": OPS_COLUMN},
         {
             "name": "run_status",
             "label": "Status",
             "field": "run_status",
             "align": "left",
-            "sortable": False,
+            "sortable": True,
             "style": STATUS_WITH_COUNT_COLUMN,
         },
         {
@@ -267,7 +270,7 @@ def _change_table(state: dict[str, Any]) -> None:
             "label": "Modified",
             "field": "modified",
             "align": "left",
-            "sortable": False,
+            "sortable": True,
             "style": MODIFIED_COLUMN,
         },
         {
@@ -286,13 +289,25 @@ def _change_table(state: dict[str, Any]) -> None:
         # properties its suboperations write.
         row_key="row_key",
         selection="multiple",
-        pagination={"rowsPerPage": 0},
+        pagination=review_sort_pagination(state.get("sort_by") or "recorded", bool(state.get("sort_desc"))),
         on_select=lambda e: _on_table_select(state, e),
     ).classes("w-full")
+    # Two clicks must mean ascending then descending, never a third "unsorted"
+    # state: Quasar's default cycle includes one, ``binary-state-sort`` removes
+    # it. With ``rowsNumber`` (see review_sort_pagination) QTable is in server
+    # mode: it draws the arrow but never re-sorts the page we hand it locally.
+    table.props["binary-state-sort"] = True
+    # The page has its own "Showing X–Y of Z" readout and page buttons, so the
+    # QTable footer would be a second, redundant pagination control.
+    table.props["hide-pagination"] = True
     # The table's expansion state lives in the ``expanded`` prop, so the server
     # owns it: that is what lets the page expand (and collapse) every operation
     # at once. It starts empty.
     table.props["expanded"] = []
+    # In server mode Quasar reports a header click with a ``request`` carrying
+    # the new sortBy/descending (it does NOT emit ``update:sort``). Only the
+    # pagination is needed; the filter and the JS cell-value helper are noise.
+    table.on("request", lambda e: _table_sort_requested(state, e), ["pagination"])
 
     table.add_slot(
         "body",
@@ -432,7 +447,12 @@ def _change_table(state: dict[str, Any]) -> None:
                             </template>
                             <div v-else class="text-body2">{{ sub.proposed }}</div>
                           </td>
-                          <td class="q-pa-xs"><q-badge :color="sub.status_color">{{ sub.status }}</q-badge></td>
+                          <td class="q-pa-xs">
+                            <q-badge :color="sub.status_color">{{ sub.status }}</q-badge>
+                            <q-btn v-if="sub.is_validation" dense flat icon="upgrade" color="purple"
+                                   title="Promote this entity out of the validation set and make its rows runnable"
+                                   @click.stop="$parent.$emit('promote_validation', props.row.row_key)" />
+                          </td>
                           <td class="q-pa-xs subs-actions">
                             <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
                                    title="Run this suboperation (only this property)"
@@ -484,6 +504,7 @@ def _change_table(state: dict[str, Any]) -> None:
     table.on("revert_sub", lambda e: _revert_sub_clicked(state, getattr(e, "args", None)))
     table.on("edit_sub", lambda e: _edit_sub_clicked(state, getattr(e, "args", None)))
     table.on("accept_values", lambda e: _accept_values_clicked(state, getattr(e, "args", None)))
+    table.on("promote_validation", lambda e: _promote_validation_clicked(state, _row_key_of(getattr(e, "args", None))))
     # The RAW selection event carries WHICH rows were added/removed, which is
     # what the cascade to the suboperations needs (``on_select`` only carries
     # the selection itself).
@@ -661,6 +682,7 @@ def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> Su
         accepted_only=accepted_only,
         sort_by=state["sort_by"],
         sort_desc=state["sort_desc"],
+        validation=state.get("validation", ""),
     )
 
 
@@ -1047,6 +1069,43 @@ def _refresh_run_badge(state: dict[str, Any]) -> None:
     badge.props(f"color={_RUN_STATUS_BADGE_COLORS.get(detail.status.value, 'grey-7')}")
 
 
+def _promote_validation_clicked(state: dict[str, Any], row_key: str) -> None:
+    """Move an entity out of the validation set (its rows become runnable work).
+
+    This is the ONE way a held-out entity becomes work, and it is deliberately
+    explicit: it shrinks the set, so the score stops describing the entity the
+    operator just took out.
+    """
+    row = _row_of_key(state, row_key)
+    if row is None:
+        return
+    shared_id = str(row.get("shared_id") or "")
+    if not shared_id:
+        return
+
+    def _confirm() -> None:
+        from uwazi_admin_agent.drivers.web.run_service import promote_validation_row
+
+        try:
+            count = len(promote_validation_row(state["instance_url"], state["run_id"], shared_id))
+        except Exception as exc:  # noqa: BLE001 — report, never crash the page
+            logger.exception("promote validation failed")
+            ui.notify(f"Could not promote {shared_id}: {exc}", type="negative", multi_line=True)
+            return
+        ui.notify(
+            f"{shared_id} left the validation set — {count} row(s) are now regular work.",
+            type="positive",
+        )
+        _refresh_all(state)
+
+    _simple_confirm(
+        "Promote out of the validation set?",
+        f"{shared_id} will be removed from the test set and its rows will become runnable. "
+        "The performance score is recomputed from the remaining entities.",
+        _confirm,
+    )
+
+
 def _refresh_selection_counts(state: dict[str, Any]) -> None:
     """Update the selection-driven buttons' texts from the checked SUBOPERATIONS.
 
@@ -1077,15 +1136,55 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
         select_button.set_enabled(all_selected or total > 0)
 
 
-def _refresh_sort_controls(state: dict[str, Any]) -> None:
-    """Make the direction button say which order the table is in."""
-    button = state.get("_sort_direction_button")
-    if button is None or button.is_deleted:
+def _sync_table_sort(state: dict[str, Any]) -> None:
+    """Mirror the server-side sort into the table's pagination (and its arrows).
+
+    The state dict is the one source of truth; Quasar only displays the sort
+    arrow. Keeping the pagination in step here is what lets the NEXT header
+    click toggle the right direction, and what keeps the arrow honest after a
+    reload changes the row count.
+    """
+    table = state.get("_table")
+    if table is None or table.is_deleted:
         return
+    pagination = review_sort_pagination(
+        state.get("sort_by") or "recorded",
+        bool(state.get("sort_desc")),
+        int(state.get("total") or 0),
+    )
+    # A running pass reloads the table every few seconds: only push the prop
+    # when the sort or the row count actually changed.
+    if table.pagination != pagination:
+        table.pagination = pagination
+
+
+def _table_sort_requested(state: dict[str, Any], event: Any) -> None:
+    """A header click: translate Quasar's column name and re-query in that order.
+
+    Quasar has already flipped its own arrow, but the ORDER of the rows comes
+    from SQL, not from the browser: the whole filtered set must be re-ordered
+    before the page window is taken. Requests that do not carry a known column
+    (a page/filter change, an unknown name) leave the current sort alone.
+    """
+    args = getattr(event, "args", None)
+    # With ``args=['pagination']`` NiceGUI forwards the ONE event object as
+    # ``{'pagination': {...}}`` (a bare dict when no key filter is given).
+    pagination = args.get("pagination") if isinstance(args, dict) else None
+    if not isinstance(pagination, dict):
+        return
+    column = str(pagination.get("sortBy") or "")
     sort_by = state.get("sort_by") or "recorded"
     descending = bool(state.get("sort_desc"))
-    button.set_icon("arrow_downward" if descending else "arrow_upward")
-    button.text = sort_direction_label(sort_by, descending)
+    ordered = sort_from_header_click(sort_by, descending, column)
+    if ordered is None:
+        return
+    new_by, new_desc = ordered
+    if new_by == sort_by and new_desc == descending:
+        return
+    state["sort_by"] = new_by
+    state["sort_desc"] = new_desc
+    state["offset"] = 0
+    _reload_table(state)
 
 
 def _reload_table(state: dict[str, Any]) -> None:
@@ -1179,7 +1278,7 @@ def _reload_table(state: dict[str, Any]) -> None:
             last = min(state["offset"] + REVIEW_PAGE_SIZE, total)
             label.text = f"Showing {first:,}–{last:,} of {total:,} operations"
         _refresh_page_controls(state)
-        _refresh_sort_controls(state)
+        _sync_table_sort(state)
         _refresh_expand_button(state)
     finally:
         state["loading"] = False
@@ -1193,6 +1292,7 @@ def _render_summary(state: dict[str, Any]) -> None:
     pass_row = current_pass(page_instance_url(), state["run_id"])
     holder.clear()
     with holder:
+        _score_card(state)
         # ONE card for the operations and their suboperations: the Operations
         # card counts the PARTS (the table's real content — one proposal per
         # property/language/link), and the
@@ -1363,6 +1463,97 @@ def _revert_sub_clicked(state: dict[str, Any], args: Any) -> None:
     )
 
 
+def holdout_warning_message(count: int) -> str:
+    """The sentence the Run confirmation appends when a held-out entity would change (pure).
+
+    Validation rows themselves cannot be run, so this fires only for a
+    REGULAR row of an entity that is ALSO in the set (a promoted sibling, or a
+    future surface that forgot the guard). Saying it in the confirmation is the
+    last line of defence before Uwazi is written.
+    """
+    entities = "entity" if count == 1 else "entities"
+    return (
+        f"WARNING: {count} {entities} in this selection belong to the validation set. "
+        "Writing them changes your test data, and the performance score stops being a fair estimate."
+    )
+
+
+def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tuple[str, str | None]]:
+    """The held-out (entity, language) rows the selection would touch (pure over state).
+
+    With validation rows never selectable this should be empty; it exists so a
+    future surface cannot silently write a held-out entity, and the confirmation
+    says so when it happens.
+    """
+    try:
+        from uwazi_admin_agent.drivers.web.run_service import validation_summary
+
+        summary = validation_summary(state["instance_url"], state["run_id"])
+    except Exception:  # noqa: BLE001 — a warning must never block a Run
+        return set()
+    validation = summary.get("set")
+    if validation is None:
+        return set()
+    held = set(validation.shared_ids)
+    refs = {ref[0]: ref for ref in _checked_refs(state)}
+    return {(ref[1], ref[2]) for ref in refs.values() if ref[0] in ids and ref[1] in held}
+
+
+def _score_card(state: dict[str, Any]) -> None:
+    """The performance card: ONE number, on ONE property, against the holdout.
+
+    The card states its state in words (``Unseen``, ``Used for fixes``,
+    ``Stale``, ``No test set``): a number without that word reads as a promise
+    it does not make. It is NOT shown in the property filter (the filter answers
+    a different question: how a proposal compares with Uwazi's current value).
+    """
+    holder = state.get("_score_card")
+    if holder is None or holder.is_deleted:
+        return
+    try:
+        from uwazi_admin_agent.drivers.web.run_service import validation_summary
+
+        summary = validation_summary(state["instance_url"], state["run_id"])
+    except Exception as exc:  # noqa: BLE001 — the card degrades, the page never breaks
+        logger.warning("validation card failed: {}", exc)
+        return
+    # ``clear(children)`` on the WRAPPER row would wipe the counters that follow;
+    # the card owns only its own column, created fresh on each render.
+    if summary["state"] == "none":
+        holder.clear()
+        return
+    validation = summary["set"]
+    score = summary["score"]
+    if validation is None:
+        holder.clear()
+        return
+    label = _validation_property_text(state, validation.property_name)
+    state_word = {
+        "fresh": "Unseen test set",
+        "pending": "Test set ready — not scored yet",
+        "stale": "Test set changed — score out of date",
+        "contaminated": "Used for fixes — regression score only",
+    }.get(summary["state"], summary["state"])
+    holder.clear()
+    with holder:
+        with ui.card().classes("q-pa-sm").style("min-width: 180px"):
+            ui.label(f"Performance · {label}").classes("text-caption text-grey-7")
+            if score is None:
+                ui.label("—").classes("text-subtitle1 text-bold text-grey-7")
+            else:
+                ui.label(score.value_text()).classes("text-h5 text-bold text-primary")
+                if score.detail():
+                    ui.label(score.detail()).classes("text-caption text-grey-6")
+                ui.label(score.caption(label)).classes("text-caption text-grey-6")
+            ui.badge(state_word).props("color=teal" if summary["state"] == "fresh" else "color=orange").classes("q-mt-xs")
+
+
+def _validation_property_text(state: dict[str, Any], property_name: str) -> str:
+    """The measured property's display name, from the run's label map (pure-ish)."""
+    labels = state.get("_labels") or {}
+    return labels.get(property_name) or ("Title" if property_name == "_title" else property_name)
+
+
 def _row_key_of(args: Any) -> str:
     """The row_key out of a table event's args (a dict for row emits, a list for sub emits)."""
     if isinstance(args, dict):
@@ -1489,6 +1680,9 @@ def _run_refs(
         return
 
     title, message = run_confirmation(len(ids), resolved_ops, languages)
+    holdout = _holdout_pairs_in_selection(state, ids)
+    if holdout:
+        message = f"{message} {holdout_warning_message(len(holdout))}"
     _simple_confirm(title, message, _confirm)
 
 
@@ -1681,7 +1875,7 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
     ids = [
         int(sub["id"])
         for sub in (row.get("subs") or [])
-        if isinstance(sub, dict) and sub.get("runnable") and isinstance(sub.get("id"), int)
+        if isinstance(sub, dict) and sub.get("runnable") and not sub.get("is_validation") and isinstance(sub.get("id"), int)
     ]
     _apply_checked(state, ids, checked)
 
@@ -1697,22 +1891,6 @@ def _set_drift_error(state: dict[str, Any], text: str) -> None:
         return
     label.text = text
     label.classes(replace=drift_text_classes(DRIFT_STATUS_COLORS["error"]))
-
-
-def _set_sort(state: dict[str, Any], sort_by: str) -> None:
-    """Order the table by one column (server-side, across every page)."""
-    if sort_by not in OPERATION_SORT_OPTIONS:
-        sort_by = "recorded"
-    previous = state.get("sort_by") or "recorded"
-    state["sort_by"] = sort_by
-    # Modified reads naturally newest-first; the other columns start A→Z. The
-    # direction button still flips either.
-    if sort_by == "modified" and previous != "modified":
-        state["sort_desc"] = True
-    elif sort_by != "modified" and previous == "modified":
-        state["sort_desc"] = False
-    state["offset"] = 0
-    _reload_table(state)
 
 
 def _sub_of(state: dict[str, Any], args: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -1737,6 +1915,7 @@ def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
     """
     return (
         suggestion.id is not None
+        and not suggestion.is_validation
         and suggestion.op not in DISPLAY_ONLY_OPS
         and suggestion.status.value in _RUNNABLE_STATUSES
         and not rerun_blocked(suggestion.op, suggestion.status.value)
@@ -1744,6 +1923,17 @@ def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
 
 
 def _summary_row(state: dict[str, Any]) -> None:
+    """The header: the performance card on its OWN line, then the counters.
+
+    The card leads because it answers the question the operator opened the page
+    with ("does this task work?"); the counters describe the table. Both are
+    repainted by :func:`_render_summary`, so the two can never show figures from
+    different moments. The card gets its own row because it is ONE figure with
+    its own state word, not another counter.
+    """
+    score_row = ui.row().classes("w-full items-center gap-3 q-mb-sm")
+    with score_row:
+        state["_score_card"] = ui.column().classes("")
     holder = ui.row().classes("w-full items-center gap-3 q-mb-sm")
     state["_summary"] = holder
     _render_summary(state)
@@ -1832,13 +2022,6 @@ def _toggle_select_all(state: dict[str, Any]) -> None:
     state["_checked"] = {ref[0] for ref in refs}
     state["_select_all"] = True
     _sync_selection(state)
-
-
-def _toggle_sort_direction(state: dict[str, Any]) -> None:
-    """Flip the current sort between ascending and descending."""
-    state["sort_desc"] = not bool(state.get("sort_desc"))
-    state["offset"] = 0
-    _reload_table(state)
 
 
 def _toggle_sub(state: dict[str, Any], args: Any) -> None:

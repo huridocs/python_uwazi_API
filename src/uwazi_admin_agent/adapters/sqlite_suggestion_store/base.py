@@ -54,6 +54,9 @@ class BaseMixin:
           (the script's optional ``source_shared_id`` key), so the entity
           window can show the SOURCE entity's PDF for a placeholder row.
           Legacy rows read NULL (no provenance).
+        - ``is_validation`` — whether the row is holdout evidence for the run's
+          performance score rather than work. Legacy rows read 0 (regular
+          work), which is exactly what they are: the feature did not exist.
 
         It also DROPS legacy ``status = 'obsolete'`` rows. A refresh used to
         park rows the script no longer produced in that state instead of
@@ -99,6 +102,10 @@ class BaseMixin:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN skip_reason TEXT")
             if "source_shared_id" not in columns:
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN source_shared_id TEXT")
+            if "is_validation" not in columns:
+                # Legacy rows are regular work: the holdout feature did not exist,
+                # so every stored row is runnable exactly as before.
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN is_validation INTEGER NOT NULL DEFAULT 0")
             pass_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(prediction_pass)")}
             if pass_columns and "refused_commit" not in pass_columns:
                 self._conn.execute("ALTER TABLE prediction_pass ADD COLUMN refused_commit INTEGER NOT NULL DEFAULT 0")

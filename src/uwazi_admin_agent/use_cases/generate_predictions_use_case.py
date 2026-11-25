@@ -302,6 +302,8 @@ class GeneratePredictionsUseCase:
         budget: LlmBudget,
         entity_scope: list[str] | None = None,
         plan_kind: str | None = None,
+        is_validation_pass: bool = False,
+        exclude_scope: set[str] | None = None,
     ) -> PredictionPass:
         """Run one prediction pass and persist its suggestions.
 
@@ -323,6 +325,13 @@ class GeneratePredictionsUseCase:
         """
         started = time.monotonic()
         scope = list(entity_scope) if entity_scope is not None else None
+        excluded = set(exclude_scope or ())
+        if not is_validation_pass:
+            # A production pass never reads the run's holdout entities: the
+            # review table must not propose writes for them, and the rows the
+            # validation pass owns must stay untouched (the store protects them
+            # too, this keeps them out of the plan in the first place).
+            excluded -= set(scope or ())
         now = datetime.now(timezone.utc)
         existing_pass = self._store.get_pass(run_id)
         pass_row = (
@@ -352,7 +361,7 @@ class GeneratePredictionsUseCase:
 
         ledger = LlmLedger(budget)
         records: list[dict[str, Any]] = []
-        result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope)
+        result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope, excluded)
 
         # 1. RENDER the plan into the rows the table would show. Hydration is what
         #    reveals that a proposed value equals the stored one; the outcome
@@ -363,6 +372,10 @@ class GeneratePredictionsUseCase:
             records,
             property_types=self._property_types_for(records),
         )
+        if is_validation_pass:
+            # Every row this pass records is HOLDOUT EVIDENCE, never work: the
+            # table shows it for scoring and the apply path refuses it.
+            suggestions = [row.model_copy(update={"is_validation": True}) for row in suggestions]
         if suggestions:
             await asyncio.to_thread(
                 hydrate_current_values,
@@ -524,6 +537,7 @@ class GeneratePredictionsUseCase:
         ledger: LlmLedger,
         run_id: str,
         scope: list[str] | None,
+        excluded: set[str] | None = None,
     ) -> tuple[str | None, str | None, bool]:
         """Execute the script on a worker thread's own loop (the sandbox pattern).
 
@@ -560,6 +574,7 @@ class GeneratePredictionsUseCase:
                 llm_cache=self._llm_cache,
                 apply_mode=self._llm_runtime is not None,
                 entity_scope=set(scope) if scope is not None else None,
+                exclude_scope=excluded or None,
             )
             result, error = run_script_sync(script, namespace)
         finally:

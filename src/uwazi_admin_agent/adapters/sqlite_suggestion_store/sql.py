@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     merge_source_ids TEXT,
     merge_files TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
+    is_validation INTEGER NOT NULL DEFAULT 0,
     edited_value TEXT,
     rejected_values TEXT,
     selected_values TEXT,
@@ -92,6 +93,9 @@ CREATE INDEX IF NOT EXISTS suggestion_review
 
 CREATE INDEX IF NOT EXISTS suggestion_entity_language
     ON suggestion (run_id, shared_id, language);
+
+CREATE INDEX IF NOT EXISTS suggestion_validation
+    ON suggestion (run_id, is_validation);
 """
 
 
@@ -335,6 +339,9 @@ def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
         else:
             clause.append(f"language IN ({', '.join('?' for _ in f.languages)})")
             params.extend(f.languages)
+    if f.is_validation is not None:
+        clause.append("is_validation = ?")
+        params.append(1 if f.is_validation else 0)
     if f.suggestion_ids is not None:
         # The SUBOPERATION selection: the review table's checked parts are
         # suggestion row ids, so the bulk Run/Discard/Restore scopes to exactly
@@ -367,6 +374,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         merge_source_ids=_value_from_json(row["merge_source_ids"]) or [],
         merge_files=_value_from_json(row["merge_files"]) or [],
         status=SuggestionStatus(row["status"]),
+        is_validation=bool(row["is_validation"]),
         edited_value=row["edited_value"],
         rejected_values=_value_from_json(row["rejected_values"]) or [],
         selected_values=_value_from_json(row["selected_values"]),

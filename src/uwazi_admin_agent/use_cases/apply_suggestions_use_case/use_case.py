@@ -454,7 +454,14 @@ class ApplySuggestionsUseCase:
         for status in (SuggestionStatus.PENDING, SuggestionStatus.REVERTED):
             self._store.set_status_by_filter(
                 run_id,
-                SuggestionFilter(status=[status], entity_languages=selection, suggestion_ids=row_ids),
+                # is_validation=False is belt AND braces: a Run never accepts a
+                # holdout row, even if a future surface forgot to hide it.
+                SuggestionFilter(
+                    status=[status],
+                    entity_languages=selection,
+                    suggestion_ids=row_ids,
+                    is_validation=False,
+                ),
                 SuggestionStatus.ACCEPTED,
             )
 

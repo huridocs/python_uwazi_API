@@ -38,7 +38,6 @@ from uwazi_admin_agent.domain.suggestion import (
     MOVE_OP,
     REVERT_RECREATES_OPS,
     SKIPPED_OP,
-    TITLE_PROPERTY,
     OperationReviewRow,
     Suggestion,
     SuggestionStatus,
@@ -362,17 +361,25 @@ def suboperation_row(
     """
     status_label = sub_status_label(sub.status)
     status_color = sub_status_color(sub.status)
-    if sub.op == MATCHED_OP:
+    if sub.is_validation:
+        # Holdout evidence is neither work nor a result of a write: it gets its
+        # own word so a validation row never reads as pending work in the table.
+        status_label, status_color = "validation", "purple-7"
+    elif sub.op == MATCHED_OP:
         status_label, status_color = "matched", "green-9"
     elif sub.op == SKIPPED_OP:
         status_label, status_color = "not processed", "deep-orange-10"
     current, proposed = sub_values(sub, types, titles)
     match = sub_match(sub)
     blocked = rerun_blocked(sub.op, status_label)
-    runnable = is_runnable_status(status_label) and not blocked and sub.op not in DISPLAY_ONLY_OPS
+    # A validation row is NEVER runnable and NEVER selectable: its Run would write
+    # a held-out entity and destroy the very measurement it exists for.
+    runnable = not sub.is_validation and is_runnable_status(status_label) and not blocked and sub.op not in DISPLAY_ONLY_OPS
     selectable = is_selectable(sub.op) and runnable
     if blocked:
         note = rerun_blocked_reason(sub.op)
+    elif sub.is_validation:
+        note = "validation row — evidence for the score; promote the entity to run it"
     else:
         note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
     property_type = (types or {}).get(sub.property_name or "")
@@ -427,6 +434,7 @@ def suboperation_row(
         "match": match,
         "match_color": MATCH_COLORS.get(match, "grey-4"),
         "status": status_label,
+        "is_validation": bool(sub.is_validation),
         "status_color": status_color,
         # A part is selectable only while a Run can still write it. APPLIED and
         # DISCARDED parts stay visible (and revertable/restorable) but must not
@@ -822,6 +830,15 @@ def operation_row(
     status = operation_status([payload for _sub, payload in rendered])
     subs = [payload for sub, payload in rendered if not is_merge_anchor(sub) and not is_file_move_row(sub)]
     text, color = validated_cell(subs)
+    # An operation whose every part is holdout evidence gets the validation word
+    # at the parent level too; the row's Run is already disabled (no runnable
+    # part) and its checkbox derives from the parts (all unselectable).
+    if item.validation and item.validation == len(rendered):
+        # Every part of this operation is holdout evidence: the parent says so.
+        # A MIXED operation (a promoted sibling beside validation rows) keeps
+        # the normal word, and each part keeps its own badge.
+        status = "validation"
+        color = "purple-7"
     if not is_display_only:
         subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey-7")))
         subs.extend(file_move_detail_rows(item.subs))
@@ -914,7 +931,7 @@ def operation_row(
         "rerun_blocked_reason": rerun_reason,
         "run_title": rerun_reason or "Run this operation: the ticked suboperations (all of them when none is ticked)",
         "run_status": status,
-        "run_status_color": RUN_STATUS_COLORS.get(status, "grey-7"),
+        "run_status_color": RUN_STATUS_COLORS.get(status, "purple-7" if status == "validation" else "grey-7"),
         "validated": text,
         "validated_color": color,
         "has_validated": validated_counts(subs)[1] > 0,
@@ -1018,66 +1035,6 @@ def entities_of_refs(refs: Iterable[tuple[int, str, str | None, str]]) -> list[s
     return entities
 
 
-# --- accuracy ----------------------------------------------------------------
-
-
-def property_accuracy(scores: dict[str, tuple[int, int]]) -> dict[str, float | None]:
-    """Each property's accuracy, in percent (pure).
-
-    Only verdicts that HAVE something to be right or wrong about count (exact
-    and mismatch). A ``new`` value has no current counterpart, so a property
-    with no comparable value has no score at all (None) and is left out of the
-    averages rather than counted as zero.
-    """
-    result: dict[str, float | None] = {}
-    for name, (exact, mismatch) in scores.items():
-        total = exact + mismatch
-        result[name] = (100.0 * exact / total) if total else None
-    return result
-
-
-def average_accuracy(scores: dict[str, float | None]) -> float | None:
-    """The mean of the properties' accuracy scores (pure; unscored ones left out)."""
-    values = [score for score in scores.values() if score is not None]
-    return (sum(values) / len(values)) if values else None
-
-
-def accuracy_label(score: float | None) -> str:
-    """One accuracy figure as the review page writes it (pure)."""
-    return "n/a" if score is None else f"{score:.1f}%"
-
-
-def property_options(scores: dict[str, tuple[int, int]], labels: dict[str, str] | None = None) -> dict[str, str]:
-    """The Property filter's options: every property the task writes, with its accuracy (pure).
-
-    The value is the property's raw name (what Uwazi stores, and what the store
-    filters on); the label is the human name followed by the property's
-    accuracy when it has one.
-    """
-    accuracy = property_accuracy(scores)
-    human = labels or {}
-    options: dict[str, str] = {}
-    for name in sorted(scores):
-        label = human.get(name) or ("Title" if name == TITLE_PROPERTY else name)
-        score = accuracy.get(name)
-        options[name] = label if score is None else f"{label} — {accuracy_label(score)} accuracy"
-    return options
-
-
-def any_property_option(scores: dict[str, tuple[int, int]]) -> str:
-    """The Property filter's "any" option: the average accuracy (pure).
-
-    The mean of the properties' accuracy scores — the properties WITHOUT one
-    are left out, because they are unscored rather than inaccurate. With no
-    scored property at all there is no figure to show, so the option reads
-    plainly ("any property").
-    """
-    average = average_accuracy(property_accuracy(scores))
-    if average is None:
-        return "any property"
-    return f"any property — {accuracy_label(average)} accuracy"
-
-
 __all__ = [
     "DEFAULT_BORDER_COLOR",
     "EXPAND_COLUMN",
@@ -1087,9 +1044,6 @@ __all__ = [
     "STATUS_WITH_COUNT_COLUMN",
     "SUB_STATUS_COLORS",
     "SUB_STATUS_LABELS",
-    "accuracy_label",
-    "any_property_option",
-    "average_accuracy",
     "entities_of_refs",
     "file_move_detail_rows",
     "ids_of_refs",
@@ -1107,8 +1061,6 @@ __all__ = [
     "operation_status",
     "ops_of_refs",
     "pairs_of_refs",
-    "property_accuracy",
-    "property_options",
     "rerun_blocked",
     "rerun_blocked_reason",
     "selected_subs",

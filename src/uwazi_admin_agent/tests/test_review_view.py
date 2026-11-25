@@ -8,10 +8,12 @@ from datetime import datetime, timezone
 
 from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, EntityReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import (
+    COLUMN_BY_SORT_KEY,
+    OPERATION_SORT_OPTIONS,
     SHARED_ID_CSS,
     SHARED_ID_MAX_CHARS,
+    SORT_KEY_BY_COLUMN,
     TITLE_CELL_CHARS,
-    accuracy_label,
     cost_card_value,
     entity_language_key,
     entity_open_url,
@@ -25,11 +27,13 @@ from uwazi_admin_agent.drivers.web.review_view import (
     pending_suboperation_count,
     property_caption,
     property_heading,
+    review_sort_pagination,
     row_neighbours,
     run_confirmation,
     run_status,
     section_toggle_label,
     sort_direction_label,
+    sort_from_header_click,
     suggestion_to_row,
     table_update_label,
     truncate,
@@ -189,19 +193,6 @@ def test_filter_from_controls_whitespace_text_is_no_constraint() -> None:
 def test_filter_from_controls_keeps_paging_and_the_accepted_flag() -> None:
     f = filter_from_controls(offset=50, limit=25, accepted_only=True)
     assert (f.offset, f.limit, f.accepted_only) == (50, 25, True)
-
-
-# --- accuracy_label ---------------------------------------------------------
-
-
-def test_accuracy_label_computes_a_percentage() -> None:
-    assert accuracy_label(3, 1) == "75.0%"
-    assert accuracy_label(0, 1) == "0.0%"
-    assert accuracy_label(1, 0) == "100.0%"
-
-
-def test_accuracy_label_is_na_when_nothing_compares() -> None:
-    assert accuracy_label(0, 0) == "n/a"
 
 
 # --- the LLM cost card ---------------------------------------------------------
@@ -557,6 +548,45 @@ def test_filter_from_controls_passes_the_sort_through() -> None:
     f = filter_from_controls(sort_by="modified", sort_desc=True)
     assert (f.sort_by, f.sort_desc) == ("modified", True)
     assert (filter_from_controls().sort_by, filter_from_controls().sort_desc) == ("recorded", False)
+
+
+def test_header_click_toggles_the_same_column_between_two_directions() -> None:
+    assert sort_from_header_click("title", False, "title") == ("title", True)
+    assert sort_from_header_click("title", True, "title") == ("title", False)
+    # The Status header reports "run_status" to Quasar but sorts on "status".
+    assert sort_from_header_click("status", True, "run_status") == ("status", False)
+    assert sort_from_header_click("modified", True, "modified") == ("modified", False)
+
+
+def test_header_click_on_a_new_column_starts_in_its_natural_direction() -> None:
+    assert sort_from_header_click("recorded", False, "title") == ("title", False)
+    assert sort_from_header_click("title", False, "modified") == ("modified", True)
+    assert sort_from_header_click("modified", True, "template") == ("template", False)
+    assert sort_from_header_click("title", True, "ops") == ("ops", False)
+
+
+def test_header_click_ignores_headers_that_cannot_sort() -> None:
+    assert sort_from_header_click("recorded", False, "expand") is None
+    assert sort_from_header_click("title", False, "actions") is None
+    assert sort_from_header_click("title", False, "not-a-column") is None
+
+
+def test_sortable_headers_cover_every_sort_key_except_original_order() -> None:
+    assert set(SORT_KEY_BY_COLUMN.values()) == set(OPERATION_SORT_OPTIONS) - {"recorded"}
+    assert COLUMN_BY_SORT_KEY["status"] == "run_status"
+    assert COLUMN_BY_SORT_KEY["modified"] == "modified"
+
+
+def test_review_sort_pagination_mirrors_the_server_sort_for_quasar() -> None:
+    assert review_sort_pagination("modified", True, 41) == {
+        "rowsPerPage": 0,
+        "rowsNumber": 41,
+        "sortBy": "modified",
+        "descending": True,
+    }
+    assert review_sort_pagination("status", False)["sortBy"] == "run_status"
+    assert review_sort_pagination("recorded", False, 3)["sortBy"] == ""
+    assert review_sort_pagination("title", False)["rowsNumber"] == 0
 
 
 def test_row_neighbours_has_no_buttons_for_a_single_row() -> None:

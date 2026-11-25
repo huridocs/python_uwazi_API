@@ -440,6 +440,11 @@ def pushable_rows(
         if s.op in DISPLAY_ONLY_OPS:
             # Display-only rows are never written to Uwazi.
             continue
+        if s.is_validation:
+            # A holdout row is SCORE EVIDENCE: it measures the script, it is not
+            # work. The UI hides its Run, and this guard is what makes that a
+            # property of the system rather than of one screen.
+            continue
         if s.status not in _PUSHABLE:
             continue
         if not _selected(s, selection):
@@ -477,6 +482,9 @@ def partition_for_apply(
     for suggestion in rows:
         if suggestion.op in DISPLAY_ONLY_OPS:
             # Display-only rows are never written to Uwazi.
+            continue
+        if suggestion.is_validation:
+            # Holdout evidence is never work (see pushable_rows).
             continue
         if suggestion.status not in _PUSHABLE:
             continue

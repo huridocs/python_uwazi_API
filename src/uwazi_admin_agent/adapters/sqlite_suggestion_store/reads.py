@@ -210,6 +210,7 @@ class ReadsMixin:
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS reverted,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS discarded,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS edited,
+                SUM(CASE WHEN is_validation = 1 THEN 1 ELSE 0 END) AS validation,
                 COUNT(DISTINCT match_state) AS verdicts,
                 SUM(CASE WHEN match_state IS NULL
                           AND op IN ('update','create','update_and_delete','create_and_delete')
@@ -284,6 +285,7 @@ class ReadsMixin:
                     reverted=int(row["reverted"] or 0),
                     discarded=int(row["discarded"] or 0),
                     edited=int(row["edited"] or 0),
+                    validation=int(row["validation"] or 0),
                     match_summary=match_summary_of(verdicts, verdict_rows, bool(row["has_mismatch"])),
                     has_outcome=bool(row["has_outcome"]),
                     modified_at=latest_review_activity(subs),
@@ -342,28 +344,6 @@ class ReadsMixin:
         )
         return [str(row["template_name"]) for row in rows]
 
-    def property_scores(self, run_id: str) -> dict[str, tuple[int, int]]:
-        """``property -> (exact, mismatch)`` verdict counts for the whole run (SQL).
-
-        The Property filter's options carry each property's accuracy (the same
-        figure the entity window shows), and it must span the WHOLE run, not the
-        page: a per-page accuracy would change as the operator pages or filters.
-        A ``new`` value has no current counterpart to be right or wrong about,
-        so it is left out of both counters by construction (NULL match_state).
-        """
-        rows = self._query(
-            """
-            SELECT property_name,
-                   SUM(CASE WHEN match_state = 1 THEN 1 ELSE 0 END) AS exact,
-                   SUM(CASE WHEN match_state = 0 THEN 1 ELSE 0 END) AS mismatch
-              FROM suggestion
-             WHERE run_id = ? AND property_name IS NOT NULL
-             GROUP BY property_name
-            """,
-            (run_id,),
-        )
-        return {str(row["property_name"]): (int(row["exact"] or 0), int(row["mismatch"] or 0)) for row in rows}
-
     def selection_rows(
         self,
         run_id: str,
@@ -383,7 +363,9 @@ class ReadsMixin:
         discarded.
         """
         where, params = build_where(f, run_id)
-        clause = f"WHERE {where} AND op NOT IN ({', '.join('?' for _ in DISPLAY_ONLY_OPS)})"
+        # Holdout rows are score evidence: no selection (Run, Discard, Revert)
+        # ever includes one, whatever the caller's filter says.
+        clause = f"WHERE {where} AND op NOT IN ({', '.join('?' for _ in DISPLAY_ONLY_OPS)}) AND is_validation = 0"
         query_params: list[Any] = [*params, *sorted(DISPLAY_ONLY_OPS)]
         if runnable_only:
             placeholders = ", ".join("?" for _ in RUNNABLE_STATUSES)
@@ -527,7 +509,7 @@ class ReadsMixin:
             SELECT status, COUNT(*) AS n FROM (
                 SELECT shared_id, language, status
                 FROM suggestion
-                WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped')
+                WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped') AND is_validation = 0
                 GROUP BY shared_id, language, status
             )
             GROUP BY status
@@ -537,7 +519,7 @@ class ReadsMixin:
         match_rows = self._query(
             """
             SELECT match_state, COUNT(*) AS n FROM suggestion
-             WHERE run_id = ? AND op NOT IN ('matched', 'skipped')
+             WHERE run_id = ? AND op NOT IN ('matched', 'skipped') AND is_validation = 0
              GROUP BY match_state
             """,
             (run_id,),
@@ -558,7 +540,7 @@ class ReadsMixin:
                 counts["match_mismatch"] += int(row["n"])
         total_rows = self._query(
             "SELECT COUNT(*) AS n FROM (SELECT 1 FROM suggestion WHERE run_id = ? "
-            "AND op NOT IN ('info', 'matched', 'skipped') GROUP BY shared_id, language)",
+            "AND op NOT IN ('info', 'matched', 'skipped') AND is_validation = 0 GROUP BY shared_id, language)",
             (run_id,),
         )
         counts["total"] = int(total_rows[0]["n"]) if total_rows else 0
@@ -583,7 +565,7 @@ class ReadsMixin:
             counts[f"display_{row['op']}"] = int(row["n"])
         for row in self._query(
             "SELECT status, COUNT(*) AS n FROM suggestion "
-            "WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped') GROUP BY status",
+            "WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped') AND is_validation = 0 GROUP BY status",
             (run_id,),
         ):
             count = int(row["n"])
@@ -591,7 +573,7 @@ class ReadsMixin:
             counts[f"subs_{row['status']}"] = count
         operation_rows = self._query(
             "SELECT COUNT(DISTINCT shared_id) AS n FROM suggestion "
-            "WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped')",
+            "WHERE run_id = ? AND op NOT IN ('info', 'matched', 'skipped') AND is_validation = 0",
             (run_id,),
         )
         counts["operations_total"] = int(operation_rows[0]["n"]) if operation_rows else 0
@@ -604,4 +586,14 @@ class ReadsMixin:
             (run_id,),
         )
         counts["result_entities"] = int(result_rows[0]["n"]) if result_rows else 0
+        # The holdout set gets its OWN counters: its rows are evidence, not work,
+        # so they must never inflate Pending/Operations/Applied. The card reads
+        # "Validation 24" beside the run's real totals.
+        validation_rows = self._query(
+            "SELECT COUNT(*) AS rows, COUNT(DISTINCT shared_id) AS entities FROM suggestion "
+            "WHERE run_id = ? AND is_validation = 1",
+            (run_id,),
+        )
+        counts["validation_rows"] = int(validation_rows[0]["rows"]) if validation_rows else 0
+        counts["validation_entities"] = int(validation_rows[0]["entities"]) if validation_rows else 0
         return counts
