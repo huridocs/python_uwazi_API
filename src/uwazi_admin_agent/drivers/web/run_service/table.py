@@ -97,7 +97,7 @@ async def update_table_from_uwazi(url: str, run_id: str, user: str, password: st
         property_types=runtime.property_types,
         llm_cache=runtime.file_cache,
     )
-    from .validation import holdout_ids
+    from .validation import hidden_property, holdout_ids
 
     await use_case.run(
         script,
@@ -105,6 +105,9 @@ async def update_table_from_uwazi(url: str, run_id: str, user: str, password: st
         budget=pass_row.budget or _script_caps_budget(),
         plan_kind=runtime.backup_store.load_manifest(run_id).plan_kind,
         exclude_scope=holdout_ids(url, run_id) or None,
+        # A sync re-plans the whole table, so it must hide the measured
+        # property exactly like generation did.
+        hidden_property=hidden_property(url, run_id),
     )
     summary = use_case.last_reconciliation or ReconciliationSummary()
 

@@ -56,7 +56,7 @@ from .files import (
     _build_translate_text_real_helper,
 )
 from .reads import _real_full_entities_factory, _real_sync_query_entities_factory
-from .scope import _excluded_entity_reads, _scoped_entity_reads
+from .scope import _excluded_entity_reads, _measured_property_guarded_reads, _scoped_entity_reads
 
 #: Wall-clock ceiling for one generated-script pass. Generous enough for a
 #: 10k-entity bulk read on a remote instance; it exists to stop an accidental
@@ -209,6 +209,7 @@ def build_dry_run_namespace(
     exclude_scope: set[str] | None = None,
     target_shared_id: str | None = None,
     apply_mode: bool = False,
+    hidden_property: str | None = None,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
 
@@ -249,6 +250,13 @@ def build_dry_run_namespace(
       the creation-time budget this way). Without them the helpers are
       :func:`selection_llm_refusal` loud stubs — right for an LLM-free pass,
       and the designed failure for one that needs the LLM without a budget.
+    - ``hidden_property``: ONE property whose STORED value the discovery reads
+      never return (see :func:`_measured_property_guarded_reads`). Both the
+      planning pass and the validation pass set it to the measured property, so
+      a proposal can never be a restatement of the value it replaces —
+      otherwise an extraction that only echoes ``metadata[prop]`` scores
+      perfectly while learning nothing, which is exactly how a validation
+      sample ended up carrying a value the document never mentioned.
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
@@ -298,6 +306,11 @@ def build_dry_run_namespace(
         _excluded_entity_reads(namespace, set(exclude_scope))
     if target_shared_id is not None:
         _scoped_entity_reads(namespace, {target_shared_id})
+    if hidden_property:
+        # Applied LAST so it wraps whatever scope/exclusion wrappers came
+        # before: the measured property's stored value is the one thing no read
+        # may return, whichever shape it takes.
+        _measured_property_guarded_reads(namespace, hidden_property)
     namespace["TARGET_SHARED_ID"] = target_shared_id
     return namespace
 

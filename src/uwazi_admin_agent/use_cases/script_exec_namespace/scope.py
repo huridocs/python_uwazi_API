@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any
+
+from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY
 
 from .constants import NamedNamespace
 
@@ -171,3 +174,107 @@ def full_mode_usage_error(mode: str) -> str:
         f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template'. "
         "(For known shared_ids use query_entities(mode='by_ids', shared_ids=[...]).)"
     )
+
+
+# --- measured-property guard -------------------------------------------------
+
+# The key a per-language property's value is stored under inside a raw/entity
+# dict, and the metadata key Uwazi uses for the title itself.
+_METADATA_KEY = "metadata"
+
+
+def strip_measured_property(entity: dict[str, Any], property_name: str) -> dict[str, Any]:
+    """One entity dict with the MEASURED property's current value removed (pure).
+
+    The value a run is scoring must never reach the script that proposes it: a
+    script that can read today's ``states`` links can "propose" them back (or
+    merge them into its extraction), which is exactly how a validation sample
+    ended up carrying a state the document never mentioned — the suggestion was
+    contaminated with the very value the score measures.
+
+    Only the measured property is removed (and ``title`` when the measured
+    property IS the title). Every other property stays readable, so a task that
+    legitimately derives a value from other entity data keeps working; the
+    proposed property simply cannot be used as its own input.
+
+    The caller's dict is not mutated: a copy is returned, so the read helper's
+    other consumers (and any cached raw) are unaffected. A dict without the key
+    is returned as-is.
+    """
+    if not isinstance(entity, dict):
+        return entity
+    if property_name == TITLE_PROPERTY:
+        if "title" not in entity:
+            return entity
+        return {key: value for key, value in entity.items() if key != "title"}
+    metadata = entity.get(_METADATA_KEY)
+    if not isinstance(metadata, dict) or property_name not in metadata:
+        return entity
+    stripped = {key: value for key, value in metadata.items() if key != property_name}
+    return {**entity, _METADATA_KEY: stripped}
+
+
+def strip_property_from_result(result: Any, property_name: str) -> Any:
+    """Apply :func:`strip_measured_property` to whatever shape a read returns (pure).
+
+    Handles the same shapes as :func:`scope_read_result`: an error string passes
+    through, a ``by_ids``/``query_entities_full`` list has every entity stripped,
+    and a search ``SimpleNamespace`` has its ``examples`` stripped (its summary
+    carries ids and counts, never values).
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        return [strip_measured_property(item, property_name) for item in result]
+    if isinstance(result, SimpleNamespace):
+        examples = [strip_measured_property(example, property_name) for example in (result.examples or [])]
+        return NamedNamespace(summary=result.summary, examples=examples)
+    return result
+
+
+def _measured_property_guarded_wrapper(base: Any, property_name: str) -> Any:
+    """Wrap a bound read helper so the measured property's value is never returned."""
+
+    def filtered(*args: Any, **kwargs: Any) -> Any:
+        return strip_property_from_result(base(*args, **kwargs), property_name)
+
+    return filtered
+
+
+def _measured_property_guarded_reads(namespace: dict[str, Any], property_name: str) -> None:
+    """Hide ONE property's stored value from an entity-discovery namespace (in place).
+
+    The deny-list is per property, not per entity: the script still reads the
+    entities it must process (titles, documents, other properties) and only the
+    value it is supposed to COMPUTE is missing. That makes "propose a value from
+    the document" a property of the sandbox rather than of the model's goodwill,
+    which is what keeps a holdout score honest.
+    """
+    if not property_name:
+        return
+    namespace["query_entities"] = _measured_property_guarded_wrapper(namespace["query_entities"], property_name)
+    namespace["query_entities_full"] = _measured_property_guarded_wrapper(namespace["query_entities_full"], property_name)
+
+
+def hidden_measured_property(measured_property: str, input_properties: Iterable[str] | None = None) -> str | None:
+    """The property whose stored value a planning pass must not read (pure).
+
+    The rule the operator chose in the wizard decides it: a value is a legitimate
+    INPUT only when the wizard declared it as one (a source metadata property,
+    or the target property itself when the scope is "only entities where it is
+    currently empty"). Otherwise the property being proposed is also the
+    property being measured, and letting the script read today's value turns
+    "extract it from the document" into "echo what is already stored" — which
+    scores perfectly while proving nothing, and contaminates the validation
+    sample with the very value the score compares against.
+
+    ``None`` means nothing is hidden (no measured property). The title alias is
+    normalized so ``title`` and ``_title`` name the same value.
+    """
+    name = (measured_property or "").strip()
+    if not name:
+        return None
+    declared = {str(prop).strip() for prop in (input_properties or ()) if str(prop).strip()}
+    if name in declared or (name == TITLE_PROPERTY and "title" in declared):
+        return None
+    return name

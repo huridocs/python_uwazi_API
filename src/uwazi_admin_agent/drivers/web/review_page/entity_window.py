@@ -66,7 +66,9 @@ from uwazi_admin_agent.drivers.web.review_view import (
     row_neighbours,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
+    add_validation_sample,
     entity_is_merge,
+    entity_is_validation,
     get_entity_basis,
     get_entity_segmentation,
     get_entity_suggestions,
@@ -74,11 +76,15 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_templates,
     property_labels_for,
     property_types_for,
+    promote_validation_row,
+    read_validation_label,
+    rescore_run,
     resolve_entity_document,
     revert_entity_rows,
     revert_suboperation,
     select_value_catalog,
     set_selected_values,
+    validation_summary,
 )
 from uwazi_admin_agent.drivers.web.session import (
     SessionCredentials,
@@ -1097,8 +1103,6 @@ def _entity_validation_button(state: dict[str, Any], suggestions: list[Suggestio
     if not shared_id or shared_id.startswith("dry-created-"):
         return
     try:
-        from uwazi_admin_agent.drivers.web.run_service import entity_is_validation, validation_summary
-
         summary = validation_summary(state["instance_url"], state["run_id"])
     except Exception as exc:  # noqa: BLE001 — a missing set never blocks the window
         logger.warning("validation toggle unavailable: {}", exc)
@@ -1128,22 +1132,80 @@ def _entity_validation_button(state: dict[str, Any], suggestions: list[Suggestio
 
 
 def _remove_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
-    from uwazi_admin_agent.drivers.web.run_service import promote_validation_row
+    """Promote the entity out of the holdout, then repaint the table AND re-score.
 
+    The promotion runs on the event loop (it is two local file/DB writes plus the
+    score), and the UI work happens inside an explicit client so a closed window
+    cannot break the refresh: the old handler called ``_refresh_all`` from the
+    button's own slot, whose parent the entity-window re-render had just deleted
+    ("The parent element this slot belongs to has been deleted"), so the table
+    kept showing ``validate`` until a manual browser reload.
+    """
+    client = context.client
     try:
-        count = len(promote_validation_row(state["instance_url"], state["run_id"], shared_id))
+        promote_validation_row(state["instance_url"], state["run_id"], shared_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("remove from validation failed")
         ui.notify(f"Could not remove {shared_id} from validation: {exc}", type="negative", multi_line=True)
         return
-    ui.notify(f"{shared_id} left the validation set — {count} row(s) are now runnable.", type="positive")
-    _refresh_entity_window(state)
-    _refresh_all(state)
+    credentials = credentials_for_instance(state["instance_url"])
+    background_tasks.create(
+        _rescore_after_set_change(state, client, credentials, f"{shared_id} left the validation set"),
+        name=f"rescore {state['run_id']}",
+    )
+
+
+async def _rescore_after_set_change(
+    state: dict[str, Any],
+    client: Any,
+    credentials: SessionCredentials | None,
+    message: str,
+) -> None:
+    """Recompute the score after the set changed, then repaint everything.
+
+    The set's version moved, so the stored number was cleared: without this the
+    card kept reading "not scored yet" and the operator had no way to know
+    whether the promotion changed the measurement. The table must be reloaded
+    regardless — the promoted rows' status/``is_validation`` changed, which is
+    what makes the operation read ``update`` instead of ``validate``.
+    """
+    with client:
+        _refresh_entity_window(state)
+        _refresh_all(state)
+        ui.notify(message, type="positive", multi_line=True)
+    if credentials is None:
+        with client:
+            ui.notify(
+                "The performance score was cleared with the set change — log in to Uwazi to recompute it.",
+                type="warning",
+                multi_line=True,
+            )
+        return
+    try:
+        # ``rescore_run`` is a coroutine (evaluate_run is async); it does its own
+        # blocking work on a worker thread, so awaiting it here is enough.
+        score = await rescore_run(
+            state["instance_url"],
+            state["run_id"],
+            credentials.user,
+            credentials.password,
+        )
+    except Exception as exc:  # noqa: BLE001 — the set change landed; the score is best-effort
+        logger.warning("re-scoring after a set change failed for {}: {}", state["run_id"], exc)
+        with client:
+            ui.notify(
+                f"The set changed, but the score could not be recomputed: {exc}",
+                type="warning",
+                multi_line=True,
+            )
+        return
+    with client:
+        _refresh_all(state)
+        if score is not None:
+            ui.notify(f"Performance re-scored: {score.value_text()}", type="positive")
 
 
 def _add_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
-    from uwazi_admin_agent.drivers.web.run_service import add_validation_sample
-
     credentials = credentials_for_instance(state["instance_url"])
     if credentials is None:
         ui.notify("Not logged in to Uwazi", type="negative")
@@ -1151,35 +1213,49 @@ def _add_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
 
     def _confirm() -> None:
         client = context.client
-
-        async def _add() -> None:
-            try:
-                await add_validation_sample(
-                    state["instance_url"], state["run_id"], shared_id, credentials.user, credentials.password
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("add to validation failed")
-                with client:
-                    ui.notify(f"Could not add {shared_id} to validation: {exc}", type="negative", multi_line=True)
-                return
-            with client:
-                ui.notify(
-                    f"{shared_id} added — re-run the score to include it. The AI already read it, so this is a "
-                    "regression score, not a fair unseen estimate.",
-                    type="positive",
-                    multi_line=True,
-                )
-                _refresh_entity_window(state)
-                _refresh_all(state)
-
-        background_tasks.create(_add(), name=f"add validation {shared_id}")
+        background_tasks.create(
+            _add_validation(state, client, credentials, shared_id),
+            name=f"add validation {shared_id}",
+        )
 
     _simple_confirm(
         "Add this entity to the validation set?",
-        f"{shared_id} was read by the AI while it authoring this script. Adding it now turns the score "
+        f"{shared_id} was read by the AI while it authored this script. Adding it now turns the score "
         "into a regression score, not a fair estimate on unseen data.",
         _confirm,
     )
+
+
+async def _add_validation(state: dict[str, Any], client: Any, credentials: SessionCredentials, shared_id: str) -> None:
+    """Freeze the entity's label, mark its rows as evidence, then re-score.
+
+    The label is read BEFORE the set changes (the row values are overwritten by
+    the marking), and the rows are marked so the table shows ``validate`` — the
+    half that was missing, which made the button look like it did nothing.
+    """
+    try:
+        label = await read_validation_label(
+            state["instance_url"], state["run_id"], shared_id, credentials.user, credentials.password
+        )
+        updated = await asyncio.to_thread(add_validation_sample, state["instance_url"], state["run_id"], shared_id, label)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("add to validation failed")
+        with client:
+            ui.notify(f"Could not add {shared_id} to validation: {exc}", type="negative", multi_line=True)
+        return
+    if updated is None:
+        with client:
+            ui.notify("This run has no validation set to add the entity to.", type="warning")
+        return
+    with client:
+        _refresh_entity_window(state)
+        _refresh_all(state)
+        ui.notify(
+            f"{shared_id} added — its rows now read 'validate'. Recomputing the performance score.",
+            type="positive",
+            multi_line=True,
+        )
+    await _rescore_after_set_change(state, client, credentials, f"{shared_id} is now part of the test set")
 
 
 def _entity_structural_card(detail: dict[str, Any]) -> None:

@@ -354,6 +354,7 @@ async def generate_predictions(
     plan_kind = (
         plan_kind_override if plan_kind_override is not None else runtime.backup_store.load_manifest(run_id).plan_kind
     )
+    from .validation import hidden_property as hidden_measured_property
     from .validation import holdout_ids
 
     holdout = holdout_ids(url, run_id)
@@ -384,6 +385,9 @@ async def generate_predictions(
         # table must not propose writes for them. A subset pass narrows further;
         # the store protects the validation rows from being retired meanwhile.
         exclude_scope=holdout or None,
+        # The property the run's score measures is not readable either: its
+        # stored value must never become the proposal it is compared against.
+        hidden_property=hidden_measured_property(url, run_id),
     )
     return use_case.last_reconciliation or ReconciliationSummary()
 

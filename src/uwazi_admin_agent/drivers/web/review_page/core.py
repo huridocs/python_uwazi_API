@@ -225,17 +225,14 @@ def _backup_dates_for(rows: list[Any], run_id: str, url: str) -> dict[str, Any]:
     return dates
 
 
-def _card(label: str, value: str, color: str = "primary", caption: str = "", classes: str = "") -> None:
+def _card(label: str, value: str, color: str = "primary", caption: str = "") -> None:
     """One header card: a label, the figure, and an optional second line.
 
     The caption carries the SECOND reading of a figure that has two (the
     Operations card counts the parts, and the entities behind them ride
     underneath), so the two levels of the table are read from one card.
-
-    ``classes`` positions the card within the row (the LLM cost card pushes
-    itself to the right with ``q-ml-auto``).
     """
-    with ui.card().classes(f"q-pa-sm {classes}").style("min-width: 118px"):
+    with ui.card().classes("q-pa-sm").style("min-width: 118px"):
         ui.label(label).classes("text-caption text-grey-7")
         ui.label(value).classes(f"text-subtitle1 text-bold text-{color}")
         if caption:
@@ -331,10 +328,20 @@ def _change_table(state: dict[str, Any]) -> None:
         """
         <q-tr :props="props">
           <q-td auto-width>
-            <q-checkbox v-if="!props.row.is_display_only" v-model="props.selected" dense
-                        :disable="!props.row.has_runnable"
+            <!-- The row checkbox is SERVER-OWNED, exactly like the suboperation
+                 ones: it reads ``props.selected`` (derived from the checked
+                 suboperation ids) and reports the click through the table's own
+                 event. ``v-model=props.selected`` used to write Quasar's
+                 selection directly, which raced the Python-side re-derivation
+                 of the same state — on a table whose rows shared a key (the
+                 create placeholders all read ``dry-created-0``) the write-back
+                 overwrote the tick, so the box snapped back and could not be
+                 checked. -->
+            <q-checkbox v-if="!props.row.is_display_only" :model-value="props.selected" dense
+                        :disable="!props.row.has_selectable"
                         :title="props.row.rerun_blocked ? props.row.rerun_blocked_reason
-                                : (props.row.has_runnable ? '' : 'No runnable suboperation')" />
+                                : (props.row.has_selectable ? '' : 'Nothing to run or revert on this operation')"
+                        @update:model-value="v => $parent.$emit('toggle_row', props.row.row_key, v)" />
           </q-td>
           <q-td key="expand" :props="props" class="text-center">
             <q-btn v-if="!props.row.is_info || props.row.has_subs" dense flat size="sm"
@@ -527,6 +534,7 @@ def _change_table(state: dict[str, Any]) -> None:
     table.on("restore_op", lambda e: _restore_op_clicked(state, _row_key_of(getattr(e, "args", None))))
     table.on("revert_op", lambda e: _revert_entity_clicked(state, _row_key_of(getattr(e, "args", None))))
     table.on("open_entity", lambda e: _open_entity_row(state, _row_of(e)))
+    table.on("toggle_row", lambda e: _toggle_row(state, getattr(e, "args", None)))
     table.on("toggle_sub", lambda e: _toggle_sub(state, getattr(e, "args", None)))
     table.on("run_sub", lambda e: _run_sub_clicked(state, getattr(e, "args", None)))
     table.on("discard_sub", lambda e: _discard_sub_clicked(state, getattr(e, "args", None)))
@@ -688,12 +696,14 @@ def _clear_checked(state: dict[str, Any]) -> None:
     state["_checked"] = set()
     state["_select_all"] = False
     state["_global_refs"] = {}
+    state["_global_applied_ids"] = set()
 
 
 def _clear_selection(state: dict[str, Any], *, clear_page: bool) -> None:
     """Leave whole-result mode and (optionally) uncheck the visible page."""
     state["_select_all"] = False
     state["_global_refs"] = {}
+    state["_global_applied_ids"] = set()
     if clear_page:
         state["_checked"] = set()
     _sync_selection(state)
@@ -718,13 +728,15 @@ def _current_filter(
 
 
 def _discard_from_state(state: dict[str, Any]) -> None:
-    """Open the bulk-Discard dialog for the checked SUBOPERATIONS.
+    """Open the bulk-Discard dialog for the runnable checked SUBOPERATIONS.
 
     The dialog asks for the reason too: the operator discards an operation
     because the end user does not want it executed, and WHY is worth keeping
-    with the rows (it is stored as the rows' discard reason).
+    with the rows (it is stored as the rows' discard reason). Only parts still
+    to be written are discarded — an applied row is undone by Revert, not
+    refused.
     """
-    refs, _ops = _selection_snapshot(state)
+    refs = _checked_flags(state, "run")
     ids = ids_of_refs(refs)
     if not ids:
         ui.notify("Nothing selected", type="warning")
@@ -825,31 +837,37 @@ def _drift_banner(state: dict[str, Any]) -> None:
     It sits BELOW the action bar, just above the list — the state of the data
     the list shows. Renders the STORED verdict (or "not checked yet") and
     ALWAYS starts a fresh check: entering the page is the moment the operator
-    needs to know whether the list still matches Uwazi. One row: an icon, the
-    verdict, and when the list was last synced; the sync action sits under it
-    while the verdict is "drifted".
+    needs to know whether the list still matches Uwazi.
+
+    ONE row, inside a bordered strip: icon, verdict, last-sync time and — when
+    the verdict is "drifted" — the sync action at the END of the same line. The
+    drifted state used to stack the button under the verdict as a flat grey
+    button, which read as a caption rather than as the way out of the warning.
     """
-    with ui.column().classes("w-full items-start gap-1 q-mb-sm"):
-        with ui.row().classes("w-full items-center gap-2"):
-            state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
-            state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
-                drift_text_classes("grey-7")
-            )
-            # The verdict color is painted on the TEXT as well as the icon (see
-            # ``_apply_drift_state``): "Out of date" must be impossible to miss,
-            # and grey body text on a light table reads as ordinary prose.
-            state["_table_update_label"] = ui.label(
-                table_update_label(get_table_update_time(page_instance_url(), state["run_id"]))
-            ).classes("text-caption text-grey-6")
-        # The drifted verdict's remedy sits UNDER the verdict line, so the
-        # banner reads top-down: what the check found, then the action that
-        # fixes it. Grey, not red: the warning is the text, and the button is
-        # merely the way out of it.
+    with (
+        ui.row()
+        .classes("w-full items-center gap-2 q-mb-sm review-strip")
+        .style("border: 1px solid rgba(0,0,0,0.12); border-radius: 4px; padding: 4px 8px;")
+    ):
+        state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
+        state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
+            drift_text_classes("grey-7")
+        )
+        # The verdict color is painted on the TEXT as well as the icon (see
+        # ``_apply_drift_state``): "Out of date" must be impossible to miss,
+        # and grey body text on a light table reads as ordinary prose.
+        state["_table_update_label"] = ui.label(
+            table_update_label(get_table_update_time(page_instance_url(), state["run_id"]))
+        ).classes("text-caption text-grey-6")
+        # The drifted verdict's remedy sits at the END of the same row, so the
+        # banner reads left-to-right: what the check found, then the action that
+        # fixes it. It is a real OUTLINED button (not flat): the drifted state is
+        # the one moment this control appears, and it has to look pressable.
         state["_drift_sync_button"] = ui.button(
             "Sync with Uwazi",
             icon="cloud_sync",
             on_click=lambda: _sync_now_clicked(state),
-        ).props("dense flat color=grey-8")
+        ).props("dense outline color=primary")
         state["_drift_sync_button"].set_visibility(False)
 
     # The verdict's text is stored per run: apply it immediately, then let the
@@ -1147,28 +1165,81 @@ def _refresh_run_badge(state: dict[str, Any]) -> None:
     badge.props(f"color={_RUN_STATUS_BADGE_COLORS.get(detail.status.value, 'grey-7')}")
 
 
+def _checked_flags(state: dict[str, Any], kind: str) -> list[tuple[int, str, str | None, str]]:
+    """The checked refs whose part can be acted on by ``kind`` (pure over state).
+
+    The payload carries WHY a part is selectable (``run_selectable`` for Run and
+    Discard, ``revert_selectable`` for Revert) because a tick means different
+    things to the three buttons. In whole-result mode the projection is a plain
+    ref list with no flags, so those refs count for ``run`` only — "select all
+    results" selects runnable rows by construction.
+    """
+    rows = state.get("_table")
+    flagged: dict[int, dict[str, Any]] = {}
+    if rows is not None and not rows.is_deleted:
+        for row in rows.rows or []:
+            if not isinstance(row, dict):
+                continue
+            for sub in row.get("subs") or []:
+                if isinstance(sub, dict) and isinstance(sub.get("id"), int):
+                    flagged[int(sub["id"])] = sub
+    checked = state.get("_checked") or set()
+    refs = {ref[0]: ref for ref in (_checked_refs(state))}
+    # In whole-result mode a checked id may not be on the current page, so its
+    # flags are gone. The projection's own split says which side it belongs to:
+    # ``_global_applied_ids`` is what "select all" added for REVERT.
+    applied_ids = state.get("_global_applied_ids") or set()
+    selected: list[tuple[int, str, str | None, str]] = []
+    for sub_id in checked:
+        ref = refs.get(sub_id)
+        if ref is None:
+            continue
+        sub = flagged.get(sub_id)
+        if sub is None:
+            # Whole-result mode (or another page): no payload flags. A row the
+            # projection reported as runnable belongs to both sides; one it
+            # reported as applied belongs to REVERT only.
+            if kind == "run" and sub_id not in applied_ids:
+                selected.append(ref)
+            elif kind == "revert":
+                selected.append(ref)
+            continue
+        if sub.get(kind + "_selectable"):
+            selected.append(ref)
+    return selected
+
+
 def _refresh_selection_counts(state: dict[str, Any]) -> None:
     """Update the selection-driven buttons' texts from the checked SUBOPERATIONS.
 
-    The Run/Discard counts are the checked suggestions (a count of suggestions, not of
-    entities); Revert counts the distinct entities those parts belong to,
-    because one entity is restored once however many of its rows are ticked.
+    ONE selection, THREE meanings — each button counts the checked parts IT can
+    act on, so a selection of applied rows reads "Revert (N)" and "Run (0)":
+
+    - Run/Discard act on the parts still to be written (pending/reverted), and
+      an applied or discarded part must never inflate them;
+    - Revert acts on the APPLIED parts' distinct entities — the top Revert
+      could not be used before, because an applied row had no checkbox at all
+      (the row checkbox was disabled on "nothing runnable").
+
+    Both counts collapse to DISTINCT entities for Revert (one backup covers
+    every language of an entity, so the entity reverts once).
     """
-    refs = _checked_refs(state)
-    count = len(refs)
-    entities = len(entities_of_refs(refs))
+    run_refs = _checked_flags(state, "run")
+    revert_refs = _checked_flags(state, "revert")
+    run_count = len(run_refs)
+    entities = len(entities_of_refs(revert_refs))
     run_button = state.get("_run_button")
     if run_button is not None and not run_button.is_deleted:
-        run_button.text = run_button_label(count)
-        run_button.set_enabled(count > 0)
+        run_button.text = run_button_label(run_count)
+        run_button.set_enabled(run_count > 0)
     revert_button = state.get("_bulk_revert_button")
     if revert_button is not None and not revert_button.is_deleted:
         revert_button.text = bulk_revert_label(entities)
         revert_button.set_enabled(entities > 0)
     discard_button = state.get("_bulk_discard_button")
     if discard_button is not None and not discard_button.is_deleted:
-        discard_button.text = bulk_discard_label(count)
-        discard_button.set_enabled(count > 0)
+        discard_button.text = bulk_discard_label(run_count)
+        discard_button.set_enabled(run_count > 0)
     select_button = state.get("_select_all_button")
     if select_button is not None and not select_button.is_deleted:
         total = int(state.get("total") or 0)
@@ -1294,7 +1365,7 @@ def _reload_table(state: dict[str, Any]) -> None:
             # nothing on the page (or at all: an empty result) is selectable,
             # it is dead weight and it does nothing — hide it (see the CSS on
             # the review page).
-            if any(isinstance(payload, dict) and payload.get("has_runnable") for payload in payloads):
+            if any(isinstance(payload, dict) and payload.get("has_selectable") for payload in payloads):
                 table.classes(remove="review-no-selectable")
             else:
                 table.classes(add="review-no-selectable")
@@ -1314,7 +1385,7 @@ def _reload_table(state: dict[str, Any]) -> None:
                     int(sub["id"])
                     for payload in payloads
                     for sub in payload.get("subs") or []
-                    if isinstance(sub.get("id"), int) and sub.get("runnable")
+                    if isinstance(sub.get("id"), int) and sub.get("selectable")
                 }
                 state["_checked"] = {sub_id for sub_id in (state.get("_checked") or ()) if sub_id in visible}
             _sync_selection(state)
@@ -1354,13 +1425,16 @@ def _schedule_drift_check(state: dict[str, Any]) -> None:
 
 def _render_summary(state: dict[str, Any]) -> None:
     holder = state.get("_summary")
+    # The performance line lives OUTSIDE this holder (always visible, at the top
+    # of the page) but it is refreshed here so the score and the counters are
+    # never painted from different moments.
+    _render_performance(state)
     if holder is None or holder.is_deleted:
         return
     counts = get_suggestion_counts(page_instance_url(), state["run_id"])
     pass_row = current_pass(page_instance_url(), state["run_id"])
     holder.clear()
     with holder:
-        _score_card(state)
         # ONE card for the operations and their suboperations: the Operations
         # card counts the PARTS (the list's real content — one suggestion per
         # property/language/link), and the
@@ -1394,7 +1468,6 @@ def _render_summary(state: dict[str, Any]) -> None:
                     pass_row.budget.max_cost,
                 ),
                 "teal",
-                classes="q-ml-auto",
             )
 
 
@@ -1440,12 +1513,17 @@ def _restore_sub_clicked(state: dict[str, Any], args: Any) -> None:
 
 
 def _revert_from_state(state: dict[str, Any]) -> None:
-    """Open the bulk-Revert confirmation for the selection the button's count describes."""
-    refs, _ops = _selection_snapshot(state)
-    if not refs:
-        ui.notify("Nothing selected", type="warning")
+    """Open the bulk-Revert confirmation for the selection the button's count describes.
+
+    The entities come from the REVERT side of the selection: the checked parts
+    whose write exists to undo. A pending part of an applied entity cannot ride
+    a revert (there is nothing to restore for it), and an applied part must not
+    be dropped just because its siblings are still pending.
+    """
+    entities = entities_of_refs(_checked_flags(state, "revert"))
+    if not entities:
+        ui.notify("Nothing selected to revert", type="warning")
         return
-    entities = entities_of_refs(refs)
 
     def _confirm() -> None:
         # The client is captured HERE, inside the click's slot context (the same
@@ -1566,51 +1644,66 @@ def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tu
     return {(ref[1], ref[2]) for ref in refs.values() if ref[0] in ids and ref[1] in held}
 
 
-def _score_card(state: dict[str, Any]) -> None:
-    """The performance card: ONE number, on ONE property, against the holdout.
+def _performance_row(state: dict[str, Any]) -> None:
+    """The performance line: ONE percentage, on ONE property, against the holdout.
 
-    The card states its state in words (``Unseen``, ``Used for fixes``,
-    ``Stale``, ``No test set``): a number without that word reads as a promise
-    it does not make. It is NOT shown in the property filter (the filter answers
-    a different question: how a suggestion compares with Uwazi's current value).
+    A ROW, not a card: the number the operator opens the page with is a single
+    figure with its state word, and boxing it as one more card in a strip of
+    cards made it compete with the counters (and buried it inside a collapsible
+    section). It is ALWAYS visible, at the top of the page: a run whose score is
+    hidden reads as a run without one.
+
+    The state is stated in words (``Unseen``, ``Used for fixes``, ``Stale``,
+    ``No test set``): a number without that word reads as a promise it does not
+    make. It is NOT shown in the property filter (the filter answers a different
+    question: how a suggestion compares with Uwazi's current value).
     """
-    holder = state.get("_score_card")
+    holder = ui.row().classes("items-center gap-2 no-wrap")
+    state["_performance_holder"] = holder
+    _render_performance(state)
+
+
+def _render_performance(state: dict[str, Any]) -> None:
+    """Paint the performance line (called on load and after every refresh)."""
+    holder = state.get("_performance_holder")
     if holder is None or holder.is_deleted:
         return
     try:
         summary = validation_summary(state["instance_url"], state["run_id"])
-    except Exception as exc:  # noqa: BLE001 — the card degrades, the page never breaks
+    except Exception as exc:  # noqa: BLE001 — the line degrades, the page never breaks
         logger.warning("validation card failed: {}", exc)
         return
-    # ``clear(children)`` on the WRAPPER row would wipe the counters that follow;
-    # the card owns only its own column, created fresh on each render.
-    if summary["state"] == "none":
-        holder.clear()
-        return
-    validation = summary["set"]
-    score = summary["score"]
-    if validation is None:
-        holder.clear()
-        return
-    label = _validation_property_text(state, validation.property_name)
-    state_word = {
-        "fresh": "Unseen test set",
-        "pending": "Test set ready — not scored yet",
-        "stale": "Test set changed — score out of date",
-        "contaminated": "Used for fixes — regression score only",
-    }.get(summary["state"], summary["state"])
     holder.clear()
     with holder:
-        with ui.card().classes("q-pa-sm").style("min-width: 180px"):
-            ui.label(f"Performance · {label}").classes("text-caption text-grey-7")
-            if score is None:
-                ui.label("—").classes("text-subtitle1 text-bold text-grey-7")
-            else:
-                ui.label(score.value_text()).classes("text-h5 text-bold text-primary")
-                if score.detail():
-                    ui.label(score.detail()).classes("text-caption text-grey-6")
-                ui.label(score.caption(label)).classes("text-caption text-grey-6")
-            ui.badge(state_word).props("color=teal" if summary["state"] == "fresh" else "color=orange").classes("q-mt-xs")
+        validation = summary.get("set")
+        score = summary.get("score")
+        state_word = {
+            "none": "No test set",
+            "fresh": "Unseen test set",
+            "pending": "Test set ready — not scored yet",
+            "stale": "Test set changed — score out of date",
+            "contaminated": "Used for fixes — regression score only",
+        }.get(summary["state"], summary["state"])
+        color = "teal" if summary["state"] == "fresh" else "orange"
+        if validation is None or summary["state"] == "none":
+            ui.icon("speed", color="grey-6").classes("text-body2")
+            ui.label("Performance").classes("text-body2 text-grey-7")
+            ui.label("—").classes("text-h6 text-bold text-grey-6")
+            ui.badge(state_word).props("color=grey-7 outline")
+            ui.label("Add a test set in the wizard to measure this task").classes("text-caption text-grey-6")
+            return
+        label = _validation_property_text(state, validation.property_name)
+        ui.icon("speed", color="primary").classes("text-body2")
+        ui.label(f"Performance · {label}").classes("text-body2 text-grey-7")
+        if score is None:
+            ui.label("—").classes("text-h6 text-bold text-grey-6")
+        else:
+            ui.label(score.value_text()).classes("text-h6 text-bold text-primary")
+            if score.detail():
+                ui.label(score.detail()).classes("text-caption text-grey-6")
+        ui.badge(state_word).props(f"color={color}").classes("q-ml-sm")
+        if score is not None:
+            ui.label(score.caption(label)).classes("text-caption text-grey-6")
 
 
 def _validation_property_text(state: dict[str, Any], property_name: str) -> str:
@@ -1651,9 +1744,14 @@ def _row_refs(row: dict[str, Any] | None) -> list[tuple[int, str, str | None, st
 
 
 def _run_from_state(state: dict[str, Any]) -> None:
-    """Open the Run confirmation for the selection the button's count describes."""
-    refs, ops = _selection_snapshot(state)
-    _run_refs(state, refs, ops)
+    """Open the Run confirmation for the RUNNABLE side of the selection.
+
+    The selection may also carry applied rows (checked so the top Revert can
+    address them); Run writes only the parts still to be written, so it reads
+    the runnable subset and never re-writes a landed change.
+    """
+    refs = _checked_flags(state, "run")
+    _run_refs(state, refs, ops_of_refs(refs))
 
 
 def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
@@ -1915,14 +2013,6 @@ def _selection_changed(state: dict[str, Any], event: Any) -> None:
     _sync_selection(state)
 
 
-def _selection_snapshot(
-    state: dict[str, Any],
-) -> tuple[list[tuple[int, str, str | None, str]], list[str]]:
-    """What Run would act on right now: the checked suboperations and their ops."""
-    refs = _checked_refs(state)
-    return refs, ops_of_refs(refs)
-
-
 def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: bool) -> None:
     """Tick/untick every part of one operation.
 
@@ -1933,14 +2023,18 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
     """
     if row.get("is_display_only") or row.get("is_info"):
         return
-    # Only parts a Run can still write enter the selection. An applied part
-    # (already in Uwazi) or a discarded one (restore first) must never inflate
-    # Run (N) / Discard (N); locked parts of a RUNNABLE operation still ride
-    # their operation's tick.
+    # Every part an action can address enters the selection: the ones a Run may
+    # still write, and the APPLIED ones a Revert restores. A discarded part
+    # (restore first) and a validation part stay out. Run/Discard only count
+    # the runnable ones, Revert only the applied ones (see
+    # ``_refresh_selection_counts``); a tick is a selection, not an action.
     ids = [
         int(sub["id"])
         for sub in (row.get("subs") or [])
-        if isinstance(sub, dict) and sub.get("runnable") and not sub.get("is_validation") and isinstance(sub.get("id"), int)
+        if isinstance(sub, dict)
+        and (sub.get("runnable") or sub.get("revert_selectable"))
+        and not sub.get("is_validation")
+        and isinstance(sub.get("id"), int)
     ]
     _apply_checked(state, ids, checked)
 
@@ -1991,18 +2085,19 @@ def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
 
 
 def _summary_row(state: dict[str, Any]) -> None:
-    """The header: the performance card on its OWN line, then the counters.
+    """The counters strip: how the table's suggestions split across statuses.
 
-    The card leads because it answers the question the operator opened the page
-    with ("does this task work?"); the counters describe the table. Both are
-    repainted by :func:`_render_summary`, so the two can never show figures from
-    different moments. The card gets its own row because it is ONE figure with
-    its own state word, not another counter.
+    The performance number is NOT here: it has its own always-visible line at the
+    top of the page (see :func:`_performance_row`), because it is one figure
+    with its own state word, not another counter. Both are repainted by
+    :func:`_render_summary`, so the two can never show figures from different
+    moments.
+
+    The row WRAPS: eight counters (plus the money card, which is pushed to the
+    right) do not fit on a narrow window, and a nowrap row simply clipped the
+    last card at the card's edge.
     """
-    score_row = ui.row().classes("w-full items-center gap-3 q-mb-sm")
-    with score_row:
-        state["_score_card"] = ui.column().classes("")
-    holder = ui.row().classes("w-full items-center gap-3 q-mb-sm")
+    holder = ui.row().classes("w-full items-center gap-3 q-mb-sm wrap")
     state["_summary"] = holder
     _render_summary(state)
 
@@ -2019,6 +2114,10 @@ def _sync_selection(state: dict[str, Any]) -> None:
     operation's tick created (a delete/publish/merge part runs with the
     operation), so the parent's derivation counts every part, while the counter
     beside the status badge counts only the checkable ones.
+
+    "Actionable" is wider than "runnable": an APPLIED part of an in-place
+    operation has no Run left, but it is exactly what the top Revert restores,
+    so it counts toward the parent's tick too.
     """
     table = state.get("_table")
     if table is None or table.is_deleted:
@@ -2035,8 +2134,10 @@ def _sync_selection(state: dict[str, Any]) -> None:
         for sub in subs:
             if isinstance(sub, dict):
                 sub["checked"] = bool(sub.get("selectable")) and sub.get("id") in checked
-        runnable_subs = [sub for sub in subs if isinstance(sub, dict) and sub.get("runnable")]
-        if runnable_subs and all(sub.get("id") in checked for sub in runnable_subs):
+        actionable_subs = [
+            sub for sub in subs if isinstance(sub, dict) and (sub.get("runnable") or sub.get("revert_selectable"))
+        ]
+        if actionable_subs and all(sub.get("id") in checked for sub in actionable_subs):
             selected.append(row)
     table.selected = selected
     table.update()
@@ -2077,18 +2178,48 @@ def _toggle_select_all(state: dict[str, Any]) -> None:
     if int(state.get("total") or 0) <= 0:
         return
     # The projection is a row-id list, not a page: selection_rows ignores
-    # limit/offset, so this covers every operation the filter matches. Only
-    # runnable rows are selected: applied/discarded parts cannot be written by a
-    # Run and must not inflate the action counts.
-    refs = get_selection_rows(
+    # limit/offset, so this covers every operation the filter matches. Discarded
+    # parts stay out (Restore is their undo), but APPLIED rows are selected too:
+    # they cannot be written by a Run, yet they are exactly what the top Revert
+    # restores. Each button counts its own side of the selection (see
+    # ``_refresh_selection_counts``), so the extra rows never inflate Run (N).
+    runnable = get_selection_rows(
         page_instance_url(),
         state["run_id"],
         _current_filter(state),
         runnable_only=True,
     )
-    state["_global_refs"] = {ref[0]: ref for ref in refs}
-    state["_checked"] = {ref[0] for ref in refs}
+    with_applied = get_selection_rows(
+        page_instance_url(),
+        state["run_id"],
+        _current_filter(state),
+        runnable_only=True,
+        include_applied=True,
+    )
+    runnable_ids = {ref[0] for ref in runnable}
+    state["_global_refs"] = {ref[0]: ref for ref in with_applied}
+    state["_global_applied_ids"] = {ref[0] for ref in with_applied if ref[0] not in runnable_ids}
+    state["_checked"] = set(state["_global_refs"])
     state["_select_all"] = True
+    _sync_selection(state)
+
+
+def _toggle_row(state: dict[str, Any], args: Any) -> None:
+    """Apply one OPERATION checkbox (row_key, checked): the cascade's own entry.
+
+    The row checkbox no longer writes Quasar's selection directly, so this is
+    the only path a row tick takes: it propagates to the operation's parts and
+    then re-derives the whole selection, which is what keeps the parent box and
+    the part boxes from disagreeing (a row used to be able to show a tick while
+    its parts were unchecked, or snap back on the next render).
+    """
+    if not isinstance(args, list) or len(args) != 2:
+        return
+    row_key, checked = args
+    row = _row_of_key(state, row_key)
+    if row is None:
+        return
+    _set_children_checked(state, row, bool(checked))
     _sync_selection(state)
 
 

@@ -353,6 +353,7 @@ def get_selection_rows(
     f: SuggestionFilter,
     *,
     runnable_only: bool = False,
+    include_applied: bool = False,
 ) -> list[tuple[int, str, str | None, str]]:
     """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection.
 
@@ -361,7 +362,9 @@ def get_selection_rows(
     or discarded parts cannot inflate the Run/Discard counts; entity navigation
     reads the whole projection so it can still step through every row.
     """
-    return build_suggestion_store(url).selection_rows(run_id, f, runnable_only=runnable_only)
+    return build_suggestion_store(url).selection_rows(
+        run_id, f, runnable_only=runnable_only, include_applied=include_applied
+    )
 
 
 def discard_rows(url: str, run_id: str, pairs: list[tuple[str, str | None]], reason: str | None = None) -> int:

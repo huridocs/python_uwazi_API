@@ -230,5 +230,8 @@ def test_score_rendering_states_the_metric_and_the_denominator() -> None:
         script_hash="abc",
         now=NOW,
     )
-    assert f1.value_text() == "1.00 F1"
+    # Both metrics read as a PERCENTAGE; the metric's own name rides in the
+    # caption so two different scales are never compared in the headline.
+    assert f1.value_text() == "100.0%"
+    assert "micro-F1" in f1.caption("Keywords")
     assert "TP 1" in f1.detail()

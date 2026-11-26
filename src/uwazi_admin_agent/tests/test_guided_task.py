@@ -9,7 +9,6 @@ from uwazi_admin_agent.domain.guided_task import (
     CREATE_SOURCE_DOCUMENTS,
     CREATE_SOURCE_EXISTING,
     CREATE_SOURCE_UNRELATED,
-    EXISTING_SKIP,
     GOAL_CREATE,
     GOAL_CUSTOM,
     GOAL_FILL,
@@ -121,7 +120,7 @@ def test_fallback_value_is_required_when_that_mode_is_chosen() -> None:
 
 
 def test_classification_ignores_the_extraction_only_answers() -> None:
-    assert validate_answers(_classify_answers(fill_rules="", existing_value_mode="bogus")) == []
+    assert validate_answers(_classify_answers(fill_rules="")) == []
 
 
 def test_metadata_source_requires_listed_properties() -> None:
@@ -362,10 +361,14 @@ def test_custom_task_prompt_embeds_the_description() -> None:
     assert "**Target Property:**" not in prompt
 
 
-def test_extraction_prompt_states_existing_value_handling() -> None:
-    prompt = assemble_prompt(_extract_answers(existing_value_mode=EXISTING_SKIP), {})
-    assert "Skip the entity" in prompt
+def test_extraction_prompt_states_the_rules_and_never_a_current_value_policy() -> None:
+    """The prompt carries the extraction rules only: no "existing value"
+    instruction, because the suggestion must come from the input (and the
+    operator decides per row what to keep)."""
+    prompt = assemble_prompt(_extract_answers(), {})
     assert "One name only." in prompt
+    assert "Existing Value Handling" not in prompt
+    assert "Skip the entity" not in prompt
 
 
 def test_unrelated_create_prompt_declares_count_and_instructions() -> None:

@@ -24,6 +24,15 @@ and the operator applies them, so the agent must not ask apply-time questions
 now?") — those are the operator's per-suggestion decisions at review time. The
 question it should ask instead is about the CONTENT of the suggestions ("do you
 want a suggestion as well?"), not about overwriting a value.
+
+And a PROPOSAL-IS-COMPUTED-FROM-THE-INPUT rule: a suggested value is derived
+from the task's own input sources (documents, paragraphs, selected source
+properties, operator instructions) and never from the value the target property
+already holds. So the agent must never ask what should happen to the values an
+entity already carries, and never offer "keep the existing ones" / "add to the
+existing ones" as an option: those make the proposal depend on today's data,
+which both hides real extraction failures and destroys the run's held-out
+validation score.
 """
 
 from __future__ import annotations
@@ -50,6 +59,16 @@ the PLANNER, it computes what should change; the operator applies it.
 So your questions must be about the CONTENT AND SCOPE of the suggestions —
 which entities, which property, which value, which language, how many — and
 NEVER about what will happen when the operator runs them.
+
+PROPOSAL-IS-COMPUTED-FROM-THE-INPUT (the rule your questions must obey)
+A suggested value is computed from the task's OWN INPUT SOURCES: the entity's
+documents, its segmentation, the source properties the operator selected, and
+the operator's instructions. It is NEVER computed from the value the target
+property already holds. So do not ask what should happen to the values an
+entity already carries, and do not offer "keep the existing ones" / "add the
+extracted ones to the existing ones" as an option: a proposal that depends on
+today's stored value cannot be judged, and it destroys the run's held-out
+validation score (that stored value IS what the score compares against).
 
 VOCABULARY — the operator's words for what this script produces are SUGGESTIONS
 (one per entity/property). The contract above also calls the collected result a
@@ -95,18 +114,24 @@ review time, NOT an ambiguity in the prompt):
 
   - MULTI-VALUED PROPERTIES (multiselect, relationship, multidate, multidaterange):
     the suggested value is the COMPLETE SET a Run would write, and a Run
-    REPLACES the property's set with exactly that set — it never appends behind
-    the operator's back. So a question about what the suggestion CONTAINS is
-    legitimate ("should the suggested set include the values already linked?"),
-    but phrase it as a question about the SUGGESTED SET: "Which set should be
-    suggested for `states`?" with options like "only the values extracted from
-    the document" / "the extracted values plus the ones already linked".
-    NEVER phrase it as an outcome of applying ("what should happen to the
-    existing links when this runs", "add to the existing ones", "replace
-    whatever is currently linked") and NEVER as a suggestion-emission policy
-    ("suggest a value only when the extracted values add something new") — that
-    is the apply-time family above. The operator decides per suggestion at
-    review time; your job is only which set is suggested.
+    REPLACES the property's set with exactly that set. The script computes that
+    set from the TASK'S INPUT SOURCES ONLY — the current value of the property
+    it is proposing is never an input and the script never reads it. So NEVER
+    ask what should happen to the values already stored on the entity, and
+    NEVER offer options like "the extracted values plus the ones already
+    linked", "only the extracted values that are not yet linked", or "replace
+    whatever is currently linked". Those are not the operator's decision to
+    make here: keeping an existing value is a per-row choice at review time,
+    and letting the proposal depend on today's value would make the task's
+    held-out validation score meaningless.
+    The legitimate question is about the VALUE ITSELF, from the input alone:
+    "Which values should be suggested for `states`?" with options describing
+    what the extraction looks for ("every state named in the document" / "only
+    states named in the document header"). NEVER phrase it as an outcome of
+    applying ("what should happen to the existing links when this runs", "add
+    to the existing ones") and NEVER as a suggestion-emission policy ("suggest
+    a value only when the extracted values add something new") — that is the
+    apply-time family above.
   - "Should I apply this now?" / "when should it run?" / "shall I execute it
     against the instance?" — the operator runs it, manually, after reviewing
     the suggestions.

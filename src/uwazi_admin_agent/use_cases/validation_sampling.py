@@ -174,6 +174,7 @@ async def resolve_validation_set(
         shared_ids=shared_ids,
         labels=labels,
         mode=VALIDATION_AUTOMATIC if config.mode == VALIDATION_AUTOMATIC else VALIDATION_CUSTOM,
+        input_properties=sorted({str(name).strip() for name in config.input_properties if str(name).strip()}),
         selector_explanation=(config.selector_explanation or "").strip() if config.mode == VALIDATION_CUSTOM else "",
         created_at=now or datetime.now(timezone.utc),
     )

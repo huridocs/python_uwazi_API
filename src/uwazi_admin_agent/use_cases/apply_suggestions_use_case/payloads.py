@@ -566,9 +566,18 @@ def apply_units_total(
     — one unit each), each merge's source deletions, and each standalone file
     copy (one unit per target). This is the Run progress toast's denominator
     ("13/1230 suboperations").
+
+    CREATE rows are counted by their payload units ONLY. ``partition_for_apply``
+    reports them in ``whole_entity_rows`` too (their sharedId is the recorder's
+    ``dry-created-N`` placeholder, so they cannot ride the update path), but
+    :func:`build_apply_creates` is what writes them, and ``_write`` counts their
+    payload units as its batches land. Counting the same rows a second time here
+    made the toast's denominator exactly double the numerator for a
+    create-heavy selection ("3030/6060 suboperations" on a run that ended at
+    3030).
     """
     total = sum(payload_units(payload) for payload in (*updates, *creates))
-    total += len(whole_entity_rows)
+    total += sum(1 for row in whole_entity_rows if getattr(row, "op", "") not in CREATE_OPS)
     total += sum(len(sources) for _target, sources in (merges or []))
     total += len(file_moves or [])
     return total

@@ -42,6 +42,7 @@ from .core import (
     _check_drift_now,
     _discard_from_state,
     _drift_banner,
+    _performance_row,
     _poll_gate_toast,
     _poll_progress,
     _refresh_all,
@@ -173,6 +174,9 @@ def _build_page(run_id: str) -> None:
         # their identity so Run/Discard/Revert do not need the page payload.
         "_select_all": False,
         "_global_refs": {},
+        # Whole-result mode marks which checked ids came from the APPLIED side
+        # of the projection (they feed Revert only, never Run/Discard).
+        "_global_applied_ids": set(),
         # Which operations are expanded (the table's ``expanded`` prop is the
         # source of truth, which is what makes "Expand all" possible), and the
         # page-wide MODE ("all"/"none"/"mixed") that a page flip carries over:
@@ -203,31 +207,35 @@ def _build_page(run_id: str) -> None:
 
     with ui.column().classes("w-full items-center"):
         with ui.card().classes("w-full max-w-7xl"):
-            # Row 1: the hamburger ALONE, at the top right. The menu is the
-            # page's own corner control, so it gets a row of its own instead
-            # of sharing a row with the actions.
-            with ui.row().classes("w-full items-center justify-end q-mb-sm"):
+            # Row 1: the performance line (ALWAYS visible — "does this task
+            # work?" is the question the page opens with) and, at the far
+            # right, the hamburger menu that reveals the occasional controls.
+            # The score used to live inside the collapsible stats section as a
+            # card of its own, which buried the one number the operator came
+            # for and made the top of the page a stack of unrelated boxes.
+            with ui.row().classes("w-full items-center justify-between gap-2 no-wrap"):
+                _performance_row(state)
                 _header_menu(state, run_id, has_script=bool(detail.script))
-            # The three collapsible sections: the stats (the header cards), the
+            # The three collapsible sections: the counters (stats), the
             # free-text search and the filters. The FILTERS are visible when
             # the page opens — they narrow the table, which is the operator's
-            # first job — while the stats and the search start hidden. The menu
-            # toggles each independently: the search sits OUTSIDE the filters
-            # section so showing it works even when the filters are collapsed.
-            with ui.column().classes("w-full") as stats_section:
-                state["_stats_section"] = stats_section
-                _summary_row(state)
+            # first job — while the counters and the search start hidden. The
+            # menu toggles each independently: the search sits OUTSIDE the
+            # filters section so showing it works even when the filters are
+            # collapsed.
             with ui.column().classes("w-full q-mb-sm") as search_section:
                 state["_search_section"] = search_section
                 _search_bar(state)
             with ui.column().classes("w-full") as filters_section:
                 state["_filters_section"] = filters_section
                 _filter_bar(state)
-            # Row 2: the actions, aligned LEFT. They act on the rows the
-            # operator ticks, so they sit with the table, on the side the
-            # reading starts from.
-            with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
-                _action_bar(state)
+            with ui.column().classes("w-full") as stats_section:
+                state["_stats_section"] = stats_section
+                _summary_row(state)
+            # Row 2: the selection-driven actions on the LEFT (they act on the
+            # rows the operator ticks, so they sit with the table, on the side
+            # the reading starts from) and the view controls on the RIGHT.
+            _action_bar(state)
             # The drift verdict sits BELOW the action bar, just above the
             # table: it is the state of the data the table shows, so it reads
             # as a banner over the table, not as one more control above it.
@@ -238,9 +246,8 @@ def _build_page(run_id: str) -> None:
             # the stored verdict describes when it was taken, not now.
             _change_table(state)
             # Apply the initial visibility the menu labels already advertise:
-            # the filters ON, the stats and the search off. Entering the page
-            # ALWAYS resets to this — the filters are there to be used, while
-            # the search and the counters are reached from the menu.
+            # the filters ON, the counters and the search off. Entering the page
+            # ALWAYS resets to this.
             state["_stats_section"].set_visibility(state["_stats_visible"])
             state["_filters_section"].set_visibility(state["_filters_visible"])
             state["_search_section"].set_visibility(state["_search_visible"])
@@ -375,96 +382,104 @@ def _search_bar(state: dict[str, Any]) -> None:
 
 
 def _filter_bar(state: dict[str, Any]) -> None:
-    """The filters, in one row of selects plus the Reset button.
+    """The filters: one labelled strip of selects plus the Reset button.
 
-    The row is aligned RIGHT (``justify-end``) so it sits under the table's
-    right edge, while the controls keep their left-to-right reading order:
-    Property, Language, Operation, Status, then Reset. The free-text search has
-    its own, independently toggled section (see :func:`_search_bar`).
+    The row is aligned LEFT and starts with a small "Filters" caption, so the
+    controls read as one cohesive block instead of four unrelated dropdowns
+    floating at the table's right edge. Each select keeps the same height and a
+    minimum width, and Reset sits LAST with a vertical rule in front of it: it
+    undoes the whole row, so it reads as the row's own exit.
     """
-    with ui.column().classes("w-full q-mb-sm"):
-        with ui.row().classes("w-full items-center justify-end gap-2"):
-            # The Property filter comes FIRST: it decides WHAT the table shows
-            # (every property the task writes is an option, and picking one
-            # narrows the table to the suboperations writing that property).
-            # Options carry NO score: the run's ONE performance number lives in
-            # the validation card, so the two cannot compete or disagree.
-            labels_by_template = _template_labels(state["run_id"])
-            state["_template_labels"] = labels_by_template
-            state["_labels"] = _merged_labels(labels_by_template)
-            # Types ride along with labels so date values render as calendar
-            # dates in the table and in the entity window.
-            types_by_template = _template_types(state["run_id"])
-            state["_template_types"] = types_by_template
-            state["_types"] = _merged_types(types_by_template)
-            # Every dropdown is counted against the OTHER active filters (see
-            # ``_refresh_filter_counts``): the labels say how many rows each
-            # choice would leave, and a choice that matches nothing under them is
-            # not offered at all.
-            counts = get_filter_counts(
-                page_instance_url(),
-                state["run_id"],
-                filter_from_controls(
-                    property_name=state["property"],
-                    language=state["language"],
-                    limit=100000,
-                ),
+    with (
+        ui.row()
+        .classes("w-full items-center gap-2 no-wrap q-py-xs")
+        .style("border-top: 1px solid rgba(0,0,0,0.08); padding-top: 4px;")
+    ):
+        ui.icon("filter_alt", color="grey-7").classes("text-body2")
+        ui.label("Filters").classes("text-caption text-grey-7 q-mr-sm")
+        # The Property filter comes FIRST: it decides WHAT the table shows
+        # (every property the task writes is an option, and picking one
+        # narrows the table to the suboperations writing that property).
+        # Options carry NO score: the run's ONE performance number lives in
+        # the validation card, so the two cannot compete or disagree.
+        labels_by_template = _template_labels(state["run_id"])
+        state["_template_labels"] = labels_by_template
+        state["_labels"] = _merged_labels(labels_by_template)
+        # Types ride along with labels so date values render as calendar
+        # dates in the table and in the entity window.
+        types_by_template = _template_types(state["run_id"])
+        state["_template_types"] = types_by_template
+        state["_types"] = _merged_types(types_by_template)
+        # Every dropdown is counted against the OTHER active filters (see
+        # ``_refresh_filter_counts``): the labels say how many rows each
+        # choice would leave, and a choice that matches nothing under them is
+        # not offered at all.
+        counts = get_filter_counts(
+            page_instance_url(),
+            state["run_id"],
+            filter_from_controls(
+                property_name=state["property"],
+                language=state["language"],
+                limit=100000,
+            ),
+        )
+        state["_property_select"] = (
+            ui.select(
+                property_filter_options(state["_labels"], counts.get("property", {}), state["property"]),
+                value=state["property"],
+                label="Property",
+                on_change=lambda e: _set_filter(state, "property", e.value or ""),
             )
-            state["_property_select"] = (
-                ui.select(
-                    property_filter_options(state["_labels"], counts.get("property", {}), state["property"]),
-                    value=state["property"],
-                    label="Property",
-                    on_change=lambda e: _set_filter(state, "property", e.value or ""),
-                )
-                .props("dense outlined")
-                .classes("min-w-[240px]")
+            .props("dense outlined")
+            .classes("min-w-[240px]")
+        )
+        # The Language filter names the language a SUBOPERATION is written
+        # in: the operation row is one entity whatever languages it writes,
+        # so the language has to be selectable below the row. It sits right
+        # after Property: both narrow WHAT the table shows.
+        state["_language_select"] = (
+            ui.select(
+                language_filter_options(counts.get("language", {}), state["language"]),
+                value=state["language"],
+                label="Language",
+                on_change=lambda e: _set_filter(state, "language", e.value or ""),
             )
-            # The Language filter names the language a SUBOPERATION is written
-            # in: the operation row is one entity whatever languages it writes,
-            # so the language has to be selectable below the row. It sits right
-            # after Property: both narrow WHAT the table shows.
-            state["_language_select"] = (
-                ui.select(
-                    language_filter_options(counts.get("language", {}), state["language"]),
-                    value=state["language"],
-                    label="Language",
-                    on_change=lambda e: _set_filter(state, "language", e.value or ""),
-                )
-                .props("dense outlined")
-                .classes("min-w-[150px]")
+            .props("dense outlined")
+            .classes("min-w-[150px]")
+        )
+        # Operation and Status are MULTI-selects: an operator often wants to
+        # see two statuses (or two operations) at once. No "any" option — an empty
+        # selection is the unfiltered state, and the Reset button clears it.
+        # Their options list only the values the run actually has under the
+        # other filters, each with its row count (see _refresh_filter_counts
+        # for the live refresh).
+        state["_op_select"] = (
+            ui.select(
+                filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
+                multiple=True,
+                value=state["op"],
+                label="Operation",
+                on_change=lambda e: _set_filter(state, "op", e.value or []),
             )
-            # Operation and Status are MULTI-selects: an operator often wants to
-            # see two statuses (or two operations) at once. No "any" option — an empty
-            # selection is the unfiltered state, and the Reset button clears it.
-            # Their options list only the values the run actually has under the
-            # other filters, each with its row count (see _refresh_filter_counts
-            # for the live refresh).
-            state["_op_select"] = (
-                ui.select(
-                    filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
-                    multiple=True,
-                    value=state["op"],
-                    label="Operation",
-                    on_change=lambda e: _set_filter(state, "op", e.value or []),
-                )
-                .props("dense outlined use-chips clearable")
-                .classes("min-w-[190px]")
+            .props("dense outlined use-chips clearable")
+            .classes("min-w-[190px]")
+        )
+        state["_status_select"] = (
+            ui.select(
+                filter_options(_STATUS_LABELS, counts.get("status", {}), state["status"]),
+                multiple=True,
+                value=state["status"],
+                label="Status",
+                on_change=lambda e: _set_filter(state, "status", e.value or []),
             )
-            state["_status_select"] = (
-                ui.select(
-                    filter_options(_STATUS_LABELS, counts.get("status", {}), state["status"]),
-                    multiple=True,
-                    value=state["status"],
-                    label="Status",
-                    on_change=lambda e: _set_filter(state, "status", e.value or []),
-                )
-                .props("dense outlined use-chips clearable")
-                .classes("min-w-[140px]")
-            )
-            # The clear button is the LAST item of the row: it undoes the whole
-            # row, so it reads as the row's own exit.
-            ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense")
+            .props("dense outlined use-chips clearable")
+            .classes("min-w-[140px]")
+        )
+        # The clear button is the LAST item of the row: it undoes the whole
+        # row, so it reads as the row's own exit, behind a rule that sets it
+        # apart from the controls it clears.
+        ui.separator().props("vertical").classes("q-mx-sm").style("height: 24px")
+        ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense")
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
@@ -519,38 +534,47 @@ def _reset_filters(state: dict[str, Any]) -> None:
 
 
 def _action_bar(state: dict[str, Any]) -> None:
-    """The selection-driven action bar (the checked rows carry the count)."""
-    with ui.row().classes("w-full items-center gap-2"):
-        state["_run_button"] = ui.button(
-            run_button_label(0),
-            icon="play_arrow",
-            on_click=lambda: _run_from_state(state),
-        ).props("dense color=primary")
-        state["_bulk_revert_button"] = ui.button(
-            bulk_revert_label(0),
-            icon="undo",
-            on_click=lambda: _revert_from_state(state),
-        ).props("dense flat color=indigo")
-        # The bulk Discard: marking the checked operations as "will not be
-        # executed" one by one is not workable on a table of thousands, so the
-        # selection carries it too.
-        state["_bulk_discard_button"] = ui.button(
-            bulk_discard_label(0),
-            icon="block",
-            on_click=lambda: _discard_from_state(state),
-        ).props("dense flat color=negative")
-        # These last two are view controls, not actions on the selection, so a
-        # spacer pushes them to the right edge, away from Run/Revert/Discard.
-        ui.space()
-        state["_select_all_button"] = ui.button(
-            select_all_label(0, False),
-            icon="select_all",
-            on_click=lambda: _toggle_select_all(state),
-        ).props("dense flat")
-        # The expand toggle changes what the table SHOWS, not what the operator
-        # has selected, so it sits at the far right, away from the actions.
-        state["_expand_button"] = ui.button(
-            "Expand all",
-            icon="unfold_more",
-            on_click=lambda: _toggle_expand_all(state),
-        ).props("dense flat")
+    """The table's control row: the selection actions, then the view controls.
+
+    ONE row with two visually distinct groups, separated by a vertical rule: on
+    the left the actions that act on the checked rows (Run / Revert / Discard,
+    each carrying its count), on the right the controls that change what the
+    table SHOWS (Select all results / Expand all). They used to be nine flat
+    buttons strung across the full width with nothing but a spacer between
+    them, which made "Run" and "Expand all" read as peers.
+    """
+    with ui.row().classes("w-full items-center gap-2 no-wrap q-mb-sm"):
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            state["_run_button"] = ui.button(
+                run_button_label(0),
+                icon="play_arrow",
+                on_click=lambda: _run_from_state(state),
+            ).props("dense color=primary")
+            state["_bulk_revert_button"] = ui.button(
+                bulk_revert_label(0),
+                icon="undo",
+                on_click=lambda: _revert_from_state(state),
+            ).props("dense flat color=indigo")
+            # The bulk Discard: marking the checked operations as "will not be
+            # executed" one by one is not workable on a table of thousands, so
+            # the selection carries it too.
+            state["_bulk_discard_button"] = ui.button(
+                bulk_discard_label(0),
+                icon="block",
+                on_click=lambda: _discard_from_state(state),
+            ).props("dense flat color=negative")
+        ui.separator().props("vertical").classes("q-mx-sm").style("height: 24px")
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            state["_select_all_button"] = ui.button(
+                select_all_label(0, False),
+                icon="select_all",
+                on_click=lambda: _toggle_select_all(state),
+            ).props("dense flat")
+            # The expand toggle changes what the table SHOWS, not what the
+            # operator has selected, so it sits beside Select all rather than
+            # among the actions.
+            state["_expand_button"] = ui.button(
+                "Expand all",
+                icon="unfold_more",
+                on_click=lambda: _toggle_expand_all(state),
+            ).props("dense flat")

@@ -110,17 +110,6 @@ FALLBACK_LABELS: dict[str, str] = {
     FALLBACK_VALUE: "Suggest a specific fallback value",
 }
 
-EXISTING_SKIP = "skip"
-EXISTING_REPLACE = "replace"
-EXISTING_CUSTOM = "custom"
-EXISTING_MODES: tuple[str, ...] = (EXISTING_SKIP, EXISTING_REPLACE, EXISTING_CUSTOM)
-
-EXISTING_VALUE_LABELS: dict[str, str] = {
-    EXISTING_SKIP: "Skip the entity (do not generate a suggestion if data already exists)",
-    EXISTING_REPLACE: "Suggest a replacement (propose a new value to overwrite the existing one)",
-    EXISTING_CUSTOM: "Custom rule",
-}
-
 OUTPUT_ALL = "all"
 OUTPUT_SPECIFIC = "specific"
 OUTPUT_SOURCE = "source"
@@ -366,8 +355,6 @@ class GuidedAnswers:
     fallback_mode: str = FALLBACK_BLANK
     fallback_value: str = ""
     fill_rules: str = ""
-    existing_value_mode: str = EXISTING_REPLACE
-    existing_value_rule: str = ""
     custom_description: str = ""
     create_source: str = CREATE_SOURCE_EXISTING
     create_source_properties: tuple[str, ...] = ()
@@ -425,10 +412,6 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
             else:
                 if not answers.fill_rules.strip():
                     errors.append("Describe the rules or formatting the generated value should follow.")
-                if answers.existing_value_mode not in EXISTING_MODES:
-                    errors.append("Choose how to handle a property that already has a value.")
-                if answers.existing_value_mode == EXISTING_CUSTOM and not answers.existing_value_rule.strip():
-                    errors.append("Describe the custom rule for properties that already have a value.")
         elif answers.goal == GOAL_CUSTOM:
             if not answers.custom_description.strip():
                 errors.append("Describe what the task should analyze, extract or suggest.")
@@ -677,21 +660,10 @@ def _logic_lines(answers: GuidedAnswers) -> list[str]:
             f"- **Classification rules:** {_classification_rules_text(prop_type)}",
             f"- **Fallback:** {fallback}",
         ]
-    if answers.existing_value_mode == EXISTING_SKIP:
-        existing = "Skip the entity when the property already has a value (generate no suggestion)."
-    elif answers.existing_value_mode == EXISTING_CUSTOM:
-        existing = f"Apply this rule: {answers.existing_value_rule.strip()}"
-    else:
-        existing = "Suggest a replacement value that overwrites the existing one."
     lines = [f"- **Target Property:** {target}"]
     if prop_type:
         lines.append(f"- **Target Property Type:** {prop_type}")
-    lines.extend(
-        [
-            f"- **Extraction/Formatting Rules:** {answers.fill_rules.strip()}",
-            f"- **Existing Value Handling:** {existing}",
-        ]
-    )
+    lines.append(f"- **Extraction/Formatting Rules:** {answers.fill_rules.strip()}")
     return lines
 
 
@@ -876,11 +848,6 @@ def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] |
 __all__ = [
     "CLASSIFY_TARGET_PROPERTY_TYPES",
     "DEFAULT_DOCUMENT_GUIDANCE",
-    "EXISTING_CUSTOM",
-    "EXISTING_MODES",
-    "EXISTING_REPLACE",
-    "EXISTING_SKIP",
-    "EXISTING_VALUE_LABELS",
     "FALLBACK_BLANK",
     "FALLBACK_LABELS",
     "FALLBACK_MODES",

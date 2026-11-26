@@ -412,11 +412,23 @@ def suboperation_row(
     # A validation row is NEVER runnable and NEVER selectable: its Run would write
     # a held-out entity and destroy the very measurement it exists for.
     runnable = not sub.is_validation and is_runnable_status(status_label) and not blocked and sub.op not in DISPLAY_ONLY_OPS
-    selectable = is_selectable(sub.op) and runnable
+    # A WRITTEN row is still a selection target: the top Revert acts on the
+    # entities the operator checks, and an applied row was the one thing that
+    # could not be checked. ``in_place`` is the operation-level undo rule (a
+    # delete or a create-merge reverts at run level, a plain update/create row
+    # reverts here), so an applied part of such an operation enters the
+    # selection for REVERT only — never for Run or Discard.
+    revert_selectable = (
+        in_place and not sub.is_validation and sub.status is SuggestionStatus.APPLIED and sub.op not in DISPLAY_ONLY_OPS
+    )
+    run_selectable = is_selectable(sub.op) and runnable
+    selectable = run_selectable or revert_selectable
     if blocked:
         note = rerun_blocked_reason(sub.op)
     elif sub.is_validation:
         note = "validation row — evidence for the score; promote the entity to run it"
+    elif revert_selectable:
+        note = "already applied — select it to revert this write"
     else:
         note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
     property_type = (types or {}).get(sub.property_name or "")
@@ -479,6 +491,11 @@ def suboperation_row(
         # inflate Run (N) / Discard (N). A REVERTED delete/merge is visible too,
         # but its old sharedId cannot be written again.
         "runnable": runnable,
+        # Why the part can be selected: Run/Discard read ``run_selectable``,
+        # Revert reads ``revert_selectable``, and the checkbox is offered for
+        # either (the action buttons carry the counts that apply).
+        "run_selectable": run_selectable,
+        "revert_selectable": revert_selectable,
         "rerun_blocked": blocked,
         "rerun_blocked_reason": rerun_blocked_reason(sub.op) if blocked else "",
         "selectable": selectable,
@@ -557,6 +574,10 @@ def _structural_row(
         "rerun_blocked": blocked,
         "rerun_blocked_reason": rerun_blocked_reason(op) if blocked else "",
         "selectable": False,
+        # A structural part is never addressed on its own: its operation's row
+        # is the thing a Run/Revert acts on.
+        "run_selectable": False,
+        "revert_selectable": False,
         "independent": False,
         "checked": False,
         "note": rerun_blocked_reason(op) if blocked else (lock_note(op) or "part of the operation — select the operation"),
@@ -1100,6 +1121,10 @@ def operation_row(
         "has_validated": validated_counts(subs)[1] > 0,
         "has_checkable": any(sub["selectable"] for sub in subs) and not rerun_blocked,
         "has_runnable": any(sub.get("runnable") for sub in subs) and not rerun_blocked,
+        # Whether ANY part is selectable at all (Run or Revert). The row
+        # checkbox is enabled on this: an applied operation has nothing to run,
+        # but its write is exactly what the top Revert restores.
+        "has_selectable": any(sub.get("selectable") for sub in subs) and not rerun_blocked,
         "border_color": OP_BORDER_COLORS.get(item.ops[0] if item.ops else "", DEFAULT_BORDER_COLOR),
         "in_place": in_place,
         "revertable": in_place and item.applied > 0,

@@ -319,6 +319,7 @@ class GeneratePredictionsUseCase:
         plan_kind: str | None = None,
         is_validation_pass: bool = False,
         exclude_scope: set[str] | None = None,
+        hidden_property: str | None = None,
     ) -> PredictionPass:
         """Run one prediction pass and persist its suggestions.
 
@@ -376,7 +377,9 @@ class GeneratePredictionsUseCase:
 
         ledger = LlmLedger(budget)
         records: list[dict[str, Any]] = []
-        result, error, aborted = await asyncio.to_thread(self._run_script, script, records, ledger, run_id, scope, excluded)
+        result, error, aborted = await asyncio.to_thread(
+            self._run_script, script, records, ledger, run_id, scope, excluded, hidden_property
+        )
 
         # 1. RENDER the plan into the rows the table would show. Hydration is what
         #    reveals that a proposed value equals the stored one; the outcome
@@ -543,6 +546,7 @@ class GeneratePredictionsUseCase:
         run_id: str,
         scope: list[str] | None,
         excluded: set[str] | None = None,
+        hidden_property: str | None = None,
     ) -> tuple[str | None, str | None, bool]:
         """Execute the script on a worker thread's own loop (the sandbox pattern).
 
@@ -580,6 +584,7 @@ class GeneratePredictionsUseCase:
                 apply_mode=self._llm_runtime is not None,
                 entity_scope=set(scope) if scope is not None else None,
                 exclude_scope=excluded or None,
+                hidden_property=hidden_property,
             )
             result, error = run_script_sync(script, namespace)
         finally:

@@ -312,15 +312,22 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
   multidate, multidaterange): the list you put in `metadata[prop]` is EXACTLY
   what the property will hold after the Run - Uwazi replaces the property's
   whole list, it does not append to it. So:
-    - when the task says the extracted values must be ADDED to whatever the
-      entity already links/selects, READ the current list first and propose
-      `current + extracted` (deduped);
-    - when the task says REPLACE, propose only the extracted list;
-    - either way, decide from the task whether existing values should be KEPT
-      (`current + extracted`, deduped) or REPLACED, and never leave it implicit:
-      record the FULL set you intend - a value you leave out reads as a value
-      that will be REMOVED. The review table shows one chip per proposed value
-      and the operator accepts or drops values there before Run.
+    - the proposed set is computed from the TASK'S OWN INPUT SOURCES only
+      (the document, the paragraph, the operator's instructions): the value
+      the entity holds today is NEVER an input to the proposal;
+    - do NOT read the entity's current value of the property you are
+      proposing and do NOT merge it into the proposal (`current + extracted`,
+      "keep the ones already linked", "add to what exists"): a suggestion that
+      depends on today's stored value is not reproducible and it contaminates
+      the run's held-out validation score with the very value being measured;
+    - if the task genuinely needs the entity's data, it must say so as an
+      INPUT (a source property the operator selected), and then that input is
+      read through the normal discovery reads - never as a silent peek at the
+      target property;
+    - record the FULL set your own extraction produced - a value you leave out
+      reads as a value that will be REMOVED. The review table shows one chip
+      per proposed value and the operator accepts or drops values there before
+      Run; keeping an existing value is that per-row decision, not the script's.
   Relationship lists carry the target `shared_id`s (`["sid", ...]`), not titles.
 
   create_entities(entities_dicts, language='en')

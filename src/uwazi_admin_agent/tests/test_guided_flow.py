@@ -5,13 +5,11 @@ from uwazi_admin_agent.domain.guided_task import (
     CREATE_SOURCE_DOCUMENTS,
     CREATE_SOURCE_EXISTING,
     CREATE_SOURCE_UNRELATED,
-    EXISTING_CUSTOM,
     FALLBACK_VALUE,
     GOAL_CREATE,
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
-    OUTPUT_SOURCE,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
@@ -20,14 +18,16 @@ from uwazi_admin_agent.domain.guided_task import (
 )
 
 
-def test_fill_flow_only_shows_the_custom_existing_value_follow_up_when_selected() -> None:
-    answers = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="text")
-    assert "existing_value_rule" not in guided_question_ids(answers)
-    assert next_question_id("existing_value_mode", answers) == "scope"
-
-    custom = GuidedAnswers(**{**answers.__dict__, "existing_value_mode": EXISTING_CUSTOM})
-    assert next_question_id("existing_value_mode", custom) == "existing_value_rule"
-    assert next_question_id("existing_value_rule", custom) == "scope"
+def test_fill_flow_never_asks_about_the_current_value_of_the_property() -> None:
+    """Keeping/replacing an existing value is a per-row review decision, and a
+    suggestion must be computed from the task's input — so neither the question
+    nor its custom-rule follow-up is ever offered."""
+    extracting = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="text")
+    questions = guided_question_ids(extracting)
+    assert "existing_value_mode" not in questions
+    assert "existing_value_rule" not in questions
+    assert next_question_id("target_property", extracting) == "scope"
+    assert next_question_id("generation", extracting) == "review"
 
 
 def test_fill_target_type_selects_classification_or_extraction_branch() -> None:
@@ -41,8 +41,8 @@ def test_fill_target_type_selects_classification_or_extraction_branch() -> None:
     assert question_error("generation", classifying) is None
 
     extract_questions = guided_question_ids(extracting)
-    assert "existing_value_mode" in extract_questions
     assert "fallback_mode" not in extract_questions
+    assert "existing_value_mode" not in extract_questions
     assert question_error("generation", extracting) is not None
 
 

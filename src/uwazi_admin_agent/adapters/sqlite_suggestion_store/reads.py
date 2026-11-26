@@ -368,6 +368,7 @@ class ReadsMixin:
         f: SuggestionFilter,
         *,
         runnable_only: bool = False,
+        include_applied: bool = False,
     ) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection (SQL).
 
@@ -378,7 +379,9 @@ class ReadsMixin:
         ``info`` rows are excluded: they can never be selected or run.
         ``runnable_only`` narrows to the statuses a Run may write, so a
         whole-result selection cannot include rows that are already applied or
-        discarded.
+        discarded. ``include_applied`` adds the APPLIED rows back: they are not
+        Run work, but they are exactly what the top Revert restores, so "select
+        all results" must reach them too.
         """
         where, params = build_where(f, run_id)
         # Holdout rows are score evidence: no selection (Run, Discard, Revert)
@@ -386,9 +389,10 @@ class ReadsMixin:
         clause = f"WHERE {where} AND op NOT IN ({', '.join('?' for _ in DISPLAY_ONLY_OPS)}) AND is_validation = 0"
         query_params: list[Any] = [*params, *sorted(DISPLAY_ONLY_OPS)]
         if runnable_only:
-            placeholders = ", ".join("?" for _ in RUNNABLE_STATUSES)
+            statuses = [*RUNNABLE_STATUSES, *([SuggestionStatus.APPLIED.value] if include_applied else [])]
+            placeholders = ", ".join("?" for _ in statuses)
             clause += f" AND status IN ({placeholders})"
-            query_params.extend(RUNNABLE_STATUSES)
+            query_params.extend(statuses)
             # A reverted delete/merge row is NOT runnable again: its revert
             # re-created an entity with a fresh sharedId, so the recorded row's
             # old id is dead. Keep it out of "select all results" too.

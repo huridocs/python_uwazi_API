@@ -209,9 +209,19 @@ def _current_client() -> Any:
     ``context.client`` would CREATE a placeholder client when the task has no
     slot (script mode, tests), so the slot stack is inspected first: a check
     that must not have side effects cannot use the convenience property.
+
+    A slot whose parent element was DELETED (the entity window re-renders its
+    hosts, so a handler can still be attached inside a slot that no longer has
+    a parent) must read as "no client" instead of raising: this is a plain
+    liveness check, and a deleted container is not a live session.
     """
     stack = Slot.get_stack()
-    return stack[-1].parent.client if stack else None
+    if not stack:
+        return None
+    try:
+        return stack[-1].parent.client
+    except RuntimeError:  # the parent element was deleted
+        return None
 
 
 def session_is_active(instance: str) -> bool:

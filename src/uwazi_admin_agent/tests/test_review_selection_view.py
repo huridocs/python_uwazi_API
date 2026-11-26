@@ -102,3 +102,51 @@ def test_prune_selection_drops_a_language_that_left_the_page() -> None:
     remaining = [_row("s1", "es")]
 
     assert prune_selection(selected, remaining) == [selected[0]]
+
+
+def test_the_revert_side_of_a_selection_reads_applied_parts_only() -> None:
+    """A tick means different things to Run and Revert: an applied part has
+    nothing to run and everything to undo. The flag on the payload (not the
+    status badge) decides, because the badge of a whole-entity op is derived."""
+    from uwazi_admin_agent.drivers.web.review_page.core import _checked_flags
+
+    class _Table:
+        is_deleted = False
+        rows = [
+            {
+                "row_key": "entity-a",
+                "subs": [
+                    {"id": 1, "runnable": True, "run_selectable": True, "revert_selectable": False},
+                    {"id": 2, "runnable": False, "run_selectable": False, "revert_selectable": True},
+                ],
+            },
+            {
+                "row_key": "entity-b",
+                "subs": [{"id": 3, "runnable": True, "run_selectable": True, "revert_selectable": False}],
+            },
+        ]
+
+    state = {"_table": _Table(), "_checked": {1, 2, 3}}
+
+    assert [ref[0] for ref in _checked_flags(state, "run")] == [1, 3]
+    assert [ref[0] for ref in _checked_flags(state, "revert")] == [2]
+
+
+def test_a_whole_result_selection_splits_its_applied_ids_out_of_run() -> None:
+    """On another page a checked id has no payload flags, so the projection's
+    own split says which side it belongs to."""
+    from uwazi_admin_agent.drivers.web.review_page.core import _checked_flags
+
+    class _Table:
+        is_deleted = False
+        rows: list[dict] = []
+
+    state = {
+        "_table": _Table(),
+        "_checked": {11, 12},
+        "_global_refs": {11: (11, "a", None, "update"), 12: (12, "b", None, "update")},
+        "_global_applied_ids": {12},
+    }
+
+    assert [ref[0] for ref in _checked_flags(state, "run")] == [11]
+    assert [ref[0] for ref in _checked_flags(state, "revert")] == [11, 12]

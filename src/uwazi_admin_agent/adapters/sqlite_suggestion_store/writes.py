@@ -385,13 +385,32 @@ class WritesMixin:
             len(stale),
         )
 
-    def promote_to_regular(self, run_id: str, shared_id: str) -> int:
-        """Turn one entity's validation rows into regular reviewable work.
+    def promote_to_regular(
+        self,
+        run_id: str,
+        shared_id: str,
+        *,
+        label_property: str | None = None,
+        label: Any = None,
+    ) -> int:
+        """Turn one entity's rows into regular reviewable work.
 
-        The rows keep their proposal and become PENDING with their review
-        columns cleared: the entity just LEFT the holdout, so any earlier
-        decision about it is meaningless. The set's own bookkeeping (shrinking
-        and version bump) belongs to the caller.
+        TWO kinds of row belong to an entity that left the holdout:
+
+        - its validation rows (``is_validation = 1``), which become PENDING with
+          their review columns cleared — the entity just LEFT the holdout, so any
+          earlier decision about it is meaningless;
+        - its REGULAR rows of the measured property, which become PENDING too.
+          They were recorded by the production pass from the live value, so the
+          table showed ``validate`` for the entity while its runnable work sat
+          under a different row: pressing Run wrote the held-out value back
+          (the pre-flight refused it) and the operator saw "nothing to run".
+          ``label_property``/``label`` stamp those rows' ``current_value`` with
+          the frozen label the score measures, so the promoted row reads exactly
+          like the validation row it replaces.
+
+        The set's own bookkeeping (shrinking and version bump) belongs to the
+        caller.
         """
         cursor = self._execute(
             """
@@ -407,8 +426,73 @@ class WritesMixin:
                 shared_id,
             ],
         )
-        logger.info("promoted validation rows run={} shared_id={}: {}", run_id, shared_id, cursor.rowcount)
-        return int(cursor.rowcount)
+        promoted = int(cursor.rowcount)
+        if label_property:
+            regular = self._execute(
+                """
+                UPDATE suggestion
+                   SET status = ?, is_validation = 0, discard_reason = NULL,
+                       rejected_values = NULL, selected_values = NULL, reviewed_at = ?,
+                       current_value = ?, match_state = ?
+                 WHERE run_id = ? AND shared_id = ? AND is_validation = 0 AND property_name = ?
+                """,
+                [
+                    SuggestionStatus.PENDING.value,
+                    _dt_to_text(datetime.now().astimezone()),
+                    _json_or_none(label),
+                    None,
+                    run_id,
+                    shared_id,
+                    label_property,
+                ],
+            )
+            promoted += int(regular.rowcount)
+        logger.info("promoted rows run={} shared_id={}: {}", run_id, shared_id, promoted)
+        return promoted
+
+    def mark_validation_rows(
+        self,
+        run_id: str,
+        shared_id: str,
+        *,
+        label_for_language: Any = None,
+    ) -> int:
+        """Turn one entity's EXISTING rows into holdout evidence (in place).
+
+        Adding an entity to the validation set used to write only
+        ``validation.yaml``: the table kept showing that entity's regular rows,
+        so the operation still read ``update`` and its Run was still offered —
+        the new sample was invisible until the next scoring pass, and pressing
+        "Add to validation" looked like a no-op. There is no second row set to
+        build here: the production rows already carry the proposal, so they are
+        re-marked as evidence. ``label_for_language(language)`` supplies the
+        frozen label each row's ``current_value`` takes, so a validation row
+        reads exactly like one the evaluation pass records.
+        """
+        rows = self._query(
+            "SELECT id, language FROM suggestion WHERE run_id = ? AND shared_id = ? AND is_validation = 0",
+            [run_id, shared_id],
+        )
+        touched = 0
+        for row in rows:
+            label = label_for_language(row["language"]) if label_for_language is not None else None
+            cursor = self._execute(
+                """
+                UPDATE suggestion
+                   SET is_validation = 1, status = ?, discard_reason = NULL, reviewed_at = ?,
+                       current_value = COALESCE(?, current_value)
+                 WHERE id = ?
+                """,
+                [
+                    SuggestionStatus.PENDING.value,
+                    _dt_to_text(datetime.now().astimezone()),
+                    _json_or_none(label) if label is not None else None,
+                    int(row["id"]),
+                ],
+            )
+            touched += int(cursor.rowcount)
+        logger.info("rows marked as validation run={} shared_id={}: {}", run_id, shared_id, touched)
+        return touched
 
     def drop_validation_rows(self, run_id: str, shared_id: str) -> int:
         """Delete one entity's validation rows (it left the holdout without promotion)."""

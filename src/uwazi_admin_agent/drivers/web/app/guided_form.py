@@ -23,8 +23,6 @@ from uwazi_admin_agent.domain.guided_flow import (
     CUSTOM_DESCRIPTION_QUESTION,
     DOCUMENT_GUIDANCE_QUESTION,
     EXAMPLES_QUESTION,
-    EXISTING_VALUE_MODE_QUESTION,
-    EXISTING_VALUE_RULE_QUESTION,
     FALLBACK_MODE_QUESTION,
     FALLBACK_VALUE_QUESTION,
     FILL_RULES_QUESTION,
@@ -49,7 +47,6 @@ from uwazi_admin_agent.domain.guided_flow import (
 from uwazi_admin_agent.domain.guided_task import (
     CREATE_SOURCE_DOCUMENTS,
     CREATE_SOURCE_LABELS,
-    EXISTING_VALUE_LABELS,
     FALLBACK_BLANK,
     FALLBACK_LABELS,
     FALLBACK_VALUE,
@@ -89,8 +86,6 @@ _QUESTION_TITLES = {
     TEMPLATE_QUESTION: "Which templates should be analyzed?",
     CUSTOM_DESCRIPTION_QUESTION: "What should the task do?",
     TARGET_PROPERTY_QUESTION: "Which property should receive the suggestion?",
-    EXISTING_VALUE_MODE_QUESTION: "What if the property already has a value?",
-    EXISTING_VALUE_RULE_QUESTION: "What custom rule should apply to existing values?",
     FALLBACK_MODE_QUESTION: "What if no value clearly applies?",
     FALLBACK_VALUE_QUESTION: "What fallback value should be suggested?",
     SCOPE_QUESTION: "Which entities should be included?",
@@ -331,7 +326,6 @@ def _render_question(state: dict[str, Any]) -> None:
 
 _AUTO_ADVANCE_QUESTIONS = frozenset(
     {
-        EXISTING_VALUE_MODE_QUESTION,
         FALLBACK_MODE_QUESTION,
         SCOPE_QUESTION,
         INPUT_LANGUAGE_MODE_QUESTION,
@@ -422,10 +416,6 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             answers.examples,
             placeholder="e.g. 'Plaintiff was granted leave to appeal' -> 'Leave to appeal: granted'",
         )
-    elif question == EXISTING_VALUE_MODE_QUESTION:
-        _radio(state, EXISTING_VALUE_LABELS, answers.existing_value_mode, on_change=lambda: _next(state))
-    elif question == EXISTING_VALUE_RULE_QUESTION:
-        _input(state, "existing_value_rule", answers.existing_value_rule, "Custom rule")
     elif question == FALLBACK_MODE_QUESTION:
         _radio(
             state,
@@ -641,7 +631,6 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
             updates["metadata_properties"] = ()
     elif question in _AUTO_ADVANCE_QUESTIONS:
         field = {
-            EXISTING_VALUE_MODE_QUESTION: "existing_value_mode",
             FALLBACK_MODE_QUESTION: "fallback_mode",
             SCOPE_QUESTION: "entity_scope",
             INPUT_LANGUAGE_MODE_QUESTION: "input_language_mode",
@@ -668,7 +657,6 @@ def _commit_current(state: dict[str, Any]) -> GuidedAnswers:
             updates["fallback_value"] = ""
     elif question in {
         CUSTOM_DESCRIPTION_QUESTION,
-        EXISTING_VALUE_RULE_QUESTION,
         FALLBACK_VALUE_QUESTION,
         SCOPE_FILTER_QUESTION,
         CREATE_COUNT_QUESTION,

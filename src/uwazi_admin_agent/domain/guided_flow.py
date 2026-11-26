@@ -6,13 +6,11 @@ from .guided_task import (
     CREATE_SOURCE_DOCUMENTS,
     CREATE_SOURCE_EXISTING,
     CREATE_SOURCE_UNRELATED,
-    EXISTING_CUSTOM,
     FALLBACK_VALUE,
     GOAL_CREATE,
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
-    OUTPUT_SOURCE,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
@@ -24,8 +22,6 @@ TEMPLATE_QUESTION = "templates"
 CUSTOM_DESCRIPTION_QUESTION = "custom_description"
 TARGET_PROPERTY_QUESTION = "target_property"
 FILL_RULES_QUESTION = "fill_rules"
-EXISTING_VALUE_MODE_QUESTION = "existing_value_mode"
-EXISTING_VALUE_RULE_QUESTION = "existing_value_rule"
 FALLBACK_MODE_QUESTION = "fallback_mode"
 FALLBACK_VALUE_QUESTION = "fallback_value"
 SCOPE_QUESTION = "scope"
@@ -59,10 +55,12 @@ def _fill_questions(answers: GuidedAnswers) -> list[str]:
         questions.append(FALLBACK_MODE_QUESTION)
         if answers.fallback_mode == FALLBACK_VALUE:
             questions.append(FALLBACK_VALUE_QUESTION)
-    else:
-        questions.append(EXISTING_VALUE_MODE_QUESTION)
-        if answers.existing_value_mode == EXISTING_CUSTOM:
-            questions.append(EXISTING_VALUE_RULE_QUESTION)
+    # NO "what if the property already has a value?" question: whether an
+    # existing value is kept, replaced or ignored is the operator's per-row
+    # decision in the review table, and a suggestion must be computed from the
+    # task's input only. Asking it here also invited "add to the current
+    # values", which makes a proposal depend on the very value the test set
+    # measures.
     return questions
 
 
@@ -152,8 +150,6 @@ def question_error(question: str, answers: GuidedAnswers) -> str | None:
     if question == GENERATION_QUESTION and answers.goal == GOAL_FILL and not fill_is_classification(answers):
         if not answers.fill_rules.strip():
             return "Describe the rules or formatting for the generated value."
-    if question == EXISTING_VALUE_RULE_QUESTION and not answers.existing_value_rule.strip():
-        return "Describe the custom rule for properties that already have a value."
     if question == FALLBACK_VALUE_QUESTION and not answers.fallback_value.strip():
         return "Enter the fallback value to suggest."
     if question == SCOPE_FILTER_QUESTION and not answers.scope_filter.strip():

@@ -170,6 +170,7 @@ class SuggestionStorePort(ABC):
         f: SuggestionFilter,
         *,
         runnable_only: bool = False,
+        include_applied: bool = False,
     ) -> list[tuple[int, str, str | None, str]]:
         """Every matching row's ``(id, sharedId, language, op)`` — the selection projection.
 
@@ -178,6 +179,8 @@ class SuggestionStorePort(ABC):
         projection. Limit/offset are ignored on purpose. ``runnable_only``
         narrows to the statuses a Run may still write (PENDING/REVERTED), so a
         whole-result selection never includes already-applied or discarded rows.
+        ``include_applied`` adds the APPLIED rows back for the REVERT side of the
+        selection (a written row has nothing to run but everything to undo).
         """
         ...
 

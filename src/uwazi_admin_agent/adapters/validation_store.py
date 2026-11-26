@@ -68,6 +68,19 @@ class ValidationStore:
         self._run_path.mkdir(parents=True, exist_ok=True)
         self.score_path.write_text(score.model_dump_json(indent=2), encoding="utf-8")
 
+    def clear_score(self) -> None:
+        """Drop the stored score (the set it described no longer exists).
+
+        Used when the set CHANGES (a promotion, a removal): the number would
+        otherwise sit beside a set it was not measured on, reading as current.
+        The card then says "Test set ready — not scored yet" until the caller
+        re-scores.
+        """
+        try:
+            self.score_path.unlink(missing_ok=True)
+        except OSError as exc:  # noqa: BLE001 — a missing score is not an error
+            logger.warning("could not remove the stored score {}: {}", self.score_path, exc)
+
     def mark_contaminated(self, validation: ValidationSet) -> ValidationSet:
         """Flag the set as used for a prompt fix (pure write, no Uwazi read)."""
         if validation.contaminated_at is not None:

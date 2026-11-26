@@ -134,19 +134,41 @@ def test_operation_status_is_derived_from_its_parts() -> None:
     assert view.operation_status([]) == "pending"
 
 
-def test_only_pending_and_reverted_parts_are_selectable() -> None:
-    """An applied/discarded part is visible but cannot inflate Run (N)."""
+def test_only_pending_and_reverted_parts_are_RUN_selectable() -> None:
+    """An applied/discarded part can never inflate Run (N) / Discard (N)."""
     pending = view.suboperation_row(_sub(1, status=SuggestionStatus.PENDING), checked=True, in_place=True)
     reverted = view.suboperation_row(_sub(2, status=SuggestionStatus.REVERTED), checked=True, in_place=True)
     applied = view.suboperation_row(_sub(3, status=SuggestionStatus.APPLIED), checked=True, in_place=True)
     discarded = view.suboperation_row(_sub(4, status=SuggestionStatus.DISCARDED), checked=True, in_place=True)
 
-    assert (pending["runnable"], pending["selectable"], pending["checked"]) == (True, True, True)
-    assert (reverted["runnable"], reverted["selectable"], reverted["checked"]) == (True, True, True)
-    assert (applied["runnable"], applied["selectable"], applied["checked"]) == (False, False, False)
-    assert (discarded["runnable"], discarded["selectable"], discarded["checked"]) == (False, False, False)
-    assert applied["note"] == "already applied — revert it first"
+    assert (pending["runnable"], pending["run_selectable"], pending["checked"]) == (True, True, True)
+    assert (reverted["runnable"], reverted["run_selectable"], reverted["checked"]) == (True, True, True)
+    assert (applied["runnable"], applied["run_selectable"], applied["revert_selectable"]) == (False, False, True)
+    assert (discarded["runnable"], discarded["run_selectable"], discarded["revert_selectable"]) == (False, False, False)
     assert discarded["note"] == "discarded — restore it first"
+
+
+def test_an_applied_part_is_selectable_for_the_revert() -> None:
+    """The top Revert acts on the checked entities, so a written row must be
+    checkable — it used to have no checkbox at all ("no runnable suboperation")."""
+    applied = view.suboperation_row(_sub(3, status=SuggestionStatus.APPLIED), checked=True, in_place=True)
+
+    assert applied["selectable"] is True
+    assert applied["checked"] is True
+    assert applied["revert_selectable"] is True
+    assert applied["note"] == "already applied — select it to revert this write"
+
+
+def test_an_applied_part_of_a_run_level_undo_op_is_not_selectable() -> None:
+    """A delete / create-merge reverts at run level, so its parts stay excluded."""
+    applied_delete = view.suboperation_row(
+        _sub(1, op="delete", property_name=None, language=None, status=SuggestionStatus.APPLIED),
+        checked=True,
+        in_place=False,
+    )
+
+    assert applied_delete["selectable"] is False
+    assert applied_delete["revert_selectable"] is False
 
 
 def test_a_locked_part_stays_independently_unselectable() -> None:
@@ -204,8 +226,12 @@ def test_operation_row_combines_parts_and_derives_the_parent_badge() -> None:
     row = view.operation_row(item, checked_ids=[1, 2], uwazi_url="https://uwazi.example")
     assert row["row_key"] == "entity-a"
     assert row["run_status"] == "applied"
-    # Applied parts are not checkable any more: Run would refuse them.
-    assert row["validated"] == "n/a"
+    # Applied parts are checkable (for the Revert) but not runnable: the counter
+    # beside the status badge reads how many of the ACTIONABLE parts are ticked,
+    # and Run (N) counts only the runnable side of the same selection.
+    assert row["validated"] == "2/2"
+    assert row["has_runnable"] is False
+    assert row["has_selectable"] is True
     assert row["revertable"] is True
     assert row["url"] == "https://uwazi.example/en/entity/entity-a"
     assert [sub["language"] for sub in row["subs"]] == ["en", "es"]

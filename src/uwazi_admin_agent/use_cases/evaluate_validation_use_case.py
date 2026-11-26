@@ -12,9 +12,16 @@ The evaluation is a SEPARATE planning pass over the holdout entities only:
 - the metric is micro-F1 for a set-valued property, normalized accuracy
   otherwise.
 
-An LLM-using script would spend money and produce a non-deterministic number, so
-the namespace binds NO LLM helpers: the call is recorded as a refusal and the
-affected rows count as missing. The score must be reproducible.
+A generated script that produces its values with ``llm_complete``/``llm_map`` is
+the normal shape of a classification task, so the evaluation binds those helpers
+exactly as the planning pass does — under the run's approved budget and a fresh
+ledger per evaluation. Refusing them made every LLM-driven row record ``skipped``
+and scored a working script at 0.
+
+The measured property's STORED value is hidden from the discovery reads (see
+``hidden_measured_property``): the proposal must not be able to restate the very
+value the score compares it against, which is what turned one validation sample
+into evidence for a value the document never mentioned.
 """
 
 from __future__ import annotations
@@ -26,7 +33,12 @@ from typing import Any
 
 from loguru import logger
 
+from uwazi_admin_agent.configuration import (
+    LLM_PRICE_INPUT_PER_MTOK,
+    LLM_PRICE_OUTPUT_PER_MTOK,
+)
 from uwazi_admin_agent.domain.extraction_eval import is_blank
+from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmPrice
 from uwazi_admin_agent.domain.suggestion import MOVE_OP, SKIPPED_OP, Suggestion
 from uwazi_admin_agent.domain.suggestion_scoring import records_to_suggestions
 from uwazi_admin_agent.domain.validation import (
@@ -40,7 +52,9 @@ from uwazi_admin_agent.domain.validation import (
 )
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
+from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.generate_predictions_use_case import hydrate_current_values
@@ -61,6 +75,9 @@ class ValidationEvaluationUseCase:
         url_fetcher: UrlFetcherPort | None = None,
         translation_port: TranslationPort | None = None,
         default_language: str = "en",
+        llm_runtime: LlmRuntimePort | None = None,
+        llm_cache: TextCachePort | None = None,
+        llm_budget: LlmBudget | None = None,
     ) -> None:
         self._entity_api = entity_api
         self._entity_repository = entity_repository
@@ -69,6 +86,17 @@ class ValidationEvaluationUseCase:
         self._url_fetcher = url_fetcher
         self._translation_port = translation_port
         self._default_language = default_language
+        # The script's OWN llm_complete/llm_map calls. A generated script that
+        # produces its values with the LLM is the normal shape of a
+        # classification/extraction task; evaluating it with the helpers unbound
+        # made every such call a refusal, so the row recorded `skipped` and the
+        # performance score was 0 for a working script. Bound under the SAME
+        # ledger contract the planning pass uses (the run's approved budget in,
+        # a fresh ledger per evaluation), so the measured pass is the pass the
+        # operator will run.
+        self._llm_runtime = llm_runtime
+        self._llm_cache = llm_cache
+        self._llm_budget = llm_budget
         #: The reviewable rows the last evaluation produced (None until one runs).
         self.last_rows: list[Suggestion] | None = None
 
@@ -77,12 +105,13 @@ class ValidationEvaluationUseCase:
         script: str,
         validation: ValidationSet,
         now: datetime | None = None,
+        hidden_property: str | None = None,
     ) -> ValidationScore:
         """Run ``script`` over the instance and score it on the frozen entities."""
         if self._entity_api is None:
             raise RuntimeError("validation evaluation needs the entity API to run the script")
         started = time.monotonic()
-        records = await asyncio.to_thread(self._run_script, script)
+        records = await asyncio.to_thread(self._run_script, script, hidden_property)
         held = set(validation.shared_ids)
         held_records = [record for record in records if _addresses(record, held)]
         # A `skipped` record IS the script failing to propose a value for a
@@ -132,7 +161,7 @@ class ValidationEvaluationUseCase:
         )
         return score
 
-    def _run_script(self, script: str) -> list[dict[str, Any]]:
+    def _run_script(self, script: str, hidden_property: str | None = None) -> list[dict[str, Any]]:
         """Execute the script against the instance exactly as the planning pass does.
 
         NO entity allow-list. The old version restricted every read to the
@@ -145,10 +174,25 @@ class ValidationEvaluationUseCase:
         recorded writes. Only the rows that address a held-out entity are kept
         (and scored), so a full pass costs the same reads the planning pass
         already does and nothing is narrowed that the script itself can see.
+
+        The LLM helpers are bound exactly as in the planning pass (a fresh
+        ledger over the run's approved budget) whenever the runtime is wired: a
+        script whose values come from ``llm_complete``/``llm_map`` is the normal
+        shape of a classification task, and refusing those calls here recorded
+        every row as ``skipped`` and scored 0 for a working script. A caller
+        that wires no approved budget gets a DENY-ALL ceiling, so an
+        LLM-driven script stops on its first call instead of spending
+        unbudgeted money; either way the halt is reported and the rows recorded
+        before it still count.
+
+        ``hidden_property`` is the measured property: its stored value is never
+        returned by the discovery reads, so the proposal cannot be a restatement
+        of the very value the score compares it against.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         records: list[dict[str, Any]] = []
+        ledger = LlmLedger(self._llm_budget or _deny_all_budget())
         try:
             namespace = build_dry_run_namespace(
                 entity_api=self._entity_api,
@@ -161,15 +205,39 @@ class ValidationEvaluationUseCase:
                 url_fetcher=self._url_fetcher,
                 translation_port=self._translation_port,
                 throttle=ThrottleController(),
-                # Deliberately no LLM helpers (apply_mode=False): the score must
-                # be reproducible and must not spend the operator's allowance.
+                llm_runtime=self._llm_runtime,
+                llm_ledger=ledger,
+                llm_cache=self._llm_cache,
+                apply_mode=self._llm_runtime is not None,
+                hidden_property=hidden_property,
             )
             _result, error = run_script_sync(script, namespace)
         finally:
             loop.close()
         if error is not None:
             logger.warning("validation pass script error: {}", error)
+        if ledger.exceeded:
+            logger.warning("validation pass stopped at the script's LLM budget; the rows recorded before it count")
         return records
+
+
+def _deny_all_budget() -> LlmBudget:
+    """The ceiling an evaluation runs under when the caller passed no budget.
+
+    Deny-by-default (both caps 0), exactly like the wizard's unchecked AI cap:
+    a caller that wires no approved budget cannot make the evaluation spend
+    money by accident. ``evaluate_run`` passes the run's own approved budget, so
+    the measured pass is the pass the operator will run.
+    """
+    return LlmBudget(
+        max_cost=0.0,
+        max_requests=0,
+        price=LlmPrice(
+            model="script-caps",
+            input_per_mtok=LLM_PRICE_INPUT_PER_MTOK,
+            output_per_mtok=LLM_PRICE_OUTPUT_PER_MTOK,
+        ),
+    )
 
 
 def _addresses(record: dict[str, Any], held: set[str]) -> bool:

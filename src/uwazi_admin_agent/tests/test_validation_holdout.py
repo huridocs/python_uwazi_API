@@ -208,16 +208,23 @@ def test_the_run_confirmation_warns_about_the_holdout() -> None:
     assert "1 entity " in holdout_warning_message(1)
 
 
-def _row(shared_id: str, *, is_validation: bool, status: SuggestionStatus = SuggestionStatus.PENDING) -> Suggestion:
+def _row(
+    shared_id: str,
+    *,
+    status: SuggestionStatus = SuggestionStatus.PENDING,
+    property_name: str = "document_ref",
+    current: Any = "Y",
+    is_validation: bool = False,
+) -> Suggestion:
     return Suggestion(
         id=None,
         run_id="run-1",
         shared_id=shared_id,
         op="update",
-        property_name="document_ref",
+        property_name=property_name,
         status=status,
         proposed_value="X",
-        current_value="Y",
+        current_value=current,
         is_validation=is_validation,
     )
 
@@ -482,3 +489,67 @@ def test_a_skipped_holdout_record_is_rendered_as_the_measured_row() -> None:
     payload = view.operation_row(operation)
     assert payload["ops"] == "validate"
     assert payload["run_status"] == "validate"
+
+
+# --- the operator's set edits must be VISIBLE in the table -------------------
+
+
+def test_promotion_also_reruns_the_entity_s_regular_rows(tmp_path: Path) -> None:
+    """Promoting only the validation rows left the entity reading "validate".
+
+    The entity's REGULAR row of the measured property (recorded by the
+    production pass) kept the operation's derived badge at "validate", so the
+    operator saw no change after pressing "Remove from validation" until a
+    browser reload re-read a table that still said the same thing. The regular
+    rows are promoted too, taking the freeze-time label as their current value.
+    """
+    store = SqliteSuggestionStore(tmp_path / "s.db")
+    store.add_suggestions(
+        [
+            _row("b", is_validation=True, property_name="states"),
+            _row("b", is_validation=False, property_name="states", current="live"),
+        ]
+    )
+
+    promoted = store.promote_to_regular("run-1", "b", label_property="states", label=["S1"])
+    assert promoted >= 1
+
+    rows, _total = store.query("run-1", SuggestionFilter(shared_ids=["b"]))
+    assert {row.property_name for row in rows} == {"states"}
+    assert all(row.is_validation is False for row in rows)
+    assert all(row.status is SuggestionStatus.PENDING for row in rows)
+    assert all(row.current_value == ["S1"] for row in rows)
+
+
+def test_marking_a_sample_turns_its_rows_into_evidence(tmp_path: Path) -> None:
+    """Adding an entity wrote only ``validation.yaml``: the table kept showing
+    ordinary work, so the button looked like a no-op. The rows are re-marked."""
+    store = SqliteSuggestionStore(tmp_path / "s.db")
+    store.add_suggestions([_row("a", is_validation=False, property_name="summary", current="old")])
+
+    touched = store.mark_validation_rows("run-1", "a", label_for_language=lambda _lang: "frozen")
+
+    assert touched == 1
+    rows, _total = store.query("run-1", SuggestionFilter(shared_ids=["a"]))
+    assert rows[0].is_validation is True
+    assert rows[0].current_value == "frozen"
+    assert [ref[1] for ref in store.selection_rows("run-1", SuggestionFilter(), runnable_only=True)] == []
+
+
+def test_selection_projection_can_include_applied_rows_for_revert(tmp_path: Path) -> None:
+    """An applied row has nothing to run but everything to undo: the top Revert
+    selects it through the projection's applied side."""
+    store = SqliteSuggestionStore(tmp_path / "s.db")
+    store.add_suggestions(
+        [
+            _row("pending", status=SuggestionStatus.PENDING),
+            _row("applied", status=SuggestionStatus.APPLIED),
+            _row("discarded", status=SuggestionStatus.DISCARDED),
+        ]
+    )
+
+    runnable = store.selection_rows("run-1", SuggestionFilter(), runnable_only=True)
+    with_applied = store.selection_rows("run-1", SuggestionFilter(), runnable_only=True, include_applied=True)
+
+    assert {ref[1] for ref in runnable} == {"pending"}
+    assert {ref[1] for ref in with_applied} == {"pending", "applied"}

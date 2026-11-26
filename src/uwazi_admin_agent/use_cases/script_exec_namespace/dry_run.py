@@ -132,10 +132,24 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
     :func:`run_script_sync`.
     """
 
+    # One monotonic counter for the WHOLE pass, not one per call: a script that
+    # creates one entity per source entity (the documented create-from-existing
+    # shape) calls ``create_entities`` once per entity, and a per-call index
+    # restarted at 0 every time — so EVERY create recorded ``dry-created-0``.
+    # The review table groups rows by shared_id, so all those creates collapsed
+    # into ONE operation: its checkboxes fought each other (the same sub-row id
+    # appeared in two rows) and most created entities were unreachable.
+    created_count = 0
+
     def create_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
+        nonlocal created_count
         del language  # recorded per-dict, not as a language override
         logger.info("dry-run record: create_entities x{}", len(entities_dicts))
-        for i, d in enumerate(entities_dicts):
+        placeholders: list[str] = []
+        for d in entities_dicts:
+            placeholder = f"dry-created-{created_count}"
+            created_count += 1
+            placeholders.append(placeholder)
             metadata, context = _split_context(d)
             _append_record(
                 records,
@@ -144,7 +158,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     # The placeholder this call returns: a later move/delete in
                     # the SAME script addresses the new entity through it, so the
                     # record has to carry it (merge detection pairs them).
-                    "shared_id": f"dry-created-{i}",
+                    "shared_id": placeholder,
                     "title": d.get("title", ""),
                     "template_name": d.get("template_name", ""),
                     "metadata": metadata,
@@ -157,7 +171,7 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "source_shared_id": _source_shared_id(d.get("source_shared_id")),
                 },
             )
-        return [{"shared_id": f"dry-created-{i}", "success": True} for i, d in enumerate(entities_dicts)]
+        return [{"shared_id": placeholder, "success": True} for placeholder in placeholders]
 
     def update_entities(entities_dicts: list[dict], language: str | None = None) -> list[dict]:
         logger.info("dry-run record: update_entities x{}", len(entities_dicts))

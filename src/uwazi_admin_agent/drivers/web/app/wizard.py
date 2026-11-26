@@ -809,7 +809,27 @@ def _wizard_validation_config(state: dict[str, Any]):
         selector_code=selector_code,
         selector_explanation=explanation,
         language=_wizard_default_language(answers),
+        # What the wizard DECLARED as input. The measured property is hidden from
+        # the script's reads unless it is one of these: "read the property you
+        # are proposing" is only legitimate when the operator asked for it.
+        input_properties=_declared_input_properties(answers, property_name),
     )
+
+
+def _declared_input_properties(answers: Any, measured_property: str) -> list[str]:
+    """The properties the guided answers declared as INPUTS (pure).
+
+    Two sources: the source metadata properties the operator checked, and the
+    target property when the scope is "only entities where it is currently
+    empty" (that filter necessarily reads it). Everything else is not an input,
+    so a measured property that is not listed here is hidden from the script.
+    """
+    from uwazi_admin_agent.domain.guided_task import SCOPE_EMPTY
+
+    declared = [str(name).strip() for name in getattr(answers, "metadata_properties", ()) or () if str(name).strip()]
+    if str(getattr(answers, "entity_scope", "") or "") == SCOPE_EMPTY and measured_property.strip():
+        declared.append(measured_property.strip())
+    return sorted(set(declared))
 
 
 def _validation_property_type(state: dict[str, Any], name: str) -> str:

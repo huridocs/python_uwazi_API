@@ -24,6 +24,7 @@ from uwazi_admin_agent.use_cases.apply_suggestions_use_case import (
     language_scoped_value,
     metadata_value,
     partition_for_apply,
+    payload_units,
     pushable_rows,
     select_labels,
     stamp_language,
@@ -931,3 +932,42 @@ def test_apply_creates_write_the_relationship_selection() -> None:
     creates = build_apply_creates([row], property_types={"related": "relationship"})
     # A create runs through the entity mapper, which wraps the ids itself.
     assert creates[0]["metadata"]["related"] == ["x", "y"]
+
+
+def test_apply_units_total_does_not_count_creates_twice() -> None:
+    """A create row rides two payload shapes: ``build_apply_creates`` writes it,
+    and ``partition_for_apply`` reports it in ``whole_entity_rows`` (its sharedId
+    is a placeholder, so it cannot ride the update path). The denominator counted
+    BOTH, so a create-only selection's toast read "6060 suboperations" while the
+    pass ended at the correct 3030."""
+    from uwazi_admin_agent.use_cases.apply_suggestions_use_case import apply_units_total
+
+    rows = [
+        _s(shared_id="dry-created-0", op="create", property_name="summary", proposed="s", template_name="DOCUMENT"),
+        _s(shared_id="dry-created-0", op="create", property_name=TITLE_PROPERTY, proposed="T", template_name="DOCUMENT"),
+    ]
+    creates = build_apply_creates(rows)
+    _property_rows, whole = partition_for_apply(rows)
+    assert len(whole) == 2  # both create rows are reported as whole-entity rows
+
+    total = apply_units_total([], creates, whole)
+
+    assert total == sum(payload_units(create) for create in creates) == 2
+
+
+def test_apply_units_total_still_counts_other_whole_entity_rows() -> None:
+    from uwazi_admin_agent.use_cases.apply_suggestions_use_case import apply_units_total
+
+    rows = [
+        _s(shared_id="dry-created-0", op="create", property_name="summary", proposed="s", template_name="DOCUMENT"),
+        _s(shared_id="s1", op="delete", property_name=None, proposed=None),
+    ]
+    creates = build_apply_creates(rows)
+    _property_rows, whole = partition_for_apply(rows)
+
+    total = apply_units_total([], creates, whole)
+
+    # The create payload is counted by ITS OWN units (the metadata row plus the
+    # generated fallback title — exactly what _write advances), and the delete
+    # row adds one. The create row is NOT counted again as a whole-entity row.
+    assert total == sum(payload_units(create) for create in creates) + 1 == 3

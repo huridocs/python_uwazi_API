@@ -99,6 +99,15 @@ class ValidationConfig(BaseModel):
         description="The operator's own description of how the test entities should be chosen.",
     )
     language: str = Field(default="en", description="Entity row the sample and its labels are read in.")
+    input_properties: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The properties the operator DECLARED as inputs (a source metadata property, or the target "
+            "property read to select the empty-valued entities). Anything not listed here is hidden from "
+            "the script's reads when it is also the measured property: a proposal must not be able to "
+            "restate the value the score compares it against."
+        ),
+    )
 
     def resolved_property_name(self) -> str:
         """The store key of the measured property (pure)."""
@@ -120,6 +129,14 @@ class ValidationSet(BaseModel):
         description="label_key(sharedId, language) -> the expected value at freeze time.",
     )
     mode: ValidationMode = VALIDATION_AUTOMATIC
+    input_properties: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The properties the operator declared as INPUTS when the set was frozen. The measured property "
+            "is hidden from the planning/evaluation reads unless it appears here (see "
+            "``hidden_measured_property``): a proposal computed from the value it replaces cannot be scored."
+        ),
+    )
     selector_explanation: str = Field(
         default="",
         description="The operator's description of how this sample was chosen (custom mode).",
@@ -214,16 +231,26 @@ class ValidationScore(BaseModel):
     created_at: datetime
 
     def value_text(self) -> str:
-        """The headline figure, with its metric (pure)."""
-        if self.metric == METRIC_F1:
-            return f"{self.value:.2f} F1"
+        """The headline figure as a PERCENTAGE (pure).
+
+        Both metrics are read as a share of the whole: normalized accuracy is a
+        share of the judged entities, micro-F1 is the same kind of ratio between
+        0 and 1 (a set-valued property's precision/recall balance). Printing F1
+        as ``1.00 F1`` made the operator compare two different scales side by
+        side; the metric's own name belongs in :meth:`caption`, not in the
+        headline.
+        """
         return f"{100 * self.value:.1f}%"
+
+    def metric_name(self) -> str:
+        """The metric's word, for the caption beside the percentage (pure)."""
+        return "micro-F1" if self.metric == METRIC_F1 else "accuracy"
 
     def caption(self, measured_property: str) -> str:
         """The one-line reading under the headline (pure)."""
         checks = "check" if self.judged == 1 else "checks"
         return (
-            f"{self.judged} {checks} on {self.entities} held-out "
+            f"{self.metric_name()} · {self.judged} {checks} on {self.entities} held-out "
             f"{'entity' if self.entities == 1 else 'entities'} · measured: {measured_property}"
         )
 

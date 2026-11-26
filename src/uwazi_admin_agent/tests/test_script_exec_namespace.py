@@ -376,3 +376,82 @@ def test_run_script_sync_reports_a_typo_with_the_real_surface() -> None:
 
     assert error is not None
     assert "Did you mean 'summary'?" in error
+
+
+# --- unique create placeholders ---------------------------------------------
+
+
+def test_create_placeholders_are_unique_across_calls() -> None:
+    """A script that creates one entity per source entity calls the recorder once
+    per entity. A per-call index restarted at 0, so every create recorded
+    ``dry-created-0``; the review table groups rows by shared_id, so all the
+    created entities collapsed into ONE operation whose checkboxes fought each
+    other (the same sub-row id appeared in several rows)."""
+    from uwazi_admin_agent.domain.suggestion_scoring import records_to_suggestions
+    from uwazi_admin_agent.use_cases.script_exec_namespace import _dry_run_write_helpers
+
+    records: list[dict] = []
+    create = _dry_run_write_helpers(records)["create_entities"]
+
+    assert create([{"title": "A", "template_name": "T"}]) == [{"shared_id": "dry-created-0", "success": True}]
+    assert create([{"title": "B", "template_name": "T"}]) == [{"shared_id": "dry-created-1", "success": True}]
+    batch = create([{"title": "C", "template_name": "T"}, {"title": "D", "template_name": "T"}])
+    assert [item["shared_id"] for item in batch] == ["dry-created-2", "dry-created-3"]
+
+    rows = records_to_suggestions("run-1", records)
+    assert [row.shared_id for row in rows] == ["dry-created-0", "dry-created-1", "dry-created-2", "dry-created-3"]
+    assert len({row.shared_id for row in rows}) == len(records)
+
+
+# --- measured-property guard -------------------------------------------------
+
+
+def test_strip_measured_property_removes_only_the_measured_key() -> None:
+    from uwazi_admin_agent.use_cases.script_exec_namespace.scope import strip_measured_property
+
+    raw = {"shared_id": "e1", "title": "Case", "metadata": {"states": [{"value": "X"}], "judge": "A"}}
+
+    stripped = strip_measured_property(raw, "states")
+
+    assert stripped["metadata"] == {"judge": "A"}
+    assert raw["metadata"]["states"] == [{"value": "X"}]  # the caller's dict is untouched
+
+
+def test_strip_measured_property_handles_the_title_and_absent_keys() -> None:
+    from uwazi_admin_agent.use_cases.script_exec_namespace.scope import strip_measured_property
+
+    assert "title" not in strip_measured_property({"shared_id": "e1", "title": "Case"}, "_title")
+    raw = {"shared_id": "e1", "metadata": {"judge": "A"}}
+    assert strip_measured_property(raw, "states") == raw
+
+
+def test_measured_property_guard_wraps_every_read_shape() -> None:
+    from types import SimpleNamespace
+
+    from uwazi_admin_agent.use_cases.script_exec_namespace.scope import strip_property_from_result
+
+    def entity(shared_id: str) -> dict:
+        return {"shared_id": shared_id, "title": shared_id, "metadata": {"states": ["X"], "judge": "A"}}
+
+    listed = strip_property_from_result([entity("a"), entity("b")], "states")
+    assert [item["metadata"] for item in listed] == [{"judge": "A"}, {"judge": "A"}]
+
+    searched = strip_property_from_result(
+        SimpleNamespace(summary="summary", examples=[entity("a")]),
+        "states",
+    )
+    assert searched.summary == "summary"
+    assert searched.examples[0]["metadata"] == {"judge": "A"}
+
+    assert strip_property_from_result("Error: nope", "states") == "Error: nope"
+
+
+def test_hidden_measured_property_respects_declared_inputs() -> None:
+    from uwazi_admin_agent.use_cases.script_exec_namespace.scope import hidden_measured_property
+
+    assert hidden_measured_property("", ["states"]) is None
+    assert hidden_measured_property("states") == "states"
+    assert hidden_measured_property("states", ["judge"]) == "states"
+    assert hidden_measured_property("states", ["states"]) is None
+    assert hidden_measured_property("_title", ["title"]) is None
+    assert hidden_measured_property("_title") == "_title"

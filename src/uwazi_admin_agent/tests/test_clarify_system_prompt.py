@@ -100,16 +100,28 @@ def test_clarify_prompt_restatement_is_phrased_as_a_proposal() -> None:
     assert "the task will suggest" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
 
 
-def test_clarify_prompt_qualifies_multivalued_questions() -> None:
-    """A question about what a multi-value PROPOSAL contains is legitimate; one
-    about what happens to existing links when it runs is not.
+def test_clarify_prompt_forbids_any_question_about_the_stored_values() -> None:
+    """A multi-value question must be about the value extracted from the INPUT,
+    never about what is already stored on the entity.
 
-    The bug: the agent asked "when a Rec entity already has `states` links
-    recorded, what should the proposed value be?" with options phrased as
-    outcomes of applying (union / replace / only record a row when …).
+    The bug: the agent asked "which set should be suggested for `states` ..."
+    with options including "the extracted states plus any states already linked
+    to the entity" / "only the extracted states that are not yet linked". Both
+    make the proposal depend on the value the score measures, so the suggestion
+    can never be wrong — and the validation sample ends up carrying values the
+    document never mentions.
     """
     assert "MULTI-VALUED PROPERTIES" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "REPLACES the property's set" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "Which set should be" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "NEVER phrase it as an outcome of applying" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "suggest a value only when the extracted values add something new" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "from the TASK'S INPUT SOURCES ONLY" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "the extracted values plus the ones already" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "do not ask what should happen to the values an" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "as an outcome of" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "suggestion-emission policy" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_states_the_proposal_comes_from_the_input() -> None:
+    """The prompt's own preamble carries the same rule, so a question outside
+    the multi-value section still cannot be about a stored value."""
+    assert "PROPOSAL-IS-COMPUTED-FROM-THE-INPUT" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "It is NEVER computed from the value the target" in CLARIFY_SYSTEM_PROMPT_TEMPLATE

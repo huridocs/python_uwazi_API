@@ -45,15 +45,26 @@ side must never read, used to score the script honestly.
 - `use_cases/evaluate_validation_use_case.py` — scores the committed script by
   running it with the PRODUCTION read surface (no entity allow-list) and keeping
   only the rows that address a held-out entity; writes are recorded, never
-  applied, and no LLM helper is bound (the number must be reproducible). It must
-  see the same instance the planning pass sees: a classify-by-relationship
-  script resolves its names against a catalog template, and scoping reads to the
-  holdout starved that catalog — every held-out entity then recorded `skipped`
-  and a working script scored 0. A row the script produced no measured value for
-  still appears, carrying the frozen label and the script's own skip reason.
+  applied. It must see the same instance the planning pass sees: a
+  classify-by-relationship script resolves its names against a catalog template,
+  and scoping reads to the holdout starved that catalog — every held-out entity
+  then recorded `skipped` and a working script scored 0. The script's own
+  `llm_complete`/`llm_map` calls are bound exactly as the planning pass binds
+  them: under the run's approved budget and a fresh ledger (a caller that wires
+  none gets a deny-all ceiling). Evaluating with them unbound made every
+  LLM-driven row `skipped` and scored a working script at 0. A row the script
+  produced no measured value for still appears, carrying the frozen label and
+  the script's own skip reason.
 - `use_cases/script_exec_namespace/scope.py` — `_scoped_entity_reads(...,
   exclude=...)` and `_excluded_entity_reads`: the PRODUCTION planning pass also
   drops the held-out ids, so the review table never proposes writes for them.
+  `strip_measured_property` / `_measured_property_guarded_reads` are the second
+  deny-list: the MEASURED property's stored value is removed from every
+  discovery read (`query_entities`, `query_entities_full`) unless the operator
+  declared that property as an input (`ValidationSet.input_properties`). A
+  proposal computed from the value it replaces scores perfectly while proving
+  nothing — that is how a validation sample ended up carrying a value the
+  document never mentioned.
 
 Rows of the validation pass carry `Suggestion.is_validation`. They are evidence,
 never work: `payloads.pushable_rows`, the store's selection projection, the
@@ -62,8 +73,10 @@ promotion (`promote_validation_row`), which shrinks the set (bumping its
 version, so the stored score reads `stale`) and relabels the entity's rows as
 regular PENDING work. A production reconcile never deletes a validation row.
 
-The measured property is ONE per run: the score card says which, and the review
-table's property filter carries no score at all (two numbers would compete).
+The measured property is ONE per run: the always-visible Performance line at the
+top of the review page states which, as a percentage with the metric named in its
+caption, and the review table's property filter carries no score at all (two
+numbers would compete).
 
 The wizard's custom test set is a PROMPT, not a button: the operator describes
 the filter and the maximum entity count, and `build_validation_set` asks the LLM
@@ -117,7 +130,9 @@ each `__init__.py` re-exports the original names.
     (`select`/`multiselect`/`relationship`) switches the flow to the
     classification sub-flow (existing thesaurus terms or linked entities, plus
     the no-match fallback); any other type gets the extraction sub-flow
-    (formatting rules + existing-value policy).
+    (formatting rules only — there is NO existing-value question: the proposal
+    is computed from the task's input, and keeping or replacing a stored value
+    is the operator's per-row decision in the review table).
   - Create entities branches on what the new entities are based on: existing
     entities' properties (one new entity per source entity), existing entities'
     documents, or instructions unrelated to the instance. The last one asks for
