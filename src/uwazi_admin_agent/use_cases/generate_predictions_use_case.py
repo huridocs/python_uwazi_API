@@ -34,6 +34,7 @@ from loguru import logger
 
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmUsage
 from uwazi_admin_agent.domain.plan_intent import PlanOutcome, plan_outcome, plan_refusal
+from uwazi_admin_agent.domain.property_evidence import basis_context_text
 from uwazi_admin_agent.domain.review_refresh import ReconciliationSummary
 from uwazi_admin_agent.domain.suggestion import (
     INFO_OP,
@@ -175,6 +176,20 @@ def _apply_hydration(
         if raw is None:
             continue
         updates: dict[str, Any] = {}
+        if suggestion.basis and not suggestion.context:
+            # The value was inferred from the entity's OWN data, so there is no
+            # document passage to show. The evidence IS those properties' live
+            # values — capture them as the row's context, so the review table
+            # can show the input text the operator must check without opening
+            # the entity window for every row.
+            labels = (
+                template_labels.property_labels(suggestion.template_name)
+                if template_labels is not None and suggestion.template_name
+                else {}
+            )
+            evidence = basis_context_text(raw, suggestion.basis, labels)
+            if evidence:
+                updates["context"] = evidence
         if suggestion.property_name is not None and suggestion.op in PROPERTY_OPS:
             raw_language = raw.get("language")
             answered_other_row = bool(
@@ -495,7 +510,9 @@ class GeneratePredictionsUseCase:
                 }
             )
             self._store.save_pass(final)
-            raise PredictionPassError(error)
+            # A script CRASH, not a refusal: the creation flow may spend ONE
+            # repair round on it (the traceback re-opens the authoring turn).
+            raise PredictionPassError(error, refused=False)
 
         final = pass_row.model_copy(
             update={
@@ -517,18 +534,6 @@ class GeneratePredictionsUseCase:
         return final
 
     # --- internals -----------------------------------------------------------
-
-    async def refresh(
-        self,
-        script: str,
-        run_id: str,
-        budget: LlmBudget,
-        plan_kind: str | None = None,
-    ) -> tuple[PredictionPass, ReconciliationSummary]:
-        """Re-run the script against current Uwazi and merge into the live table."""
-        self.last_reconciliation = None
-        final = await self.run(script, run_id=run_id, budget=budget, plan_kind=plan_kind)
-        return final, self.last_reconciliation or ReconciliationSummary()
 
     def _run_script(
         self,
@@ -584,7 +589,22 @@ class GeneratePredictionsUseCase:
 
 
 class PredictionPassError(RuntimeError):
-    """The prediction script failed for a reason other than the LLM budget."""
+    """The prediction script failed for a reason other than the LLM budget.
+
+    ``refused`` separates the TWO failure kinds the pass can produce:
+
+    - ``True`` — the INTENT GATE refused the plan (it contradicts its declared
+      kind). That is the design answering the prompt; a caller must not try to
+      "fix" it by re-authoring.
+    - ``False`` — the script itself CRASHED (a model typo: the wrong helper
+      name, an attribute the result object does not have). The traceback is the
+      evidence an authoring repair round needs, which is what the creation flow
+      runs once before giving up.
+    """
+
+    def __init__(self, message: str, *, refused: bool = True) -> None:
+        super().__init__(message)
+        self.refused = refused
 
 
 __all__ = [

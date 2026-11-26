@@ -34,9 +34,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import DryRunReport, _count_ops
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
-    ScopeViolationError,
     build_dry_run_namespace,
-    build_exec_namespace,
     build_real_exec_namespace,
     run_script_sync,
 )
@@ -211,18 +209,6 @@ def _incident_repos(*, fail_deletes: bool = False) -> tuple[InMemoryEntityRepo, 
     return repo, files
 
 
-def _dummy_namespace() -> dict:
-    return build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=asyncio.new_event_loop(),
-        scope={"E1", "E2"},
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-
-
 def _dry_run_namespace(
     records: list,
     entity_repository: InMemoryEntityRepo | None = None,
@@ -262,34 +248,12 @@ def _real_namespace(
 # --- all three namespaces bind the same name --------------------------------
 
 
-def test_all_three_namespaces_bind_the_dedupe_name() -> None:
-    assert "dedupe_entity_files_parallel" in _dummy_namespace()
+def test_both_namespaces_bind_the_dedupe_name() -> None:
     assert "dedupe_entity_files_parallel" in _dry_run_namespace([])
     assert "dedupe_entity_files_parallel" in _real_namespace()
 
 
 # --- dummy mode: scoped no-op ------------------------------------------------
-
-
-def test_dummy_dedupe_noops_in_scope_in_input_order() -> None:
-    ns = _dummy_namespace()
-    summaries = ns["dedupe_entity_files_parallel"](["E1", "E2"])
-    assert summaries == [
-        {"shared_id": "E1", "duplicates": 0, "deleted": 0, "failed": 0, "kept_cited": 0},
-        {"shared_id": "E2", "duplicates": 0, "deleted": 0, "failed": 0, "kept_cited": 0},
-    ]
-
-
-def test_dummy_dedupe_refuses_out_of_scope_ids() -> None:
-    ns = _dummy_namespace()
-    with pytest.raises(ScopeViolationError):
-        ns["dedupe_entity_files_parallel"](["REAL"])
-
-
-def test_dummy_dedupe_refuses_a_duplicated_shared_id() -> None:
-    ns = _dummy_namespace()
-    with pytest.raises(ValueError, match="at most once per call"):
-        ns["dedupe_entity_files_parallel"](["E1", "E1"])
 
 
 # --- dry-run mode: real discovery reads, recorded deletes ---------------------
@@ -546,6 +510,5 @@ def test_empty_input_returns_empty_list_in_every_mode() -> None:
     assert real_ns["dedupe_entity_files_parallel"]([]) == []
     assert files.deletes == []
     assert throttle.snapshot().success_streak == 0  # empty input records no verdict
-    assert _dummy_namespace()["dedupe_entity_files_parallel"]([]) == []
     assert _dry_run_namespace([], repo, files)["dedupe_entity_files_parallel"]([]) == []
     assert files.deletes == []  # the dry run never deletes either

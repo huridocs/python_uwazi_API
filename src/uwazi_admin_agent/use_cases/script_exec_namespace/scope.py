@@ -5,55 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from uwazi_agent.domain.agent_entity import AgentEntity
-
-
-class ScopeViolationError(RuntimeError):
-    """A script helper was asked to touch a shared_id outside the dummy scope."""
-
-
-def filter_ids_to_scope(shared_ids: list[str], scope: set[str]) -> list[str]:
-    """Return the requested ids that are within ``scope``, preserving order."""
-    return [sid for sid in shared_ids if sid in scope]
-
-
-def assert_ids_in_scope(shared_ids: list[str], scope: set[str], helper: str) -> None:
-    """Raise :class:`ScopeViolationError` if any id is outside ``scope``.
-
-    Pure: the dummy-scoped write helpers call this before forwarding to the
-    reused CRUD function, so a script cannot mutate a real entity during
-    validation even if it hardcodes a real shared_id.
-    """
-    offenders = [sid for sid in shared_ids if sid not in scope]
-    if offenders:
-        raise ScopeViolationError(
-            f"{helper}: refused shared_id(s) outside the dummy scope: {offenders}. "
-            "The validation script may only touch the throwaway dummies."
-        )
-
-
-def filter_in_scope_by_template(in_scope: list[AgentEntity], template_name: str | None) -> list[AgentEntity]:
-    """Return the in-scope dummies belonging to ``template_name`` (dummy mode).
-
-    In real mode ``by_template`` returns only the entities of that template; the
-    dummy wrapper must mirror that so a script that loops ``by_template`` over
-    several discovered templates processes each template's dummies once.
-    Otherwise every ``by_template`` call returns ALL in-scope dummies and the
-    gate false-fails a correct multi-template script: deleted source dummies
-    reappear via the static ``dummy_entities`` list on the next iteration and
-    get re-processed (double merge / delete-already-deleted).
-
-    Pure: the testable seam extracted from :func:`_sync_query_entities_factory`.
-    A ``None`` template_name returns the list unchanged (defensive - the
-    ``by_template`` mode requires a template_name, but the helper stays total).
-    """
-    if not template_name:
-        return in_scope
-    return [e for e in in_scope if e.template_name == template_name]
+from .constants import NamedNamespace
 
 
 def scope_read_result(result: Any, scope: set[str]) -> Any:
-    """Post-filter a bound read helper's return value to ``scope`` (pure).
+    """Post-filter a bound read helper's result to ``scope`` (pure).
 
     The subset-prediction mechanism: the SAME script runs unchanged, but a
     ``query_entities``/``query_entities_full`` call sees only the selected
@@ -78,18 +34,24 @@ def scope_read_result(result: Any, scope: set[str]) -> Any:
             if isinstance(example, dict) and str(example.get("shared_id") or "") in scope
         ]
         summary = result.summary
-        ids = filter_ids_to_scope(list(summary.shared_ids), scope)
-        return SimpleNamespace(summary=summary.model_copy(update={"shared_ids": ids, "count": len(ids)}), examples=examples)
+        ids = [sid for sid in summary.shared_ids if sid in scope]
+        by_template: dict[str, int] = {}
+        for example in examples:
+            name = str(example.get("template_name") or "")
+            if name:
+                by_template[name] = by_template.get(name, 0) + 1
+        updated = summary.model_copy(update={"shared_ids": ids, "count": len(ids)})
+        return NamedNamespace(summary=updated, examples=examples)
     return result
 
 
 def _scoped_read_wrapper(base: Any, scope: set[str]) -> Any:
-    """Wrap a bound read helper so its result is post-filtered to ``scope``."""
+    """Wrap a bound read helper so its result keeps only the in-scope ids."""
 
-    def scoped(*args: Any, **kwargs: Any) -> Any:
+    def filtered(*args: Any, **kwargs: Any) -> Any:
         return scope_read_result(base(*args, **kwargs), scope)
 
-    return scoped
+    return filtered
 
 
 def exclude_read_result(result: Any, excluded: set[str]) -> Any:
@@ -113,7 +75,7 @@ def exclude_read_result(result: Any, excluded: set[str]) -> Any:
         ]
         summary = result.summary
         ids = [sid for sid in summary.shared_ids if sid not in excluded]
-        return SimpleNamespace(summary=summary.model_copy(update={"shared_ids": ids, "count": len(ids)}), examples=examples)
+        return NamedNamespace(summary=summary.model_copy(update={"shared_ids": ids, "count": len(ids)}), examples=examples)
     return result
 
 

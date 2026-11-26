@@ -34,10 +34,23 @@ side must never read, used to score the script honestly.
   `deps.entity_repository`, `deps.segmentation_repository`) when the run has a
   holdout; the runtime's own ports stay raw for the evaluation and apply paths.
 - `use_cases/validation_sampling.py` — the one read that DEFINES the set
-  (automatic sample or custom search), run before generation.
-- `use_cases/evaluate_validation_use_case.py` — scores the committed script in a
-  dry-run namespace scoped to the held-out ids; writes are recorded, never
-  applied, and no LLM helper is bound (the number must be reproducible).
+  (automatic sample, or the LLM-authored custom selector), run before
+  generation.
+- `domain/validation_selector.py` + `use_cases/generate_validation_selector_use_case.py`
+  — the custom picker. The operator DESCRIBES the set (property filter, date
+  window, explicit shared ids) and the LLM writes a small read-only snippet over
+  `query_entities`/`query_entities_full`; `script_exec_namespace/selector.py`
+  is the namespace it runs in (reads only, no writers, no LLM helpers, no
+  `random`).
+- `use_cases/evaluate_validation_use_case.py` — scores the committed script by
+  running it with the PRODUCTION read surface (no entity allow-list) and keeping
+  only the rows that address a held-out entity; writes are recorded, never
+  applied, and no LLM helper is bound (the number must be reproducible). It must
+  see the same instance the planning pass sees: a classify-by-relationship
+  script resolves its names against a catalog template, and scoping reads to the
+  holdout starved that catalog — every held-out entity then recorded `skipped`
+  and a working script scored 0. A row the script produced no measured value for
+  still appears, carrying the frozen label and the script's own skip reason.
 - `use_cases/script_exec_namespace/scope.py` — `_scoped_entity_reads(...,
   exclude=...)` and `_excluded_entity_reads`: the PRODUCTION planning pass also
   drops the held-out ids, so the review table never proposes writes for them.
@@ -51,6 +64,13 @@ regular PENDING work. A production reconcile never deletes a validation row.
 
 The measured property is ONE per run: the score card says which, and the review
 table's property filter carries no score at all (two numbers would compete).
+
+The wizard's custom test set is a PROMPT, not a button: the operator describes
+the filter and the maximum entity count, and `build_validation_set` asks the LLM
+for the read-only selector at task-creation time (so filling the wizard never
+waits on a model turn). Validation rows are shown as the `validate` operation
+with Uwazi's frozen label as their current value, so the operator can judge each
+suggestion against the value the score measures.
 
 ## End-to-end flow
 

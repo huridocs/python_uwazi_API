@@ -24,7 +24,6 @@ import asyncio
 
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     build_dry_run_namespace,
-    build_exec_namespace,
     build_real_exec_namespace,
     run_script_sync,
 )
@@ -64,18 +63,6 @@ class _PassthroughIntercept:
         pass
 
 
-def _dummy_namespace() -> dict:
-    return build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=asyncio.new_event_loop(),
-        scope={"DUMMY1"},
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-
-
 def _dry_run_namespace(records: list) -> dict:
     return build_dry_run_namespace(
         entity_api=None,
@@ -103,11 +90,6 @@ def _real_namespace() -> dict:
 # --- all three namespaces bind the same 5 names -------------------------------
 
 
-def test_dummy_namespace_binds_the_parallel_names() -> None:
-    ns = _dummy_namespace()
-    assert all(name in ns for name in _WRITE_NAMES + _READ_NAMES)
-
-
 def test_dry_run_namespace_binds_the_parallel_names() -> None:
     ns = _dry_run_namespace([])
     assert all(name in ns for name in _WRITE_NAMES + _READ_NAMES)
@@ -119,31 +101,6 @@ def test_real_namespace_binds_the_parallel_names() -> None:
 
 
 # --- dummy mode: aliases + scoped no-op reads ----------------------------------
-
-
-def test_dummy_parallel_writes_alias_the_scoped_sequential_helpers() -> None:
-    """Aliasing IS the dummy contract: same scope enforcement, same shapes, zero divergence."""
-    ns = _dummy_namespace()
-    assert ns["update_entities_parallel"] is ns["update_entities"]
-    assert ns["create_entities_parallel"] is ns["create_entities"]
-    assert ns["create_relationships_parallel"] is ns["create_relationships"]
-
-
-def test_dummy_parallel_reads_mirror_the_single_item_noops() -> None:
-    ns = _dummy_namespace()
-    code = """
-bytes_map = get_file_bytes_parallel(["f1", "f2"])
-in_files = get_entity_files_parallel(["DUMMY1"])
-refused = "none"
-try:
-    get_entity_files_parallel(["REAL_ID"])
-except Exception as exc:
-    refused = "refused" if "refused shared_id(s) outside the dummy scope" in str(exc) else "other"
-result = f"{len(bytes_map)}|{bytes_map['f1']}|{len(in_files['DUMMY1'])}|{refused}"
-"""
-    result, error = run_script_sync(code, ns)
-    assert error is None
-    assert result == "2|None|0|refused"
 
 
 # --- dry-run mode: recorder write aliases + unwired read stubs ----------------

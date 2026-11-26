@@ -52,7 +52,6 @@ from uwazi_admin_agent.adapters.http_url_fetcher_adapter import HttpUrlFetcherAd
 from uwazi_admin_agent.adapters.publish_state_adapter import UwaziPublishStateRepository
 from uwazi_admin_agent.adapters.relationship_catalog_adapter import UwaziRelationshipCatalog
 from uwazi_admin_agent.adapters.relationship_hub_adapter import UwaziRelationshipHubs
-from uwazi_admin_agent.adapters.search_probe_adapter import UwaziSearchProbe
 from uwazi_admin_agent.adapters.segmentation_repository_adapter import UwaziSegmentationRepository
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.adapters.template_label_adapter import UwaziTemplateLabels
@@ -89,7 +88,6 @@ from uwazi_admin_agent.ports.property_type_port import PropertyTypeLookupPort
 from uwazi_admin_agent.ports.publish_state_port import PublishStatePort
 from uwazi_admin_agent.ports.relationship_catalog_port import RelationshipCatalogPort
 from uwazi_admin_agent.ports.relationship_hub_port import RelationshipHubPort
-from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
 from uwazi_admin_agent.ports.thesaurus_value_port import ThesaurusValueLookupPort
@@ -125,7 +123,6 @@ class Runtime:
         deps: AdminAgentDeps,
         revert_use_case: RevertRunUseCase,
         verify_use_case: VerifyRevertUseCase,
-        search_probe: SearchProbePort,
         file_cache: FileCacheStore | None,
         segmentation_repository: SegmentationRepositoryPort,
         url_fetcher: UrlFetcherPort,
@@ -152,7 +149,6 @@ class Runtime:
         self.deps: AdminAgentDeps = deps
         self.revert_use_case: RevertRunUseCase = revert_use_case
         self.verify_use_case: VerifyRevertUseCase = verify_use_case
-        self.search_probe: SearchProbePort = search_probe
         self.segmentation_repository: SegmentationRepositoryPort = segmentation_repository
         # The persistent file/entity cache (None = disabled). Held here so the
         # step drivers can wire it into their use cases as the stats/invalidation
@@ -312,7 +308,6 @@ def build_runtime(
     # change is per-language (the free-text types) or one shared value. The
     # same cached /api/templates read the label lookup uses.
     property_types: PropertyTypeLookupPort = UwaziTemplatePropertyTypes(api.client)
-    search_probe = UwaziSearchProbe(api.client)
     base_segmentation_repository = UwaziSegmentationRepository(api.client)
     segmentation_repository: SegmentationRepositoryPort = (
         CachedSegmentationRepository(base_segmentation_repository, file_cache)
@@ -351,7 +346,6 @@ def build_runtime(
         # The clarification pass embeds the instance's configured languages so
         # it never asks which languages exist.
         settings_api=api,
-        search_probe=search_probe,
         # Generation-time file sampling (peek_entity_files / benchmark_extractor)
         # reads the RAW entity rows (the validated AgentEntity strips documents /
         # attachments), so this repository must be on the deps — without it both
@@ -407,7 +401,6 @@ def build_runtime(
         deps=deps,
         revert_use_case=revert_use_case,
         verify_use_case=verify_use_case,
-        search_probe=search_probe,
         file_cache=file_cache,
         segmentation_repository=segmentation_repository,
         url_fetcher=url_fetcher,

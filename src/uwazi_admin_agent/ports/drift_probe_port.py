@@ -15,8 +15,8 @@ Two queries, both served from Elasticsearch (``/api/v2/search``):
 
 The language dimension follows the search API's own semantics: the route
 always applies a ``term: { language }`` filter from the request locale, so
-one call covers one language (same convention :class:`UwaziSearchProbe`
-already uses with its ``Accept-Language`` header + ``locale`` cookie).
+one call covers one language (the adapter sets ``Accept-Language`` plus the
+``locale`` cookie per call).
 """
 
 from __future__ import annotations

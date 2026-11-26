@@ -66,8 +66,14 @@ def test_the_multi_status_filter_adds_one_in_clause() -> None:
 
 def test_the_multi_op_filter_adds_one_in_clause() -> None:
     where, params = build_where(SuggestionFilter(op=["update", "delete"]), "run-1")
-    assert where == "run_id = ? AND op IN (?, ?)"
+    assert where == "run_id = ? AND ((is_validation = 0 AND op IN (?, ?)))"
     assert params == ["run-1", "update", "delete"]
+
+
+def test_the_validate_op_selects_only_holdout_rows() -> None:
+    where, params = build_where(SuggestionFilter(op=["validate"]), "run-1")
+    assert where == "run_id = ? AND (is_validation = 1)"
+    assert params == ["run-1"]
 
 
 def test_an_empty_status_or_op_selection_matches_nothing() -> None:

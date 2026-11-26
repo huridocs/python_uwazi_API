@@ -31,9 +31,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.dry_run_script_use_case import _count_ops
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
-    ScopeViolationError,
     build_dry_run_namespace,
-    build_exec_namespace,
     build_real_exec_namespace,
     run_script_sync,
 )
@@ -163,18 +161,6 @@ def _wired_repos() -> tuple[InMemoryEntityRepo, InMemoryFileRepo]:
     return repo, files
 
 
-def _dummy_namespace() -> dict:
-    return build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=asyncio.new_event_loop(),
-        scope={"S1", "S2", "T1", "T2"},
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-
-
 def _dry_run_namespace(records: list) -> dict:
     return build_dry_run_namespace(
         entity_api=None,
@@ -210,43 +196,12 @@ def _real_namespace(
 # --- all three namespaces bind the same name --------------------------------
 
 
-def test_all_three_namespaces_bind_the_parallel_move_name() -> None:
-    assert "move_files_to_entity_parallel" in _dummy_namespace()
+def test_both_namespaces_bind_the_parallel_move_name() -> None:
     assert "move_files_to_entity_parallel" in _dry_run_namespace([])
     assert "move_files_to_entity_parallel" in _real_namespace()
 
 
 # --- dummy mode: scoped no-op ------------------------------------------------
-
-
-def test_dummy_parallel_move_noops_in_scope_in_input_order() -> None:
-    ns = _dummy_namespace()
-    moves = [
-        {"from_shared_ids": ["S1", "S2"], "to_shared_id": "T1"},
-        {"from_shared_ids": ["S2"], "to_shared_id": "T2"},
-    ]
-    assert ns["move_files_to_entity_parallel"](moves) == [
-        {"to_shared_id": "T1", "moved": 0, "failed": 0, "skipped": 0},
-        {"to_shared_id": "T2", "moved": 0, "failed": 0, "skipped": 0},
-    ]
-
-
-def test_dummy_parallel_move_refuses_out_of_scope_ids() -> None:
-    ns = _dummy_namespace()
-    with pytest.raises(ScopeViolationError):
-        ns["move_files_to_entity_parallel"]([{"from_shared_ids": ["REAL"], "to_shared_id": "T1"}])
-    with pytest.raises(ScopeViolationError):
-        ns["move_files_to_entity_parallel"]([{"from_shared_ids": ["S1"], "to_shared_id": "REAL"}])
-
-
-def test_dummy_parallel_move_refuses_a_duplicated_target() -> None:
-    ns = _dummy_namespace()
-    moves = [
-        {"from_shared_ids": ["S1"], "to_shared_id": "T1"},
-        {"from_shared_ids": ["S2"], "to_shared_id": "T1"},
-    ]
-    with pytest.raises(ValueError, match="at most ONE move per call"):
-        ns["move_files_to_entity_parallel"](moves)
 
 
 # --- dry-run mode: one move_files record per move -----------------------------
@@ -447,5 +402,4 @@ def test_empty_moves_return_empty_list_in_every_mode() -> None:
     assert real_ns["move_files_to_entity_parallel"]([]) == []
     assert files.uploads == []
     assert throttle.snapshot().success_streak == 0  # empty input records no verdict
-    assert _dummy_namespace()["move_files_to_entity_parallel"]([]) == []
     assert _dry_run_namespace([])["move_files_to_entity_parallel"]([]) == []

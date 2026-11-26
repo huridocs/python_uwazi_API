@@ -208,10 +208,16 @@ def test_create_does_not_read_instance_sources() -> None:
 def test_property_choices_are_fill_scoped_and_deduplicated() -> None:
     classify = property_choices(_schema(), ())
     names = [name for name, _ in classify]
-    assert names == ["creationDate", "judge", "related", "topics"]
+    # Date added is Uwazi-managed: never a write target.
+    assert names == ["judge", "related", "topics"]
     # Templates narrow the set: Order defines no multiselect property.
     narrowed = [name for name, _ in property_choices(_schema(), ["Order"])]
     assert narrowed == ["judge", "related"]
+
+
+def test_the_managed_dates_stay_readable_input_but_are_not_write_targets() -> None:
+    assert "creationDate" in [name for name, _ in template_property_choices(_schema(), "Judgment")]
+    assert "creationDate" not in [name for name, _ in template_property_choices(_schema(), "Judgment", writable_only=True)]
 
 
 def test_template_property_choices_and_property_type_resolve_one_template() -> None:
@@ -237,13 +243,51 @@ def test_assembled_prompt_carries_the_answers_and_structure() -> None:
         {"en": "English"},
     )
     assert "### Task Goal" in prompt
+    assert "Fill multiselect property `topics`" in prompt
     assert "- **Target Templates:** Judgment" in prompt
     assert "currently empty" in prompt
     assert "`topics`" in prompt
     assert "Classification rules" in prompt
-    assert "### Multilingual Output Rules" in prompt
-    assert "### Output Requirement" in prompt
-    assert "do not mutate Uwazi entities directly" in prompt
+    assert "Assign all relevant existing thesaurus terms" in prompt
+    # Contract rules belong in the system prompt, not the task prompt.
+    assert "Suggested value = the COMPLETE set" not in prompt
+    assert "### Output Requirement" not in prompt
+    # Multiselect is a shared property: no multilingual output rules section.
+    assert "### Multilingual Output Rules" not in prompt
+    # Empty optional rules/examples are omitted rather than printed as None.
+    assert "**Examples:** None" not in prompt
+    assert "**Additional Rules:** None" not in prompt
+
+
+def test_relationship_metadata_prompt_is_specific_and_omits_document_and_contract_noise() -> None:
+    prompt = assemble_prompt(
+        GuidedAnswers(
+            goal=GOAL_FILL,
+            templates=("Rec",),
+            sources=(SOURCE_METADATA,),
+            metadata_properties=("rec",),
+            input_language_mode=INPUT_LANGUAGE_SPECIFIC,
+            input_languages=("en",),
+            target_property="states",
+            target_property_type="relationship",
+            additional_rules="Extract states from trailing parentheses.",
+        ),
+        {"en": "English"},
+    )
+    assert "Fill relationship property `states` by linking matching existing entities" in prompt
+    assert "entity metadata properties (`rec`)" in prompt
+    assert "Document reading guidance" not in prompt
+    assert "document" not in prompt.lower()
+    assert "thesaurus" not in prompt.lower()
+    assert "multiselect" not in prompt.lower()
+    assert "Link matching existing entities from the target relationship template." in prompt
+    assert "Suggested value = the COMPLETE set" not in prompt
+    assert "- **Fallback:** Leave the suggestion blank when no value clearly applies." in prompt
+    assert "### Multilingual Output Rules" not in prompt
+    assert "### Output Requirement" not in prompt
+    assert "### Custom Instructions" in prompt
+    assert "Extract states from trailing parentheses." in prompt
+    assert "**Examples:**" not in prompt
 
 
 def test_classification_prompt_never_asks_for_extraction_rules() -> None:
@@ -262,11 +306,16 @@ def test_empty_scope_is_goal_aware() -> None:
     assert "target property is currently empty" in classify
 
 
-def test_assembled_prompt_uses_document_guidance_default() -> None:
-    prompt = assemble_prompt(_classify_answers(), {})
-    assert "Determine the optimal extraction strategy" in prompt
-    explicit = assemble_prompt(_classify_answers(document_guidance="Read the last page"), {})
-    assert "Read the last page" in explicit
+def test_assembled_prompt_includes_document_guidance_only_when_reading_documents_and_supplied() -> None:
+    blank_pdf = assemble_prompt(_classify_answers(), {})
+    assert "Document reading guidance" not in blank_pdf
+    explicit_pdf = assemble_prompt(_classify_answers(document_guidance="Read the last page"), {})
+    assert "- **Document reading guidance:** Read the last page" in explicit_pdf
+    metadata_only = assemble_prompt(
+        _classify_answers(sources=(SOURCE_METADATA,), metadata_properties=("rec",), document_guidance="Read the last page"),
+        {},
+    )
+    assert "Document reading guidance" not in metadata_only
 
 
 def test_assembled_prompt_lists_metadata_properties_and_scope_filter() -> None:
@@ -283,14 +332,21 @@ def test_assembled_prompt_lists_metadata_properties_and_scope_filter() -> None:
     assert "creationDate > 2025-01-01" in prompt
 
 
-def test_assembled_prompt_names_output_languages_and_source_mode() -> None:
+def test_assembled_prompt_names_output_languages_and_source_mode_for_text_properties() -> None:
     specific = assemble_prompt(
-        _classify_answers(output_language_mode=OUTPUT_SPECIFIC, output_languages=("en", "es")),
+        _extract_answers(output_language_mode=OUTPUT_SPECIFIC, output_languages=("en", "es")),
         {"en": "English", "es": "Spanish"},
     )
+    assert "### Multilingual Output Rules" in specific
     assert "English (en), Spanish (es)" in specific
-    source = assemble_prompt(_classify_answers(output_language_mode=OUTPUT_SOURCE), {})
-    assert "language of the source document" in source
+    assert "Inspect the target property definition" not in specific
+    source_doc = assemble_prompt(_extract_answers(output_language_mode=OUTPUT_SOURCE), {})
+    assert "language of the source document" in source_doc
+    source_meta = assemble_prompt(
+        _extract_answers(sources=(SOURCE_METADATA,), metadata_properties=("rec",), output_language_mode=OUTPUT_SOURCE),
+        {},
+    )
+    assert "Generate only in the source language." in source_meta
 
 
 def test_custom_task_prompt_embeds_the_description() -> None:

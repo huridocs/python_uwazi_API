@@ -160,8 +160,14 @@ class BaseMixin:
         :meth:`_revert_merge`). Restoring the target alone would leave the
         absorbed entities deleted.
 
+        An entity the run CREATED is undone from its row too: there is no
+        snapshot to restore, so the undo is a DELETION of the minted sharedId
+        (the row's ``created_shared_id``), after which its rows read REVERTED and
+        become runnable again.
+
         Returns the snapshot restored (its ``captured_at`` feeds the tooltip),
-        or ``None`` when the run has no snapshot for this entity.
+        ``None`` when the run has no snapshot for this entity, or an empty
+        snapshot for a created entity that was deleted (nothing to restore).
 
         Flips the run's APPLIED rows of THIS sharedId to REVERTED (keep the
         table honest across languages: all the entity's rows' writes — any
@@ -172,10 +178,16 @@ class BaseMixin:
         merge_sources = self._merge_sources(run_id, shared_id)
         if merge_sources:
             return await self._revert_merge(run_id, shared_id, merge_sources, manifest)
-        if shared_id in {e.shared_id for e in manifest.created}:
+        if self._is_create_merge(run_id, shared_id):
+            # A create-merge is NOT a plain create: its undo also re-creates the
+            # sources it absorbed, which only the ordered run-level revert can
+            # do. Deleting just the created target would lose those entities.
             raise RevertRefusedError(
-                "this row's entity was created by the run — revert it from the run-level Revert (undo deletes the entity)"
+                "this row is a create-merge: its undo also re-creates the sources it absorbed — use the run-level Revert"
             )
+        if shared_id in {entry.shared_id for entry in manifest.created} or self._created_id_of(run_id, shared_id):
+            await self._revert_created(run_id, shared_id, manifest)
+            return None
         if shared_id in {e.shared_id for e in manifest.deleted}:
             # A deleted entity has no row to update: its undo is a RE-CREATE
             # (fresh sharedId + files + relationship rows), which only the
@@ -219,6 +231,66 @@ class BaseMixin:
         self._flip_rows_reverted(run_id, [shared_id])
         self._finalize_partial_revert(run_id, manifest)
         return snapshot
+
+    def _is_create_merge(self, run_id: str, shared_id: str) -> bool:
+        """Whether this entity's review rows describe a ``create_and_delete`` merge (pure-ish).
+
+        Such a row's sharedId is the ``dry-created-N`` placeholder, and its undo
+        must re-create the absorbed sources — so it is run-level, not a delete.
+        """
+        if self._suggestion_store is None:
+            return False
+        try:
+            rows = self._suggestion_store.applied_rows_for(run_id, [shared_id])
+            if not any(row.op == "create_and_delete" for row in rows):
+                # A merge whose revert already ran no longer has APPLIED rows;
+                # the stored rows still say what the operation was.
+                rows = self._suggestion_store.get_entity(run_id, shared_id)
+        except Exception as exc:  # noqa: BLE001 — a read failure degrades to "not a merge"
+            logger.warning("revert: could not read the merge rows of {}: {}", shared_id, exc)
+            return False
+        return any(row.op == "create_and_delete" for row in rows)
+
+    def _created_id_of(self, run_id: str, shared_id: str) -> str | None:
+        """The minted sharedId behind a create row (None without a store/record)."""
+        if self._suggestion_store is None:
+            return None
+        try:
+            return self._suggestion_store.created_shared_id_for(run_id, shared_id)
+        except Exception as exc:  # noqa: BLE001 — a lookup failure degrades to "not a create"
+            logger.warning("revert: could not resolve the created id of {}: {}", shared_id, exc)
+            return None
+
+    async def _revert_created(self, run_id: str, shared_id: str, manifest: Any) -> None:
+        """Undo a CREATE row: delete the entity the run minted, then flip its rows.
+
+        A created entity has no before-state to restore, so its undo is a
+        deletion. The id to delete is the real sharedId — the manifest's entry
+        (a row addressed by its real id) or the row's ``created_shared_id`` (a
+        row addressed by its ``dry-created-N`` placeholder). After the delete the
+        rows read REVERTED (runnable again) and the minted id is cleared so the
+        table stops linking to a page that no longer exists. A created entity
+        with NO minted id (its create never ran) is refused: nothing exists to
+        delete.
+        """
+        manifest_ids = {entry.shared_id for entry in manifest.created}
+        minted = shared_id if shared_id in manifest_ids else self._created_id_of(run_id, shared_id)
+        if not minted:
+            raise RevertRefusedError(
+                "this row's entity was created by the run but no sharedId was recorded for it, so there is nothing to delete"
+            )
+        await self._entity_repository.delete_by_shared_id(minted)
+        self._emit(run_id, "delete_created", [minted])
+        logger.info("revert created entity: run={} sharedId={}", run_id, minted)
+        manifest.mark_reverted([minted])
+        self._backup_store.save_manifest(run_id, manifest)
+        if self._suggestion_store is not None:
+            try:
+                self._suggestion_store.mark_applied_reverted_for(run_id, [minted, shared_id])
+                self._suggestion_store.clear_created_ids(run_id, [minted, shared_id])
+            except Exception as exc:  # noqa: BLE001 — status refresh must not fail the revert
+                logger.warning("could not mark created rows reverted for {}: {}", minted, exc)
+        self._finalize_partial_revert(run_id, manifest)
 
     async def revert_property(
         self,

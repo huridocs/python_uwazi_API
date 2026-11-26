@@ -67,6 +67,11 @@ class BaseMixin:
         Uwazi (only APPLIED rows survive a refresh), so deleting them loses no
         history.
 
+        The retired ``accepted``/``edited`` review states are folded into
+        ``pending``: a Run is the acceptance now, so a stored row that still
+        waits to be written is pending by definition. Without this migration a
+        legacy row would fail to parse against the reduced enum.
+
         The ORDER is load-bearing: tables, then the ALTERs, then the indexes.
         ``suggestion_identity`` is recreated on every pass because it cannot
         express a column added later — and ``suggestion_entity_language`` names
@@ -106,6 +111,10 @@ class BaseMixin:
                 # Legacy rows are regular work: the holdout feature did not exist,
                 # so every stored row is runnable exactly as before.
                 self._conn.execute("ALTER TABLE suggestion ADD COLUMN is_validation INTEGER NOT NULL DEFAULT 0")
+            if "created_shared_id" not in columns:
+                # Legacy create rows were never re-pointed at the entity a Run
+                # minted; they keep showing their placeholder until re-run.
+                self._conn.execute("ALTER TABLE suggestion ADD COLUMN created_shared_id TEXT")
             pass_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(prediction_pass)")}
             if pass_columns and "refused_commit" not in pass_columns:
                 self._conn.execute("ALTER TABLE prediction_pass ADD COLUMN refused_commit INTEGER NOT NULL DEFAULT 0")
@@ -113,6 +122,7 @@ class BaseMixin:
             # Retired rows the current lifecycle does not have at all (see the
             # docstring): they cannot be read back and no longer describe work.
             self._conn.execute("DELETE FROM suggestion WHERE status = 'obsolete'")
+            self._conn.execute("UPDATE suggestion SET status = 'pending' WHERE status IN ('accepted', 'edited')")
             # An index created before ``language`` joined it cannot express the
             # new identity, and CREATE INDEX IF NOT EXISTS would keep the old
             # one: drop and let _INDEXES recreate it.

@@ -16,7 +16,8 @@ from starlette.requests import Request
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web.host_guard import assert_safe_bind
-from uwazi_admin_agent.drivers.web.instances import page_target
+from uwazi_admin_agent.drivers.links import startup_login_link
+from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS, page_target
 from uwazi_admin_agent.drivers.web.run_service import (
     fetch_entity_document_bytes,
 )
@@ -43,6 +44,11 @@ def _build_page() -> None:
         .q-stepper__step-inner, .q-stepper__content, .q-panel {
           width: 100% !important; max-width: none !important;
         }
+        /* The wizard renders its own one-line step indicator. Quasar's own
+           header lays the eight branchy steps out over two ragged rows and
+           has no prop to hide it on QStepper (no-header belongs to other
+           components), so it is removed here. */
+        .wizard-stepper .q-stepper__header { display: none !important; }
         .wizard-options { gap: 12px; }
         .wizard-options .q-radio {
           width: 100%; margin: 0; padding: 14px 16px; align-items: flex-start;
@@ -162,6 +168,13 @@ def main() -> None:
     stable ``ADMIN_WEB_STORAGE_SECRET``; :func:`assert_safe_bind` refuses the
     cleartext/wrong-secret combinations before the server starts.
 
+    Ready time announces the login link of the FIRST configured instance
+    (``?instance=<token>``), the link that actually opens the login page: the
+    ``instance`` parameter is mandatory, so a bare base url is a dead end.
+    NiceGUI's own welcome line (named ``show_welcome_message``) is replaced by
+    it and the auto-opened browser lands on the login page instead of the
+    bare path too.
+
     The websocket is bound to the browser session (:mod:`socket_guard`), so a
     socket that carries no session cookie cannot drive another browser's
     client.
@@ -173,13 +186,41 @@ def main() -> None:
     public_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
     storage_secret = os.environ.get("ADMIN_WEB_STORAGE_SECRET")
     assert_safe_bind(host, public_url, storage_secret)
+    user = os.environ.get("UWAZI_USER", "").strip()
+    # The absolute link goes to the terminal (the operator of a remote
+    # deployment cannot use a loopback address); the relative one is the path
+    # the local browser is opened at.
+    login_url = startup_login_link(public_url.rstrip("/") or f"http://{_display_host(host)}:{port}", INSTANCE_URLS, user)
+    login_path = startup_login_link("", INSTANCE_URLS, user)
+
+    def _announce_login_url() -> None:
+        if INSTANCE_URLS:
+            logger.info("Admin-agent web: open {} to log in", login_url)
+        else:
+            logger.warning("Admin-agent web: UWAZI_URL is empty — no instance to log in to")
+
+    app.on_startup(_announce_login_url)
     ui.run(
         host=host,
         port=port,
         reload=False,
         title="Uwazi Admin Agent",
         storage_secret=_storage_secret(),
+        show=login_path,
+        show_welcome_message=False,
     )
+
+
+def _display_host(host: str) -> str:
+    """The host a clickable URL names: a wildcard bind reads as loopback.
+
+    ``0.0.0.0`` (or the empty/``::`` wildcards) is a bind address, never a
+    destination; the printed link names the machine's own loopback so it can
+    be clicked. An IPv6 literal is bracketed the way a URL requires.
+    """
+    if host in {"", "0.0.0.0", "::", "*"}:
+        return "127.0.0.1"
+    return f"[{host}]" if ":" in host else host
 
 
 def _install_socket_guard() -> None:

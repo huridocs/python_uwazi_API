@@ -327,8 +327,23 @@ def get_suggestion_languages(url: str, run_id: str) -> list[str]:
     return build_suggestion_store(url).languages(run_id)
 
 
+def get_filter_counts(
+    url: str,
+    run_id: str,
+    f: SuggestionFilter | None = None,
+) -> dict[str, dict[str, int]]:
+    """Every dropdown's option counts, faceted by the OTHER active filters.
+
+    The review page's labels read "update (1,204)": each option says how many
+    rows picking it would leave. Each dimension is counted with its own filter
+    cleared, so the options of a dropdown are not cancelled out by the current
+    choice, and the rest of the filter still applies.
+    """
+    return build_suggestion_store(url).op_status_counts(run_id, f)
+
+
 def get_op_status_counts(url: str, run_id: str) -> dict[str, dict[str, int]]:
-    """``op``/``status`` row counts over the whole run — the filter option labels."""
+    """The unfaceted counts (kept for callers that want whole-run totals)."""
     return build_suggestion_store(url).op_status_counts(run_id)
 
 
@@ -342,7 +357,7 @@ def get_selection_rows(
     """Every matching row's ``(id, sharedId, language, op)`` — the whole-result selection.
 
     ``runnable_only`` restricts the projection to the statuses a Run may write
-    (PENDING/ACCEPTED/EDITED/REVERTED). "Select all" uses it so already-applied
+    (PENDING/REVERTED). "Select all" uses it so already-applied
     or discarded parts cannot inflate the Run/Discard counts; entity navigation
     reads the whole projection so it can still step through every row.
     """

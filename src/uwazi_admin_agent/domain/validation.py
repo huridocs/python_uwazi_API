@@ -87,7 +87,17 @@ class ValidationConfig(BaseModel):
     property_type: str = Field(default="", description="The measured property's Uwazi type.")
     template_names: list[str] = Field(default_factory=list, description="Templates the sample is drawn from.")
     sample_size: int = Field(default=30, ge=1, description="How many entities automatic sampling asks for.")
-    filter_text: str = Field(default="", description="Free-text search used to resolve a custom sample.")
+    selector_code: str = Field(
+        default="",
+        description=(
+            "The LLM-authored Python selector that picks the custom sample. It may use property filters, "
+            "date windows and explicit shared ids — things a free-text search cannot express."
+        ),
+    )
+    selector_explanation: str = Field(
+        default="",
+        description="The operator's own description of how the test entities should be chosen.",
+    )
     language: str = Field(default="en", description="Entity row the sample and its labels are read in.")
 
     def resolved_property_name(self) -> str:
@@ -110,7 +120,10 @@ class ValidationSet(BaseModel):
         description="label_key(sharedId, language) -> the expected value at freeze time.",
     )
     mode: ValidationMode = VALIDATION_AUTOMATIC
-    filter_text: str = ""
+    selector_explanation: str = Field(
+        default="",
+        description="The operator's description of how this sample was chosen (custom mode).",
+    )
     version: int = Field(default=1, ge=1, description="Bumped on every membership/label edit; scores are per version.")
     contaminated_at: datetime | None = Field(
         default=None,
@@ -149,6 +162,34 @@ class ValidationSet(BaseModel):
                 "version": self.version + 1,
             }
         )
+
+    def label_for(self, shared_id: str, language: str | None) -> Any:
+        """The frozen label one (entity, language) is scored against (pure).
+
+        The exact key wins. Failing that, a LANGUAGE-INDEPENDENT row (a select,
+        multiselect, relationship, date — its ``language`` is ``None``, because
+        the value is shared by every entity-language row) reads the entity's
+        single frozen label. Without that fallback the set froze ``a|en`` (the
+        language the sample was read in) while the recorded row carried
+        ``language=None``, so every validation row reached the table with no
+        current value at all. ``None`` means the entity holds no label in the
+        row's language — it is then not judged, which is a different fact from
+        "the label is empty".
+        """
+        exact = label_key(shared_id, language)
+        if exact in self.labels:
+            return self.labels[exact]
+        # No key for this exact (entity, language): a language-independent row
+        # (select/multiselect/relationship/date carries no language at all) may
+        # legitimately read the entity's single frozen label. A per-language
+        # property with only ONE frozen language is equally unambiguous. Two or
+        # more candidates mean the row's language matters and cannot be guessed.
+        candidates = [value for key, value in self.labels.items() if split_label_key(key)[0] == shared_id]
+        if len(candidates) != 1:
+            return None
+        if language is not None and self.is_per_language():
+            return None
+        return candidates[0]
 
 
 class ValidationScore(BaseModel):
@@ -204,6 +245,51 @@ def _set_of(value: Any, property_type: str) -> set[str]:
     return {str(item).strip() for item in items if str(item).strip()}
 
 
+def values_match(expected: Any, predicted: Any, property_type: str) -> bool:
+    """Whether a proposed value equals the frozen label the way the score reads it (pure).
+
+    The review table's Match column and the score must agree: a set-valued
+    property (multiselect, relationship) compares its VALUE SETS, because the
+    proposal is recorded as bare ids while the frozen label carries read shapes
+    (``[{"shared_id": ..., "title": ...}]``) — rendering both to text reported
+    every correct relationship link as a mismatch. Every other type uses the
+    review table's own normalized comparison.
+    """
+    if is_blank(expected):
+        return False
+    if validation_metric(property_type) == METRIC_F1:
+        return _set_of(predicted, property_type) == _set_of(expected, property_type)
+    return compare_field(predicted, expected, policy=MatchPolicy.NORMALIZED, property_type=property_type)
+
+
+def prediction_for(
+    predictions: Mapping[tuple[str, str | None], Any],
+    shared_id: str,
+    language: str | None,
+    property_type: str,
+) -> Any:
+    """The script's proposal scored against one frozen label (pure).
+
+    The exact (entity, language) pair wins. A LANGUAGE-INDEPENDENT property
+    (select, multiselect, relationship, date) holds ONE value per entity, so a
+    script that recorded its write with a ``language`` argument different from
+    the language the sample was frozen in (or with none at all) still made the
+    proposal being measured: the entity's single distinct write is used. For a
+    per-language type (text, richtext) the pair is the identity — collapsing it
+    would score another language's text against this label.
+    """
+    value = predictions.get((shared_id, language))
+    if value is not None:
+        return value
+    if (property_type or "").strip().lower() in {"text", "richtext"}:
+        return None
+    found = [candidate for (sid, _lang), candidate in predictions.items() if sid == shared_id and candidate is not None]
+    if not found:
+        return None
+    signatures = {frozenset(_set_of(candidate, property_type)) for candidate in found}
+    return found[0] if len(signatures) == 1 else None
+
+
 def score_validation(
     validation: ValidationSet,
     predictions: Mapping[tuple[str, str | None], Any],
@@ -216,6 +302,10 @@ def score_validation(
     pair absent from the mapping is a MISSING prediction: the script produced
     no value for that held-out entity, which for a fill task is not success.
     A blank frozen label is excluded (the entity is not judgeable).
+
+    A LANGUAGE-INDEPENDENT property is scored by the entity's single write (see
+    :func:`prediction_for`): the sample is frozen under the language it was read
+    in, while the script records the shared value with no language at all.
     """
     metric = validation_metric(validation.property_type)
     matched = mismatched = missing = tp = fp = fn = judged = 0
@@ -224,7 +314,7 @@ def score_validation(
         if is_blank(expected):
             continue
         shared_id, language = split_label_key(key)
-        predicted = predictions.get((shared_id, language))
+        predicted = prediction_for(predictions, shared_id, language, validation.property_type)
         judged += 1
         entities.add(shared_id)
         if metric == METRIC_F1:
@@ -342,6 +432,7 @@ __all__ = [
     "ValidationScore",
     "ValidationSet",
     "label_key",
+    "prediction_for",
     "predictions_from_records",
     "script_hash",
     "score_validation",
@@ -349,4 +440,5 @@ __all__ = [
     "validation_metric",
     "validation_property_name",
     "validation_state",
+    "values_match",
 ]

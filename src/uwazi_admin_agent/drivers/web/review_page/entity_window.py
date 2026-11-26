@@ -26,6 +26,7 @@ from uwazi_admin_agent.domain.select_values import (
     value_options,
 )
 from uwazi_admin_agent.domain.suggestion import (
+    CREATE_OPS,
     MATCHED_OP,
     MERGE_OPS,
     PROPERTY_OPS,
@@ -60,7 +61,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
     RUN_STATUS_COLORS,
     full_value,
     match_label,
-    property_caption,
     property_heading,
     revert_entity_confirmation,
     row_neighbours,
@@ -125,7 +125,9 @@ def _open_entity_window(
         ui.notify(f"No suggestions for {shared_id}", type="warning")
         return
     title = suggestions[0].entity_title or shared_id
-    label = f"{title} — {shared_id}" + (f" · {language}" if language else "")
+    # The title alone: the sharedId is in the browser link and in the table, and
+    # printing it beside the title only crowded the header.
+    label = title + (f" · {language}" if language else "")
     state["_entity_home"] = {
         "shared_id": shared_id,
         "language": language,
@@ -186,8 +188,20 @@ def _open_entity_window(
 
 
 def _entity_rows(state: dict[str, Any], shared_id: str, language: str | None) -> list[Suggestion]:
-    """The entity's rows in one language group, narrowed by the table's filter."""
-    return get_entity_suggestions(page_instance_url(), state["run_id"], shared_id, language, _current_filter(state))
+    """The entity's rows in one language group, narrowed by the table's filter.
+
+    When the filter hides EVERY row of the group (a validation row under
+    "regular rows only", a status the row no longer carries, a title search),
+    the window still opens that entity: the operator clicked this row, so an
+    empty panel with "no suggestions" is never the right answer. The unfiltered
+    read is the fallback, and it is what makes the document/PDF reachable for a
+    validation or not-processed row.
+    """
+    url = page_instance_url()
+    rows = get_entity_suggestions(url, state["run_id"], shared_id, language, _current_filter(state))
+    if rows:
+        return rows
+    return get_entity_suggestions(url, state["run_id"], shared_id, language)
 
 
 def _render_entity_header(
@@ -264,18 +278,30 @@ def _entity_is_revertable(
 
     The Revert is entity-wide, not a property action, so it is decided from the
     UNFILTERED language group: a filter that hides the applied rows must not
-    hide their undo. The same in-place rule as the table applies — a created
-    entity, a deleted one, a create-merge (its target is a dry-created
-    placeholder) and a file copy revert at run level, not from this button. An
-    ``update_and_delete`` merge IS revertable here: its undo restores the target
-    and re-creates the sources it deleted.
+    hide their undo. The same rule as the table applies — a deleted entity, a
+    create-merge (its target is a dry-created placeholder) and a file copy
+    revert at run level, not from this button. A CREATED entity is revertable:
+    its undo deletes the entity the run minted. An ``update_and_delete`` merge
+    is revertable too: its undo restores the target and re-creates the sources
+    it deleted.
     """
     rows = get_entity_suggestions(page_instance_url(), state["run_id"], shared_id, language) or suggestions
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in rows)
-    # The table's own rule: an in-place entity with at least one applied row.
-    # That covers a whole-entity op (publish/unpublish) whose undo the snapshot
-    # restore also performs, not just property writes.
+    # The table's own rule: an entity with at least one applied row that is not
+    # run-level-only. That covers a whole-entity op (publish/unpublish) whose
+    # undo the snapshot restore also performs, a created entity (deleted on
+    # undo), not just property writes.
     return in_place and any(s.status is SuggestionStatus.APPLIED for s in rows)
+
+
+def _entity_is_created(suggestions: list[Suggestion]) -> bool:
+    """Whether this group's rows describe an entity the run CREATED (pure).
+
+    A create row (``create``, or a ``create_and_delete`` merge) names an entity
+    that did not exist before the Run, so the group has no pre-run state to
+    restore and its undo is a deletion.
+    """
+    return any(s.op in CREATE_OPS for s in suggestions)
 
 
 def _close_entity_window(state: dict[str, Any]) -> None:
@@ -483,9 +509,6 @@ async def _render_basis(
         ui.label(f"Read from the {raw_language} row").classes("text-caption text-grey-6")
         for name in basis:
             ui.label(property_heading(name, "update", labels)).classes("text-subtitle2")
-            caption = property_caption(name, labels)
-            if caption:
-                ui.label(caption).classes("text-caption text-grey-6")
             _entity_value_label(full_value(values.get(name), types.get(name)), "text-body2")
 
 
@@ -509,14 +532,17 @@ def _entity_header(
     rows = suggestions or []
     refs = [(s.id, s.shared_id, s.language, s.op) for s in rows if s.id is not None and _suggestion_is_runnable(s)]
     revertable = _entity_is_revertable(state, shared_id, language, rows)
+    created = _entity_is_created(rows)
     # The same open-in-Uwazi rule the review table uses: only a row that points
     # at a REAL entity page (not a dry-created placeholder, not a publish-only
-    # change) gets the link, so the icon never opens a 404.
+    # change) gets the link, so the icon never opens a 404. A create row links
+    # through the id a Run minted, exactly as its table row does.
     open_url = operation_open_url(
         shared_id,
         [s.op for s in rows],
         [language] if language else [],
         page_instance_url(),
+        created_shared_id=next((s.created_shared_id for s in rows if s.created_shared_id), None),
     )
     with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
         with ui.row().classes("items-center no-wrap").style("min-width: 0"):
@@ -540,10 +566,10 @@ def _entity_header(
             if not refs:
                 run_button.disable()
             revert_button = ui.button(
-                "Revert this entity",
-                icon="undo",
+                "Delete (undo create)" if created else "Revert this entity",
+                icon="delete" if created else "undo",
                 on_click=lambda: _revert_entity_clicked(state, shared_id),
-            ).props("flat dense color=indigo")
+            ).props(f"flat dense color={'negative' if created else 'indigo'}")
             if not revertable:
                 revert_button.disable()
             ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat dense")
@@ -821,10 +847,10 @@ def _entity_suggestions(
     """The right-hand panel: the precomputed rows the Run heuristic will write.
 
     Each card is headed by the property's LABEL — what Uwazi calls it and what
-    the operator knows it by — with the raw property name beneath it, so a row is
-    both readable and still matchable against the template or a CSV
-    (:func:`property_heading` / :func:`property_caption`). ``labels`` is the
+    the operator knows it by (:func:`property_heading`). ``labels`` is the
     template's label map; without it the heading falls back to the raw name.
+    The internal property name is NOT printed: the actions use it as an
+    identifier, the operator never reads it.
 
     Each card carries the same per-property actions as the review table's
     suboperation row: Run (when the part can still be written on its own) and
@@ -862,7 +888,7 @@ def _entity_suggestions(
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 with ui.column().classes("items-start no-wrap").style("min-width: 0"):
                     if suggestion.op == SKIPPED_OP:
-                        ui.label("Not processed").classes("text-subtitle2")
+                        ui.label("Excluded").classes("text-subtitle2")
                         ui.label(skip_reason_label(suggestion.skip_reason)).classes("text-caption text-grey-7")
                     elif suggestion.op == MATCHED_OP:
                         ui.label(property_heading(suggestion.property_name, suggestion.op, resolved)).classes(
@@ -872,9 +898,6 @@ def _entity_suggestions(
                         ui.label(property_heading(suggestion.property_name, suggestion.op, resolved)).classes(
                             "text-subtitle2"
                         )
-                    caption = property_caption(suggestion.property_name, resolved)
-                    if caption:
-                        ui.label(caption).classes("text-caption text-grey-6")
                 with ui.row().classes("items-center no-wrap gap-1"):
                     ui.badge(match_label(suggestion.match)).props(f"color={MATCH_COLORS[match_label(suggestion.match)]}")
                     ui.badge(sub_status_label(suggestion.status)).props(f"color={sub_status_color(suggestion.status)}")
@@ -907,18 +930,18 @@ def _entity_suggestions(
                     "text-body2 text-grey-7",
                 )
                 _entity_value_label(
-                    f"Extracted value: {_render_value(suggestion.proposed_value, property_type, titles)}",
+                    f"Suggested value: {_render_value(suggestion.proposed_value, property_type, titles)}",
                     "text-body2 text-teal-9",
                 )
             if suggestion.op == SKIPPED_OP and suggestion.proposed_value:
                 _entity_value_label(
-                    f"Source page / error details: {suggestion.proposed_value}",
+                    f"Evidence for this exclusion: {suggestion.proposed_value}",
                     "text-body2 text-grey-7",
                 )
             if suggestion.op in PROPERTY_OPS:
                 property_type = property_types.get(suggestion.property_name or "")
                 _entity_value_label(
-                    f"Value: {_render_value(suggestion.current_value, property_type, titles)}",
+                    f"Current value: {_render_value(suggestion.current_value, property_type, titles)}",
                     "text-body2 text-grey-7",
                 )
                 if property_type == RELATIONSHIP_TYPE:
@@ -962,11 +985,8 @@ def _entity_suggestions(
                     )
                     # A row discarded BY the value mechanism stays editable
                     # (picking a value back is exactly the review loop); every
-                    # other non-runnable state, and an EDITED row (its edit wins
-                    # over the values), is read-only.
-                    editable = (
-                        _suggestion_is_runnable(suggestion) or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON
-                    ) and suggestion.status is not SuggestionStatus.EDITED
+                    # other non-runnable state is read-only.
+                    editable = _suggestion_is_runnable(suggestion) or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON
                     picker = ui.select(
                         {option["label"]: _option_text(option) for option in options},
                         multiple=True,
@@ -1001,16 +1021,15 @@ def _entity_suggestions(
                     )
                 else:
                     _entity_value_label(
-                        f"Proposed: {_render_value(suggestion.proposed_value, property_type, titles)}",
+                        f"Suggested value: {_render_value(suggestion.proposed_value, property_type, titles)}",
                         "text-body2",
                     )
                 if suggestion.context:
                     _entity_value_label(
-                        f"Source context: {suggestion.context}",
+                        f"Input text the suggestion was read from: {suggestion.context}",
                         "text-body2 text-grey-7",
                     )
-            if suggestion.edited_value is not None:
-                _entity_value_label(f"Edited: {suggestion.edited_value}", "text-body2 text-teal")
+
     if merge_rows:
         status = operation_status([{"status": sub_status_label(row.status)} for row in merge_rows])
         status_color = RUN_STATUS_COLORS.get(status, "grey-7")
@@ -1131,20 +1150,29 @@ def _add_validation_clicked(state: dict[str, Any], shared_id: str) -> None:
         return
 
     def _confirm() -> None:
-        try:
-            add_validation_sample(state["instance_url"], state["run_id"], shared_id, credentials.user, credentials.password)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("add to validation failed")
-            ui.notify(f"Could not add {shared_id} to validation: {exc}", type="negative", multi_line=True)
-            return
-        ui.notify(
-            f"{shared_id} added — re-run the score to include it. The AI already read it, so this is a "
-            "regression score, not a fair unseen estimate.",
-            type="positive",
-            multi_line=True,
-        )
-        _refresh_entity_window(state)
-        _refresh_all(state)
+        client = context.client
+
+        async def _add() -> None:
+            try:
+                await add_validation_sample(
+                    state["instance_url"], state["run_id"], shared_id, credentials.user, credentials.password
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("add to validation failed")
+                with client:
+                    ui.notify(f"Could not add {shared_id} to validation: {exc}", type="negative", multi_line=True)
+                return
+            with client:
+                ui.notify(
+                    f"{shared_id} added — re-run the score to include it. The AI already read it, so this is a "
+                    "regression score, not a fair unseen estimate.",
+                    type="positive",
+                    multi_line=True,
+                )
+                _refresh_entity_window(state)
+                _refresh_all(state)
+
+        background_tasks.create(_add(), name=f"add validation {shared_id}")
 
     _simple_confirm(
         "Add this entity to the validation set?",
@@ -1165,8 +1193,8 @@ def _entity_structural_card(detail: dict[str, Any]) -> None:
             with ui.row().classes("items-center no-wrap gap-1"):
                 ui.badge(detail["match"]).props(f"color={detail['match_color']}")
                 ui.badge(detail["status"]).props(f"color={detail['status_color']}")
-        _entity_value_label(f"Value: {detail['current']}", "text-body2 text-grey-7")
-        _entity_value_label(f"Proposed: {detail['proposed']}", "text-body2")
+        _entity_value_label(f"Current value: {detail['current']}", "text-body2 text-grey-7")
+        _entity_value_label(f"Suggested value: {detail['proposed']}", "text-body2")
 
 
 def _navigation_pairs(state: dict[str, Any]) -> list[tuple[str, str | None]]:
@@ -1211,10 +1239,14 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
         client = context.client
         background_tasks.create(_revert_entity_rows(state, shared_id, client), name=f"revert {shared_id}")
 
+    # A create task's rows live in the language-independent group; the window is
+    # usually open on it, but a create row can also be opened via its language.
+    rows = _entity_rows(state, shared_id, None) or []
     title, message = revert_entity_confirmation(
         shared_id,
         tooltip_text,
         merge=entity_is_merge(page_instance_url(), state["run_id"], shared_id),
+        created=_entity_is_created(rows),
     )
     _simple_confirm(title, message, _confirm)
 
@@ -1325,11 +1357,14 @@ async def _revert_entity_rows(state: dict[str, Any], shared_id: str, client: Any
             )
             state["_progress"](1, 1)
             with client:
-                ui.notify(
-                    f"Reverted {shared_id} to its backup"
-                    + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
-                    type="positive",
-                )
+                if _entity_is_created(get_entity_suggestions(page_instance_url(), state["run_id"], shared_id)):
+                    ui.notify(f"Deleted {shared_id} — the run created it, so the creation is undone", type="positive")
+                else:
+                    ui.notify(
+                        f"Reverted {shared_id} to its backup"
+                        + (f" ({info.backup_created_at:%Y-%m-%d %H:%M})" if info.backup_created_at else ""),
+                        type="positive",
+                    )
         except Exception as exc:  # noqa: BLE001 — the toast reports, the page never crashes
             logger.exception("per-entity revert failed")
             with client:

@@ -12,6 +12,7 @@ from uwazi_admin_agent.configuration import (
     DUMMY_LANGUAGE,
 )
 from uwazi_admin_agent.domain.file_restore import extract_file_refs
+from uwazi_admin_agent.domain.property_evidence import basis_values
 from uwazi_admin_agent.drivers.runtime import build_runtime
 from uwazi_api.domain.segmentation import Segmentation
 
@@ -79,25 +80,6 @@ async def resolve_entity_document(
         if documents:
             return EntityDocument(documents[0].filename, candidate)
     return None
-
-
-def basis_values(raw: dict[str, Any], names: list[str]) -> dict[str, Any]:
-    """The live value of each inferred-from property (pure; `_title` reads the title).
-
-    ``raw`` is one entity's raw Uwazi row: ``_title`` comes from its top-level
-    ``title``, every other name from its ``metadata`` cell (the WHOLE cell — a
-    shared property has one cell, so no language narrowing applies). A name the
-    row does not carry maps to ``None``, which the window renders as an empty
-    value instead of failing.
-    """
-    metadata = raw.get("metadata") or {}
-    values: dict[str, Any] = {}
-    for name in names:
-        if name == "_title":
-            values[name] = raw.get("title")
-        else:
-            values[name] = metadata.get(name)
-    return values
 
 
 async def get_entity_basis(

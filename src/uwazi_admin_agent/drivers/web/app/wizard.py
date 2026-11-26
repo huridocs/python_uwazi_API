@@ -12,12 +12,13 @@ from uwazi_admin_agent.configuration import (
     LLM_PRICE_OUTPUT_PER_MTOK,
     PREDICTION_DEFAULT_MAX_COST,
     PREDICTION_DEFAULT_MAX_REQUESTS,
-    SCRIPT_DEFAULT_MAX_COST,
+    WIZARD_DEFAULT_AI_ALLOWANCE,
 )
 from uwazi_admin_agent.domain.allowance_note import allowance_note_to_user_block
 from uwazi_admin_agent.domain.guided_task import GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOAL_FILL, GOALS
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
+from uwazi_admin_agent.domain.validation_note import validation_note_to_user_block
 from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
@@ -44,6 +45,44 @@ from .state import _broadcast_notify, _busy_run_text, _notify_error, _session_en
 _PROMPT_SOURCE_GUIDED = "guided"
 
 
+def _wizard_path(state: dict[str, Any]) -> list[tuple[str, str]]:
+    """The steps the current answers will visit, in order (pure-ish).
+
+    The Quasar header wraps eight branchy steps onto two ragged rows, so the
+    wizard renders its own single-line indicator. Only the steps the chosen
+    task actually walks are listed: the guided questions replace the custom
+    prompt, and the test set exists only for a fill-a-property flow.
+    """
+    source = state.get("_prompt_source")
+    steps: list[tuple[str, str]] = [("name", "Name"), ("goal", "Task type")]
+    if source == GOAL_CUSTOM:
+        steps.append(("custom", "Custom task"))
+    else:
+        steps.append(("guided", "Questions"))
+    # The test set exists ONLY for a guided fill-a-property flow: there is no
+    # measured property (and no label) to score otherwise.
+    if _validation_goal(state) == GOAL_FILL:
+        steps.append(("test_set", "Test set"))
+    steps.extend((("caps", "AI allowance"), ("understand", "AI check"), ("generate", "Generate")))
+    return steps
+
+
+def _sync_step_indicator(state: dict[str, Any], active: str | None) -> None:
+    """Point the single-line step indicator at the step the stepper shows."""
+    label = state.get("_step_label")
+    progress = state.get("_step_progress")
+    if label is None or getattr(label, "is_deleted", False):
+        return
+    path = _wizard_path(state)
+    names = [name for name, _title in path]
+    titles = dict(path)
+    current = active if active in titles else names[0]
+    index = names.index(current) + 1
+    label.text = f"Step {index} of {len(path)} · {titles[current]}"
+    if progress is not None and not getattr(progress, "is_deleted", False):
+        progress.value = index / len(path)
+
+
 def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_validated_prompt: str | None = None) -> None:
     """Open the task-type-first wizard, or Generate directly for a duplicate."""
     base_prompt = (prefill_validated_prompt or prefill_prompt).strip() or prefill_prompt
@@ -56,18 +95,28 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
         dialog.props("persistent")
         modal_header(dialog, "New task")
-        with ui.stepper().classes("w-full") as stepper:
-            # Guided questions have their own progress indicator; outer tabs
-            # would expose irrelevant branches and allow answers to be skipped.
-            stepper.props("no-header")
+        # The Quasar header lays the branchy steps out over two ragged rows, so
+        # the wizard shows one line instead: "Step n of N · <title>". It follows
+        # the steps the chosen task actually walks. The stepper's own header is
+        # hidden with CSS (.wizard-stepper in page.py): it lists branches the
+        # task will not visit and allows answers to be skipped.
+        with ui.column().classes("w-full gap-1"):
+            state["_step_label"] = ui.label().classes("text-caption text-grey-7")
+            state["_step_progress"] = ui.linear_progress(value=0, show_value=False).classes("w-full")
+        with ui.stepper().classes("wizard-stepper w-full") as stepper:
             state["_dialog"] = dialog
             state["_stepper"] = stepper
             _wizard_step_task(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
             _wizard_step_guided(state, dialog)
+            # The test set is defined BEFORE the two AI steps: the allowance and
+            # the prompt-understanding questions both depend on what the score
+            # will measure, not the other way round.
+            _wizard_step_validation(state, stepper, dialog)
             _wizard_step_caps(state, stepper, dialog)
             _wizard_step_validate(state, stepper, dialog)
-            _wizard_step_validation(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
+            stepper.on_value_change(lambda event: _sync_step_indicator(state, str(event.value or "")))
+        _sync_step_indicator(state, stepper.value)
         dialog.open()
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
@@ -151,11 +200,16 @@ def _wizard_goal_next(state: dict[str, Any]) -> None:
     """Route the selected task type to guided questions or custom entry."""
     goal = state["_goal_input"].value
     if goal == GOAL_CUSTOM:
+        state["_prompt_source"] = GOAL_CUSTOM
+        _sync_step_indicator(state, "custom")
         state["_stepper"].set_value("custom")
         return
     state["_prompt_source"] = _PROMPT_SOURCE_GUIDED
-    state["_stepper"].set_value("guided")
+    # Start the flow FIRST: it records the goal the step indicator reads, so a
+    # fill task already lists its test-set step on arrival.
     start_guided_flow(state, goal)
+    _sync_step_indicator(state, "guided")
+    state["_stepper"].set_value("guided")
 
 
 def _custom_prompt_next(state: dict[str, Any]) -> None:
@@ -168,11 +222,11 @@ def _custom_prompt_next(state: dict[str, Any]) -> None:
 
 
 def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> None:
-    """Store ``prompt`` and advance to validate, dropping stale clarifications.
+    """Store ``prompt`` and advance to the test-set step, dropping stale clarifications.
 
     A duplicate opens with the source run's FOLDED prompt (original +
     clarifications) already applied. Stepping back to this panel must not
-    silently drop it: only an EDITED request invalidates those clarifications,
+    silently drop it: only an edited request invalidates those clarifications,
     because they answered the previous wording. A guided prompt is always a new
     request.
     """
@@ -185,10 +239,14 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
     state["final_prompt"] = state.get("validated_prompt") or prompt
     state["_validation_done"] = False
     _render_validate_idle(state, state["_validate_container"])
-    # The allowance step sits BETWEEN the prompt and validation: its cap is
-    # folded into the clarification request, so validation must never be
-    # reached without it.
-    stepper.set_value("caps")
+    # The test set comes FIRST, then the AI allowance, then the AI check: the
+    # allowance and the clarification questions are tailored to the score the
+    # operator chose to measure. Only a fill-a-property flow HAS a test set —
+    # there is no label to score against when the task creates entities or runs
+    # a custom rule, so those walk straight past the step. Rebuild the content
+    # HERE (not only at build time) so it follows the goal just chosen.
+    _render_test_set_step(state)
+    stepper.set_value("test_set" if _validation_goal(state) == GOAL_FILL else "caps")
 
 
 def _guided_prompt_ready(state: dict[str, Any], prompt: str) -> None:
@@ -214,6 +272,7 @@ def _guided_switch_to_free_text(state: dict[str, Any]) -> None:
     """Fall back to custom entry when the instance schema cannot be read."""
     state["_goal_input"].value = GOAL_CUSTOM
     state["_prompt_source"] = GOAL_CUSTOM
+    _sync_step_indicator(state, "custom")
     state["_stepper"].set_value("custom")
 
 
@@ -228,7 +287,9 @@ def _wizard_step_guided(state: dict[str, Any], dialog: Any) -> None:
 
 
 def _wizard_step_validate(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
-    with ui.step(name="validate", title="Validate", icon="help"):
+    # Named "AI check" (not "Validate") so it is not confused with the test-set
+    # step it used to sit beside.
+    with ui.step(name="understand", title="AI check", icon="help"):
         container = ui.column().classes("w-full")
         state["_validate_container"] = container
         _render_validate_idle(state, container)
@@ -238,20 +299,22 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
     """Show the pre-validation state: a Validate button (validation is opt-in)."""
     container.clear()
     with container:
-        ui.label("Ask the LLM what it understood from your prompt before generating.").classes("text-body1 q-mb-md")
+        keeps_set = _validation_goal(state) == GOAL_FILL
+        ui.label(
+            "Ask the LLM what it understood from your prompt before generating. It also sees the test set you "
+            "chose, so its questions can be about what the score will measure."
+            if keeps_set
+            else "Ask the LLM what it understood from your prompt before generating."
+        ).classes("text-body1 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
             ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
-            ui.button("Validate", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
+            ui.button("Check with the AI", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
 
 
 def _wizard_validate_back(state: dict[str, Any]) -> None:
-    """Back from prompt validation: to the allowance step that precedes it.
-
-    The caps step is ALWAYS built (the wizard creates it before validation), so
-    Back never jumps over the operator's budget choice.
-    """
+    """Back from the AI check: to the allowance step that precedes it."""
     state["_stepper"].set_value("caps")
 
 
@@ -268,7 +331,7 @@ def _start_validation(state: dict[str, Any]) -> None:
     with container:
         with ui.row().classes("w-full items-center gap-2"):
             ui.spinner(size="lg")
-            ui.label("Validating prompt — asking the LLM what it understood...").classes("text-body1")
+            ui.label("Asking the AI what it understood...").classes("text-body1")
     background_tasks.create(_do_clarify(state, container), name="clarify prompt")
 
 
@@ -285,9 +348,10 @@ async def _do_clarify(state: dict[str, Any], container: Any) -> None:
         _render_validation_error(state, container, RuntimeError("your session ended — log in again"))
         return
     try:
-        # The caps step runs BEFORE validation, so the operator's approved AI
-        # allowance is folded into the clarify prompt: the LLM tailors its
-        # restatement and its questions to what the task can actually afford.
+        # The test-set and allowance steps run BEFORE this call, so the operator's
+        # decisions are folded into the clarify prompt: the LLM tailors its
+        # restatement and questions to the score that will be measured and to
+        # what the task can afford.
         understanding = await asyncio.to_thread(
             asyncio.run,
             clarify_prompt(
@@ -296,6 +360,7 @@ async def _do_clarify(state: dict[str, Any], container: Any) -> None:
                 credentials.user,
                 credentials.password,
                 allowance_note=allowance_note_to_user_block(_wizard_budget(state)),
+                validation_note=validation_note_to_user_block(_wizard_validation_config(state)),
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -356,13 +421,12 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
         )
         state["_notes_input"] = notes_input
 
-        ui.label("Final prompt (sent to the LLM)").classes("text-subtitle1 text-grey-7 q-mt-md")
-        preview = ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
-        state["_preview"] = preview
-
+        # Deliberately NO prompt preview here: the Generate step shows the
+        # exact text that will be sent, so showing it twice made the operator
+        # read the same thing on two consecutive screens.
         with ui.row().classes("q-mt-lg w-full justify-end"):
             ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_back_to_prompt_step(state)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
             ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
             ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("color=primary")
 
@@ -384,7 +448,7 @@ def _collect_answers(state: dict[str, Any]) -> list[QuestionAnswer]:
 
 
 def _refresh_final_prompt(state: dict[str, Any]) -> None:
-    """Recompute the final prompt from the current answers + notes and update the preview.
+    """Recompute the final prompt from the current answers + notes.
 
     Folds onto the SAME text the clarification pass was shown (``_clarify_base``),
     not the bare original: a duplicate's questions were asked about the source
@@ -395,11 +459,7 @@ def _refresh_final_prompt(state: dict[str, Any]) -> None:
     notes_input = state.get("_notes_input")
     notes = (notes_input.value or "") if notes_input is not None else ""
     base = state.get("_clarify_base") or state["prompt"]
-    final = build_final_prompt(base, _collect_answers(state), notes)
-    state["final_prompt"] = final
-    preview = state.get("_preview")
-    if preview is not None:
-        preview.value = final
+    state["final_prompt"] = build_final_prompt(base, _collect_answers(state), notes)
 
 
 def _wizard_skip(state: dict[str, Any]) -> None:
@@ -419,7 +479,7 @@ def _wizard_skip(state: dict[str, Any]) -> None:
     state["final_prompt"] = base
     state["_prompt_base"] = base
     _show_generate_prompt(state)
-    state["_stepper"].set_value("validation")
+    state["_stepper"].set_value("generate")
 
 
 def _wizard_confirm(state: dict[str, Any]) -> None:
@@ -428,7 +488,7 @@ def _wizard_confirm(state: dict[str, Any]) -> None:
     state["validated_prompt"] = state["final_prompt"]
     state["_prompt_base"] = state["validated_prompt"]
     _show_generate_prompt(state)
-    state["_stepper"].set_value("validation")
+    state["_stepper"].set_value("generate")
 
 
 def _show_generate_prompt(state: dict[str, Any]) -> None:
@@ -450,24 +510,65 @@ def _refresh_generate_prompt(state: dict[str, Any]) -> None:
 
 
 def _wizard_generate_back(state: dict[str, Any]) -> None:
-    """Back from the generate step: to the validation-set step before it.
+    """Back from the generate step: to the AI check that precedes it."""
+    state["_stepper"].set_value("understand")
 
-    The stepper's order is task → questions → allowance → validate → validation
-    → generate, so Back never skips the step that decides whether a holdout
-    exists (it must be chosen BEFORE generation reads the instance).
+
+def _validation_goal(state: dict[str, Any]) -> str:
+    """The task type the test set applies to ('' when the wizard has no goal yet).
+
+    A CUSTOM task is answered in free text and never runs the guided questions,
+    so ``_guided_answers`` may still hold a stale fill goal from a previous
+    pick; the prompt source wins there. It has no measured property, hence no
+    test set either.
     """
-    state["_stepper"].set_value("validation")
+    source = state.get("_prompt_source")
+    if source == GOAL_CUSTOM:
+        return GOAL_CUSTOM
+    if source is None and _goal_of(state) == GOAL_CUSTOM:
+        return GOAL_CUSTOM
+    return _goal_of(state)
+
+
+def _goal_of(state: dict[str, Any]) -> str:
+    """The guided flow's goal, or '' when no questions were answered (pure-ish)."""
+    return str(getattr(state.get("_guided_answers"), "goal", "") or "")
 
 
 def _wizard_step_validation(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
-    """The holdout step: pick whether to keep a fair test set, and of what.
+    """The test-set step: pick whether to keep a fair test set, and of what.
 
-    The wording is for operators who have never heard of a held-out set: it says
-    what the set is FOR (a fair score on entities the AI never sees) and what it
-    costs (those entities are not changed by the task until promoted). One
-    property is measured — the task itself may still change others.
+    It runs BEFORE the AI allowance and the AI check so both can be tailored to
+    what the score measures. The content is rebuilt on entry (see
+    ``_render_test_set_step``): the goal is chosen LATER in the wizard, so the
+    build-time render cannot know whether a test set applies at all.
     """
-    with ui.step(name="validation", title="Validation", icon="science"):
+    with ui.step(name="test_set", title="Test set", icon="science"):
+        container = ui.column().classes("w-full")
+        state["_test_set_container"] = container
+        _render_test_set_step(state)
+
+
+def _render_test_set_step(state: dict[str, Any]) -> None:
+    """(Re)build the test-set step's content for the current goal.
+
+    ONLY the fill-a-property flow offers the picker: a measured property is a
+    fill-flow concept (the property being filled is what the score reads, and
+    the guided questions carry its template). Entity-creation and custom tasks
+    get a plain statement instead — no radio, no fields, no way to park the
+    wizard on a picker that could never sample anything.
+    """
+    container = state.get("_test_set_container")
+    if container is None or container.is_deleted:
+        return
+    dialog = state["_dialog"]
+    stepper = state["_stepper"]
+    container.clear()
+    with container:
+        # No content outside the fill flow: navigation skips the step entirely
+        # (an entity-creation task has no label data to score against).
+        if _validation_goal(state) != GOAL_FILL:
+            return
         ui.label("Keep a fair test set?").classes("text-h6 q-mb-sm")
         ui.label(
             "A test set is a few entities kept away from the AI. The finished task is scored on them, "
@@ -478,29 +579,29 @@ def _wizard_step_validation(state: dict[str, Any], stepper: Any, dialog: Any) ->
             {
                 "none": "No test set — just run the task",
                 "automatic": "Pick a sample automatically (recommended)",
-                "custom": "Pick a sample by a search/filter",
+                "custom": "Describe how to choose the sample (the AI writes the selector when the task is generated)",
             },
             value="automatic",
-            on_change=lambda e: _render_validation_fields(state),
+            on_change=lambda _event: _render_validation_fields(state),
         ).classes("wizard-options w-full")
         with ui.column().classes("w-full") as fields:
             state["_validation_fields"] = fields
         with ui.row().classes("q-mt-lg w-full justify-between"):
             ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_validation_back(state, stepper)).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: _wizard_validation_back(state)).props("color=grey-7 flat")
             ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_validation_next(state, stepper)).props(
                 "color=primary"
             )
         _render_validation_fields(state)
 
 
-def _wizard_validation_back(state: dict[str, Any], stepper: Any) -> None:
-    """Back from validation: the prompt validation step precedes it."""
-    stepper.set_value("validate")
+def _wizard_validation_back(state: dict[str, Any]) -> None:
+    """Back from the test set: the screen that produced the prompt precedes it."""
+    _wizard_back_to_prompt_step(state)
 
 
 def _wizard_validation_next(state: dict[str, Any], stepper: Any) -> None:
-    """Validate the answers, then move on to generation."""
+    """Validate the test-set answers, then continue to the AI allowance."""
     config = _wizard_validation_config(state)
     if config is not None and config.mode != "none":
         if not config.property_name.strip():
@@ -508,90 +609,135 @@ def _wizard_validation_next(state: dict[str, Any], stepper: Any) -> None:
             return
         if not config.template_names:
             ui.notify(
-                "The test set sample needs a template: pick one in the questions step, or turn the test set off",
+                "A test set is sampled from the templates this task targets: pick one in the questions step, "
+                "or turn the test set off",
                 type="warning",
             )
             return
-        if config.mode == "custom" and not config.filter_text.strip():
-            ui.notify("Describe the search that selects the test entities, or use the automatic sample", type="warning")
+        if config.mode == "custom" and not config.selector_explanation.strip():
+            ui.notify(
+                "Describe how the test entities should be chosen, or use the automatic sample",
+                type="warning",
+            )
             return
-    stepper.set_value("generate")
-    _show_generate_prompt(state)
+    stepper.set_value("caps")
+
+
+def _validation_templates(answers: Any) -> list[str]:
+    """The task's target templates (source templates as a create-flow fallback)."""
+    templates = [str(name) for name in getattr(answers, "templates", ()) or () if str(name).strip()]
+    if not templates:
+        templates = [str(name) for name in getattr(answers, "source_templates", ()) or () if str(name).strip()]
+    return templates
+
+
+def _validation_property_options(state: dict[str, Any]) -> dict[str, str]:
+    """The property names the score can measure, with their display labels."""
+    schema = state.get("_guided_schema")
+    answers = state.get("_guided_answers")
+    templates = _validation_templates(answers)
+    goal = getattr(answers, "goal", "")
+    target = str(getattr(answers, "target_property", "") or "").strip()
+    if goal == "fill" and target:
+        return {target: _validation_property_label(state, target)}
+    options: dict[str, str] = {}
+    try:
+        from uwazi_admin_agent.domain.guided_task import property_choices
+
+        options.update(dict(property_choices(schema, templates)))
+    except Exception:  # noqa: BLE001 — the schema is best-effort
+        options = {}
+    if target:
+        options[target] = _validation_property_label(state, target)
+    return options
 
 
 def _render_validation_fields(state: dict[str, Any]) -> None:
-    """Show the fields the selected mode needs (one property + sample size/search)."""
+    """Show the fields the selected mode needs (one property + sample size/search).
+
+    Every widget is built INSIDE ``container``. An event handler's default slot is
+    the page root, so creating them without that context appended a fresh picker
+    to the page on every option change — the duplicated/triplicated inputs the
+    operator saw — and ``container.clear()`` could never remove them.
+    """
     container = state.get("_validation_fields")
     if container is None or container.is_deleted:
         return
     mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
     container.clear()
-    if mode == "none":
-        ui.label("No score will be shown for this run. You can add a test set later from the review page.").classes(
-            "text-body2 text-grey-7"
+    with container:
+        if mode == "none":
+            ui.label("No score will be shown for this run. You can add a test set later from the review page.").classes(
+                "text-body2 text-grey-7"
+            )
+            return
+        options = _validation_property_options(state)
+        typed = str(state.get("_validation_property_name") or "").strip()
+        if options:
+            selected = typed if typed in options else next(iter(options))
+            state["_validation_property_name"] = selected
+            state["_validation_property"] = (
+                ui.select(
+                    options,
+                    value=selected,
+                    label="Property to measure",
+                    on_change=lambda event: state.update(_validation_property_name=str(event.value or "")),
+                )
+                .props("dense outlined")
+                .classes("w-full")
+            )
+            ui.label(
+                "The score covers this one property. The task may still change others; this is what the number measures."
+            ).classes("text-caption text-grey-7 q-mb-sm")
+        else:
+            # ONE picker, never both: with no readable property list the operator
+            # types the name and the dropdown is not rendered at all.
+            state["_validation_property"] = ui.input(
+                "Property to measure (name)",
+                value=typed,
+                on_change=lambda event: state.update(_validation_property_name=str(event.value or "")),
+            ).classes("w-full")
+            ui.label(
+                "The score needs one measured property. Type its name (the wizard could not read the instance's "
+                "templates for this prompt), or turn the test set off."
+            ).classes("text-body2 text-grey-7")
+        state["_validation_size"] = ui.number(
+            "Max test entities",
+            value=state.get("_validation_size_value", 30),
+            min=5,
+            max=200,
+            precision=0,
+            on_change=lambda event: state.update(_validation_size_value=event.value),
+        ).classes("w-48")
+        ui.label("Upper limit: the sample or the search can return fewer entities than this.").classes(
+            "text-caption text-grey-7"
         )
-        return
-    schema = state.get("_guided_schema")
-    answers = state.get("_guided_answers")
-    goal = getattr(answers, "goal", "")
-    templates = list(getattr(answers, "templates", ()) or ())
-    if not templates:
-        source_templates = list(getattr(answers, "source_templates", ()) or ())
-        templates = source_templates
-    options: dict[str, str] = {}
-    if goal == "fill" and getattr(answers, "target_property", ""):
-        target = str(answers.target_property).strip()
-        options[target] = _validation_property_label(state, target)
-    else:
-        try:
-            from uwazi_admin_agent.domain.guided_task import property_choices
-
-            options.update(dict(property_choices(schema, templates)))
-        except Exception:  # noqa: BLE001 — the schema is best-effort
-            options = {}
-        target = str(getattr(answers, "target_property", "") or "").strip()
-        if target:
-            options[target] = _validation_property_label(state, target)
-    if not options:
-        ui.label(
-            "The score needs one measured property. Type its name (the wizard could not read the instance's "
-            "templates for this prompt), or turn the test set off."
-        ).classes("text-body2 text-grey-7")
-        state["_validation_property"] = ui.input(
-            "Property to measure (name)",
-            value=state.get("_validation_property") or "",
-        ).classes("w-full")
-        return
-    selected = state.get("_validation_property") or next(iter(options))
-    if selected not in options:
-        selected = next(iter(options))
-    state["_validation_property"] = (
-        ui.select(
-            options,
-            value=selected,
-            label="Property to measure",
-            on_change=lambda e: state.update({"_validation_property": e.value}),
-        )
-        .props("dense outlined")
-        .classes("w-full")
-    )
-    ui.label(
-        "The score covers this one property. The task may still change others; this is what the number measures."
-    ).classes("text-caption text-grey-7 q-mb-sm")
-    state["_validation_size"] = ui.number("Test entities", value=30, min=5, max=200, precision=0).classes("w-48")
-    if mode == "custom":
-        state["_validation_filter"] = ui.input(
-            "Search that selects the test entities (title or text)",
-            placeholder="e.g. judgment 2024",
-        ).classes("w-full")
-    if not templates:
-        # The sample is drawn per template; with no template there is no
-        # population to sample from. Saying so is honest — silently creating no
-        # set would look like the feature did nothing.
-        ui.label(
-            "A test set is drawn from the templates this task targets. Go back to the questions step and pick a "
-            "template, or turn the test set off."
-        ).classes("text-body2 text-warning")
+        if mode == "custom":
+            ui.label("How should the test entities be chosen?").classes("text-subtitle2 q-mt-sm")
+            ui.label(
+                "Describe the filter in your own words — any property filter, a date window, a template, or "
+                "explicit shared ids. When you generate the task, the AI writes the read-only selector that "
+                "picks the sample, and the task is then built without reading those entities."
+            ).classes("text-caption text-grey-7")
+            state["_validation_filter"] = (
+                ui.textarea(
+                    "Test-set filter",
+                    value=str(state.get("_validation_filter_value") or ""),
+                    placeholder="e.g. judgments from the Kigali court dated 2024 whose summary is filled, or "
+                    "these shared ids: abc123, def456",
+                    on_change=lambda event: state.update(_validation_filter_value=str(event.value or "")),
+                )
+                .props("outlined autogrow")
+                .classes("w-full")
+            )
+        if not _validation_templates(state.get("_guided_answers")):
+            # The sample is drawn per template; with no template there is no
+            # population to sample from. Saying so is honest — silently creating
+            # no set would look like the feature did nothing.
+            ui.label(
+                "A test set is sampled from the templates this task targets. Pick one in the questions step, "
+                "or turn the test set off (a custom task can add one later from the review page)."
+            ).classes("text-body2 text-warning")
 
 
 def _validation_property_label(state: dict[str, Any], name: str) -> str:
@@ -618,34 +764,50 @@ def _wizard_validation_config(state: dict[str, Any]):
         )
     except Exception:  # noqa: BLE001 — an import failure must not block generation
         return None
+    # The measured-property picker exists ONLY in the fill-a-property flow (see
+    # ``_render_test_set_step``); no other goal keeps a test set, whatever a
+    # stale widget from a previous render might still carry.
+    if _validation_goal(state) != GOAL_FILL:
+        return ValidationConfig(mode=VALIDATION_NONE)
     mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
     if mode == VALIDATION_NONE:
         return ValidationConfig(mode=VALIDATION_NONE)
     property_widget = state.get("_validation_property")
     raw_value = getattr(property_widget, "value", "") or ""
     # The picker's value is the property NAME; when no picker exists (custom
-    # prompt), the operator's typed name IS the value.
-    property_name = str(raw_value).strip()
+    # prompt), the operator's typed name IS the value. The plain state key keeps
+    # the choice across re-renders of the picker.
+    property_name = str(raw_value).strip() or str(state.get("_validation_property_name") or "").strip()
     if not property_name:
         return ValidationConfig(mode=VALIDATION_NONE)
     answers = state.get("_guided_answers")
-    templates = list(getattr(answers, "templates", ()) or ())
-    if not templates:
-        templates = list(getattr(answers, "source_templates", ()) or ())
+    templates = _validation_templates(answers)
     size_widget = state.get("_validation_size")
+    raw_size = getattr(size_widget, "value", None)
+    if raw_size is None:
+        raw_size = state.get("_validation_size_value", 30)
     try:
-        size = int(getattr(size_widget, "value", 30) or 30)
+        size = int(raw_size or 30)
     except (TypeError, ValueError):
         size = 30
     filter_widget = state.get("_validation_filter")
-    filter_text = str(getattr(filter_widget, "value", "") or "").strip() if mode == VALIDATION_CUSTOM else ""
+    raw_filter = getattr(filter_widget, "value", None)
+    if raw_filter is None:
+        raw_filter = state.get("_validation_filter_value", "")
+    # The textarea is the operator's FILTER DESCRIPTION in custom mode. The
+    # selector snippet itself is authored at generation time (see
+    # ``build_validation_set``), so the operator never waits on an LLM turn
+    # while filling the wizard.
+    explanation = str(raw_filter or "").strip() if mode == VALIDATION_CUSTOM else ""
+    selector_code = ""
     return ValidationConfig(
         mode=mode,
         property_name=validation_property_name(property_name),
         property_type=_validation_property_type(state, property_name),
         template_names=templates,
         sample_size=max(5, min(200, size)),
-        filter_text=filter_text,
+        selector_code=selector_code,
+        selector_explanation=explanation,
         language=_wizard_default_language(answers),
     )
 
@@ -668,30 +830,43 @@ def _wizard_default_language(answers: Any) -> str:
 
 
 def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
-    """One step that explains and caps the AI allowance the finished task may use.
+    """One step that decides whether the finished task may use the AI, and its cap.
 
-    Written for an operator who has never seen a script or an LLM call: it says
-    what the finished thing is, when it might ask the AI, and the one money
-    limit that bounds those asks. The request-count backstop is derived here —
-    the operator only sets money.
+    Written for an operator who has never seen a script or an LLM call: a single
+    checkbox answers "may the task infer values with an LLM?", and only when it
+    is checked does the money limit appear. Unchecked (the DEFAULT) means the
+    generated script must compute its values from the data itself (the ledger's
+    deny-by-default zero budget), so no per-item AI spend can happen. The
+    request-count backstop is derived here — the operator only sets money.
     """
     with ui.step(name="caps", title="AI allowance", icon="payments"):
-        ui.label("Before the last checks: how much of the AI may the task use?").classes("text-body1 q-mb-md")
+        ui.label("May the task use the AI?").classes("text-body1 q-mb-md")
         with ui.card().classes("w-full"):
-            ui.label("Allow the task to use the AI, and set a cap on how much money it may spend.").classes("text-body2")
-            with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
+            # Unchecked by default: the generated script derives its values from
+            # the data itself unless the operator deliberately opts in.
+            state["_caps_use_llm"] = ui.checkbox(
+                "Let the task use an LLM to infer the values",
+                value=False,
+                on_change=lambda _event: _sync_caps_fields(state),
+            ).classes("text-body1")
+            ui.label(
+                "Unchecked: the task must derive its values from the data itself — no AI calls after generation. "
+                "Checked: the generated script may call the AI, and every call is bounded by the cap below."
+            ).classes("text-body2 text-grey-7 q-mt-xs")
+            with ui.column().classes("w-full") as cost_fields:
+                state["_caps_cost_fields"] = cost_fields
                 state["_caps_cost_input"] = ui.number(
                     "Maximum spend ($)",
-                    value=SCRIPT_DEFAULT_MAX_COST,
+                    value=WIZARD_DEFAULT_AI_ALLOWANCE,
                     min=0.0,
                     step=0.5,
                     format="%.2f",
-                ).classes("grow")
-            ui.label("A typical summary-style task over a few hundred items costs well under a dollar.").classes(
-                "text-body2 text-grey-7 q-mt-sm"
-            )
+                ).classes("w-full")
+                ui.label("A typical summary-style task over a few hundred items costs well under a dollar.").classes(
+                    "text-body2 text-grey-7 q-mt-sm"
+                )
         ui.label(
-            "The next step's validation is informed by this allowance: the LLM tailors its "
+            "The next step's AI check is informed by this allowance: the LLM tailors its "
             "questions (and its restatement) to what the task can actually afford."
         ).classes("text-body2 text-grey-7 q-mt-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
@@ -700,12 +875,25 @@ def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
             ui.button(
                 "Next",
                 icon="arrow_forward",
-                on_click=lambda: stepper.set_value("validate"),
+                on_click=lambda: stepper.set_value("understand"),
             ).props("color=primary")
+    _sync_caps_fields(state)
+
+
+def _sync_caps_fields(state: dict[str, Any]) -> None:
+    """Show the spend cap only while the task is allowed to use the AI."""
+    fields = state.get("_caps_cost_fields")
+    checkbox = state.get("_caps_use_llm")
+    if fields is None or fields.is_deleted:
+        return
+    fields.set_visibility(bool(getattr(checkbox, "value", False)))
 
 
 def _wizard_caps_back(state: dict[str, Any]) -> None:
-    """Back from the caps step: it precedes validation, so to the prompt step."""
+    """Back from the AI allowance: the test set (fill flow only) or the prompt."""
+    if _validation_goal(state) == GOAL_FILL:
+        state["_stepper"].set_value("test_set")
+        return
     _wizard_back_to_prompt_step(state)
 
 
@@ -745,7 +933,7 @@ def _start_generation(
     run so both produce the identical toast/table/background-task flow.
 
     Generation takes only a per-run claim: it writes the run's folder and the
-    review table but never Uwazi, so it must not block (or be blocked by) a
+    review list but never Uwazi, so it must not block (or be blocked by) a
     write pass on another run or instance.
 
     ``claimed`` is set by the retry path, which already holds the claim (taken
@@ -805,16 +993,22 @@ def _script_caps_model() -> str:
 def _wizard_budget(state: dict[str, Any]) -> LlmBudget:
     """The approved budget for the script's llm_complete/llm_map calls (caps step).
 
-    The operator sets ONLY money. ``with_default_backstops`` derives the
-    request-count backstop the ledger still enforces: both at 0 keeps the
-    deny-by-default (the pass aborts on the script's first LLM call), any
-    positive cost fills the backstop with its standard default. An
+    The checkbox is the opt-in: unchecked means the task may not call the AI at
+    all, so the budget is the deny-by-default pair (0, 0) and the ledger aborts
+    the script's first LLM call. Checked, the operator sets ONLY money;
+    ``with_default_backstops`` derives the request-count backstop the ledger
+    still enforces (any positive cost fills it with its standard default). An
     empty/invalid cost input falls back to the configured default.
     """
+    use_llm_widget = state.get("_caps_use_llm")
+    use_llm = bool(getattr(use_llm_widget, "value", False)) if use_llm_widget is not None else False
     cost_widget = state.get("_caps_cost_input")
-    cost = _cap_float(cost_widget.value) if cost_widget is not None else None
+    if not use_llm:
+        cost: float | None = 0.0
+    else:
+        cost = _cap_float(cost_widget.value) if cost_widget is not None else None
     max_cost, max_requests = with_default_backstops(
-        SCRIPT_DEFAULT_MAX_COST if cost is None else cost,
+        WIZARD_DEFAULT_AI_ALLOWANCE if cost is None else cost,
         0,
         default_cost=PREDICTION_DEFAULT_MAX_COST,
         default_requests=PREDICTION_DEFAULT_MAX_REQUESTS,
@@ -852,10 +1046,10 @@ def _confirm_generation(
     requests via pydantic-ai's ``UsageLimits``, ``LLM_MAX_OUTPUT_TOKENS`` per
     call). ``budget`` — approved in the wizard's caps step — is the HARD ceiling
     on the generated script's own llm_complete/llm_map calls, enforced during
-    the planning pass that populates the review table.
+    the planning pass that fills the review list.
     """
     ui.notification(
-        "Generating the script — the planning pass runs right after and fills the review table under the approved LLM caps.",
+        "Generating the script — the planning pass runs right after and fills the suggestions under the approved LLM caps.",
         type="info",
         timeout=6,
     )
@@ -916,7 +1110,7 @@ async def _do_generate(
         )
         _broadcast_notify(
             instance,
-            f"Run {name!r} generated — the planning pass filled the review table.",
+            f"Run {name!r} generated — the planning pass produced its suggestions.",
             type="positive",
         )
     except Exception as exc:  # noqa: BLE001

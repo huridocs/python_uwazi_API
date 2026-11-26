@@ -20,7 +20,6 @@ from uwazi_admin_agent.configuration import AI_TRANSLATED_MARKER
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     _build_translate_text_real_helper,
-    _translate_text_noop,
 )
 
 
@@ -42,12 +41,6 @@ def test_unwired_helper_raises_loudly() -> None:
 
     with pytest.raises(RuntimeError, match="translate_text requires a wired translation_port"):
         translate_text("Hello", "en", "fr")
-
-
-def test_dummy_helper_prefixes_marker_unchanged() -> None:
-    translate_text = _translate_text_noop()
-
-    assert translate_text("Hello", "en", "fr") == f"{AI_TRANSLATED_MARKER}Hello"
 
 
 def test_real_helper_failure_propagates() -> None:

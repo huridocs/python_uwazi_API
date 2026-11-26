@@ -89,43 +89,9 @@ URL_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
 # Authoring-time character truncation for peek_url_text (LLM-context bound).
 URL_FETCH_MAX_CHARS: int = 200_000
 
-# Row locale used when the dummy harness creates/snapshots/reverts dummies. The
-# generated script is target-agnostic; the harness fixes the locale for its own
-# create/read/revert so the before/after/post-revert raws are comparable.
+# Row locale used where no row language is known (a language-independent row's
+# link, a default read). The generated script is target-agnostic.
 DUMMY_LANGUAGE: str = "en"
-
-# ES-freshness settle before dummy cleanup (Option A). Uwazi indexes creates/updates
-# via ES ``bulk`` (awaited but NOT refreshed) and deletes via ``deleteByQuery``
-# (``conflicts: 'proceed'``, ``refresh: true``). A deleteByQuery snapshots the
-# refreshed index and skips docs whose version advanced since the snapshot (a newer
-# unrefreshed re-index from the dummy gate's revert); the skipped doc reappears
-# after the trailing refresh as an orphan (Mongo gone, ES still has it) -> the
-# shared index needs ``yarn reindex``. The settle polls ``/api/v2/search`` for each
-# dummy's ``editDate`` (bumped on every save - a monotonic "which version is
-# refreshed" signal) until it reaches the latest Mongo ``editDate`` seen, so the
-# deleteByQuery snapshots the latest version and removes it cleanly (no conflict).
-# The dummy gate also skips the no-op revert for unchanged dummies, avoiding the
-# re-index entirely. These bound the wait; freshness is adaptive (zero wait once
-# the latest version is refreshed), so the timeout only bites on an unresponsive/
-# slow ES, in which case the harness proceeds best-effort and records an
-# ``es_settle_warning`` (gate correctness is Mongo-based, not ES-based).
-ES_SETTLE_TIMEOUT_MS: int = 10_000
-ES_SETTLE_POLL_INTERVAL_MS: int = 250
-
-# Fixed settle grace period (ms) after the ES-freshness settle succeeds, before
-# the cleanup delete. The settle's ``editDate`` signal is a heuristic (it reflects
-# the ES doc's ``editDate`` field, which is only visible after a refresh), while
-# the ``deleteByQuery`` version conflict is keyed on the doc's ``_seq_no``/``_version``
-# (advanced on every write). A short fixed delay after the settle gives ES time to
-# fully stabilize (its default refresh interval is 1s) so the deleteByQuery
-# snapshots the latest version and removes it cleanly. Set generously (3s) since
-# the validation gate is not latency-sensitive and a few extra seconds per run is
-# a cheap price for avoiding an unrecoverable orphan.
-ES_SETTLE_GRACE_PERIOD_MS: int = 3000
-
-# Delay (ms) before re-probing ES in the post-delete verification, to rule out
-# read-path lag (the delete's ``refresh: true`` not yet visible to ``/api/v2/search``).
-ES_VERIFY_RETRY_DELAY_MS: int = 1000
 
 # --- controlled LLM usage (prediction passes + script helpers) -----------------
 #
@@ -167,6 +133,11 @@ IMPROVE_DEFAULT_MAX_REQUESTS: int = 1
 # first call. The operator opts in by raising either cap in the wizard.
 SCRIPT_DEFAULT_MAX_COST: float = 0.0
 SCRIPT_DEFAULT_MAX_REQUESTS: int = 0
+
+# The wizard's AI-allowance prefill when the operator LETS the task use the AI.
+# The checkbox is the opt-in, so a checked box must not prefill the
+# deny-by-default zero: this small cap covers a typical summary-style run.
+WIZARD_DEFAULT_AI_ALLOWANCE: float = 1.0
 
 # Rows per page in the review table (server-side pagination over 10k+ rows).
 REVIEW_PAGE_SIZE: int = 25

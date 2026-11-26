@@ -776,3 +776,26 @@ def test_prompt_teaches_the_context_key() -> None:
     review table can show it under the change row."""
     assert "'context'" in SYSTEM_PROMPT
     assert "SOURCE CONTEXT" in SYSTEM_PROMPT
+
+
+def test_prompt_states_a_multivalue_proposal_is_the_complete_set() -> None:
+    """Uwazi REPLACES a property's list on write, so a proposal is the whole set.
+
+    The clarification agent used to ask what should happen to existing links
+    "when this runs" — an apply-time question — because the contract never said
+    that the proposal IS the final set.
+    """
+    assert "A MULTI-VALUE PROPOSAL IS THE COMPLETE SET" in SYSTEM_PROMPT
+    assert "Uwazi replaces the property's" in SYSTEM_PROMPT
+    assert "current + extracted" in SYSTEM_PROMPT
+
+
+def test_prompt_covers_classification_and_metadata_extraction_contract() -> None:
+    """Task prompts stay minimal; the system prompt must own the contract for
+    select/multiselect/relationship classification, metadata-source extraction,
+    default document strategy, and blank fallback."""
+    assert "CLASSIFICATION & METADATA-EXTRACTION TASKS" in SYSTEM_PROMPT
+    assert "NEVER invent an entity or pass titles" in SYSTEM_PROMPT
+    assert "do NOT call `get_entity_files*` or `get_segmentation*`" in SYSTEM_PROMPT
+    assert "determine the optimal extraction strategy" in SYSTEM_PROMPT
+    assert "leave the suggestion\n  blank" in SYSTEM_PROMPT

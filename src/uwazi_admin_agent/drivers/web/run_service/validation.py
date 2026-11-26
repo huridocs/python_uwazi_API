@@ -27,6 +27,9 @@ from uwazi_admin_agent.domain.validation import (
 )
 from uwazi_admin_agent.drivers.runtime import build_runtime
 from uwazi_admin_agent.use_cases.evaluate_validation_use_case import ValidationEvaluationUseCase
+from uwazi_admin_agent.use_cases.generate_validation_selector_use_case import (
+    GenerateValidationSelectorUseCase,
+)
 from uwazi_admin_agent.use_cases.validation_sampling import resolve_validation_set
 
 from .wiring import _paths, build_suggestion_store, read_run_script
@@ -43,7 +46,7 @@ def holdout_ids(url: str, run_id: str) -> set[str]:
     return set(validation.shared_ids) if validation is not None else set()
 
 
-def build_validation_set(
+async def build_validation_set(
     url: str,
     run_id: str,
     config: ValidationConfig,
@@ -55,19 +58,38 @@ def build_validation_set(
     Runs BEFORE generation: the sampling read is the last time these entities are
     touched by the authoring side, and the set is written to disk before the
     generation turn starts so ``build_runtime(holdout_ids=...)`` can hide them.
-    """
-    import asyncio
 
+    A CUSTOM config carries only the operator's description of how the sample
+    should be chosen. This is where the LLM turns it into the read-only selector
+    (``selector_code``): the wizard deliberately does not call the model while
+    the operator fills the form, so the whole task generation is one flow.
+
+    A coroutine, not a sync function: its caller (``create_and_generate``) already
+    runs inside an event loop. The old ``asyncio.run`` here raised "cannot be
+    called from a running event loop", so the set was silently never built.
+    """
     # RAW ports on purpose: this read DEFINES the set, so it must see the
     # entities the authoring runtime will later hide.
     runtime = build_runtime(user=user, password=password, url=url)
-    validation = asyncio.run(
-        resolve_validation_set(
-            runtime.entity_api,
-            run_id,
-            config,
-            now=datetime.now(timezone.utc),
+    if config.mode == "custom" and not config.selector_code.strip():
+        selector = await GenerateValidationSelectorUseCase(llm=runtime.llm, deps=runtime.deps).execute(
+            config.selector_explanation or "",
+            template_names=list(config.template_names),
+            property_name=config.property_name,
+            sample_size=max(1, int(config.sample_size)),
+            language=config.language,
         )
+        config = config.model_copy(update={"selector_code": selector.python_code})
+        logger.info(
+            "validation selector authored run={}: {} entity/entities requested",
+            run_id,
+            config.sample_size,
+        )
+    validation = await resolve_validation_set(
+        runtime.entity_api,
+        run_id,
+        config,
+        now=datetime.now(timezone.utc),
     )
     if validation is None:
         return None
@@ -82,7 +104,7 @@ def build_validation_set(
     return validation
 
 
-def evaluate_run(url: str, run_id: str, user: str, password: str) -> ValidationScore | None:
+async def evaluate_run(url: str, run_id: str, user: str, password: str) -> ValidationScore | None:
     """Score the run's committed script against its set, and REFRESH its rows.
 
     Called after a generation/regeneration committed a script. The scoring pass
@@ -96,8 +118,6 @@ def evaluate_run(url: str, run_id: str, user: str, password: str) -> ValidationS
     if validation is None:
         return None
     script = read_run_script(url, run_id)
-    import asyncio
-
     # RAW ports on purpose: the evaluation pass must read the holdout entities.
     runtime = build_runtime(user=user, password=password, url=url)
     use_case = ValidationEvaluationUseCase(
@@ -109,7 +129,7 @@ def evaluate_run(url: str, run_id: str, user: str, password: str) -> ValidationS
         translation_port=runtime.translation_port,
         default_language="en",
     )
-    score = asyncio.run(use_case.evaluate(script, validation, now=datetime.now(timezone.utc)))
+    score = await use_case.evaluate(script, validation, now=datetime.now(timezone.utc))
     store.save_score(score)
     rows = use_case.last_rows
     if rows is not None:
@@ -170,7 +190,7 @@ def remove_validation_row(url: str, run_id: str, shared_id: str) -> None:
     store.save_set(validation.remove_entity(shared_id))
 
 
-def add_validation_sample(url: str, run_id: str, shared_id: str, user: str, password: str) -> ValidationSet | None:
+async def add_validation_sample(url: str, run_id: str, shared_id: str, user: str, password: str) -> ValidationSet | None:
     """Add one entity (and its current value) to the run's set.
 
     Adding an entity the generation turn already read contaminates the set: the
@@ -180,11 +200,10 @@ def add_validation_sample(url: str, run_id: str, shared_id: str, user: str, pass
     validation = store.load_set()
     if validation is None:
         return None
-    import asyncio
 
     runtime = build_runtime(user=user, password=password, url=url)
     language = "en"
-    raw = asyncio.run(runtime.entity_repository.get_raw_by_shared_id(shared_id, language))
+    raw = await runtime.entity_repository.get_raw_by_shared_id(shared_id, language)
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     value = (
         raw.get("title")

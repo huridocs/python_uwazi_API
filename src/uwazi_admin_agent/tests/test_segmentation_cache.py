@@ -27,7 +27,6 @@ from uwazi_admin_agent.use_cases.parallel_executor import ParallelExecutor
 from uwazi_admin_agent.use_cases.parallel_script_helpers import build_parallel_read_helpers
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     build_dry_run_namespace,
-    build_exec_namespace,
     build_real_exec_namespace,
 )
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
@@ -289,10 +288,8 @@ def test_get_segmentation_parallel_unwired_raises(tmp_path: Path) -> None:
         helpers["get_segmentation_parallel"](["S1"])
 
 
-def test_segmentation_parallel_bound_in_real_dry_run_and_dummy() -> None:
-    """The parallel segmentation name binds in real, dry-run, AND dummy; in the
-    dummy namespace it is a no-op returning ``None`` per id (dummies carry no
-    documents), mirroring the single ``get_segmentation`` no-op."""
+def test_segmentation_parallel_bound_in_real_and_dry_run() -> None:
+    """The parallel segmentation name binds in both real and dry-run namespaces."""
     repo = _InMemorySegRepo()
 
     real = build_real_exec_namespace(
@@ -312,22 +309,8 @@ def test_segmentation_parallel_bound_in_real_dry_run_and_dummy() -> None:
         dry_run_records=[],
         segmentation_repository=repo,
     )
-    dummy = build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=asyncio.new_event_loop(),
-        scope=set(),
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-
     assert "get_segmentation_parallel" in real
     assert "get_segmentation_parallel" in dry
-    assert "get_segmentation_parallel" in dummy
-
-    # The dummy no-op mirrors get_segmentation: None per id, no documents.
-    assert dummy["get_segmentation_parallel"](["A", "B"]) == {"A": None, "B": None}
 
 
 class _StubIntercept:

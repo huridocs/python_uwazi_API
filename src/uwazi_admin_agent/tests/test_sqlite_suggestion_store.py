@@ -98,10 +98,23 @@ def test_build_where_appends_only_set_predicates() -> None:
     assert "LIKE ?" in sql
 
 
-def test_build_where_accepted_only_uses_an_in_list() -> None:
-    sql, params = build_where(SuggestionFilter(accepted_only=True), "run1")
+def test_build_where_status_selection_uses_an_in_list() -> None:
+    sql, params = build_where(SuggestionFilter(status=[SuggestionStatus.PENDING, SuggestionStatus.REVERTED]), "run1")
     assert sql.endswith("status IN (?, ?)")
-    assert params == ["run1", "accepted", "edited"]
+    assert params == ["run1", "pending", "reverted"]
+
+
+def test_build_where_the_validate_op_selects_the_holdout_rows() -> None:
+    """The Operation filter's "validate" value is the run's holdout evidence."""
+    sql, params = build_where(SuggestionFilter(op=["validate"]), "run1")
+    assert "is_validation = 1" in sql
+    assert params == ["run1"]
+
+
+def test_build_where_a_regular_op_never_returns_validation_rows() -> None:
+    sql, params = build_where(SuggestionFilter(op=["update", "validate"]), "run1")
+    assert "is_validation = 0 AND op IN (?)" in sql
+    assert params == ["run1", "update"]
 
 
 def test_build_where_never_inlines_filter_values() -> None:
@@ -262,8 +275,8 @@ def test_operation_order_by_whitelists_the_sort_and_ties_on_first_id() -> None:
     assert operation_order_by("recorded", True) == "first_id DESC"
 
 
-def test_latest_review_activity_prefers_a_review_over_the_recording_time() -> None:
-    recorded = _suggestion().model_copy(update={"created_at": datetime(2026, 1, 1, 10, tzinfo=timezone.utc)})
+def test_latest_review_activity_counts_only_operator_actions() -> None:
+    """The Modified column shows when someone ACTED, never when a row was recorded."""
     reviewed = _suggestion().model_copy(
         update={
             "created_at": datetime(2026, 1, 1, 9, tzinfo=timezone.utc),
@@ -272,9 +285,9 @@ def test_latest_review_activity_prefers_a_review_over_the_recording_time() -> No
     )
     unreviewed = _suggestion().model_copy(update={"created_at": datetime(2026, 1, 1, 12, tzinfo=timezone.utc)})
 
-    assert latest_review_activity([recorded, reviewed, unreviewed]) == unreviewed.created_at
+    assert latest_review_activity([reviewed, unreviewed]) == reviewed.reviewed_at
     assert latest_review_activity([reviewed]) == reviewed.reviewed_at
-    assert latest_review_activity([recorded]) == recorded.created_at
+    assert latest_review_activity([unreviewed]) is None
     assert latest_review_activity([]) is None
 
 
@@ -315,6 +328,52 @@ def test_operations_orders_by_title_over_the_whole_set(store: SqliteSuggestionSt
     assert [row.shared_id for row in rows] == ["a", "b"]
 
 
+def test_operations_status_sort_groups_by_the_badge_words(store: SqliteSuggestionStore) -> None:
+    """The Status column sorts the words the operator READS, not the raw status.
+
+    Holdout evidence and display-only outcomes are stored as ordinary rows
+    (``pending`` or their own op), but the table shows "validation", "info",
+    "matched" and "not processed" for them. Bucketing by the raw status lumps
+    them into "pending", so a Status click re-ordered exactly the rows the
+    operator watches in an arbitrary way — the words on the badge must be the
+    sort. Ascending is the lifecycle: work remaining, outcomes, evidence,
+    display-only noise; a group's tie-break stays the recorded order.
+    """
+    holdout_a = _suggestion(shared_id="holdout-a", match=None, proposed=None).model_copy(update={"is_validation": True})
+    holdout_b = _suggestion(shared_id="holdout-a", language="es", match=None, proposed=None).model_copy(
+        update={"is_validation": True}
+    )
+    store.add_suggestions(
+        [
+            _suggestion(shared_id="discarded", status=SuggestionStatus.DISCARDED),
+            _suggestion(shared_id="applied", status=SuggestionStatus.APPLIED),
+            holdout_a,
+            holdout_b,
+            _suggestion(shared_id="info", op="info", match=None, proposed=None),
+            _suggestion(shared_id="matched", op="matched", match=True),
+            _suggestion(shared_id="pending"),
+        ]
+    )
+
+    rows, total = store.operations("run1", SuggestionFilter(sort_by="status"))
+
+    assert total == 6  # holdout-a's two language rows are ONE operation
+    # pending work first, then applied/discarded outcomes, then validation,
+    # then the display-only words; within a word, recorded (id) order.
+    assert [row.shared_id for row in rows] == [
+        "pending",
+        "applied",
+        "discarded",
+        "holdout-a",
+        "matched",
+        "info",
+    ]
+
+    lowered, _total = store.operations("run1", SuggestionFilter(sort_by="status", sort_desc=True))
+
+    assert [row.shared_id for row in lowered] == list(reversed([row.shared_id for row in rows]))
+
+
 def test_get_entity_returns_only_that_entity(store: SqliteSuggestionStore) -> None:
     store.add_suggestions(
         [
@@ -333,16 +392,15 @@ def test_get_entity_returns_only_that_entity(store: SqliteSuggestionStore) -> No
 def test_set_status_marks_selected_rows_only(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_suggestion(shared_id="s1"), _suggestion(shared_id="s2")])
     rows, _ = store.query("run1", SuggestionFilter())
-    store.set_status([rows[0].id or 1], SuggestionStatus.ACCEPTED)  # type: ignore[attr-defined]
+    store.set_status([rows[0].id or 1], SuggestionStatus.PENDING)  # type: ignore[attr-defined]
     after = store.query("run1", SuggestionFilter())[0]
-    assert after[0].status == SuggestionStatus.ACCEPTED
+    assert after[0].status == SuggestionStatus.PENDING
     assert after[0].reviewed_at is not None
     assert after[1].status == SuggestionStatus.PENDING
 
 
-def test_set_status_records_edited_value_and_reason(store: SqliteSuggestionStore) -> None:
+def test_set_status_records_the_status_and_its_reason(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_suggestion()])
-    store.set_status([1], SuggestionStatus.EDITED, edited_value="corrected")
     store.set_status([1], SuggestionStatus.DISCARDED, reason="not applicable")
     row = store.query("run1", SuggestionFilter())[0][0]
     assert row.status == SuggestionStatus.DISCARDED
@@ -351,9 +409,9 @@ def test_set_status_records_edited_value_and_reason(store: SqliteSuggestionStore
 
 def test_set_status_by_filter_returns_the_affected_count(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_suggestion(shared_id=f"s{n}") for n in range(5)])
-    affected = store.set_status_by_filter("run1", SuggestionFilter(), SuggestionStatus.ACCEPTED)
+    affected = store.set_status_by_filter("run1", SuggestionFilter(), SuggestionStatus.DISCARDED, "no")
     assert affected == 5
-    assert store.counts("run1")["accepted"] == 5
+    assert store.counts("run1")["discarded"] == 5
 
 
 def test_set_status_by_filter_honors_the_filter(store: SqliteSuggestionStore) -> None:
@@ -376,12 +434,12 @@ def test_reset_statuses_undoes_discard_only(store: SqliteSuggestionStore) -> Non
     store.add_suggestions([_suggestion(shared_id="a"), _suggestion(shared_id="b")])
     first_rows, _ = store.query("run1", SuggestionFilter())
     store.set_status([first_rows[0].id or 1], SuggestionStatus.DISCARDED, reason="x")  # type: ignore[attr-defined]
-    store.set_status([first_rows[1].id or 2], SuggestionStatus.ACCEPTED)  # type: ignore[attr-defined]
+    store.set_status([first_rows[1].id or 2], SuggestionStatus.PENDING)  # type: ignore[attr-defined]
     store.reset_statuses("run1", [first_rows[0].id or 1, first_rows[1].id or 2])  # type: ignore[attr-defined]
     after = store.query("run1", SuggestionFilter())[0]
     assert after[0].status == SuggestionStatus.PENDING
     assert after[0].discard_reason is None
-    assert after[1].status == SuggestionStatus.ACCEPTED  # accept is not undone here
+    assert after[1].status == SuggestionStatus.PENDING  # accept is not undone here
 
 
 # --- projections -------------------------------------------------------------
@@ -412,7 +470,8 @@ def test_op_status_counts_group_the_run_rows(store: SqliteSuggestionStore) -> No
     assert counts["op"] == {"update": 3, "delete": 1}
     assert counts["status"] == {"pending": 3, "discarded": 1}
     # Another run's rows never leak into this run's option counts.
-    assert store.op_status_counts("run2") == {"op": {}, "status": {}}
+    empty = store.op_status_counts("run2")
+    assert empty["op"] == {} and empty["status"] == {}
 
 
 def test_shared_ids_projection_honors_the_filter_and_ignores_paging(store: SqliteSuggestionStore) -> None:
@@ -428,8 +487,6 @@ def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: Sqli
     store.add_suggestions(
         [
             _suggestion(shared_id="pending", status=SuggestionStatus.PENDING),
-            _suggestion(shared_id="accepted", status=SuggestionStatus.ACCEPTED),
-            _suggestion(shared_id="edited", status=SuggestionStatus.EDITED),
             _suggestion(shared_id="reverted", status=SuggestionStatus.REVERTED),
             _suggestion(shared_id="applied", status=SuggestionStatus.APPLIED),
             _suggestion(shared_id="discarded", status=SuggestionStatus.DISCARDED),
@@ -442,13 +499,11 @@ def test_selection_rows_runnable_only_excludes_non_runnable_statuses(store: Sqli
 
     assert {ref[1] for ref in every} == {
         "pending",
-        "accepted",
-        "edited",
         "reverted",
         "applied",
         "discarded",
     }
-    assert {ref[1] for ref in runnable} == {"pending", "accepted", "edited", "reverted"}
+    assert {ref[1] for ref in runnable} == {"pending", "reverted"}
 
 
 def test_selection_rows_runnable_only_skips_a_reverted_recreating_op(store: SqliteSuggestionStore) -> None:
@@ -542,13 +597,12 @@ def test_counts_groups_by_status_and_match(store: SqliteSuggestionStore) -> None
         ]
     )
     rows, _ = store.query("run1", SuggestionFilter())
-    store.set_status([rows[0].id or 1], SuggestionStatus.ACCEPTED)  # type: ignore[attr-defined]
+    store.set_status([rows[0].id or 1], SuggestionStatus.PENDING)  # type: ignore[attr-defined]
     store.set_status([rows[1].id or 2], SuggestionStatus.DISCARDED)  # type: ignore[attr-defined]
     counts = store.counts("run1")
     assert counts["total"] == 4
-    assert counts["accepted"] == 1
     assert counts["discarded"] == 1
-    assert counts["pending"] == 2
+    assert counts["pending"] == 3
     assert counts["match_exact"] == 1
     assert counts["match_mismatch"] == 1
     assert counts["match_new"] == 2
@@ -578,9 +632,9 @@ def test_counts_report_entities_not_property_rows(store: SqliteSuggestionStore) 
 def test_counts_count_an_entity_once_per_status(store: SqliteSuggestionStore) -> None:
     """Many rows in one status are one entity in that status."""
     store.add_suggestions([_suggestion(shared_id="a", property_name=f"p{n}") for n in range(17)])
-    store.set_status_by_filter("run1", SuggestionFilter(), SuggestionStatus.ACCEPTED)
+    store.set_status_by_filter("run1", SuggestionFilter(), SuggestionStatus.DISCARDED, "no")
     counts = store.counts("run1")
-    assert counts["accepted"] == 1
+    assert counts["discarded"] == 1
     assert counts["pending"] == 0
     assert counts["total"] == 1
 
@@ -612,12 +666,11 @@ def test_counts_report_a_group_in_each_status_it_spans(store: SqliteSuggestionSt
         ]
     )
     page, _ = store.query("run1", SuggestionFilter())
-    store.set_status([page[1].id or 0], SuggestionStatus.ACCEPTED)  # type: ignore[attr-defined]
+    store.set_status([page[1].id or 0], SuggestionStatus.DISCARDED)  # type: ignore[attr-defined]
     counts = store.counts("run1")
     assert counts["total"] == 1
-    assert counts["accepted"] == 1
     assert counts["pending"] == 1
-    assert counts["discarded"] == 0
+    assert counts["discarded"] == 1
 
 
 # --- deletion ----------------------------------------------------------------
@@ -651,7 +704,6 @@ CREATE TABLE suggestion (
     current_value TEXT,
     match_state INTEGER,
     status TEXT NOT NULL DEFAULT 'pending',
-    edited_value TEXT,
     discard_reason TEXT,
     reviewed_at TEXT,
     created_at TEXT
@@ -810,16 +862,14 @@ def test_set_rejected_values_keeps_status_when_none(store: SqliteSuggestionStore
     assert row.discard_reason is None
 
 
-def test_set_status_edit_clears_rejections_but_apply_keeps_them(store: SqliteSuggestionStore) -> None:
+def test_set_status_keeps_the_value_level_choices(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_multiselect(), _multiselect(shared_id="s2", property_name="other", proposed=["C"])])
     rows, _total = store.query("run1", SuggestionFilter())
     ids = [row.id for row in rows]
     store.set_rejected_values(ids[1], ["B"])
-    store.set_status([ids[0]], SuggestionStatus.EDITED, edited_value="fix")
-    store.set_status([ids[1]], SuggestionStatus.ACCEPTED)
+    store.set_status([ids[1]], SuggestionStatus.APPLIED)
     fresh, _total = store.query("run1", SuggestionFilter())
     by_id = {row.id: row for row in fresh}
-    assert by_id[ids[0]].rejected_values == []
     assert by_id[ids[1]].rejected_values == ["B"]
 
 
@@ -933,17 +983,16 @@ def test_clearing_the_selection_restores_none(store: SqliteSuggestionStore) -> N
     assert _row_of(store).selected_values is None
 
 
-def test_set_status_edit_clears_the_selection_but_apply_keeps_it(store: SqliteSuggestionStore) -> None:
+def test_set_status_keeps_the_explicit_selection(store: SqliteSuggestionStore) -> None:
     store.add_suggestions([_multiselect(), _multiselect(shared_id="s2", property_name="other")])
     rows, _total = store.query("run1", SuggestionFilter())
     ids = [row.id for row in rows]
     store.set_selected_values(ids[0], ["A"])
     store.set_selected_values(ids[1], ["A"])
-    store.set_status([ids[0]], SuggestionStatus.EDITED, edited_value="fix")
     store.set_status([ids[1]], SuggestionStatus.APPLIED)
     fresh, _total = store.query("run1", SuggestionFilter())
     by_id = {row.id: row for row in fresh}
-    assert by_id[ids[0]].selected_values is None
+    assert by_id[ids[0]].selected_values == ["A"]
     assert by_id[ids[1]].selected_values == ["A"]
 
 

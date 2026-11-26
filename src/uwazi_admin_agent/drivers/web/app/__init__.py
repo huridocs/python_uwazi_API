@@ -45,6 +45,7 @@ from .runs_table import (
     _columns,
     _delete_selected_and_release,
     _export_tasks_csv,
+    _import_tasks_csv,
     _on_delete,
     _on_errors,
     _on_info,
@@ -91,11 +92,11 @@ from .wizard import (
     _wizard_goal_next,
     _wizard_name_next,
     _wizard_skip,
-    _wizard_validate_back,
     _wizard_step_caps,
     _wizard_step_generate,
     _wizard_step_task,
     _wizard_step_validate,
+    _wizard_validate_back,
 )
 
 __all__ = [
@@ -129,6 +130,7 @@ __all__ = [
     "_bulk_delete_selected",
     "_delete_selected_and_release",
     "_export_tasks_csv",
+    "_import_tasks_csv",
     "_on_review",
     "_on_delete",
     "_on_rowmenu",

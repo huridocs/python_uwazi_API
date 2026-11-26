@@ -18,7 +18,7 @@ def _row(
     op: str = "update",
     property_name: str | None = "p1",
     language: str | None = "en",
-    status: SuggestionStatus = SuggestionStatus.ACCEPTED,
+    status: SuggestionStatus = SuggestionStatus.PENDING,
     proposed: object = "new",
 ) -> Suggestion:
     return Suggestion(
@@ -87,7 +87,7 @@ def test_build_apply_creates_groups_only_the_selected_rows() -> None:
     creates = build_apply_creates(rows, row_ids=[2])
     assert creates == [
         {
-            "title": "Template dry-created-1",
+            "title": "Template 1",
             "template_name": "Template",
             "metadata": {"p2": [{"value": "new", "language": "en"}]},
             "language": "en",
@@ -102,6 +102,6 @@ def test_relationship_rows_are_pushed_with_their_payload() -> None:
     assert pushable_rows([row], row_ids=[9]) == [row]
 
 
-def test_a_pending_row_is_not_pushed_even_when_its_id_is_selected() -> None:
-    row = _row(4, status=SuggestionStatus.PENDING)
+def test_a_discarded_row_is_not_pushed_even_when_its_id_is_selected() -> None:
+    row = _row(4, status=SuggestionStatus.DISCARDED)
     assert pushable_rows([row], row_ids=[4]) == []

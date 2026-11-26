@@ -32,7 +32,6 @@ from uwazi_admin_agent.use_cases.parallel_script_helpers import (
 )
 from uwazi_admin_agent.use_cases.script_safety import validate_script_source
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
-from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 from uwazi_agent.ports.relationship_api_port import RelationshipApiPort
 from uwazi_agent.use_cases.tools.python_code_executor import _build_sync_crud_functions
@@ -55,21 +54,8 @@ from .files import (
     _build_get_url_text_real_helper,
     _build_move_files_real_helper,
     _build_translate_text_real_helper,
-    _dummy_parallel_helpers,
-    _get_entity_files_noop_scoped,
-    _get_file_bytes_noop,
-    _get_segmentation_noop,
-    _get_url_text_noop,
-    _move_files_noop_scoped,
-    _scoped_write_helpers,
-    _translate_text_noop,
 )
-from .reads import (
-    _real_full_entities_factory,
-    _real_sync_query_entities_factory,
-    _sync_full_entities_factory,
-    _sync_query_entities_factory,
-)
+from .reads import _real_full_entities_factory, _real_sync_query_entities_factory
 from .scope import _excluded_entity_reads, _scoped_entity_reads
 
 #: Wall-clock ceiling for one generated-script pass. Generous enough for a
@@ -107,54 +93,6 @@ def _run_with_deadline(fn: Callable[[], None], seconds: float) -> None:
         # Clear an injection that landed between ``fn`` returning and the timer
         # being cancelled, so it cannot fire on the caller's next bytecode.
         ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
-
-
-def build_exec_namespace(
-    entity_api: Any,
-    relationship_api: Any,
-    loop: asyncio.AbstractEventLoop,
-    scope: set[str],
-    dummy_entities: list[AgentEntity],
-    tool_cache: Any,
-    default_language: str,
-    target_shared_id: str | None = None,
-) -> dict[str, Any]:
-    """Construct the dummy-scoped exec namespace for the candidate script.
-
-    ``scope`` is the **live** set of dummy shared_ids: created dummies are added
-    to it by the scoped ``create_entities`` so cleanup can delete them. The
-    reused sync CRUD helpers (from ``_build_sync_crud_functions``) are wrapped to
-    refuse out-of-scope ids. The bound stdlib subset and ``SAFE_BUILTINS`` make
-    the namespace the §2.1 safety boundary. Returns the namespace dict ready for
-    ``exec``; the caller reads ``namespace["result"]`` afterwards. When
-    ``target_shared_id`` is given it is bound as ``TARGET_SHARED_ID`` (the apply
-    script's one-entity contract, exercised by the validation harness); the
-    default ``None`` still binds the name (create mode reads None).
-    """
-    crud = _build_sync_crud_functions(entity_api, relationship_api, default_language, loop, tool_cache)
-    scoped = _scoped_write_helpers(crud, scope)
-    namespace: dict[str, Any] = {
-        "query_entities": _sync_query_entities_factory(dummy_entities, scope),
-        "query_entities_full": _sync_full_entities_factory(dummy_entities, scope),
-        **scoped,
-        **_dummy_parallel_helpers(scoped, scope),
-        "add_info": _noop_add_info,
-        "record_skipped": _noop_record_skipped,
-        "move_files_to_entity": _move_files_noop_scoped(scope),
-        "get_entity_files": _get_entity_files_noop_scoped(scope),
-        "get_file_bytes": _get_file_bytes_noop(),
-        "get_segmentation": _get_segmentation_noop(),
-        "get_url_text": _get_url_text_noop(),
-        "translate_text": _translate_text_noop(),
-        **_STDLIB,
-        "__builtins__": SAFE_BUILTINS,
-    }
-    # The APPLY script's contract, exercised by the validation harness: bind
-    # the one-entity target so a candidate apply script is validated under the
-    # same binding the outcome pass / apply use case uses. The dummy harness
-    # passes the first dummy's shared_id (or None for a create-mode script).
-    namespace["TARGET_SHARED_ID"] = target_shared_id
-    return namespace
 
 
 def build_real_exec_namespace(

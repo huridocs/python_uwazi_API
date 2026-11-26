@@ -413,8 +413,11 @@ def test_a_script_error_is_failed_and_reraised(store: SqliteSuggestionStore) -> 
     script = """
 raise ValueError("boom")
 """
-    with pytest.raises(PredictionPassError, match="boom"):
+    with pytest.raises(PredictionPassError, match="boom") as excinfo:
         asyncio.run(_use_case(store).run(script, "run1", _budget()))
+    # A script CRASH (not a plan refusal): this is what the creation flow's one
+    # repair round fires on — the traceback re-opens the authoring turn.
+    assert excinfo.value.refused is False
     pass_row = store.get_pass("run1")
     assert pass_row is not None
     assert pass_row.status == PredictionAttemptStatus.FAILED
@@ -526,8 +529,11 @@ result = "ok"
 add_info("0 of 3 entities matched: no segmentation available", keep=True)
 result = "0 extracted"
 """
-    with pytest.raises(PredictionPassError, match="plan_kind='changes'"):
+    with pytest.raises(PredictionPassError, match="plan_kind='changes'") as excinfo:
         asyncio.run(_use_case(store).run(gave_up, "run1", _budget(), plan_kind="changes"))
+    # An intent-gate REFUSAL, not a script crash: the design answering the
+    # prompt — the creation flow must NOT spend a repair round on it.
+    assert excinfo.value.refused is True
 
     rows, total = store.query("run1", SuggestionFilter())
     assert total == 3
@@ -607,3 +613,55 @@ result = len(entities)
     rows, total = store.query("run1", SuggestionFilter())
     assert total == 3
     assert {row.shared_id: row.basis for row in rows} == {sid: ["_title"] for sid in ("s1", "s2", "s3")}
+
+
+def test_hydration_turns_recorded_basis_into_the_rows_evidence_text() -> None:
+    """A value inferred from the entity's own data gets that data as its context.
+
+    The review table must show the INPUT the operator needs to judge the row;
+    for a ``basis`` row the input is the entity's own property values, not a
+    document passage (which such a row does not have).
+    """
+    rows = [
+        Suggestion(
+            run_id="r",
+            shared_id="s1",
+            op="update",
+            property_name="states",
+            proposed_value=[{"value": "Iceland"}],
+            basis=["_title", "document_ref"],
+            context=None,
+        )
+    ]
+    raws = {
+        ("s1", "en"): {
+            "sharedId": "s1",
+            "language": "en",
+            "title": "Case A/HRC/37/2",
+            "metadata": {"document_ref": [{"value": "doc-9"}]},
+        }
+    }
+
+    _apply_hydration(rows, raws, default_language="en")
+
+    assert rows[0].context == "Title: Case A/HRC/37/2\ndocument_ref: doc-9"
+
+
+def test_hydration_never_overwrites_a_recorded_context_with_basis() -> None:
+    """An explicit passage wins: ``basis`` is the fallback evidence, not a replacement."""
+    rows = [
+        Suggestion(
+            run_id="r",
+            shared_id="s1",
+            op="update",
+            property_name="states",
+            proposed_value=[{"value": "Iceland"}],
+            basis=["_title"],
+            context="The paragraph naming Iceland.",
+        )
+    ]
+    raws = {("s1", "en"): {"sharedId": "s1", "language": "en", "title": "T", "metadata": {}}}
+
+    _apply_hydration(rows, raws, default_language="en")
+
+    assert rows[0].context == "The paragraph naming Iceland."

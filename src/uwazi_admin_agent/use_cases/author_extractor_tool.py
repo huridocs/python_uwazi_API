@@ -82,8 +82,10 @@ Your ONLY output (via the ExtractorFunction schema) is a PURE Python function:
   4. regex over the collapsed text (htmlextract.text)
 - Return a dict of {property_name: extracted_value} when found; return None when
   nothing is found (the entity is then left untouched).
-- ALSO return the exact passage the values were read from under the reserved
-  key `"_context"` — the cell/paragraph/sentence text itself, not a summary and
+- ALSO return the passage the values were read from under the reserved key
+  `"_context"` — the cell/paragraph text the operator needs to VERIFY the value,
+  i.e. the matched sentence/row plus its immediate surroundings (roughly 2-3
+  sentences, up to ~900 characters). Not a summary, not a bare fragment, and
   not the whole page:
       return {"document_ref": ref, "_context": cell_text}
   The generated script pops that key into the write's `context`, which the

@@ -70,6 +70,52 @@ class SuggestionCorrection(BaseModel):
     reason: str = ""
 
 
+# The heading the plan-pass crash report is attached under, in the repair
+# request the generation LLM receives when a FRESHLY generated script crashed
+# before any review table existed.
+SCRIPT_CRASH_HEADING: str = "## Script crash to fix"
+
+
+def script_repair_request(prompt: str, script: str, error: str, plan_kind: str | None = None) -> str:
+    """The creation flow's ONE self-repair round (pure).
+
+    A freshly generated script that CRASHES during its first planning pass (the
+    model wrote a helper or attribute that does not exist) used to end the whole
+    generation with a bare traceback, and the operator's only escape was a Retry
+    that re-authored the script from the SAME prompt — ready to repeat the typo.
+
+    The traceback is exactly the evidence the authoring agent needs, so this is
+    the request that re-opens the generation with it: the original task, the
+    crash text, and the failed script to revise. The plan itself is NOT up for
+    renegotiation — only the code that crashed changes, and the run's declared
+    plan kind is stated so the repair cannot drift into a different plan.
+    """
+    prompt_text = (prompt or "").strip()
+    crash = (error or "").strip()
+    kind_text = f"plan_kind='{plan_kind}'" if (plan_kind or "").strip() else "the same plan_kind it declared"
+    request = (
+        f"{prompt_text}\n\n"
+        f"{SCRIPT_CRASH_HEADING}\n"
+        "The script you generated CRASHED while the review table was being built, so the run was not "
+        "created. Here is the exact crash:\n\n"
+        f"{crash}\n\n"
+        "Output the CORRECTED FULL script. Fix ONLY what this crash requires — a misspelled or "
+        "nonexistent helper name, an attribute the result object does not actually have, a wrong "
+        f"shape — and keep every other behavior of the script, including {kind_text}. The plan is "
+        "correct; the code is not."
+    )
+    script_text = (script or "").strip()
+    if not script_text:
+        return request
+    return (
+        f"{request}\n\n"
+        f"{PREVIOUS_SCRIPT_HEADING}\n"
+        "This is the crashed script. Revise it rather than starting over — everything the crash does "
+        "not mention is presumed to work.\n\n"
+        f"```python\n{script_text}\n```"
+    )
+
+
 def property_line(correction: SuggestionCorrection) -> str:
     """How the flagged property is named in the request ("Document Ref (document_ref)")."""
     label = (correction.property_label or "").strip()
@@ -217,6 +263,7 @@ def prompt_with_previous_script(prompt: str, script: str) -> str:
 __all__ = [
     "CORRECTION_HEADING",
     "PREVIOUS_SCRIPT_HEADING",
+    "SCRIPT_CRASH_HEADING",
     "SuggestionCorrection",
     "combined_correction_request",
     "correction_key",
@@ -225,4 +272,5 @@ __all__ = [
     "merge_corrections",
     "property_line",
     "prompt_with_previous_script",
+    "script_repair_request",
 ]

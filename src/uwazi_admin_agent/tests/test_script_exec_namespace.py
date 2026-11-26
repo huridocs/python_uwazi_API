@@ -5,12 +5,9 @@ import pytest
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     _STDLIB,
     SAFE_BUILTINS,
-    ScopeViolationError,
-    assert_ids_in_scope,
-    build_exec_namespace,
+    NamedNamespace,
     build_real_exec_namespace,
     coerce_search_filters,
-    filter_ids_to_scope,
     run_script_sync,
 )
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
@@ -18,42 +15,7 @@ from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 # --- filter_ids_to_scope ----------------------------------------------------
 
 
-def test_filter_ids_to_scope_keeps_in_scope_preserving_order() -> None:
-    scope = {"A", "C"}
-    assert filter_ids_to_scope(["A", "B", "C", "D", "A"], scope) == ["A", "C", "A"]
-
-
-def test_filter_ids_to_scope_empty_when_none_in_scope() -> None:
-    assert filter_ids_to_scope(["X", "Y"], {"A"}) == []
-
-
-def test_filter_ids_to_scope_empty_input() -> None:
-    assert filter_ids_to_scope([], {"A"}) == []
-
-
 # --- assert_ids_in_scope ----------------------------------------------------
-
-
-def test_assert_ids_in_scope_passes_when_all_in_scope() -> None:
-    assert_ids_in_scope(["A", "B"], {"A", "B"}, "update_entities")  # no raise
-
-
-def test_assert_ids_in_scope_passes_on_empty() -> None:
-    assert_ids_in_scope([], {"A"}, "delete_entities")  # no raise
-
-
-def test_assert_ids_in_scope_raises_on_out_of_scope() -> None:
-    with pytest.raises(ScopeViolationError) as excinfo:
-        assert_ids_in_scope(["A", "REAL_ID"], {"A"}, "delete_entities")
-    assert "delete_entities" in str(excinfo.value)
-    assert "REAL_ID" in str(excinfo.value)
-
-
-def test_assert_ids_in_scope_lists_all_offenders() -> None:
-    with pytest.raises(ScopeViolationError) as excinfo:
-        assert_ids_in_scope(["X", "Y", "A"], {"A"}, "update_entities")
-    msg = str(excinfo.value)
-    assert "X" in msg and "Y" in msg and "A" not in msg[msg.index("refused") :]
 
 
 # --- SAFE_BUILTINS: allowed names present -----------------------------------
@@ -250,35 +212,6 @@ def test_run_script_sync_import_html_fails() -> None:
 # --- dummy-scoped file-fetch stubs ----------------------------------------------
 
 
-def test_dummy_namespace_get_entity_files_scoped() -> None:
-    """`get_entity_files` returns [] in-scope and raises ScopeViolationError
-    out-of-scope; `get_file_bytes` returns None (dummies carry no files)."""
-    import asyncio as _asyncio
-
-    namespace = build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=_asyncio.new_event_loop(),
-        scope={"DUMMY1"},
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-    code = """
-in_scope = get_entity_files("DUMMY1")
-refused = False
-try:
-    get_entity_files("REAL_ID")
-except RuntimeError:
-    refused = True
-missing = get_file_bytes("x.html")
-result = f"{len(in_scope)}|{refused}|{missing}"
-"""
-    result, error = run_script_sync(code, namespace)
-    assert error is None
-    assert result == "0|True|None"
-
-
 def test_real_namespace_unwired_file_helpers_raise_runtime_error() -> None:
     """With no repositories wired, the real `get_entity_files`/`get_file_bytes`
     fail LOUDLY (RuntimeError naming the helper) instead of silently no-op'ing."""
@@ -360,3 +293,86 @@ def test_coerce_search_filters_rejects_missing_required_field() -> None:
     """A dict missing the required ``property_name`` fails pydantic validation."""
     with pytest.raises(ValueError):
         coerce_search_filters([{"values": ["X"]}])
+
+
+# --- NamedNamespace ----------------------------------------------------------
+
+
+def test_named_namespace_success_lookups_are_untouched() -> None:
+    res = NamedNamespace(summary="ok", examples=[1, 2])
+
+    assert res.summary == "ok"
+    assert res.examples == [1, 2]
+
+
+def test_named_namespace_lists_the_available_attributes() -> None:
+    """The failure the operator sees must name the real surface.
+
+    A model-written script used to die on ``res.S`` with a bare
+    ``'types.SimpleNamespace' object has no attribute 'S'`` — a dead end for the
+    operator AND for the prompt-fix pass that reads the error. The typo must
+    instead say what the object actually offers and suggest the closest name.
+    """
+    res = NamedNamespace(summary="ok", examples=[1, 2])
+
+    with pytest.raises(AttributeError) as excinfo:
+        _ = res.S  # noqa: B018 — the attribute access IS the behavior under test
+
+    message = str(excinfo.value)
+    assert "'S' does not exist" in message
+    assert "Did you mean 'summary'?" in message
+    assert "examples" in message
+
+
+def test_named_namespace_without_a_close_match_lists_every_attribute() -> None:
+    res = NamedNamespace(parse=lambda s: s)
+
+    with pytest.raises(AttributeError) as excinfo:
+        _ = res.zzzz  # noqa: B018
+
+    assert "Available: parse." in str(excinfo.value)
+
+
+def test_stdlib_facades_are_named_namespaces() -> None:
+    """Every script-facing facade self-diagnoses, not just the result objects."""
+    for name in (
+        "json",
+        "re",
+        "collections",
+        "itertools",
+        "datetime",
+        "math",
+        "random",
+        "htmlextract",
+        "textmatch",
+        "dateparse",
+    ):
+        facade = _STDLIB[name]
+        assert isinstance(facade, NamedNamespace), name
+
+    with pytest.raises(AttributeError) as excinfo:
+        _ = _STDLIB["textmatch"].S  # noqa: B018
+
+    assert "Did you mean 'Scorer'?" in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_re_facade_binds_the_short_flag_aliases() -> None:
+    """``re.I``/``S``/``M``/``X`` are what scripts write; only the long names
+    used to be bound, so ``re.sub(..., flags=re.I)`` died and the entity was
+    recorded as a skip (whose error text then read like a broken suggestion)."""
+    facade = _STDLIB["re"]
+
+    assert facade.I is facade.IGNORECASE
+    assert facade.S is facade.DOTALL
+    assert facade.M is facade.MULTILINE
+    assert facade.X is facade.VERBOSE
+
+
+def test_run_script_sync_reports_a_typo_with_the_real_surface() -> None:
+    """The end-to-end failure a generated script produces stays actionable."""
+    namespace: dict = {"res": NamedNamespace(summary="s", examples=[]), "result": None}
+
+    _result, error = run_script_sync("result = res.S.shared_ids\n", namespace)
+
+    assert error is not None
+    assert "Did you mean 'summary'?" in error

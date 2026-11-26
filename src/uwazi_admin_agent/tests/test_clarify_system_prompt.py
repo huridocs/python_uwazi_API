@@ -55,7 +55,7 @@ def test_clarify_prompt_states_that_the_script_only_proposes() -> None:
     Uwazi on its own."""
     assert "WHAT THE SCRIPT ACTUALLY DOES" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "does NOT touch Uwazi" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "only RECORDS a" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "only RECORDS" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "the operator applies it" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
 
 
@@ -68,13 +68,20 @@ def test_clarify_prompt_forbids_the_override_question() -> None:
     assert "never as a question about overwriting a value" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
 
 
-def test_clarify_prompt_offers_the_table_content_question_instead() -> None:
-    """The legitimate question behind the override one: which ROWS the table
-    should carry — "do you want a suggestion as well?"."""
+def test_clarify_prompt_offers_the_suggestion_content_question_instead() -> None:
+    """The legitimate question behind the override one: which entities get a
+    suggestion — "do you want a suggestion as well?"."""
     assert "Do you want a suggestion as well?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "WHICH ROWS to" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "WHICH" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "SUGGESTIONS to produce" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "Worked example of the swap" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "RIGHT question" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_never_mentions_a_table_in_its_questions() -> None:
+    """The operator answers the questions in the wizard, which has no table: the
+    prompt tells the agent to say "suggestions" instead."""
+    assert "must never mention a" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
 
 
 def test_clarify_prompt_bans_the_other_apply_time_questions() -> None:
@@ -82,12 +89,27 @@ def test_clarify_prompt_bans_the_other_apply_time_questions() -> None:
     assert "Should I apply this now?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "revertable / backed up / undoable" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "Do you want a dry run / validation first?" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "that is a\n    confirmation, not a clarification" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "confirmation, not a clarification" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
     assert "what should the budget" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
 
 
 def test_clarify_prompt_restatement_is_phrased_as_a_proposal() -> None:
     """The restatement itself must not say "Uwazi will be updated" — the
     script proposes, the operator applies."""
-    assert "Do NOT phrase the" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
-    assert "the table will propose" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "Do NOT phrase" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "the task will suggest" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_clarify_prompt_qualifies_multivalued_questions() -> None:
+    """A question about what a multi-value PROPOSAL contains is legitimate; one
+    about what happens to existing links when it runs is not.
+
+    The bug: the agent asked "when a Rec entity already has `states` links
+    recorded, what should the proposed value be?" with options phrased as
+    outcomes of applying (union / replace / only record a row when …).
+    """
+    assert "MULTI-VALUED PROPERTIES" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "REPLACES the property's set" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "Which set should be" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "NEVER phrase it as an outcome of applying" in CLARIFY_SYSTEM_PROMPT_TEMPLATE
+    assert "suggest a value only when the extracted values add something new" in CLARIFY_SYSTEM_PROMPT_TEMPLATE

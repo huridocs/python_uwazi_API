@@ -4,8 +4,11 @@ A thin pydantic-ai ``Agent`` use case: the agent plans the bulk change with
 read/inspect tools (schema inspection, entity discovery sampling, HTML/URL
 peeking, segmentation) and emits ONE deterministic script whose recorded
 writes become the review table. The script is NEVER executed against Uwazi
-during generation (no dummy-validation gate, no dry run) — the operator's
-review table IS the proof step.
+during authoring (no dummy-validation gate, no dry run) — the operator's
+review table IS the proof step. A script that CRASHES during that first
+planning pass gets ONE repair round (see ``create_and_generate``): the
+traceback re-opens this same authoring turn with the failed source before the
+run is declared failed.
 
 The generated script MAY call ``llm_complete``/``llm_map``; the LLM caps the
 operator approves in the wizard (a request cap + a dollar cap) are enforced on
@@ -42,14 +45,14 @@ from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
+from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
+from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
 from uwazi_admin_agent.use_cases.generation_stages import (
     STAGE_SCRIPT,
     STAGE_THINKING,
     benchmark_stage,
     tool_stage,
 )
-from uwazi_admin_agent.use_cases.author_extractor_tool import author_html_extractor, build_extractor_agent
-from uwazi_admin_agent.use_cases.extraction_benchmark_tool import benchmark_extractor
 from uwazi_admin_agent.use_cases.instance_languages import fetch_instance_languages, system_prompt_with_languages
 from uwazi_admin_agent.use_cases.peek_file_tools import peek_entity_files, peek_file_text
 from uwazi_admin_agent.use_cases.script_budget import system_prompt_with_script_budget

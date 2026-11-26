@@ -25,7 +25,6 @@ from uwazi_admin_agent.use_cases.llm_script_helpers import build_llm_script_help
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     build_dry_run_namespace,
     run_script_sync,
-    scope_read_result,
 )
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_create import AgentEntityCreate
@@ -337,6 +336,7 @@ for i in range(5):
 def test_scope_read_result_filters_lists_dicts_and_search_results() -> None:
     from types import SimpleNamespace as NS
 
+    from uwazi_admin_agent.use_cases.script_exec_namespace.scope import scope_read_result
     from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
 
     assert scope_read_result("Error: nope", {"a"}) == "Error: nope"

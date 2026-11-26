@@ -8,6 +8,7 @@ from typing import Any
 from nicegui import app, context, ui
 
 from uwazi_admin_agent.domain.run_name import free_copy_name
+from uwazi_admin_agent.domain.task_import import assign_names, parse_tasks_csv
 from uwazi_admin_agent.drivers.web import operation_gate
 
 # Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
@@ -26,6 +27,7 @@ from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
     page_instance_url,
 )
+from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
 
 from .broadcast import (
     _run_rows,
@@ -119,8 +121,10 @@ def _build_runs_table() -> ui.table:
         f"""
         <q-td :props="props" class="text-no-wrap">
             <q-btn dense flat icon="fact_check" color="secondary" title="Review &amp; apply"
+                   :disable="props.row.status === 'creating'"
                    @click="$parent.$emit('review', props.row)" />
             <q-btn dense flat icon="description" color="grey-8" title="Show prompt"
+                   :disable="props.row.status === 'creating'"
                    @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="props.row.busy || {_IN_FLIGHT_JS}"
@@ -300,10 +304,14 @@ def _selection_toolbar() -> None:
         # Solid primary matches the review UI's Run button (`color="primary"`).
         ui.button("New Task", icon="add", on_click=_new_task_wizard).props("unelevated color=primary text-color=white")
         delete_button = ui.button("Delete", icon="delete", on_click=_bulk_delete_selected).props("dense flat color=negative")
-        # Export is a READ: it does not need a selection and never blocks on an
-        # in-flight run (the manifests it reads are already on disk).
-        ui.button("Export CSV", icon="download", on_click=_export_tasks_csv).props("dense flat color=secondary").tooltip(
+        # Export/Import are the portable side of a task: the prompts. Export is a
+        # READ (no selection, never blocked); import recreates tasks and is
+        # confirmed because each one is generated again.
+        ui.button("Export CSV", icon="download", on_click=_export_tasks_csv).props("dense flat color=grey-8").tooltip(
             "Download every task with its prompt and validated prompt as a CSV"
+        )
+        ui.button("Import CSV", icon="upload", on_click=_import_tasks_csv).props("dense flat color=grey-8").tooltip(
+            "Recreate tasks from a CSV exported by this page (prompts only)"
         )
         context.client._delete_selected_button = delete_button  # noqa: SLF001 — per-client enable state
 
@@ -326,6 +334,93 @@ def _export_tasks_csv() -> None:
         return
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     ui.download.content(content.encode("utf-8"), filename=f"tasks-{stamp}.csv", media_type="text/csv")
+
+
+def _import_tasks_csv() -> None:
+    """Open the upload dialog for a CSV previously produced by Export CSV.
+
+    Import is the inverse of the export: the prompts travel, the counters do
+    not. Recreating a task means running the normal generation path (the AI
+    writes the script), so nothing is imported until the operator confirms.
+    """
+    instance = page_instance_url()
+    if _session_ended(instance):
+        return
+    with context.client.layout:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+            dialog.props("persistent")
+            modal_header(dialog, "Import tasks from CSV")
+            ui.label(
+                "Tasks are recreated from the prompts in the file and generated again (the AI writes each "
+                "script). Status, counters and dates are ignored: the prompts are what is portable."
+            ).classes("text-body2 text-grey-7")
+            ui.upload(
+                on_upload=lambda event: _handle_tasks_upload(event, dialog, instance),
+                auto_upload=True,
+                max_file_size=5_000_000,
+            ).props('accept=".csv" flat').classes("w-full")
+            with ui.row().classes("q-mt-md w-full justify-end"):
+                ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
+    dialog.open()
+
+
+def _handle_tasks_upload(event: Any, dialog: Any, instance: str) -> None:
+    """Parse the uploaded CSV, then ask for one confirmation before generating.
+
+    The parse is pure (``domain.task_import``): bad rows are reported and
+    skipped instead of aborting the file. Name collisions with existing or
+    in-flight runs are resolved to ``"<id> copy"`` before the confirmation, so
+    the dialog shows the names that will actually be created.
+    """
+    try:
+        raw = event.content.read()
+    except Exception as exc:  # noqa: BLE001 — surface an unreadable upload
+        ui.notify(f"Could not read the file: {exc}", type="negative")
+        return
+    text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    parsed = parse_tasks_csv(text)
+    if not parsed.ok:
+        ui.notify(parsed.error, type="negative", multi_line=True)
+        return
+    try:
+        taken = [run.run_id for run in list_runs(instance)]
+        taken.extend(claim.run_id for claim in operation_gate.run_claims(instance))
+    except Exception as exc:  # noqa: BLE001 — refuse rather than overwrite a run
+        ui.notify(f"Could not list the existing tasks: {exc}", type="negative")
+        return
+    planned = assign_names(parsed.tasks, taken)
+    dialog.close()
+    message = (
+        f"Import {len(planned)} task(s)? Each is generated again from its prompt, which uses the AI. "
+        f"Names: {', '.join(name for name, _task in planned)}."
+    )
+    if parsed.skipped:
+        message += " Skipped rows: " + "; ".join(parsed.skipped) + "."
+    _confirm_dialog(
+        "Import tasks",
+        message,
+        lambda: _start_imported_tasks(planned, instance),
+        success_msg=f"Importing {len(planned)} task(s)",
+        instance=instance,
+    )
+
+
+def _start_imported_tasks(planned: tuple[tuple[str, Any], ...], instance: str) -> Any:
+    """Launch one generation per imported task (each takes its own claim)."""
+    credentials = credentials_for_instance(instance)
+    if credentials is None:
+        ui.notify("Not logged in to Uwazi — log in again", type="negative")
+        return _ABORT
+    for name, task in planned:
+        _start_generation(
+            name,
+            task.prompt,
+            credentials.user,
+            credentials.password,
+            instance=instance,
+            validated_prompt=task.validated_prompt,
+        )
+    return None
 
 
 def _bulk_delete_selected() -> None:
@@ -400,8 +495,21 @@ def _delete_selected_and_release(selected: list[str], instance: str) -> Any:
 
 
 def _on_review(e: Any) -> None:
-    """Open the run's review page — the primary write path (accept writes there)."""
+    """Open the run's review page — the primary write path (accept writes there).
+
+    A row being CREATED has no run on disk yet: its placeholder is clickable
+    until the 5s refresh re-renders it with the button disabled, so the click
+    is refused here as well instead of opening a page for a missing run.
+    """
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
+    instance = page_instance_url()
+    try:
+        get_run(instance, run_id)
+    except Exception:  # noqa: BLE001 — no manifest yet is the normal case here
+        claim = operation_gate.run_claim(instance, run_id)
+        if claim is not None and claim.kind == "creating":
+            ui.notify("This task is still being created — the review table opens when generation finishes", type="warning")
+            return
     ui.navigate.to(page_link(f"/review/{run_id}"))
 
 

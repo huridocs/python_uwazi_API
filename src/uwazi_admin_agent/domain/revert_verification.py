@@ -7,7 +7,7 @@ and the *current* raws fetched post-revert, decide per entity whether the
 restore matches. This is the unit-test target named by the Phase 6 DoD
 ("revert-verification decisions").
 
-Comparison semantics mirror the Phase-3 gate (:mod:`domain.validation_result`):
+Comparison semantics:
 entity-raw equality excludes :data:`PLATFORM_MANAGED_FIELDS` (``editDate`` is
 server-managed and advances on every save, including the revert save — see the
 §8 changelog). Backup/restore still preserve those fields in the snapshot (raw
@@ -60,9 +60,21 @@ from uwazi_admin_agent.domain.relationship_restore import (
     remap_metadata_refs,
 )
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot, FileRef
-from uwazi_admin_agent.domain.validation_result import FILE_FIELDS, PLATFORM_MANAGED_FIELDS
 
 MismatchKind = Literal["entity", "relationship", "created", "publish", "connection"]
+
+# Fields Uwazi bumps server-side on every save (confirmed by live probe: a no-op
+# save of an identical raw advances ``editDate`` by a few milliseconds, ignoring
+# the posted value). The restore comparison excludes them: the save itself bumps
+# them, so they can never be restored to their before-value.
+PLATFORM_MANAGED_FIELDS: frozenset[str] = frozenset({"editDate"})
+
+# File-bearing fields on a raw entity that are DENORMALIZED views of the `files`
+# collection. On delete-revert the entity is re-created with a fresh sharedId and
+# its files are re-uploaded, minting fresh file ids, so these arrays can never
+# match the snapshot's by identity; a dedicated file-gap check compares them by
+# originalname+kind+language instead.
+FILE_FIELDS: frozenset[str] = frozenset({"documents", "attachments"})
 
 # The file kind literals every file-gap check emits (typed so the builders
 # construct :class:`FileGap` with the exact Literal, not a widened str).

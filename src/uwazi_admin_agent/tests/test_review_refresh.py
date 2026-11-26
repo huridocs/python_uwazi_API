@@ -45,17 +45,17 @@ def _raw(value: object, *, language: str = "en", title: str = "Title") -> dict[s
 
 
 def test_unchanged_proposal_keeps_the_operator_status() -> None:
-    assert reconciled_status(SuggestionStatus.ACCEPTED, same=True) is SuggestionStatus.ACCEPTED
+    assert reconciled_status(SuggestionStatus.PENDING, same=True) is SuggestionStatus.PENDING
     assert reconciled_status(SuggestionStatus.APPLIED, same=True) is SuggestionStatus.APPLIED
 
 
 def test_changed_proposal_resets_a_reviewable_row_to_pending() -> None:
-    assert reconciled_status(SuggestionStatus.ACCEPTED, same=False) is SuggestionStatus.PENDING
+    assert reconciled_status(SuggestionStatus.PENDING, same=False) is SuggestionStatus.PENDING
     assert reconciled_status(SuggestionStatus.APPLIED, same=False) is SuggestionStatus.PENDING
 
 
 def test_changed_proposal_keeps_deliberate_operator_decisions() -> None:
-    assert reconciled_status(SuggestionStatus.EDITED, same=False) is SuggestionStatus.EDITED
+    assert reconciled_status(SuggestionStatus.DISCARDED, same=False) is SuggestionStatus.DISCARDED
     assert reconciled_status(SuggestionStatus.DISCARDED, same=False) is SuggestionStatus.DISCARDED
 
 
@@ -82,8 +82,6 @@ def test_missing_non_applied_row_is_deleted() -> None:
     proposal).
     """
     assert keeps_after_refresh(SuggestionStatus.PENDING) is False
-    assert keeps_after_refresh(SuggestionStatus.ACCEPTED) is False
-    assert keeps_after_refresh(SuggestionStatus.EDITED) is False
     assert keeps_after_refresh(SuggestionStatus.DISCARDED) is False
     assert keeps_after_refresh(SuggestionStatus.REVERTED) is False
 

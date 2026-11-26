@@ -11,11 +11,13 @@ from __future__ import annotations
 from uwazi_admin_agent.domain.prompt_revision import (
     CORRECTION_HEADING,
     PREVIOUS_SCRIPT_HEADING,
+    SCRIPT_CRASH_HEADING,
     SuggestionCorrection,
     correction_request,
     correction_summary,
     prompt_with_previous_script,
     property_line,
+    script_repair_request,
 )
 from uwazi_admin_agent.domain.suggestion import Suggestion
 from uwazi_admin_agent.drivers.web.review_page.entity_window import _suggestion_correction
@@ -137,3 +139,42 @@ def test_the_entity_window_uses_the_skip_reason_as_evidence() -> None:
     correction = _suggestion_correction(suggestion, {}, {})
 
     assert correction.evidence == "No primary document is attached to this entity."
+
+
+def test_script_repair_request_carries_prompt_crash_and_failed_source() -> None:
+    """The repair turn sees the original task, the exact crash, the failed source.
+
+    A freshly generated script that crashed the first planning pass used to end
+    the run, and Retry re-authored from the SAME prompt — ready to repeat the
+    typo. The repair request must instead re-open the generation WITH the
+    traceback (the evidence) and the crashed source (the thing to revise), while
+    saying the PLAN is not up for renegotiation.
+    """
+    request = script_repair_request(
+        "Extract recommendations per judgment.",
+        "res = query_entities('by_text', search_term='rec')\nids = res.S\n",
+        "AttributeError: 'types.SimpleNamespace' object has no attribute 'S'",
+        plan_kind="changes",
+    )
+
+    assert request.startswith("Extract recommendations per judgment.")
+    assert SCRIPT_CRASH_HEADING in request
+    assert "'types.SimpleNamespace' object has no attribute 'S'" in request
+    assert "Output the CORRECTED FULL script" in request
+    assert "plan_kind='changes'" in request
+    # The failed source rides along for revision, under the shared heading.
+    assert PREVIOUS_SCRIPT_HEADING in request
+    assert "res.S" in request
+
+
+def test_script_repair_request_states_the_kind_constraint_without_a_declared_kind() -> None:
+    request = script_repair_request("Do the thing.", "x = 1\n", "NameError: y", plan_kind=None)
+
+    assert "the same plan_kind it declared" in request
+
+
+def test_script_repair_request_without_a_failed_script_skips_the_source_section() -> None:
+    request = script_repair_request("Do the thing.", "   \n", "NameError: y", plan_kind="query")
+
+    assert PREVIOUS_SCRIPT_HEADING not in request
+    assert "NameError: y" in request

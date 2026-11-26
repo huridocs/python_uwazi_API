@@ -10,14 +10,12 @@ Operating model:
   variants (update/create/create_relationships writes, entity-file/file-byte/
   segmentation reads) run on up to ``THROTTLE_MAX_WORKERS`` (4) concurrent workers, backing
   off toward 1 when Uwazi complains about load (429/rate-limit) and climbing
-  back after clean batches — one shared ``ThrottleController`` per execute or
-  dry-run pass. The SAME names bind in dummy/dry-run mode with identical
-  shapes, so one script validates unchanged.
-- A run proceeds: prompt (active_run.yaml) -> generate script -> simulate
-  against dummy entities in the real instance -> backup the real touch set ->
-  execute against real entities -> (revert on demand).
-- **Dummy-entity gate**: a script must pass against dummies (correct outcome
-  AND revert restores exact original raw state) before real data is touched.
+  back after clean batches — one shared ``ThrottleController`` per pass.
+- A run proceeds: prompt (active_run.yaml) -> generate script -> the automatic
+  LLM-free planning scan (real reads, RECORDED writes) builds the review table
+  -> backup the real touch set -> execute the reviewed rows -> (revert on
+  demand). Nothing is ever created in Uwazi to "validate" a script: the review
+  table IS the proof step.
 - **Backup is CRUD-intercepted**: the real-execution CRUD helpers snapshot the
   raw before-state of every entity they modify/delete before applying, so the
   snapshot set covers the touch set by construction.

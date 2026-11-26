@@ -27,7 +27,7 @@ from uwazi_admin_agent.domain.relationship_values import (
     relationship_options,
 )
 from uwazi_admin_agent.domain.select_values import ALL_VALUES_REJECTED_REASON
-from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionStatus
+from uwazi_admin_agent.domain.suggestion import Suggestion
 from uwazi_admin_agent.drivers.web.run_service import (
     relationship_candidates,
     relationship_titles_for,
@@ -43,12 +43,9 @@ def _editable(suggestion: Suggestion, runnable: bool) -> bool:
     """Whether the value mechanism may still change this row.
 
     A row discarded BY the value mechanism stays editable (picking a value back
-    is the review loop); every other non-runnable state, and an EDITED row (its
-    edit wins over the values), is read-only.
+    is the review loop); every other non-runnable state is read-only.
     """
-    return (runnable or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON) and (
-        suggestion.status is not SuggestionStatus.EDITED
-    )
+    return runnable or suggestion.discard_reason == ALL_VALUES_REJECTED_REASON
 
 
 def _persist(state: dict[str, Any], suggestion: Suggestion, selected: list[str] | None) -> None:

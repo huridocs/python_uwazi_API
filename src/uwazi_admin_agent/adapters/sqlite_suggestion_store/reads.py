@@ -18,6 +18,8 @@ from uwazi_admin_agent.domain.suggestion import (
 )
 
 from .sql import (
+    OP_VALUE_EXPR,
+    OPERATION_STATUS_RANK_CASE,
     RUNNABLE_STATUSES,
     _entity_fields,
     _row_to_suggestion,
@@ -96,7 +98,6 @@ class ReadsMixin:
                 MAX(entity_title) AS entity_title,
                 COUNT(*) AS proposal_count,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS accepted,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS applied,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS reverted,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS discarded,
@@ -117,7 +118,6 @@ class ReadsMixin:
             """,
             [
                 SuggestionStatus.PENDING.value,
-                SuggestionStatus.ACCEPTED.value,
                 SuggestionStatus.APPLIED.value,
                 SuggestionStatus.REVERTED.value,
                 SuggestionStatus.DISCARDED.value,
@@ -162,7 +162,6 @@ class ReadsMixin:
                     properties=fields_by_id[key]["properties"],
                     proposal_count=int(row["proposal_count"]),
                     pending=int(row["pending"] or 0),
-                    accepted=int(row["accepted"] or 0),
                     applied=int(row["applied"] or 0),
                     reverted=int(row["reverted"] or 0),
                     discarded=int(row["discarded"] or 0),
@@ -205,11 +204,9 @@ class ReadsMixin:
                 MAX(entity_title) AS entity_title,
                 COUNT(*) AS proposal_count,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS accepted,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS applied,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS reverted,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS discarded,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS edited,
                 SUM(CASE WHEN is_validation = 1 THEN 1 ELSE 0 END) AS validation,
                 COUNT(DISTINCT match_state) AS verdicts,
                 SUM(CASE WHEN match_state IS NULL
@@ -223,12 +220,7 @@ class ReadsMixin:
                 LOWER(MAX(entity_title)) AS title_sort,
                 LOWER(MAX(template_name)) AS template_sort,
                 MIN(op) AS ops_sort,
-                CASE
-                    WHEN COUNT(*) = SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) THEN 'applied'
-                    WHEN COUNT(*) = SUM(CASE WHEN status = 'reverted' THEN 1 ELSE 0 END) THEN 'reverted'
-                    WHEN COUNT(*) = SUM(CASE WHEN status = 'discarded' THEN 1 ELSE 0 END) THEN 'discarded'
-                    ELSE 'pending'
-                END AS status_sort,
+                {OPERATION_STATUS_RANK_CASE} AS status_sort,
                 MAX(julianday(COALESCE(reviewed_at, created_at))) AS modified_sort
             FROM suggestion
             WHERE {where}
@@ -238,11 +230,9 @@ class ReadsMixin:
             """,
             [
                 SuggestionStatus.PENDING.value,
-                SuggestionStatus.ACCEPTED.value,
                 SuggestionStatus.APPLIED.value,
                 SuggestionStatus.REVERTED.value,
                 SuggestionStatus.DISCARDED.value,
-                SuggestionStatus.EDITED.value,
                 *params,
                 f.limit,
                 f.offset,
@@ -280,11 +270,9 @@ class ReadsMixin:
                     languages=sorted({sub.language for sub in subs if sub.language}),
                     proposal_count=int(row["proposal_count"]),
                     pending=int(row["pending"] or 0),
-                    accepted=int(row["accepted"] or 0),
                     applied=int(row["applied"] or 0),
                     reverted=int(row["reverted"] or 0),
                     discarded=int(row["discarded"] or 0),
-                    edited=int(row["edited"] or 0),
                     validation=int(row["validation"] or 0),
                     match_summary=match_summary_of(verdicts, verdict_rows, bool(row["has_mismatch"])),
                     has_outcome=bool(row["has_outcome"]),
@@ -308,26 +296,56 @@ class ReadsMixin:
         )
         return [str(row["language"]) for row in rows]
 
-    def op_status_counts(self, run_id: str) -> dict[str, dict[str, int]]:
-        """Row counts per ``op`` and per ``status`` over the whole run (SQL).
+    def op_status_counts(
+        self,
+        run_id: str,
+        f: SuggestionFilter | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Counts for every filter option, each counted against the OTHER filters.
 
-        The Op and Status filter options carry how many rows each value would
-        match. Counting rows (not operation groups) matches what those filters
-        select — they narrow the table's SUBOPERATIONS. One grouped pass per
-        dimension over the run's rows; no per-page Python loop.
+        The review page's dropdowns show how many rows picking that option
+        would leave. Two rules make those numbers honest:
+
+        1. each option is counted with its OWN dimension cleared, so the
+           options of one dropdown do not cancel themselves out (picking
+           ``update`` must still list the other operations, with the counts
+           they would have under the rest of the filter);
+        2. the count reflects every OTHER active filter, so a Property choice
+           narrows the Operation/Status numbers instead of leaving the run's
+           absolute totals beside a filtered table.
+
+        The Property/Language/Validation dropdowns work the same way: their
+        options carry the counts each value would match, and a value whose
+        count is zero is dropped (see :func:`filter_options`).
+
+        Counting rows (not operation groups) matches what those filters select
+        — they narrow the table's SUBOPERATIONS. One grouped pass per dimension
+        plus one per single-value dropdown; no per-page Python loop.
         """
-        op_rows = self._query(
-            "SELECT op, COUNT(*) AS n FROM suggestion WHERE run_id = ? GROUP BY op",
-            (run_id,),
-        )
-        status_rows = self._query(
-            "SELECT status, COUNT(*) AS n FROM suggestion WHERE run_id = ? GROUP BY status",
-            (run_id,),
-        )
+        base = f if f is not None else SuggestionFilter(limit=100000)
         return {
-            "op": {str(row["op"]): int(row["n"]) for row in op_rows},
-            "status": {str(row["status"]): int(row["n"]) for row in status_rows},
+            "op": self._count_by(run_id, base.without("op"), OP_VALUE_EXPR),
+            "status": self._count_by(run_id, base.without("status"), "status"),
+            "property": self._count_by(run_id, base.without("property_name"), "property_name", not_null=True),
+            "language": self._count_by(run_id, base.without("languages"), "language", not_null=True),
         }
+
+    def _count_by(
+        self,
+        run_id: str,
+        f: SuggestionFilter,
+        column: str,
+        *,
+        not_null: bool = False,
+    ) -> dict[str, int]:
+        """One dropdown's option counts under the rest of the filter (SQL)."""
+        where, params = build_where(f, run_id)
+        extra = f" AND {column} IS NOT NULL" if not_null else ""
+        rows = self._query(
+            f"SELECT {column} AS value, COUNT(*) AS n FROM suggestion WHERE {where}{extra} GROUP BY {column}",
+            params,
+        )
+        return {str(row["value"]): int(row["n"]) for row in rows}
 
     def templates(self, run_id: str) -> list[str]:
         """The DISTINCT template names the run's rows belong to (SQL).

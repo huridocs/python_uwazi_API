@@ -15,18 +15,19 @@ async def clarify_prompt(
     user: str,
     password: str,
     allowance_note: str = "",
+    validation_note: str = "",
 ) -> PromptUnderstanding:
     """Run the prompt-validation step: restate the prompt + surface ambiguities.
 
     A lightweight, tool-free LLM call that runs BEFORE generation so the operator
-    can confirm/rephrase. ``allowance_note`` carries the operator-approved AI caps
-    (the wizard's caps step, which runs before validation) so the clarifying
-    questions match what the task can afford; empty when unset. Raises on LLM
-    failure; the caller shows a skip affordance.
+    can confirm/rephrase. ``allowance_note`` carries the operator-approved AI
+    caps and ``validation_note`` the held-out test set the operator defined
+    (both steps run before validation); both are already-formatted blocks and
+    empty when unset. Raises on LLM failure; the caller shows a skip affordance.
     """
     runtime = build_runtime(user=user, password=password, url=url)
     use_case = ClarifyPromptUseCase(llm=runtime.llm, deps=runtime.deps)
-    return await use_case.execute(prompt, allowance_note=allowance_note)
+    return await use_case.execute(prompt, allowance_note=allowance_note, validation_note=validation_note)
 
 
 async def compact_chat(conversation: str) -> str:

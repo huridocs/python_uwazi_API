@@ -17,6 +17,10 @@ STAGE_THINKING = "LLM is working out the plan…"
 STAGE_SCRIPT = "LLM is writing the script…"
 STAGE_PLANNING = "Running the generated script (planning pass)…"
 STAGE_SAVING = "Saving the script and the review table…"
+# The creation flow's ONE self-repair round: the freshly generated script
+# crashed in its first planning pass, so the crash is fed back to the authoring
+# agent before the run is declared failed.
+STAGE_REPAIR = "The script crashed while planning — the LLM is repairing it and re-running the pass…"
 
 _TOOL_STAGES: dict[str, str] = {
     # Schema / discovery reads.

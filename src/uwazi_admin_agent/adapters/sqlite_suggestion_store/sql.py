@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS suggestion (
     merge_files TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     is_validation INTEGER NOT NULL DEFAULT 0,
-    edited_value TEXT,
+    created_shared_id TEXT,
     rejected_values TEXT,
     selected_values TEXT,
     basis TEXT,
@@ -99,16 +99,19 @@ CREATE INDEX IF NOT EXISTS suggestion_validation
 """
 
 
-APPLYABLE_STATUSES: tuple[str, ...] = (SuggestionStatus.ACCEPTED.value, SuggestionStatus.EDITED.value)
-
-
+# The rows a Run may write: still to be written, or written once and then
+# reverted (which makes them runnable again).
 RUNNABLE_STATUSES: tuple[str, ...] = (
     SuggestionStatus.PENDING.value,
-    SuggestionStatus.ACCEPTED.value,
-    SuggestionStatus.EDITED.value,
     SuggestionStatus.REVERTED.value,
 )
 
+
+# The Operation filter's value for a row: the run's holdout rows read
+# "validate" (they are evidence for the score, not a write of their own), every
+# other row reads its recorded op. Both the facet counts and the filter use it,
+# so picking "validate" selects exactly the rows the table labels that way.
+OP_VALUE_EXPR: str = "CASE WHEN is_validation = 1 THEN 'validate' ELSE op END"
 
 _OPERATION_SORT_FIELDS: dict[str, str] = {
     "recorded": "first_id",
@@ -118,6 +121,33 @@ _OPERATION_SORT_FIELDS: dict[str, str] = {
     "ops": "ops_sort",
     "status": "status_sort",
 }
+
+# The Status column's sort rank: an INTEGER rank per group, not the row status.
+# The words the review table can show on the badge (via ``operation_status`` and
+# its overrides) must be what the sort groups by — otherwise a click on Status
+# looks broken precisely on the rows the operator watches: holdout evidence and
+# display-only outcomes are stored as ordinary rows, but their badge says
+# "validate"/"info"/"matched"/"excluded", so bucketing by the raw status
+# lumps them all into "pending" while the table shows different words. Within a
+# word the order ties back to ``first_id``, so ties always keep recorded order.
+# Lifecycle order, most actionable first: work remaining, then outcomes, then
+# evidence, then display-only noise.
+#   0 pending · 1 applied · 2 reverted · 3 discarded · 4 validation
+#   5 matched ("matched") · 6 skipped ("excluded") · 7 info
+OPERATION_STATUS_RANK_CASE: str = """
+CASE
+    WHEN COUNT(*) = SUM(CASE WHEN is_validation = 1 THEN 1 ELSE 0 END) THEN 5
+    WHEN COUNT(*) = SUM(CASE WHEN op = 'info' THEN 1 ELSE 0 END) THEN 8
+    WHEN COUNT(*) = SUM(CASE WHEN op = 'matched' THEN 1 ELSE 0 END) THEN 6
+    WHEN COUNT(*) = SUM(CASE WHEN op = 'skipped' THEN 1 ELSE 0 END) THEN 7
+    WHEN COUNT(*) = SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) THEN 1
+    -- Some parts written, some not: the operation reads "mixed" and sorts
+    -- between fully applied and fully reverted (work landed, work remains).
+    WHEN SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) > 0 THEN 2
+    WHEN COUNT(*) = SUM(CASE WHEN status = 'reverted' THEN 1 ELSE 0 END) THEN 3
+    WHEN COUNT(*) = SUM(CASE WHEN status = 'discarded' THEN 1 ELSE 0 END) THEN 4
+    ELSE 0
+END"""
 
 
 def operation_order_by(sort_by: str, sort_desc: bool) -> str:
@@ -156,15 +186,15 @@ def match_summary_of(verdicts: int, verdict_rows: int, has_mismatch: bool) -> st
 
 
 def latest_review_activity(subs: list[Suggestion]) -> datetime | None:
-    """The newest timestamp among one operation's rows (pure).
+    """The newest OPERATOR ACTION among one operation's rows (pure).
 
-    A row's own "modified" moment is its last status change (``reviewed_at``)
-    or, before anyone reviewed it, when it was recorded (``created_at``). The
-    operation is the newest of its parts. The comparison is numeric
+    Only ``reviewed_at`` counts: the Modified column answers "when did someone
+    act on this?", so a freshly recorded row (nobody has touched it) reads
+    empty instead of borrowing its recording time. The comparison is numeric
     (``timestamp()``) so a legacy NAIVE timestamp and a timezone-aware one can
     still be ordered together instead of raising ``TypeError``.
     """
-    stamps = [sub.reviewed_at or sub.created_at for sub in subs]
+    stamps = [sub.reviewed_at for sub in subs]
     present = [stamp for stamp in stamps if stamp is not None]
     if not present:
         return None
@@ -279,15 +309,22 @@ def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
         else:
             clause.append(f"status IN ({', '.join('?' for _ in f.status)})")
             params.extend(s.value for s in f.status)
-    if f.accepted_only:
-        clause.append(f"status IN ({', '.join('?' for _ in APPLYABLE_STATUSES)})")
-        params.extend(APPLYABLE_STATUSES)
     if f.op is not None:
+        # "validate" names the row's DISPLAY op (see OP_VALUE_EXPR): the run's
+        # holdout rows. Every other value selects a regular row of that op, so
+        # picking "update" never returns the validation evidence beside it.
         if not f.op:
             clause.append("1 = 0")
         else:
-            clause.append(f"op IN ({', '.join('?' for _ in f.op)})")
-            params.extend(f.op)
+            wants_validate = "validate" in f.op
+            regular = [value for value in f.op if value != "validate"]
+            terms: list[str] = []
+            if regular:
+                terms.append(f"(is_validation = 0 AND op IN ({', '.join('?' for _ in regular)}))")
+                params.extend(regular)
+            if wants_validate:
+                terms.append("is_validation = 1")
+            clause.append(f"({' OR '.join(terms)})")
     if f.property_name is not None:
         clause.append("property_name = ?")
         params.append(f.property_name)
@@ -375,7 +412,7 @@ def _row_to_suggestion(row: sqlite3.Row) -> Suggestion:
         merge_files=_value_from_json(row["merge_files"]) or [],
         status=SuggestionStatus(row["status"]),
         is_validation=bool(row["is_validation"]),
-        edited_value=row["edited_value"],
+        created_shared_id=row["created_shared_id"] if "created_shared_id" in row.keys() else None,
         rejected_values=_value_from_json(row["rejected_values"]) or [],
         selected_values=_value_from_json(row["selected_values"]),
         basis=_value_from_json(row["basis"]) or [],

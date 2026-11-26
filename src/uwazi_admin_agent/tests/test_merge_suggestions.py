@@ -55,7 +55,7 @@ def _suggestion(
     proposed: object = "v",
     template_name: str | None = None,
     merge_source_ids: list[str] | None = None,
-    status: SuggestionStatus = SuggestionStatus.ACCEPTED,
+    status: SuggestionStatus = SuggestionStatus.PENDING,
 ) -> Suggestion:
     return Suggestion(
         run_id="run1",
@@ -381,11 +381,9 @@ def _operation(*subs: Suggestion) -> OperationReviewRow:
         languages=[],
         proposal_count=len(subs),
         pending=len(subs),
-        accepted=0,
         applied=0,
         reverted=0,
         discarded=0,
-        edited=0,
         match_summary="mismatch",
         has_outcome=True,
         subs=list(subs),
@@ -499,11 +497,9 @@ def _move_operation(*subs: Suggestion) -> OperationReviewRow:
         languages=[],
         proposal_count=len(subs),
         pending=len(subs),
-        accepted=0,
         applied=0,
         reverted=0,
         discarded=0,
-        edited=0,
         match_summary="n/a",
         has_outcome=False,
         subs=list(subs),
@@ -672,7 +668,7 @@ def test_create_merge_row_is_a_create_payload_not_an_update() -> None:
     assert build_apply_updates(rows) == []
     assert build_apply_creates(rows) == [
         {
-            "title": "Case dry-created-0",
+            "title": "Case 1",
             "template_name": "Case",
             "metadata": {"excerpt": [{"value": "new"}]},
             "language": None,
@@ -961,7 +957,6 @@ def test_merge_entity_row_is_offered_the_in_place_revert() -> None:
         properties=["a"],
         proposal_count=1,
         pending=0,
-        accepted=0,
         applied=1,
         reverted=0,
         discarded=0,
@@ -988,7 +983,6 @@ def test_create_merge_entity_row_is_not_offered_the_in_place_revert() -> None:
         properties=["a"],
         proposal_count=1,
         pending=0,
-        accepted=0,
         applied=1,
         reverted=0,
         discarded=0,
@@ -1011,7 +1005,6 @@ def test_file_copy_entity_row_is_not_offered_the_in_place_revert() -> None:
         properties=[],
         proposal_count=1,
         pending=0,
-        accepted=0,
         applied=1,
         reverted=0,
         discarded=0,
@@ -1029,10 +1022,10 @@ def test_run_confirmation_names_the_merge_action() -> None:
     _title, message = run_confirmation(1, ["update_and_delete"])
 
     # The revert lives in the review window; the dialog only states the change.
-    assert message == "Merge (update + delete) 1 row in Uwazi now. Breakdown: Merge (update + delete) ×1."
+    assert message == "Merge (update + delete) 1 suggestion in Uwazi now. Breakdown: Merge (update + delete) ×1."
 
 
 def test_run_confirmation_does_not_promise_a_revert_for_a_file_copy() -> None:
     _title, message = run_confirmation(1, ["move_files"])
 
-    assert message == "Add files 1 row in Uwazi now. The copied files stay on the target. Breakdown: Add files ×1."
+    assert message == "Add files 1 suggestion in Uwazi now. The copied files stay on the target. Breakdown: Add files ×1."

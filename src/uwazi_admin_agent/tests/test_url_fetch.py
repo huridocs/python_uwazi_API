@@ -15,7 +15,6 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort, UrlFetchError
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     _build_get_url_text_real_helper,
-    _get_url_text_noop,
     build_dry_run_namespace,
 )
 
@@ -124,11 +123,6 @@ def test_truncate_url_text_keeps_head_and_tail() -> None:
 
 
 # --- namespace helpers --------------------------------------------------------
-
-
-def test_get_url_text_noop_returns_none() -> None:
-    get_url_text = _get_url_text_noop()
-    assert get_url_text("entity-1") is None
 
 
 def test_get_url_text_real_helper_raises_when_unwired() -> None:

@@ -15,20 +15,20 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
     OP_LABELS,
-    SHARED_ID_CSS,
     bulk_discard_label,
     bulk_revert_label,
+    filter_from_controls,
     filter_options,
+    language_filter_options,
+    property_filter_options,
     run_button_label,
     section_toggle_label,
     select_all_label,
 )
 from uwazi_admin_agent.drivers.web.run_service import (
     current_pass,
-    get_op_status_counts,
+    get_filter_counts,
     get_run,
-    get_suggestion_languages,
-    get_suggestion_properties,
 )
 from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
@@ -100,7 +100,7 @@ def _build_page(run_id: str) -> None:
     # border in the operation's color, which is what tells the groups apart once
     # everything is expanded.
     ui.add_head_html(
-        f"""
+        """
         <style>
         .subs-expand {{ white-space: normal; }}
         .subs-table {{ width: 100%; border-collapse: collapse; table-layout: fixed; white-space: normal; }}
@@ -120,7 +120,9 @@ def _build_page(run_id: str) -> None:
         .subs-context {{ border-left: 3px solid rgba(0,0,0,0.12); padding-left: 8px; }}
         body.body--dark .subs-context {{ border-left-color: rgba(255,255,255,0.15); }}
         .review-no-selectable thead th:first-child {{ visibility: hidden; }}
-        {SHARED_ID_CSS}
+        /* The Target cell is a LINK: the browser must show the hand cursor,
+           not the I-beam a selectable label draws. */
+        .review-title-link, .review-title-link * {{ cursor: pointer !important; }}
         </style>
         """
     )
@@ -140,10 +142,6 @@ def _build_page(run_id: str) -> None:
         "property": "",
         "language": "",
         "text": "",
-        # The Validation filter: "" shows everything, "only" shows the holdout
-        # evidence, "hide" shows regular work. A SELECT, not a checkbox: the
-        # default (everything) is what keeps validation rows visible at all.
-        "validation": "",
         # The collapsible sections' initial state: the FILTERS are ON when the
         # page opens (narrowing the table is the first thing an operator does),
         # the stats and the free-text search stay behind the menu. The menu
@@ -236,6 +234,8 @@ def _build_page(run_id: str) -> None:
             # It is NOT hidden: a stale table is a safety warning, not a
             # statistic.
             _drift_banner(state)
+            # Entering the page ALWAYS re-checks drift (see ``_drift_banner``):
+            # the stored verdict describes when it was taken, not now.
             _change_table(state)
             # Apply the initial visibility the menu labels already advertise:
             # the filters ON, the stats and the search off. Entering the page
@@ -375,15 +375,15 @@ def _search_bar(state: dict[str, Any]) -> None:
 
 
 def _filter_bar(state: dict[str, Any]) -> None:
-    """The filters, in one row of selects plus the Reset button at the right.
+    """The filters, in one row of selects plus the Reset button.
 
-    The whole bar is aligned LEFT, under the stats: the filters narrow what
-    the table shows, and the operator reads them from the same side as the
-    rows they narrow. The free-text search has its own, independently toggled
-    section (see :func:`_search_bar`).
+    The row is aligned RIGHT (``justify-end``) so it sits under the table's
+    right edge, while the controls keep their left-to-right reading order:
+    Property, Language, Operation, Status, then Reset. The free-text search has
+    its own, independently toggled section (see :func:`_search_bar`).
     """
     with ui.column().classes("w-full q-mb-sm"):
-        with ui.row().classes("w-full items-center gap-2"):
+        with ui.row().classes("w-full items-center justify-end gap-2"):
             # The Property filter comes FIRST: it decides WHAT the table shows
             # (every property the task writes is an option, and picking one
             # narrows the table to the suboperations writing that property).
@@ -397,15 +397,22 @@ def _filter_bar(state: dict[str, Any]) -> None:
             types_by_template = _template_types(state["run_id"])
             state["_template_types"] = types_by_template
             state["_types"] = _merged_types(types_by_template)
+            # Every dropdown is counted against the OTHER active filters (see
+            # ``_refresh_filter_counts``): the labels say how many rows each
+            # choice would leave, and a choice that matches nothing under them is
+            # not offered at all.
+            counts = get_filter_counts(
+                page_instance_url(),
+                state["run_id"],
+                filter_from_controls(
+                    property_name=state["property"],
+                    language=state["language"],
+                    limit=100000,
+                ),
+            )
             state["_property_select"] = (
                 ui.select(
-                    {
-                        "": "any property",
-                        **{
-                            name: state["_labels"].get(name, name)
-                            for name in get_suggestion_properties(page_instance_url(), state["run_id"])
-                        },
-                    },
+                    property_filter_options(state["_labels"], counts.get("property", {}), state["property"]),
                     value=state["property"],
                     label="Property",
                     on_change=lambda e: _set_filter(state, "property", e.value or ""),
@@ -419,10 +426,7 @@ def _filter_bar(state: dict[str, Any]) -> None:
             # after Property: both narrow WHAT the table shows.
             state["_language_select"] = (
                 ui.select(
-                    {
-                        "": "any language",
-                        **{lang: lang for lang in get_suggestion_languages(page_instance_url(), state["run_id"])},
-                    },
+                    language_filter_options(counts.get("language", {}), state["language"]),
                     value=state["language"],
                     label="Language",
                     on_change=lambda e: _set_filter(state, "language", e.value or ""),
@@ -430,22 +434,12 @@ def _filter_bar(state: dict[str, Any]) -> None:
                 .props("dense outlined")
                 .classes("min-w-[150px]")
             )
-            state["_validation_select"] = (
-                ui.select(
-                    {"": "regular + validation", "hide": "regular rows only", "only": "validation rows only"},
-                    value=state["validation"],
-                    label="Validation",
-                    on_change=lambda e: _set_filter(state, "validation", e.value or ""),
-                )
-                .props("dense outlined")
-                .classes("min-w-[200px]")
-            )
             # Operation and Status are MULTI-selects: an operator often wants to
             # see two statuses (or two operations) at once. No "any" option — an empty
             # selection is the unfiltered state, and the Reset button clears it.
-            # Their options list only the values the run actually has, each with
-            # its row count (see _refresh_filter_counts for the live refresh).
-            counts = get_op_status_counts(page_instance_url(), state["run_id"])
+            # Their options list only the values the run actually has under the
+            # other filters, each with its row count (see _refresh_filter_counts
+            # for the live refresh).
             state["_op_select"] = (
                 ui.select(
                     filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
@@ -468,11 +462,9 @@ def _filter_bar(state: dict[str, Any]) -> None:
                 .props("dense outlined use-chips clearable")
                 .classes("min-w-[140px]")
             )
-            # The clear button is the LAST item on the right of the filter row:
-            # it undoes the whole row, so it reads as the row's own exit.
-            ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense").classes(
-                "q-ml-auto"
-            )
+            # The clear button is the LAST item of the row: it undoes the whole
+            # row, so it reads as the row's own exit.
+            ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense")
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
@@ -501,7 +493,6 @@ def _reset_filters(state: dict[str, Any]) -> None:
             "op": [],
             "property": "",
             "language": "",
-            "validation": "",
             "text": "",
             "offset": 0,
         }
@@ -509,7 +500,6 @@ def _reset_filters(state: dict[str, Any]) -> None:
     widgets = {
         "property": "",
         "language": "",
-        "validation": "",
         "op": [],
         "status": [],
     }

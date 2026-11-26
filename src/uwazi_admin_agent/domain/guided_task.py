@@ -8,11 +8,10 @@ Uwazi's API before the form is shown.
 
 This module is pure (no I/O, no NiceGUI): the option vocabularies the UI renders
 and the prompt assembly/validation share the same constants, so a label changed
-here cannot drift from the prompt it produces. The assembled prompt follows the
-wizard's documented structure: task goal, input sources and source-language
-strategy, target property and logic, multilingual output rules, custom
-instructions/examples, and the fixed "record suggestions, never write" output
-requirement.
+here cannot drift from the prompt it produces. The assembled prompt carries
+only the task-specific answers (goal, sources, target property/logic, output
+language when relevant, and any operator-supplied rules/examples); the script
+execution and review-table contract lives in the system prompt.
 """
 
 from __future__ import annotations
@@ -146,6 +145,22 @@ DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on 
 # value). The target's type therefore selects the sub-flow: there is no separate
 # "classify" goal.
 CLASSIFY_TARGET_PROPERTY_TYPES: frozenset[str] = frozenset({"select", "multiselect", "relationship"})
+
+# Property types stored per language row in Uwazi (free text). Every other type
+# is shared across all language rows, so multilingual output rules do not apply.
+_PER_LANGUAGE_FILL_TYPES: frozenset[str] = frozenset({"text", "markdown", "richtext"})
+
+# Uwazi-managed system properties. Every entity carries them, so they are
+# valuable INPUT (the create flow may carry the date added over), but Uwazi
+# owns them: a script must never write them, however possible the API makes it.
+INTERNAL_READ_ONLY_PROPERTIES: frozenset[str] = frozenset({"creationDate", "editDate"})
+
+
+def is_writable_property(name: str) -> bool:
+    """Whether a property may be a write TARGET (pure)."""
+    return (name or "").strip() not in INTERNAL_READ_ONLY_PROPERTIES
+
+
 FILL_TARGET_PROPERTY_TYPES: frozenset[str] = frozenset(
     {
         "text",
@@ -245,14 +260,15 @@ def property_choices(
     the prompt names the property, and the generation LLM reads each target
     template's own definition. Only fill-writable types are offered; the type
     picked here decides whether the flow classifies (select/multiselect/
-    relationship) or extracts (every other type).
+    relationship) or extracts (every other type). The Uwazi-managed date
+    properties are NOT offered: they cannot be a write target.
     """
     labels: dict[str, str] = {}
     if schema is None:
         return []
     for template in _selected_templates(schema, templates):
         for prop in template.properties:
-            if prop.type not in FILL_TARGET_PROPERTY_TYPES:
+            if prop.type not in FILL_TARGET_PROPERTY_TYPES or not is_writable_property(prop.name):
                 continue
             labels.setdefault(prop.name, prop.display)
     return sorted(labels.items(), key=lambda item: item[1].casefold())
@@ -261,11 +277,15 @@ def property_choices(
 def template_property_choices(
     schema: WizardSchema | None,
     template: str,
+    *,
+    writable_only: bool = False,
 ) -> list[tuple[str, str]]:
     """``[(name, option_text)]`` of every property of ONE template (pure).
 
     Used by the create flow to offer the properties a new entity can read from
     a source entity and the properties it can populate on the target template.
+    ``writable_only`` drops the Uwazi-managed date properties for the latter:
+    they are legitimate INPUT but never a write target.
     """
     labels: dict[str, str] = {}
     if schema is None:
@@ -274,6 +294,8 @@ def template_property_choices(
         if candidate.name != template.strip():
             continue
         for prop in candidate.properties:
+            if writable_only and not is_writable_property(prop.name):
+                continue
             labels.setdefault(prop.name, prop.display)
     return sorted(labels.items(), key=lambda item: item[1].casefold())
 
@@ -397,7 +419,7 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
                 errors.append("Choose the property that should receive the suggested value.")
             if fill_is_classification(answers):
                 if answers.fallback_mode not in FALLBACK_MODES:
-                    errors.append("Choose what to suggest when no topic clearly applies.")
+                    errors.append("Choose what to suggest when no value clearly applies.")
                 if answers.fallback_mode == FALLBACK_VALUE and not answers.fallback_value.strip():
                     errors.append("Enter the fallback value to suggest.")
             else:
@@ -487,19 +509,62 @@ def _language_text(keys: Iterable[str], labels: Mapping[str, str]) -> str:
     return ", ".join(rendered)
 
 
+def _reads_documents(answers: GuidedAnswers) -> bool:
+    """Whether the task reads uploaded documents or attachments (pure)."""
+    if answers.goal == GOAL_CREATE:
+        return answers.create_source == CREATE_SOURCE_DOCUMENTS
+    return SOURCE_PDF in answers.sources or SOURCE_ATTACHMENTS in answers.sources
+
+
+def _reads_metadata(answers: GuidedAnswers) -> bool:
+    """Whether the task reads entity metadata properties (pure)."""
+    if answers.goal == GOAL_CREATE:
+        return answers.create_source == CREATE_SOURCE_EXISTING
+    return SOURCE_METADATA in answers.sources
+
+
+def _needs_multilingual_output_section(answers: GuidedAnswers) -> bool:
+    """Whether output-language rules apply to this task's target (pure)."""
+    if answers.goal != GOAL_FILL:
+        return True
+    prop_type = answers.target_property_type.strip().lower()
+    return not prop_type or prop_type in _PER_LANGUAGE_FILL_TYPES
+
+
 def _input_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> str:
+    has_docs = _reads_documents(answers)
+    has_meta = _reads_metadata(answers)
     if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
-        return (
-            f"Always read from: {_language_text(answers.input_languages, labels)}. "
-            "Fall back to another language when the document or text is missing in it."
-        )
+        if has_docs and has_meta:
+            fallback = "Fall back to another language when the document or metadata is missing in it."
+        elif has_docs:
+            fallback = "Fall back to another language when the document is missing in it."
+        else:
+            fallback = "Fall back to another language when the source property is empty in it."
+        return f"Always read from: {_language_text(answers.input_languages, labels)}. {fallback}"
     if answers.input_language_mode == INPUT_LANGUAGE_ANY:
+        if has_docs and has_meta:
+            subject = "a document or metadata"
+        elif has_docs:
+            subject = "a document"
+        else:
+            subject = "the source property"
         return (
-            "Use any available language: whichever language has a document or text populated, "
+            f"Use any available language: whichever language has {subject} populated, "
             "falling back automatically when it is missing."
         )
+    if has_docs and has_meta:
+        return (
+            "Match each target language: read the English document/fields to generate English "
+            "suggestions, the Spanish ones for Spanish, and so on."
+        )
+    if has_docs:
+        return (
+            "Match each target language: read the English document to generate English "
+            "suggestions, the Spanish one for Spanish, and so on."
+        )
     return (
-        "Match each target language: read the English document/fields to generate English "
+        "Match each target language: read the English fields to generate English "
         "suggestions, the Spanish ones for Spanish, and so on."
     )
 
@@ -508,7 +573,9 @@ def _output_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> 
     if answers.output_language_mode == OUTPUT_SPECIFIC:
         return f"Generate only for these languages: {_language_text(answers.output_languages, labels)}."
     if answers.output_language_mode == OUTPUT_SOURCE:
-        return "Generate only in the language of the source document."
+        if _reads_documents(answers):
+            return "Generate only in the language of the source document."
+        return "Generate only in the source language."
     configured = _language_text(labels.keys(), labels)
     all_languages = "Generate for all configured Uwazi languages (extract into each language)."
     return f"{all_languages} Configured languages: {configured}." if configured else all_languages
@@ -538,22 +605,76 @@ def _sources_text(answers: GuidedAnswers) -> str:
     return "; ".join(parts)
 
 
+def _sources_inline(answers: GuidedAnswers) -> str:
+    parts: list[str] = []
+    if SOURCE_PDF in answers.sources:
+        parts.append("the main PDF(s)")
+    if SOURCE_ATTACHMENTS in answers.sources:
+        parts.append("supporting files / attachments")
+    if SOURCE_METADATA in answers.sources:
+        properties = ", ".join(_code(name) for name in answers.metadata_properties if name.strip())
+        parts.append(f"entity metadata properties ({properties})" if properties else "entity metadata properties")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+
+def _flow_text(answers: GuidedAnswers) -> str:
+    if answers.goal == GOAL_CUSTOM:
+        return GOAL_LABELS[GOAL_CUSTOM]
+    if answers.goal != GOAL_FILL:
+        return GOAL_DESCRIPTIONS.get(answers.goal, answers.goal)
+    target = _code(answers.target_property_for_goal())
+    prop_type = answers.target_property_type.strip().lower()
+    if prop_type == "relationship":
+        action = f"Fill relationship property {target} by linking matching existing entities"
+    elif prop_type == "select":
+        action = f"Fill select property {target} by assigning the most relevant existing thesaurus term"
+    elif prop_type == "multiselect":
+        action = f"Fill multiselect property {target} by assigning matching existing thesaurus terms"
+    elif fill_is_classification(answers):
+        action = f"Fill property {target} by classifying with existing thesaurus terms or linked entities"
+    elif prop_type:
+        action = f"Fill {prop_type} property {target} by extracting a value"
+    else:
+        action = f"Fill property {target} by extracting a value"
+    sources = _sources_inline(answers)
+    return f"{action} from {sources}." if sources else f"{action}."
+
+
+def _classification_rules_text(prop_type: str) -> str:
+    if prop_type == "relationship":
+        return (
+            "Link matching existing entities from the target relationship template. "
+            "Never invent an entity that does not exist."
+        )
+    if prop_type == "select":
+        return "Assign the most relevant existing thesaurus term. Never invent a term that does not exist."
+    if prop_type == "multiselect":
+        return "Assign all relevant existing thesaurus terms. Never invent a term that does not exist."
+    return (
+        "Assign the most relevant existing thesaurus term for a select/multiselect property, or link the "
+        "matching relationship entity for a relationship property. Never invent a term or an entity that does not exist."
+    )
+
+
 def _logic_lines(answers: GuidedAnswers) -> list[str]:
     if answers.goal == GOAL_CUSTOM:
         return [f"- **Task Description:** {answers.custom_description.strip()}"]
     target = _code(answers.target_property_for_goal())
+    prop_type = answers.target_property_type.strip().lower()
     if fill_is_classification(answers):
         fallback = (
-            f"Suggest {_code(answers.fallback_value)} when no topic clearly applies."
+            f"Suggest {_code(answers.fallback_value)} when no value clearly applies."
             if answers.fallback_mode == FALLBACK_VALUE
-            else "Leave the suggestion blank when no topic clearly applies."
+            else "Leave the suggestion blank when no value clearly applies."
         )
         return [
             f"- **Target Property:** {target}",
-            f"- **Target Property Type:** {answers.target_property_type.strip() or 'select/multiselect/relationship'}",
-            "- **Classification rules:** Assign the most relevant existing thesaurus term for a "
-            "select/multiselect property, or link the matching relationship entity for a "
-            "relationship property. Never invent a term or an entity that does not exist.",
+            f"- **Target Property Type:** {prop_type or 'select/multiselect/relationship'}",
+            f"- **Classification rules:** {_classification_rules_text(prop_type)}",
             f"- **Fallback:** {fallback}",
         ]
     if answers.existing_value_mode == EXISTING_SKIP:
@@ -561,26 +682,58 @@ def _logic_lines(answers: GuidedAnswers) -> list[str]:
     elif answers.existing_value_mode == EXISTING_CUSTOM:
         existing = f"Apply this rule: {answers.existing_value_rule.strip()}"
     else:
-        existing = "Suggest a replacement value that overwrites the existing one in the review table."
-    return [
-        f"- **Target Property:** {target}",
-        f"- **Extraction/Formatting Rules:** {answers.fill_rules.strip()}",
-        f"- **Existing Value Handling:** {existing}",
-    ]
+        existing = "Suggest a replacement value that overwrites the existing one."
+    lines = [f"- **Target Property:** {target}"]
+    if prop_type:
+        lines.append(f"- **Target Property Type:** {prop_type}")
+    lines.extend(
+        [
+            f"- **Extraction/Formatting Rules:** {answers.fill_rules.strip()}",
+            f"- **Existing Value Handling:** {existing}",
+        ]
+    )
+    return lines
+
+
+def _custom_instructions_lines(answers: GuidedAnswers) -> list[str]:
+    rules = answers.additional_rules.strip()
+    examples = answers.examples.strip()
+    if not rules and not examples:
+        return []
+    if rules and examples:
+        heading = "### Custom Instructions & Few-Shot Examples"
+    elif rules:
+        heading = "### Custom Instructions"
+    else:
+        heading = "### Few-Shot Examples"
+    lines = [heading]
+    if rules:
+        lines.append(f"- **Additional Rules:** {rules}")
+    if examples:
+        lines.append(f"- **Examples:** {examples}")
+    return lines
+
+
+_CREATE_FLOW_TEXT: dict[str, str] = {
+    CREATE_SOURCE_EXISTING: "Create entities from existing entities' properties.",
+    CREATE_SOURCE_DOCUMENTS: "Create entities from existing entities' PDFs/documents.",
+    CREATE_SOURCE_UNRELATED: "Create entities from the operator's instructions.",
+}
 
 
 def _create_goal_lines(answers: GuidedAnswers) -> list[str]:
     """The create flow's Task Goal lines (pure)."""
     target = ", ".join(_code(name) for name in answers.templates if name.strip()) or "All templates"
+    flow = _CREATE_FLOW_TEXT.get(answers.create_source, GOAL_DESCRIPTIONS[GOAL_CREATE])
     if answers.create_source == CREATE_SOURCE_UNRELATED:
         count = answers.create_count.strip() or "the requested number of"
         return [
-            f"- **Flow:** {GOAL_DESCRIPTIONS[GOAL_CREATE]}",
+            f"- **Flow:** {flow}",
             f"- **Target Template (new entities):** {target}",
             f"- **Entities to create:** {count}",
         ]
     return [
-        f"- **Flow:** {GOAL_DESCRIPTIONS[GOAL_CREATE]}",
+        f"- **Flow:** {flow}",
         f"- **Target Template (new entities):** {target}",
         "- **Entities to create:** One new entity per matching source entity.",
         f"- **Entity Scope (source entities):** {_scope_text(answers)}",
@@ -640,15 +793,19 @@ def _assemble_create_prompt(answers: GuidedAnswers, labels: Mapping[str, str]) -
         "",
     ]
     if answers.create_source == CREATE_SOURCE_DOCUMENTS:
-        lines.extend(
+        input_lines = [
+            "### Input Data & Source Language Strategy",
+            f"- **Sources to inspect:** {SOURCE_LABELS[SOURCE_PDF]}",
+        ]
+        if answers.document_guidance.strip():
+            input_lines.append(f"- **Document reading guidance:** {answers.document_guidance.strip()}")
+        input_lines.extend(
             [
-                "### Input Data & Source Language Strategy",
-                f"- **Sources to inspect:** {SOURCE_LABELS[SOURCE_PDF]}",
-                f"- **Document reading guidance:** {answers.document_guidance.strip() or DEFAULT_DOCUMENT_GUIDANCE}",
                 f"- **Input language selection:** {_input_language_text(answers, labels)}",
                 "",
             ]
         )
+        lines.extend(input_lines)
     elif answers.create_source == CREATE_SOURCE_EXISTING:
         lines.extend(
             [
@@ -662,19 +819,11 @@ def _assemble_create_prompt(answers: GuidedAnswers, labels: Mapping[str, str]) -
         [
             "### Multilingual Output Rules",
             f"- **Output language behavior:** {_output_language_text(answers, labels)}",
-            "- *Note: Inspect each target property's definition in Uwazi. A per-language text property "
-            "takes one value per output language; a shared property (select, multiselect, relationship, "
-            "date, numeric, geolocation) takes a single value.*",
-            "",
-            "### Custom Instructions & Few-Shot Examples",
-            f"- **Additional Rules:** {answers.additional_rules.strip() or 'None'}",
-            f"- **Examples:** {answers.examples.strip() or 'None'}",
-            "",
-            "### Output Requirement",
-            "Record each new entity as a CREATE suggestion (`create_entities`) to populate the user review "
-            "table (do not create entities in Uwazi directly).",
         ]
     )
+    custom = _custom_instructions_lines(answers)
+    if custom:
+        lines.extend(["", *custom])
     return "\n".join(lines).strip()
 
 
@@ -690,36 +839,37 @@ def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] |
     if answers.goal == GOAL_CREATE:
         return _assemble_create_prompt(answers, labels)
     templates = ", ".join(name.strip() for name in answers.templates if name.strip()) or "All templates"
-    guidance = answers.document_guidance.strip() or DEFAULT_DOCUMENT_GUIDANCE
+
+    input_lines = [
+        "### Input Data & Source Language Strategy",
+        f"- **Sources to inspect:** {_sources_text(answers)}",
+    ]
+    if _reads_documents(answers) and answers.document_guidance.strip():
+        input_lines.append(f"- **Document reading guidance:** {answers.document_guidance.strip()}")
+    input_lines.append(f"- **Input language selection:** {_input_language_text(answers, labels)}")
 
     lines: list[str] = [
         "### Task Goal",
-        f"- **Flow:** {GOAL_DESCRIPTIONS.get(answers.goal, answers.goal)}",
+        f"- **Flow:** {_flow_text(answers)}",
         f"- **Target Templates:** {templates}",
         f"- **Entity Scope:** {_scope_text(answers)}",
         "",
-        "### Input Data & Source Language Strategy",
-        f"- **Sources to inspect:** {_sources_text(answers)}",
-        f"- **Document reading guidance:** {guidance}",
-        f"- **Input language selection:** {_input_language_text(answers, labels)}",
+        *input_lines,
         "",
         "### Target Property & Logic",
         *_logic_lines(answers),
-        "",
-        "### Multilingual Output Rules",
-        f"- **Output language behavior:** {_output_language_text(answers, labels)}",
-        "- *Note: Inspect the target property definition in Uwazi. If it is a per-language text "
-        "property, generate language-specific suggestions per the rule above. If it is a shared "
-        "property (select, multiselect, relationship, date, numeric, geolocation), generate a "
-        "single unified suggestion.*",
-        "",
-        "### Custom Instructions & Few-Shot Examples",
-        f"- **Additional Rules:** {answers.additional_rules.strip() or 'None'}",
-        f"- **Examples:** {answers.examples.strip() or 'None'}",
-        "",
-        "### Output Requirement",
-        "Generate suggestions to populate the user review table (do not mutate Uwazi entities directly).",
     ]
+    if _needs_multilingual_output_section(answers):
+        lines.extend(
+            [
+                "",
+                "### Multilingual Output Rules",
+                f"- **Output language behavior:** {_output_language_text(answers, labels)}",
+            ]
+        )
+    custom = _custom_instructions_lines(answers)
+    if custom:
+        lines.extend(["", *custom])
     return "\n".join(lines).strip()
 
 
@@ -742,6 +892,7 @@ __all__ = [
     "CREATE_SOURCE_LABELS",
     "CREATE_SOURCE_UNRELATED",
     "FILL_TARGET_PROPERTY_TYPES",
+    "INTERNAL_READ_ONLY_PROPERTIES",
     "GOALS",
     "GOAL_CREATE",
     "GOAL_CUSTOM",
@@ -775,6 +926,7 @@ __all__ = [
     "WizardTemplate",
     "assemble_prompt",
     "fill_is_classification",
+    "is_writable_property",
     "language_choices",
     "language_label_map",
     "metadata_property_choices",

@@ -175,7 +175,17 @@ class BulkRevertOutcome(BaseModel):
     )
     skipped_created: list[str] = Field(
         default_factory=list,
-        description="Selected entities the run itself created — their undo is a delete (run-level Revert), refused here.",
+        description=(
+            "Selected entities the run created whose minted sharedId was never recorded, so there is "
+            "nothing to delete. (A created entity WITH an id is reverted — deleted — like any other.)"
+        ),
+    )
+    skipped_merge: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Selected entities whose row is a create-merge: its undo also re-creates the sources it "
+            "absorbed, which only the ordered run-level revert performs."
+        ),
     )
     skipped_deleted: list[str] = Field(
         default_factory=list,
@@ -197,7 +207,9 @@ class BulkRevertOutcome(BaseModel):
         """The operator-facing one-liner (pure)."""
         parts = [f"{len(self.reverted)} reverted"]
         if self.skipped_created:
-            parts.append(f"{len(self.skipped_created)} created-by-run (revert at run level)")
+            parts.append(f"{len(self.skipped_created)} created-by-run without a recorded id")
+        if self.skipped_merge:
+            parts.append(f"{len(self.skipped_merge)} create-merge (revert at run level)")
         if self.skipped_deleted:
             parts.append(f"{len(self.skipped_deleted)} deleted-by-run (revert at run level)")
         if self.skipped_no_backup:

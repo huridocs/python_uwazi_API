@@ -41,8 +41,8 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
         store.add_suggestions(
             [
                 _suggestion("same", "unchanged"),
-                _suggestion("accepted", "old", status=SuggestionStatus.ACCEPTED),
-                _suggestion("edited", "old", status=SuggestionStatus.EDITED, edited_value='[{"value": "mine"}]'),
+                _suggestion("accepted", "old", status=SuggestionStatus.PENDING),
+                _suggestion("discarded", "old", status=SuggestionStatus.DISCARDED),
                 _suggestion("applied_missing", "old", status=SuggestionStatus.APPLIED),
                 _suggestion("dropped", "old"),
             ]
@@ -52,14 +52,16 @@ def test_reconcile_preserves_and_resets_exactly_the_agreed_statuses() -> None:
             [
                 _suggestion("same", "unchanged"),
                 _suggestion("accepted", "new"),
-                _suggestion("edited", "new", status=SuggestionStatus.EDITED),
+                _suggestion("discarded", "new"),
                 _suggestion("new_row", "fresh"),
             ],
         )
         statuses = _statuses(store)
         assert statuses["same"] is SuggestionStatus.PENDING
         assert statuses["accepted"] is SuggestionStatus.PENDING
-        assert statuses["edited"] is SuggestionStatus.EDITED
+        # A deliberate discard survives a changed proposal (the operator
+        # decided this must not run; a new wording does not undo that).
+        assert statuses["discarded"] is SuggestionStatus.DISCARDED
         # An APPLIED write really happened: it stays as the run's history.
         assert statuses["applied_missing"] is SuggestionStatus.APPLIED
         # Every other stale row is GONE — no retired placeholder in the table.
@@ -154,7 +156,7 @@ def test_a_matched_row_that_becomes_a_change_becomes_that_update_row() -> None:
 def test_an_update_that_now_matches_becomes_the_matched_row_in_place() -> None:
     store = SqliteSuggestionStore(Path(":memory:"))
     try:
-        store.add_suggestions([_suggestion("excerpt", "same", status=SuggestionStatus.ACCEPTED)])
+        store.add_suggestions([_suggestion("excerpt", "same", status=SuggestionStatus.PENDING)])
         incoming = _suggestion(
             "excerpt",
             "same",

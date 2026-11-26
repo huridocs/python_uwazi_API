@@ -178,7 +178,7 @@ def test_apply_payload_coerces_a_legacy_recorded_date_string() -> None:
         op="update",  # type: ignore[arg-type]
         property_name="date_published",
         proposed_value="2026-10-30",
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     updates = build_apply_updates([row], property_types={"date_published": "date"})
     assert updates == [
@@ -198,7 +198,7 @@ def test_apply_payload_without_types_keeps_the_recorded_value() -> None:
         op="update",  # type: ignore[arg-type]
         property_name="mystery_prop",
         proposed_value="2026-10-30",
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     updates = build_apply_updates([row])
     assert updates[0]["metadata"]["mystery_prop"] == [{"value": "2026-10-30"}]
@@ -212,7 +212,7 @@ def test_apply_payload_wraps_a_multidate_list_in_envelopes() -> None:
         op="update",  # type: ignore[arg-type]
         property_name="dates",
         proposed_value=["2020-01-01", "2021-06-15"],
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     updates = build_apply_updates([row], property_types={"dates": "multidate"})
     assert updates[0]["metadata"]["dates"] == [
@@ -229,24 +229,21 @@ def test_apply_payload_wraps_a_daterange_dict_in_an_envelope() -> None:
         op="update",  # type: ignore[arg-type]
         property_name="period",
         proposed_value={"from": "2020-01-01", "to": "2020-12-31"},
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     updates = build_apply_updates([row], property_types={"period": "daterange"})
     assert updates[0]["metadata"]["period"] == [{"value": {"from": _epoch("2020-01-01"), "to": _epoch("2020-12-31")}}]
 
 
-def test_apply_payload_coerces_an_operator_edit_for_a_date_property() -> None:
-    # The Edit flow stores its patch as a JSON-encoded value; a date typed by
-    # the operator gets the same treatment as the script's own proposal.
+def test_apply_payload_coerces_an_iso_date_proposal_to_the_stored_shape() -> None:
     row = Suggestion(
         run_id="run1",
         shared_id="s1",
         language=None,
         op="update",  # type: ignore[arg-type]
         property_name="date_published",
-        proposed_value="2020-05-01",
-        edited_value='"2020-06-01"',
-        status=SuggestionStatus.EDITED,
+        proposed_value="2020-06-01",
+        status=SuggestionStatus.PENDING,
     )
     updates = build_apply_updates([row], property_types={"date_published": "date"})
     assert updates[0]["metadata"]["date_published"] == [{"value": _epoch("2020-06-01")}]

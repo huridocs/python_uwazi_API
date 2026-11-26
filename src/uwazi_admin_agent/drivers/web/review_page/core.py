@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
@@ -12,6 +13,7 @@ from uwazi_admin_agent.configuration import REVIEW_PAGE_SIZE
 from uwazi_admin_agent.domain.drift import DriftStatus
 from uwazi_admin_agent.domain.relationship_values import RELATIONSHIP_TYPE
 from uwazi_admin_agent.domain.suggestion import (
+    CREATE_OPS,
     DISPLAY_ONLY_OPS,
     FILE_OPS,
     PredictionAttemptStatus,
@@ -61,7 +63,9 @@ from uwazi_admin_agent.drivers.web.review_view import (
     expansion_mode,
     filter_from_controls,
     filter_options,
+    language_filter_options,
     pending_suboperation_count,
+    property_filter_options,
     review_sort_pagination,
     run_button_label,
     run_confirmation,
@@ -76,7 +80,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     current_pass,
     discard_ids,
     get_drift_state,
-    get_op_status_counts,
+    get_filter_counts,
     get_operation_rows,
     get_run,
     get_selection_rows,
@@ -87,6 +91,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     restore_ids,
     revert_entities_selection,
     update_table_from_uwazi,
+    validation_summary,
 )
 from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
@@ -99,8 +104,6 @@ from .dialogs import _reason_dialog, _simple_confirm
 _RUNNABLE_STATUSES: frozenset[str] = frozenset(
     {
         SuggestionStatus.PENDING.value,
-        SuggestionStatus.ACCEPTED.value,
-        SuggestionStatus.EDITED.value,
         SuggestionStatus.REVERTED.value,
     }
 )
@@ -156,10 +159,12 @@ def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = F
             icon.classes("animate-spin text-body1")
             icon.color = "blue"
             icon.update()
+        _set_drift_sync_visibility(state, False)
         return
     if stored is None:
         label.text = drift_banner_text(status="unknown", detail=None)
         label.classes(replace=drift_text_classes("grey-7"))
+        _set_drift_sync_visibility(state, False)
         return
     label.text = drift_banner_text(
         status=stored.status.value,
@@ -185,6 +190,18 @@ def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = F
         icon.classes(replace="text-body1")
         icon.classes(f"text-{color}")
         icon.update()
+    # Drift is the one verdict with an action attached: the table is out of
+    # date, so the banner offers the sync that fixes it, right where the
+    # warning is read.
+    _set_drift_sync_visibility(state, stored.status is DriftStatus.DRIFTED)
+
+
+def _set_drift_sync_visibility(state: dict[str, Any], visible: bool) -> None:
+    """Show/hide the banner's Sync button (the drifted state's remedy)."""
+    button = state.get("_drift_sync_button")
+    if button is None or button.is_deleted:
+        return
+    button.set_visibility(bool(visible))
 
 
 def _backup_dates_for(rows: list[Any], run_id: str, url: str) -> dict[str, Any]:
@@ -256,7 +273,7 @@ def _change_table(state: dict[str, Any]) -> None:
             "sortable": True,
             "style": TEMPLATE_COLUMN,
         },
-        {"name": "ops", "label": "Operations", "field": "ops", "align": "left", "sortable": True, "style": OPS_COLUMN},
+        {"name": "ops", "label": "Operation", "field": "ops", "align": "left", "sortable": True, "style": OPS_COLUMN},
         {
             "name": "run_status",
             "label": "Status",
@@ -328,14 +345,19 @@ def _change_table(state: dict[str, Any]) -> None:
           <q-td key="title" :props="props">
             <div v-if="props.row.is_info" class="text-body2"
                  style="white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;">{{ props.row.title_full }}</div>
-            <div v-else class="row items-center no-wrap" style="width: 100%;">
-              <span class="text-grey-7 q-mr-xs review-shared-id"
-                    style="user-select: text;">{{ props.row.shared_id }}</span>
-              <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener" class="q-mr-xs"
-                 style="flex: 0 0 auto;" title="Open this entity in Uwazi" draggable="false">
-                <q-icon name="open_in_new" size="15px" color="primary" /></a>
-              <span class="text-primary" style="flex: 1 1 auto; min-width: 0; overflow: hidden;
-                    text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: text;"
+            <div v-else style="min-width: 0;">
+              <!-- The title IS the link: clicking it opens the entity in Uwazi.
+                   A row with nothing to open (a create that has not run yet)
+                   falls back to the plain title, which opens the detail window.
+                   ``user-select: none`` on purpose: selectable text makes the
+                   browser draw its I-beam, hiding the pointer that says "this
+                   opens the entity". -->
+              <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener"
+                 class="text-primary review-title-link" style="display: block; overflow: hidden;
+                       text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: none;"
+                 :title="props.row.title_full + ' — open in Uwazi'" draggable="false">{{ props.row.title }}</a>
+              <span v-else class="text-primary review-title-link" style="display: block; overflow: hidden;
+                    text-overflow: ellipsis; white-space: nowrap; cursor: pointer;"
                     :title="props.row.title_full"
                     @click="$event => { const sel = $event.target.ownerDocument.getSelection();
                       if (sel && !sel.isCollapsed && sel.rangeCount &&
@@ -350,14 +372,23 @@ def _change_table(state: dict[str, Any]) -> None:
                      :color="props.row.op_colors[i]" class="q-mr-xs">{{ op }}</q-badge>
           </q-td>
           <q-td key="run_status" :props="props" class="text-no-wrap">
-            <q-badge :color="props.row.run_status_color" class="q-mr-xs">{{ props.row.run_status }}</q-badge>
+            <q-badge v-if="!props.row.status_hidden" :color="props.row.run_status_color" class="q-mr-xs">
+              {{ props.row.run_status }}</q-badge>
             <span v-if="props.row.has_validated" :class="'text-' + props.row.validated_color"
                   class="text-caption text-bold">{{ props.row.validated }}</span>
+            <div v-if="props.row.status_breakdown" class="text-caption text-grey-6">
+              {{ props.row.status_breakdown }}</div>
             <q-icon v-if="props.row.rerun_blocked" name="sync_disabled" size="16px" color="orange-9"
                     class="q-ml-xs" :title="props.row.rerun_blocked_reason" />
           </q-td>
           <q-td key="modified" :props="props" class="text-no-wrap">{{ props.row.modified }}</q-td>
           <q-td key="actions" :props="props" class="text-no-wrap">
+            <!-- A display-only row (excluded / matched) is still an ENTITY:
+                 opening its detail window is how the operator sees the document
+                 behind the verdict. -->
+            <q-btn v-if="props.row.is_display_only && !props.row.is_info" dense flat icon="edit" color="teal"
+                   title="Open the entity window (its document and this row's evidence)"
+                   @click.stop="$parent.$emit('open_entity', props.row)" />
             <template v-if="!props.row.is_display_only">
               <q-btn dense flat icon="play_arrow" color="primary"
                      :disable="!props.row.has_runnable"
@@ -396,10 +427,10 @@ def _change_table(state: dict[str, Any]) -> None:
                   <thead>
                     <tr class="text-caption text-grey-7">
                       <th></th>
-                      <th class="text-left q-pa-xs">Change</th>
+                      <th class="text-left q-pa-xs">Suggestion</th>
                       <th class="text-left q-pa-xs">Language</th>
-                      <th class="text-left q-pa-xs">Value</th>
-                      <th class="text-left q-pa-xs">Proposed value</th>
+                      <th class="text-left q-pa-xs">Current value</th>
+                      <th class="text-left q-pa-xs">Suggested value</th>
                       <th class="text-left q-pa-xs">Status</th>
                       <th class="text-left q-pa-xs">Actions</th>
                     </tr>
@@ -439,19 +470,15 @@ def _change_table(state: dict[str, Any]) -> None:
                                         :color="v.accepted ? 'green-2' : 'red-2'"
                                         :text-color="v.accepted ? 'green-10' : 'red-10'"
                                         :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
-                              </div>
-                              <div class="text-caption text-grey-6">
-                                {{ sub.select_type === 'relationship' ? 'Related entities to write' : 'Will write' }}:
-                                {{ sub.selection_text }}
+                                <q-chip v-if="sub.extra_selection" dense color="blue-2" text-color="blue-10"
+                                        icon="add">
+                                  {{ sub.extra_selection }}</q-chip>
                               </div>
                             </template>
                             <div v-else class="text-body2">{{ sub.proposed }}</div>
                           </td>
                           <td class="q-pa-xs">
                             <q-badge :color="sub.status_color">{{ sub.status }}</q-badge>
-                            <q-btn v-if="sub.is_validation" dense flat icon="upgrade" color="purple"
-                                   title="Promote this entity out of the validation set and make its rows runnable"
-                                   @click.stop="$parent.$emit('promote_validation', props.row.row_key)" />
                           </td>
                           <td class="q-pa-xs subs-actions">
                             <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
@@ -478,9 +505,12 @@ def _change_table(state: dict[str, Any]) -> None:
                         <tr v-if="sub.context" :key="sub.key + '-context'">
                           <td></td>
                           <td class="q-pa-xs" colspan="6">
-                            <div class="text-body2 text-grey-7 subs-context"
-                                 style="white-space: pre-wrap; overflow-wrap: anywhere;
-                                        user-select: text;">{{ sub.context }}</div>
+                            <div class="subs-context">
+                              <div class="text-caption text-grey-6">Input text the suggestion was read from</div>
+                              <div class="text-body2 text-grey-7"
+                                   style="white-space: pre-wrap; overflow-wrap: anywhere;
+                                          user-select: text;">{{ sub.context }}</div>
+                            </div>
                           </td>
                         </tr>
                       </template>
@@ -504,7 +534,6 @@ def _change_table(state: dict[str, Any]) -> None:
     table.on("revert_sub", lambda e: _revert_sub_clicked(state, getattr(e, "args", None)))
     table.on("edit_sub", lambda e: _edit_sub_clicked(state, getattr(e, "args", None)))
     table.on("accept_values", lambda e: _accept_values_clicked(state, getattr(e, "args", None)))
-    table.on("promote_validation", lambda e: _promote_validation_clicked(state, _row_key_of(getattr(e, "args", None))))
     # The RAW selection event carries WHICH rows were added/removed, which is
     # what the cascade to the suboperations needs (``on_select`` only carries
     # the selection itself).
@@ -670,7 +699,11 @@ def _clear_selection(state: dict[str, Any], *, clear_page: bool) -> None:
     _sync_selection(state)
 
 
-def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> SuggestionFilter:
+def _current_filter(
+    state: dict[str, Any],
+    *,
+    limit: int = REVIEW_PAGE_SIZE,
+) -> SuggestionFilter:
     return filter_from_controls(
         status=state["status"],
         op=state["op"],
@@ -678,11 +711,9 @@ def _current_filter(state: dict[str, Any], *, accepted_only: bool = False) -> Su
         language=state["language"],
         text=state["text"],
         offset=state["offset"],
-        limit=REVIEW_PAGE_SIZE,
-        accepted_only=accepted_only,
+        limit=limit,
         sort_by=state["sort_by"],
         sort_desc=state["sort_desc"],
-        validation=state.get("validation", ""),
     )
 
 
@@ -709,7 +740,7 @@ def _discard_from_state(state: dict[str, Any]) -> None:
             name=f"discard {state['run_id']}",
         )
 
-    noun = "suboperation" if len(ids) == 1 else "suboperations"
+    noun = "suggestion" if len(ids) == 1 else "suggestions"
     _reason_dialog(
         f"Mark {len(ids)} checked {noun} as discarded. They will NOT be applied by a Run, "
         "and the reason is stored with them.",
@@ -728,10 +759,10 @@ async def _discard_ids(
 ) -> None:
     """Mark the given SUBOPERATIONS as discarded, then refresh the page."""
     try:
-        count = await asyncio.to_thread(discard_ids, state["run_id"], ids, reason)
+        count = await asyncio.to_thread(discard_ids, state["instance_url"], state["run_id"], ids, reason)
         with client:
             ui.notify(
-                f"Discarded {count} suboperation(s) — a Run will not execute them",
+                f"Discarded {count} suggestion(s) — a Run will not execute them",
                 type="positive",
                 multi_line=True,
             )
@@ -746,11 +777,11 @@ async def _discard_ids(
 
 
 def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
-    """Mark ONE operation as discarded (its visible suboperations).
+    """Mark ONE entity's visible suggestions as discarded.
 
-    The filter is a SUBOPERATION filter, so "the operation" here means the
-    parts the table is showing: discarding an operation under a property filter
-    refuses those property writes, not the ones the filter hid.
+    The filter is a SUGGESTION filter, so "the operation" here means the parts
+    the list is showing: discarding an entity under a property filter refuses
+    those property suggestions, not the ones the filter hid.
     """
     row = _row_of_key(state, row_key)
     if row is None or row.get("is_display_only") or row.get("is_info"):
@@ -767,23 +798,23 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
         background_tasks.create(_discard_ids(state, ids, reason, client), name=f"discard {row_key}")
 
     _reason_dialog(
-        "Mark this operation as discarded? A Run will not apply it. The reason is stored with it.",
+        "Mark this suggestion as discarded? A Run will not apply it. The reason is stored with it.",
         _submit,
-        title="Discard operation",
+        title="Discard suggestions",
         confirm_label="Discard",
         reason_label="Reason (optional — why the end user does not want this applied)",
     )
 
 
 def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
-    """Discard ONE suboperation (its id is the whole selection)."""
+    """Discard ONE suggestion (its id is the whole selection)."""
     _row, sub = _sub_of(state, args)
     if sub is None or sub.get("is_info") or sub.get("is_display_only") or not isinstance(sub.get("id"), int):
         return
     sub_id = int(sub["id"])
     client = context.client
     background_tasks.create(
-        _discard_ids(state, [sub_id], "discarded from the suboperations table", client),
+        _discard_ids(state, [sub_id], "discarded from the suggestions list", client),
         name=f"discard sub {sub_id}",
     )
 
@@ -791,34 +822,53 @@ def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
 def _drift_banner(state: dict[str, Any]) -> None:
     """The drift line: what the last drift check concluded.
 
-    It sits BELOW the action bar, just above the table — the state of the data
-    the table shows. Renders the STORED verdict (or "not checked yet"); the
-    open-page auto-check and the manual button update it. One row: an icon +
-    the text + (right) the check-drift and sync buttons.
+    It sits BELOW the action bar, just above the list — the state of the data
+    the list shows. Renders the STORED verdict (or "not checked yet") and
+    ALWAYS starts a fresh check: entering the page is the moment the operator
+    needs to know whether the list still matches Uwazi. One row: an icon, the
+    verdict, and when the list was last synced; the sync action sits under it
+    while the verdict is "drifted".
     """
-    with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
-        state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
-        state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
-            drift_text_classes("grey-7")
-        )
-        # The verdict color is painted on the TEXT as well as the icon (see
-        # ``_apply_drift_state``): "Out of date" must be impossible to miss,
-        # and grey body text on a light table reads as ordinary prose.
-        state["_table_update_label"] = ui.label(
-            table_update_label(get_table_update_time(page_instance_url(), state["run_id"]))
-        ).classes("text-caption text-grey-6")
+    with ui.column().classes("w-full items-start gap-1 q-mb-sm"):
+        with ui.row().classes("w-full items-center gap-2"):
+            state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
+            state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
+                drift_text_classes("grey-7")
+            )
+            # The verdict color is painted on the TEXT as well as the icon (see
+            # ``_apply_drift_state``): "Out of date" must be impossible to miss,
+            # and grey body text on a light table reads as ordinary prose.
+            state["_table_update_label"] = ui.label(
+                table_update_label(get_table_update_time(page_instance_url(), state["run_id"]))
+            ).classes("text-caption text-grey-6")
+        # The drifted verdict's remedy sits UNDER the verdict line, so the
+        # banner reads top-down: what the check found, then the action that
+        # fixes it. Grey, not red: the warning is the text, and the button is
+        # merely the way out of it.
+        state["_drift_sync_button"] = ui.button(
+            "Sync with Uwazi",
+            icon="cloud_sync",
+            on_click=lambda: _sync_now_clicked(state),
+        ).props("dense flat color=grey-8")
+        state["_drift_sync_button"].set_visibility(False)
 
     # The verdict's text is stored per run: apply it immediately, then let the
     # open-page auto-check refresh it (a fresh page should not show a stale
     # 'valid' while Uwazi moved — the check replaces the text in place).
     stored = get_drift_state(page_instance_url(), state["run_id"])
     _apply_drift_state(state, stored, checking=stored is None)
-    if stored is None or stored.status is DriftStatus.UNKNOWN or stored.checked_by == "sync":
-        background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
-    elif stored.status is not DriftStatus.VALID:
-        # A previous page visit already found drift; re-check in the background
-        # so the operator sees CURRENT drift rather than yesterday's.
-        background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+    # EVERY visit checks drift: Uwazi moves between visits, so a stored verdict
+    # (even "up to date") describes the moment it was taken, not now. The check
+    # runs in the background — the page renders the stored verdict meanwhile —
+    # and replaces it in place.
+    background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+
+
+def _sync_now_clicked(state: dict[str, Any]) -> None:
+    """The banner's Sync button (defined in ``page``: ``core`` cannot import it)."""
+    from .page import _update_table_clicked
+
+    _update_table_clicked(state)
 
 
 def _edit_sub_clicked(state: dict[str, Any], args: Any) -> None:
@@ -874,13 +924,27 @@ def _on_table_select(state: dict[str, Any], event: Any) -> None:
 
 
 def _open_entity_row(state: dict[str, Any], row: dict[str, Any]) -> None:
-    """Open the entity window for one operation row (its first written language)."""
+    """Open the entity window for one operation row (its first written language).
+
+    Every row that names an entity opens — including a validation row and a
+    not-processed/matched one. Those rows carry no work to write, but the
+    operator still needs the evidence behind them: the entity's document (often
+    the PDF the value was extracted from) and the row's recorded values. Info
+    rows name no entity, so they still open nothing.
+    """
     from .entity_window import _open_entity_window
 
     if row.get("is_info"):
         return
     shared_id = str(row.get("shared_id") or "")
+    if not shared_id:
+        return
     languages = [lang for lang in (row.get("languages") or []) if lang]
+    # A created entity's row is keyed by its placeholder; its language group is
+    # the language-independent one (a create writes no per-language row).
+    if any(op in CREATE_OPS for op in str(row.get("ops") or "").split(", ") if op):
+        _open_entity_window(state, shared_id, None)
+        return
     _open_entity_window(state, shared_id, languages[0] if languages else None)
 
 
@@ -1014,15 +1078,21 @@ def _refresh_expand_button(state: dict[str, Any]) -> None:
 
 
 def _refresh_filter_counts(state: dict[str, Any]) -> None:
-    """Relabel the Operation/Status options with fresh whole-run counts (best-effort).
+    """Rebuild every filter dropdown from the FACETED counts (best-effort).
+
+    Each dropdown's options are counted with the OTHER active filters applied:
+    narrowing the table by property must narrow the Operation/Status numbers
+    too, and an option that can only return zero rows is not offered. Each
+    dimension is counted with ITS OWN filter cleared, so the current choice
+    never cancels out its own options.
 
     The counts move when rows change status (accept, discard, run, revert), so
     the controls are rebuilt after every refresh. ``set_options`` keeps the
-    current selection, and :func:`filter_options` keeps a selected value listed
-    even at ``(0)``, so a filter is never silently cleared.
+    current selection, and the builders keep a selected value listed even at
+    ``(0)``, so a filter is never silently cleared.
     """
     try:
-        counts = get_op_status_counts(page_instance_url(), state["run_id"])
+        counts = get_filter_counts(page_instance_url(), state["run_id"], _current_filter(state, limit=100000))
     except Exception:  # noqa: BLE001 — labels must not break a table refresh
         logger.exception("could not refresh the filter counts")
         return
@@ -1031,6 +1101,14 @@ def _refresh_filter_counts(state: dict[str, Any]) -> None:
         if widget is None or widget.is_deleted:
             continue
         widget.set_options(filter_options(labels, counts.get(key, {}), state[key]))
+    property_widget = state.get("_property_select")
+    if property_widget is not None and not property_widget.is_deleted:
+        property_widget.set_options(
+            property_filter_options(state.get("_labels") or {}, counts.get("property", {}), state["property"])
+        )
+    language_widget = state.get("_language_select")
+    if language_widget is not None and not language_widget.is_deleted:
+        language_widget.set_options(language_filter_options(counts.get("language", {}), state["language"]))
 
 
 def _refresh_page_controls(state: dict[str, Any]) -> None:
@@ -1069,47 +1147,10 @@ def _refresh_run_badge(state: dict[str, Any]) -> None:
     badge.props(f"color={_RUN_STATUS_BADGE_COLORS.get(detail.status.value, 'grey-7')}")
 
 
-def _promote_validation_clicked(state: dict[str, Any], row_key: str) -> None:
-    """Move an entity out of the validation set (its rows become runnable work).
-
-    This is the ONE way a held-out entity becomes work, and it is deliberately
-    explicit: it shrinks the set, so the score stops describing the entity the
-    operator just took out.
-    """
-    row = _row_of_key(state, row_key)
-    if row is None:
-        return
-    shared_id = str(row.get("shared_id") or "")
-    if not shared_id:
-        return
-
-    def _confirm() -> None:
-        from uwazi_admin_agent.drivers.web.run_service import promote_validation_row
-
-        try:
-            count = len(promote_validation_row(state["instance_url"], state["run_id"], shared_id))
-        except Exception as exc:  # noqa: BLE001 — report, never crash the page
-            logger.exception("promote validation failed")
-            ui.notify(f"Could not promote {shared_id}: {exc}", type="negative", multi_line=True)
-            return
-        ui.notify(
-            f"{shared_id} left the validation set — {count} row(s) are now regular work.",
-            type="positive",
-        )
-        _refresh_all(state)
-
-    _simple_confirm(
-        "Promote out of the validation set?",
-        f"{shared_id} will be removed from the test set and its rows will become runnable. "
-        "The performance score is recomputed from the remaining entities.",
-        _confirm,
-    )
-
-
 def _refresh_selection_counts(state: dict[str, Any]) -> None:
     """Update the selection-driven buttons' texts from the checked SUBOPERATIONS.
 
-    The Run/Discard counts are the checked parts (a count of proposals, not of
+    The Run/Discard counts are the checked suggestions (a count of suggestions, not of
     entities); Revert counts the distinct entities those parts belong to,
     because one entity is restored once however many of its rows are ticked.
     """
@@ -1238,7 +1279,12 @@ def _reload_table(state: dict[str, Any]) -> None:
         ]
         # The Revert icon names the backup it would restore, the way the
         # entity table's did: the date is already read for the confirm dialog.
+        # A row the run CREATED has no backup: its undo deletes the entity, and
+        # the tooltip says so instead of promising a restore.
         for payload in payloads:
+            if any(op in CREATE_OPS for op in payload.get("ops", "").split(", ") if op):
+                payload["revert_tooltip"] = "Delete this entity — the run created it, so undoing the creation removes it"
+                continue
             captured = tooltips.get(payload["shared_id"])
             payload["revert_tooltip"] = f"entity backup creation {captured:%Y-%m-%d %H:%M}" if captured is not None else ""
         table = state.get("_table")
@@ -1282,6 +1328,28 @@ def _reload_table(state: dict[str, Any]) -> None:
         _refresh_expand_button(state)
     finally:
         state["loading"] = False
+        # Every table load re-checks drift: the table is a snapshot of Uwazi, so
+        # a reload (a filter change, a page flip, a post-action refresh) is a
+        # moment the operator needs to know whether it still matches. The check
+        # runs in the background and repaints the banner in place. While a pass
+        # is running the table reloads every few seconds, so a short throttle
+        # keeps one check per interval instead of one per poll.
+        _schedule_drift_check(state)
+
+
+def _schedule_drift_check(state: dict[str, Any]) -> None:
+    """Start a drift check unless one just ran (the table-load hook)."""
+    if state.get("_drift_label") is None:
+        return
+    now = time.monotonic()
+    last = float(state.get("_drift_checked_at") or 0.0)
+    if now - last < 10.0:
+        return
+    state["_drift_checked_at"] = now
+    background_tasks.create(
+        _check_drift_now(state, notify=False, client=context.client),
+        name=f"drift {state['run_id']}",
+    )
 
 
 def _render_summary(state: dict[str, Any]) -> None:
@@ -1294,12 +1362,12 @@ def _render_summary(state: dict[str, Any]) -> None:
     with holder:
         _score_card(state)
         # ONE card for the operations and their suboperations: the Operations
-        # card counts the PARTS (the table's real content — one proposal per
+        # card counts the PARTS (the list's real content — one suggestion per
         # property/language/link), and the
         # entities behind them ride underneath, so the operator reads the
         # table's two levels without a second card.
         _card(
-            "Operations",
+            "Suggestions",
             f"{counts.get('subs_total', 0):,}",
             caption=(
                 f"{counts.get('operations_total', 0):,} entities to run"
@@ -1308,7 +1376,7 @@ def _render_summary(state: dict[str, Any]) -> None:
         )
         _card("Pending", f"{pending_suboperation_count(counts):,}", "grey")
         _card("Matched", f"{counts.get('display_matched', 0):,}", "green")
-        _card("Not processed", f"{counts.get('display_skipped', 0):,}", "orange")
+        _card("Excluded", f"{counts.get('display_skipped', 0):,}", "grey-7")
         _card("Discarded", f"{counts.get('subs_discarded', 0):,}", "red")
         # Applied reads as a fraction so the operator sees how much of the task
         # is written without counting rows: applied suboperations / all of them.
@@ -1339,9 +1407,9 @@ def _reset_global_selection(state: dict[str, Any]) -> None:
 async def _restore_ids(state: dict[str, Any], ids: list[int], client: Any) -> None:
     """Return the given SUBOPERATIONS' discarded rows to pending, then refresh."""
     try:
-        count = await asyncio.to_thread(restore_ids, state["run_id"], ids)
+        count = await asyncio.to_thread(restore_ids, state["instance_url"], state["run_id"], ids)
         with client:
-            ui.notify(f"Restored {count} suboperation(s) — they can be run again", type="positive")
+            ui.notify(f"Restored {count} suggestion(s) — they can be run again", type="positive")
     except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
         logger.exception("restore failed")
         with client:
@@ -1390,7 +1458,8 @@ def _revert_from_state(state: dict[str, Any]) -> None:
     message = (
         f"Restore {len(entities)} entit{'' if len(entities) == 1 else 'ies'} to the backup the run made "
         "BEFORE any of its writes. ALL languages of each entity are restored (they share one backup); "
-        "only the checked entities are reverted."
+        "only the checked entities are reverted. Entities the run CREATED have no backup — they are "
+        "DELETED instead (their rows go back to pending)."
     )
     _simple_confirm(title, message, _confirm)
 
@@ -1486,8 +1555,6 @@ def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tu
     says so when it happens.
     """
     try:
-        from uwazi_admin_agent.drivers.web.run_service import validation_summary
-
         summary = validation_summary(state["instance_url"], state["run_id"])
     except Exception:  # noqa: BLE001 — a warning must never block a Run
         return set()
@@ -1505,14 +1572,12 @@ def _score_card(state: dict[str, Any]) -> None:
     The card states its state in words (``Unseen``, ``Used for fixes``,
     ``Stale``, ``No test set``): a number without that word reads as a promise
     it does not make. It is NOT shown in the property filter (the filter answers
-    a different question: how a proposal compares with Uwazi's current value).
+    a different question: how a suggestion compares with Uwazi's current value).
     """
     holder = state.get("_score_card")
     if holder is None or holder.is_deleted:
         return
     try:
-        from uwazi_admin_agent.drivers.web.run_service import validation_summary
-
         summary = validation_summary(state["instance_url"], state["run_id"])
     except Exception as exc:  # noqa: BLE001 — the card degrades, the page never breaks
         logger.warning("validation card failed: {}", exc)
@@ -1616,7 +1681,7 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
         # operation — the only reading that makes the button useful.
         covered = subs
     if not covered:
-        ui.notify("This operation has nothing to run", type="warning")
+        ui.notify("This entity has nothing to run", type="warning")
         return
     # A part that was already written (or refused) is not written again by the
     # operation's Run: "run this operation" means the work that remains, and a
@@ -1630,7 +1695,7 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
         if blocked_reason:
             ui.notify(f"This operation cannot be run again — {blocked_reason}", type="warning", multi_line=True)
             return
-        ui.notify("Nothing left to run in this operation", type="warning")
+        ui.notify("Nothing left to run for this entity", type="warning")
         return
     _set_children_checked(state, row, True)
     _sync_selection(state)
@@ -1891,6 +1956,9 @@ def _set_drift_error(state: dict[str, Any], text: str) -> None:
         return
     label.text = text
     label.classes(replace=drift_text_classes(DRIFT_STATUS_COLORS["error"]))
+    # A failed check proves nothing about the table's currency, so the sync
+    # action stays hidden until a check actually reports drift.
+    _set_drift_sync_visibility(state, False)
 
 
 def _sub_of(state: dict[str, Any], args: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

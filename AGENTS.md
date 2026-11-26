@@ -2,6 +2,10 @@
 
 Guidelines for coding agents working in this repository.
 
+## No __init__
+
+Avoid the __init__.py files and similar files starting with __ 
+
 ## Testing Policy
 
 The repo has **two test tiers** with different rules. Choose the tier before you

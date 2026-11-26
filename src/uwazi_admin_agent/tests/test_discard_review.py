@@ -64,7 +64,6 @@ def _entity_row(*, proposal_count: int = 2, discarded: int = 0, applied: int = 0
         properties=["excerpt"],
         proposal_count=proposal_count,
         pending=max(proposal_count - discarded - applied, 0),
-        accepted=0,
         applied=applied,
         reverted=0,
         discarded=discarded,
@@ -101,7 +100,7 @@ def test_a_partially_discarded_operation_is_not_discarded() -> None:
 
 
 def test_run_status_reads_discarded_for_a_refused_operation() -> None:
-    assert run_status(_entity_row(proposal_count=2, discarded=2)) == ("discarded", "red-9")
+    assert run_status(_entity_row(proposal_count=2, discarded=2)) == ("discarded", "pink-10")
 
 
 def test_run_status_stays_pending_when_only_some_rows_are_discarded() -> None:
@@ -118,9 +117,9 @@ def test_bulk_discard_label_carries_the_selection_count() -> None:
     assert bulk_discard_label(3) == "Discard (3)"
 
 
-def test_discard_confirmation_says_the_rows_will_not_be_applied() -> None:
+def test_discard_confirmation_says_the_suggestions_will_not_be_applied() -> None:
     title, message = discard_confirmation(2)
-    assert title == "Discard 2 operations"
+    assert title == "Discard 2 suggestions"
     assert "NOT be applied" in message
 
 
@@ -186,7 +185,7 @@ def test_restore_by_filter_touches_only_the_discarded_rows(store: SqliteSuggesti
     store.add_suggestions(
         [
             _suggestion(property_name="a", status=SuggestionStatus.DISCARDED),
-            _suggestion(property_name="b", status=SuggestionStatus.ACCEPTED),
+            _suggestion(property_name="b", status=SuggestionStatus.PENDING),
         ]
     )
 
@@ -195,7 +194,7 @@ def test_restore_by_filter_touches_only_the_discarded_rows(store: SqliteSuggesti
     assert restored == 1
     rows, _ = store.query("run1", SuggestionFilter())
     assert rows[0].status is SuggestionStatus.PENDING
-    assert rows[1].status is SuggestionStatus.ACCEPTED
+    assert rows[1].status is SuggestionStatus.PENDING
 
 
 # --- the store: filtering by the discard state ------------------------------------

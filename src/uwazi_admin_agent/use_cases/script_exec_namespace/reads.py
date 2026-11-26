@@ -12,111 +12,11 @@ from loguru import logger
 from uwazi_admin_agent.configuration import MAX_ENTITIES_READ_PER_PASS
 from uwazi_agent.domain.agent_entity import AgentEntity
 from uwazi_agent.domain.agent_entity_search_result import AgentEntitySearchResult
-from uwazi_agent.domain.agent_entity_summary import AgentEntitySummary
 from uwazi_agent.domain.agent_search_filter import AgentSearchFilter
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 
-from .constants import _BY_IDS_CHUNK, _SEARCH_MODES
-from .scope import filter_ids_to_scope, filter_in_scope_by_template, full_mode_usage_error
-
-
-def _sync_query_entities_factory(
-    dummy_entities: list[AgentEntity],
-    scope: set[str],
-) -> Any:
-    """Build the sync, dummy-scoped ``query_entities`` bound into the namespace.
-
-    In dummy mode discovery is a no-op against Uwazi: the harness already created
-    the dummies, so the wrapper returns them (filtered to ``scope``) in the
-    shapes the system prompt declares — a result object
-    (``.summary`` + ``.examples``, a SimpleNamespace with dict examples) for the search
-    modes and a ``list[dict]`` (``model_dump``) for ``by_ids``. Returning dicts matches
-    the dict-access idioms the CRUD helpers use (create/update take dict literals).
-    This guarantees the script can only ever see dummies during validation,
-    regardless of what it searches for.
-    """
-
-    def query_entities(
-        mode: str,
-        language: str = "en",
-        limit: int = 10000,
-        search_term: str | None = None,
-        template_name: str | None = None,
-        filters: list | None = None,
-        published: bool | None = None,
-        shared_ids: list[str] | None = None,
-    ) -> Any:  # dict list (by_ids) or SimpleNamespace (search) or str (error)
-        _ = language, limit, search_term, template_name, filters, published  # search criteria ignored under scoping
-        in_scope = [e for e in dummy_entities if e.shared_id in scope]
-        if mode == "by_ids":
-            if not shared_ids:
-                return "Error: 'by_ids' mode requires `shared_ids` (a non-empty list)."
-            wanted = filter_ids_to_scope(shared_ids, scope)
-            by_id = {e.shared_id: e for e in in_scope}
-            # Return dicts (model_dump): the system prompt declares by_ids returns
-            # "a list of entity dicts", matching the dict-access idioms the CRUD
-            # helpers use (create/update take dict literals).
-            return [by_id[sid].model_dump() for sid in wanted if sid in by_id]
-        if mode in ("by_text", "by_filter", "by_template"):
-            # by_template must filter by template_name (mirror real mode) so a
-            # script looping by_template over several discovered templates
-            # processes each template's dummies once - otherwise every call
-            # returns ALL in-scope dummies and the gate false-fails a correct
-            # multi-template script. by_text/by_filter stay unfiltered (fuzzy
-            # text / property filters can't be simulated on dummies).
-            selected = filter_in_scope_by_template(in_scope, template_name) if mode == "by_template" else in_scope
-            summary = AgentEntitySummary(
-                count=len(selected),
-                by_template={},
-                sample_titles=[e.title for e in selected[:5]],
-                shared_ids=[e.shared_id for e in selected],
-            )
-            # A result object with `.summary` and `.examples` (dicts). The script
-            # reads `summary.shared_ids`, then fetches full dicts via `by_ids`.
-            return SimpleNamespace(
-                summary=summary,
-                examples=[e.model_dump() for e in selected[:5]],
-            )
-        return f"Error: unknown mode '{mode}'. Use one of: 'by_text', 'by_filter', 'by_template', 'by_ids'."
-
-    return query_entities
-
-
-def _sync_full_entities_factory(
-    dummy_entities: list[AgentEntity],
-    scope: set[str],
-) -> Any:
-    """Build the sync, dummy-scoped ``query_entities_full`` bound into the namespace.
-
-    Mirrors the real helper's contract for validation: the same three search
-    modes, returning the in-scope dummies as FULL entity dicts (``model_dump``)
-    — the shape ``by_ids`` returns — so the identical script runs in dummy and
-    real mode. Search criteria are ignored under scoping and ``by_template``
-    filters by ``template_name``, exactly like the dummy ``query_entities``.
-    ``by_ids`` is refused (the real helper does not offer it; ids-only and
-    known-id reads belong to ``query_entities``). A ``shared_ids`` argument is
-    accepted but IGNORED so the LLM's by_ids habit gets the guidance error
-    string instead of a TypeError crash.
-    """
-
-    def query_entities_full(
-        mode: str,
-        language: str = "en",
-        limit: int = 10000,
-        search_term: str | None = None,
-        template_name: str | None = None,
-        filters: list | None = None,
-        published: bool | None = None,
-        shared_ids: list[str] | None = None,
-    ) -> Any:  # list[dict] (full entities) or str (error)
-        _ = language, limit, search_term, filters, published, shared_ids  # search criteria ignored under scoping
-        if mode not in _SEARCH_MODES:
-            return full_mode_usage_error(mode)
-        in_scope = [e for e in dummy_entities if e.shared_id in scope]
-        selected = filter_in_scope_by_template(in_scope, template_name) if mode == "by_template" else in_scope
-        return [e.model_dump() for e in selected]
-
-    return query_entities_full
+from .constants import _BY_IDS_CHUNK, _SEARCH_MODES, NamedNamespace
+from .scope import full_mode_usage_error
 
 
 def _real_sync_query_entities_factory(
@@ -256,7 +156,7 @@ def build_search_result_view(result: AgentEntitySearchResult) -> SimpleNamespace
     all_entities: list[AgentEntity] = result._all_entities
     full_ids = [e.shared_id for e in all_entities if e.shared_id]
     summary = result.summary.model_copy(update={"shared_ids": full_ids})
-    return SimpleNamespace(summary=summary, examples=[e.model_dump() for e in result.examples])
+    return NamedNamespace(summary=summary, examples=[e.model_dump() for e in result.examples])
 
 
 def build_full_entities_view(result: AgentEntitySearchResult) -> list[dict]:

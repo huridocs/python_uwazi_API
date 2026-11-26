@@ -291,7 +291,7 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
 
   WHICH PROPERTIES ARE PER-LANGUAGE (do NOT loop over languages for the rest):
       Only the FREE-TEXT types are stored per language row: `text` and
-      `richtext`. Every OTHER type - `select`, `multiselect`, `date`,
+      `richtext` (also called `markdown`). Every OTHER type - `select`, `multiselect`, `date`,
       `daterange`, `multidate`, `multidaterange`, `numeric`, `link`,
       `geolocation`, `relationship`, `image`, `media` - holds ONE value that is
       SHARED by every language row of the entity. The entity's `title` is
@@ -307,6 +307,21 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
           default one and move on.
       Only a `text`/`richtext` value, or a `title`, genuinely differs per
       language - those are the ones to write once per language.
+
+  A MULTI-VALUE PROPOSAL IS THE COMPLETE SET (multiselect, relationship,
+  multidate, multidaterange): the list you put in `metadata[prop]` is EXACTLY
+  what the property will hold after the Run - Uwazi replaces the property's
+  whole list, it does not append to it. So:
+    - when the task says the extracted values must be ADDED to whatever the
+      entity already links/selects, READ the current list first and propose
+      `current + extracted` (deduped);
+    - when the task says REPLACE, propose only the extracted list;
+    - either way, decide from the task whether existing values should be KEPT
+      (`current + extracted`, deduped) or REPLACED, and never leave it implicit:
+      record the FULL set you intend - a value you leave out reads as a value
+      that will be REMOVED. The review table shows one chip per proposed value
+      and the operator accepts or drops values there before Run.
+  Relationship lists carry the target `shared_id`s (`["sid", ...]`), not titles.
 
   create_entities(entities_dicts, language='en')
       Create new entities. Each dict needs `title` and `template_name`
@@ -1213,6 +1228,33 @@ random subset per entity small (1–5 above) so relationship hubs stay manageabl
 The run's touch set is `created` only (an `update_entities` on a just-created
 entity adds nothing to `modified`), so N must stay <= `MAX_ENTITIES_PER_RUN`.
 
+CLASSIFICATION & METADATA-EXTRACTION TASKS
+A "fill a property" prompt asks you to populate one property on existing
+entities from their own metadata properties or documents:
+- `select` / `multiselect` targets: inspect the template via
+  `get_templates_by_names` and the thesaurus via `get_thesauris_by_names`.
+  Assign ONLY exact existing thesaurus labels; NEVER invent a term that does
+  not exist. Remember `select` takes a SCALAR label and `multiselect` takes a
+  COMPLETE list of labels.
+- `relationship` targets: inspect the template via `get_templates_by_names` to
+  read `related_template_name`. Query the candidate target entities at runtime
+  (`query_entities_full(mode="by_template", template_name=<related_template_name>)`)
+  and match mentions against those existing entities (using `textmatch` or
+  `llm_map` under budget when naming conventions vary). Write their
+  `shared_id`s (`["sid", ...]`, COMPLETE set) into `metadata[rel_prop]` via
+  `update_entities_parallel`. NEVER invent an entity or pass titles instead of
+  `shared_id`s.
+- Metadata-source extraction (when the prompt reads entity metadata properties
+  rather than documents): read from `d["metadata"][prop]` (remember the READ
+  array shape), pass `'basis': [prop, ...]` on each update dict (NOT
+  `'context'`), and do NOT call `get_entity_files*` or `get_segmentation*`.
+- Document-source extraction: when reading documents and the prompt gives no
+  specific page or section guidance, determine the optimal extraction strategy
+  from the document's length and structure (see DOCUMENT EXTRACTION below).
+- Fallback: when no value clearly applies for an entity, leave the suggestion
+  blank (omit that entity from `updates`; never guess or invent a value) unless
+  the prompt specifies an explicit fallback value.
+
 EXTRACTION TASKS
 An "extraction" prompt asks you to read each entity's HTML supporting file and
 write extracted values into its metadata (e.g. "for every entity under template
@@ -1330,9 +1372,14 @@ not hunt for it there. Same sample-derived extractor shape, different source:
      - Otherwise find the passage deterministically and pass THAT string:
        `para = next((p for p in seg["paragraphs"] if <the rule that matched>), None)`
        and use `para["text"]`. Never re-derive a different snippet later.
-     - Keep it tight: the paragraph/segment/sentence actually read, not the
-       whole document and not an unrelated nearby block. Include the page for a
-       PDF passage when it helps the operator locate it (`[page N] <text>`).
+     - Keep it USABLE, not minimal: send the sentence(s)/table row the value was
+       read from PLUS its immediate surroundings (the preceding and following
+       sentence or two, roughly 2-3 sentences / up to ~900 characters). The
+       operator judges the suggestion from this text alone, so a bare fragment
+       forces them to open the PDF; the whole document is equally wrong — it
+       buries the value. Never include an unrelated nearby block. Include the
+       page for a PDF passage when it helps the operator locate it
+       (`[page N] <text>`).
      - One `context` per write dict: if ONE entity's value came from several
        passages, join them with a blank line rather than guessing one.
    The HTML/URL extraction paths above have the same rule (`'context': segment`

@@ -29,9 +29,7 @@ import pytest
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
-    ScopeViolationError,
     build_dry_run_namespace,
-    build_exec_namespace,
     build_real_exec_namespace,
     run_script_sync,
 )
@@ -212,18 +210,6 @@ def _wired(
     return ns, files
 
 
-def _dummy_namespace() -> dict:
-    return build_exec_namespace(
-        entity_api=None,
-        relationship_api=None,
-        loop=asyncio.new_event_loop(),
-        scope={"E1", "E2"},
-        dummy_entities=[],
-        tool_cache=None,
-        default_language="en",
-    )
-
-
 def _dry_run_namespace(
     records: list,
     entity_repository: _EntityRepo | None = None,
@@ -242,8 +228,7 @@ def _dry_run_namespace(
 # --- all three namespaces bind the same name --------------------------------
 
 
-def test_all_three_namespaces_bind_the_delete_name() -> None:
-    assert "delete_entity_files_parallel" in _dummy_namespace()
+def test_both_namespaces_bind_the_delete_name() -> None:
     assert "delete_entity_files_parallel" in _dry_run_namespace([])
     assert "delete_entity_files_parallel" in build_real_exec_namespace(
         entity_api=None,  # type: ignore[arg-type]
@@ -256,33 +241,6 @@ def test_all_three_namespaces_bind_the_delete_name() -> None:
 
 
 # --- dummy mode: scoped no-op ------------------------------------------------
-
-
-def test_dummy_delete_noops_per_distinct_entity_in_first_appearance_order() -> None:
-    ns = _dummy_namespace()
-    summaries = ns["delete_entity_files_parallel"](
-        [
-            {"shared_id": "E1", "file_id": "d1"},
-            {"shared_id": "E2", "file_id": "x1"},
-            {"shared_id": "E1", "file_id": "d2"},
-        ]
-    )
-    assert summaries == [
-        {"shared_id": "E1", "requested": 2, "deleted": 0, "failed": 0, "refused": 0, "refusals": []},
-        {"shared_id": "E2", "requested": 1, "deleted": 0, "failed": 0, "refused": 0, "refusals": []},
-    ]
-
-
-def test_dummy_delete_refuses_out_of_scope_ids() -> None:
-    ns = _dummy_namespace()
-    with pytest.raises(ScopeViolationError):
-        ns["delete_entity_files_parallel"]([{"shared_id": "REAL", "file_id": "d1"}])
-
-
-def test_dummy_delete_refuses_a_duplicated_request() -> None:
-    ns = _dummy_namespace()
-    with pytest.raises(ValueError, match="at most once per call"):
-        ns["delete_entity_files_parallel"]([{"shared_id": "E1", "file_id": "d1"}, {"shared_id": "E1", "file_id": "d1"}])
 
 
 # --- dry-run mode: real discovery reads, recorded deletes ---------------------
@@ -546,8 +504,6 @@ def test_request_without_shared_id_fails_identically_in_every_mode() -> None:
     """A malformed request is never silently dropped (that would hide the loss
     of a deletion): every mode raises the same ValueError up front."""
     malformed = [{"file_id": "d1"}]
-    with pytest.raises(ValueError, match="must name a shared_id"):
-        _dummy_namespace()["delete_entity_files_parallel"](malformed)
     records: list = []
     repo, bytes_store = _incident()
     events: list = []
@@ -584,7 +540,6 @@ def test_empty_input_returns_empty_list_in_every_mode() -> None:
     assert real_ns["delete_entity_files_parallel"]([]) == []
     assert files.deletes == []
     assert intercept.deleted_file_records == []
-    assert _dummy_namespace()["delete_entity_files_parallel"]([]) == []
     records: list = []
     repo, bytes_store = _incident()
     events: list = []

@@ -69,7 +69,6 @@ def test_one_entity_with_update_and_delete_yields_one_row(store: SqliteSuggestio
     assert item.properties == ["excerpt"]
     assert item.proposal_count == 2
     assert item.pending == 2
-    assert item.accepted == 0
     assert item.applied == 0
     assert item.discarded == 0
 
@@ -146,13 +145,13 @@ def test_has_outcome_reflects_a_proposed_property_value(store: SqliteSuggestionS
 def test_status_sums_per_entity(store: SqliteSuggestionStore) -> None:
     _add(
         store,
-        _suggestion(status=SuggestionStatus.ACCEPTED),
+        _suggestion(status=SuggestionStatus.PENDING),
         _suggestion(status=SuggestionStatus.APPLIED, property_name="other"),
         _suggestion(status=SuggestionStatus.DISCARDED, property_name="third"),
     )
     rows, _ = store.entity_rows("run1", SuggestionFilter())
     item = rows[0]
-    assert (item.pending, item.accepted, item.applied, item.discarded, item.proposal_count) == (0, 1, 1, 1, 3)
+    assert (item.pending, item.applied, item.discarded, item.proposal_count) == (1, 1, 1, 3)
 
 
 # --- shared_ids subset + paging ------------------------------------------------

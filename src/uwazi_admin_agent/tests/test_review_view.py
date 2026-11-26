@@ -10,8 +10,6 @@ from uwazi_admin_agent.domain.suggestion import TITLE_PROPERTY, EntityReviewRow,
 from uwazi_admin_agent.drivers.web.review_view import (
     COLUMN_BY_SORT_KEY,
     OPERATION_SORT_OPTIONS,
-    SHARED_ID_CSS,
-    SHARED_ID_MAX_CHARS,
     SORT_KEY_BY_COLUMN,
     TITLE_CELL_CHARS,
     cost_card_value,
@@ -25,7 +23,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
     match_label,
     modified_label,
     pending_suboperation_count,
-    property_caption,
     property_heading,
     review_sort_pagination,
     row_neighbours,
@@ -98,7 +95,7 @@ def test_match_label_maps_the_tri_state() -> None:
 
 
 def test_suggestion_to_row_flattens_the_display_contract() -> None:
-    row = suggestion_to_row(_suggestion(entity_title="Title", status=SuggestionStatus.ACCEPTED))
+    row = suggestion_to_row(_suggestion(entity_title="Title", status=SuggestionStatus.PENDING))
     assert row["id"] == 7
     assert row["shared_id"] == "s1"
     assert row["title"] == "Title"
@@ -107,16 +104,16 @@ def test_suggestion_to_row_flattens_the_display_contract() -> None:
     assert row["proposed"] == "new"
     assert row["current"] == "old"
     assert row["match"] == "mismatch"
-    assert row["status"] == "accepted"
+    assert row["status"] == "pending"
     assert row["editable"] is True
 
 
 def test_suggestion_to_row_carries_the_badge_colors() -> None:
     """Vue slots cannot reach ``window.*``, so colors must ride on the row."""
     row = suggestion_to_row(_suggestion(op="delete", property_name=None, match=None, status=SuggestionStatus.DISCARDED))
-    assert row["op_color"] == "negative"
+    assert row["op_color"] == "brown-9"
     assert row["match_color"] == "grey-7"
-    assert row["status_color"] == "red-9"
+    assert row["status_color"] == "pink-10"
 
 
 def test_suggestion_to_row_uses_shared_id_when_there_is_no_title() -> None:
@@ -140,12 +137,11 @@ def test_filter_from_controls_maps_empty_strings_to_no_constraint() -> None:
     assert f.property_name is None
     assert f.match is None
     assert f.text is None
-    assert f.accepted_only is False
 
 
 def test_filter_from_controls_maps_values_through() -> None:
-    f = filter_from_controls(status="accepted", op="update", property_name="excerpt", text=" foo ")
-    assert f.status == [SuggestionStatus.ACCEPTED]
+    f = filter_from_controls(status="pending", op="update", property_name="excerpt", text=" foo ")
+    assert f.status == [SuggestionStatus.PENDING]
     assert f.op == ["update"]
     assert f.property_name == "excerpt"
     assert f.match is None
@@ -181,18 +177,18 @@ def test_filter_options_append_a_selected_value_without_a_label() -> None:
 
 
 def test_filter_options_keep_the_label_order() -> None:
-    labels = {"pending": "pending", "accepted": "accepted", "discarded": "discarded"}
-    counts = {"discarded": 1, "pending": 5, "accepted": 2}
-    assert list(filter_options(labels, counts, [])) == ["pending", "accepted", "discarded"]
+    labels = {"pending": "pending", "applied": "applied", "discarded": "discarded"}
+    counts = {"discarded": 1, "pending": 5, "applied": 2}
+    assert list(filter_options(labels, counts, [])) == ["pending", "applied", "discarded"]
 
 
 def test_filter_from_controls_whitespace_text_is_no_constraint() -> None:
     assert filter_from_controls(text="   ").text is None
 
 
-def test_filter_from_controls_keeps_paging_and_the_accepted_flag() -> None:
-    f = filter_from_controls(offset=50, limit=25, accepted_only=True)
-    assert (f.offset, f.limit, f.accepted_only) == (50, 25, True)
+def test_filter_from_controls_keeps_paging() -> None:
+    f = filter_from_controls(offset=50, limit=25)
+    assert (f.offset, f.limit) == (50, 25)
 
 
 # --- the LLM cost card ---------------------------------------------------------
@@ -221,7 +217,6 @@ def _entity_row(
     properties: list[str] | None = None,
     proposal_count: int = 2,
     pending: int = 2,
-    accepted: int = 0,
     applied: int = 0,
     reverted: int = 0,
     discarded: int = 0,
@@ -237,7 +232,6 @@ def _entity_row(
         properties=properties if properties is not None else ["excerpt"],
         proposal_count=proposal_count,
         pending=pending,
-        accepted=accepted,
         applied=applied,
         reverted=reverted,
         discarded=discarded,
@@ -251,7 +245,7 @@ def test_entity_row_flattens_the_entity_contract() -> None:
     assert row["shared_id"] == "s1"
     assert row["title"] == "One"
     assert row["ops"] == "update"
-    assert row["op_colors"] == ["blue-9"]
+    assert row["op_colors"] == ["teal-10"]
     assert row["template"] == "Judgment"
 
 
@@ -262,13 +256,13 @@ def test_entity_row_uses_shared_id_when_there_is_no_title() -> None:
 def test_entity_row_dashes_an_unknown_template() -> None:
     row = entity_row(_entity_row(template_names=[], ops=["delete"]))
     assert row["template"] == "—"
-    assert row["op_colors"] == ["negative"]
+    assert row["op_colors"] == ["brown-9"]
 
 
 def test_entity_row_mixed_ops_keep_their_colors_aligned() -> None:
     row = entity_row(_entity_row(ops=["update", "delete"]))
     assert row["ops"] == "update, delete"
-    assert row["op_colors"] == ["blue-9", "negative"]
+    assert row["op_colors"] == ["teal-10", "brown-9"]
 
 
 def test_entity_row_match_column_is_gone() -> None:
@@ -313,13 +307,13 @@ def test_the_uwazi_link_opens_the_row_in_its_own_language() -> None:
 def test_run_confirmation_names_the_languages_it_will_write() -> None:
     title, _message = run_confirmation(2, ["update"], ["es"])
 
-    assert title == "Run 2 rows (es)"
+    assert title == "Run 2 suggestions (es)"
 
 
 def test_run_confirmation_without_languages_stays_plain() -> None:
     title, _message = run_confirmation(1, ["delete"])
 
-    assert title == "Run 1 row"
+    assert title == "Run 1 suggestion"
 
 
 # --- open in Uwazi ------------------------------------------------------------
@@ -391,29 +385,6 @@ def test_the_shared_id_is_its_own_field_and_is_not_glued_to_the_title() -> None:
     assert "(" not in row["title"]
 
 
-# --- the shared id cell --------------------------------------------------------
-
-
-def test_the_shared_id_slot_holds_a_fifteen_character_id() -> None:
-    """The id is never cut: its slot is wide enough for a 15-character id."""
-    assert SHARED_ID_MAX_CHARS == 15
-    assert f"min-width: {SHARED_ID_MAX_CHARS}ch" in SHARED_ID_CSS
-
-
-def test_the_shared_id_slot_does_not_shrink_or_clip() -> None:
-    """The id must be shown in FULL: it never shrinks and it never ellipsises."""
-    assert "flex: 0 0 auto" in SHARED_ID_CSS
-    assert "white-space: nowrap" in SHARED_ID_CSS
-    assert "overflow: visible" in SHARED_ID_CSS
-    assert "ellipsis" not in SHARED_ID_CSS
-
-
-def test_a_real_shared_id_fits_the_slot() -> None:
-    """Uwazi's sharedIds are 10-11 characters, so the 15-char slot holds them."""
-    assert len("275ju9aw3gr") <= SHARED_ID_MAX_CHARS
-    assert len("pxtvk1f0fx") <= SHARED_ID_MAX_CHARS
-
-
 def test_entity_row_trims_the_template_list() -> None:
     names = ", ".join(f"TEMPLATE-{index}" for index in range(10))
 
@@ -424,7 +395,7 @@ def test_entity_row_trims_the_template_list() -> None:
 
 
 def test_entity_row_carries_the_url_for_the_title_cell() -> None:
-    """The link is the title cell's trailing icon now — the row still carries it."""
+    """The title cell is the link itself; the row still carries the URL."""
     assert entity_row(_entity_row(ops=["update"]), "http://localhost:3000")["url"].endswith("/en/entity/s1")
 
 
@@ -452,18 +423,6 @@ def test_property_heading_names_a_whole_entity_row_by_its_op() -> None:
     assert property_heading(None, "delete", {}) == "delete"
 
 
-def test_property_caption_keeps_the_name_beside_the_label() -> None:
-    assert property_caption("document_ref", {"document_ref": "Document Ref"}) == "document_ref"
-
-
-def test_property_caption_is_empty_when_the_heading_is_the_name() -> None:
-    assert property_caption("document_ref", {}) == ""
-    assert property_caption(None, {"document_ref": "Document Ref"}) == ""
-
-
-# --- run status --------------------------------------------------------------
-
-
 def test_run_status_is_pending_for_an_unreviewed_entity() -> None:
     assert run_status(_entity_row(pending=2, applied=0)) == ("pending", "grey-8")
 
@@ -481,18 +440,15 @@ def test_run_status_stays_pending_on_a_partial_state() -> None:
     assert run_status(_entity_row(pending=0, applied=1, reverted=1)) == ("pending", "grey-8")
 
 
-def test_pending_card_counts_every_state_the_row_badge_calls_pending() -> None:
-    """ACCEPTED/EDITED rows read "pending" in the table, so the card sums them."""
+def test_pending_card_counts_the_pending_suggestions() -> None:
     counts = {
         "subs_pending": 2,
-        "subs_accepted": 3,
-        "subs_edited": 1,
         "subs_applied": 4,
         "subs_reverted": 5,
         "subs_discarded": 6,
     }
 
-    assert pending_suboperation_count(counts) == 6
+    assert pending_suboperation_count(counts) == 2
 
 
 def test_pending_card_is_zero_for_an_empty_set() -> None:
@@ -508,8 +464,9 @@ def test_filter_from_controls_passes_shared_ids_through() -> None:
 # --- table refresh label -----------------------------------------------------
 
 
-def test_table_update_label_names_a_never_synced_table() -> None:
-    assert table_update_label(None) == "Never synced with Uwazi"
+def test_table_update_label_is_silent_for_a_never_synced_table() -> None:
+    """A never-synced run says nothing: the drift banner already reports the check."""
+    assert table_update_label(None) == ""
 
 
 def test_table_update_label_shows_date_and_time() -> None:
@@ -530,9 +487,10 @@ def test_modified_label_formats_a_timestamp() -> None:
     assert modified_label(value) == "2026-11-03 09:45"
 
 
-def test_modified_label_reads_a_dash_for_no_timestamp() -> None:
-    assert modified_label(None) == "—"
-    assert modified_label(object()) == "—"
+def test_modified_label_is_empty_until_an_action_happens() -> None:
+    """A freshly recorded suggestion has no review activity, so the cell is blank."""
+    assert modified_label(None) == ""
+    assert modified_label(object()) == ""
 
 
 def test_sort_direction_label_speaks_the_modified_order() -> None:

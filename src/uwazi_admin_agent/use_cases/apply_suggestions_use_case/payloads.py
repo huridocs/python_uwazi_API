@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from uwazi_admin_agent.domain.date_values import coerce_date_property_value, is_date_property_type
@@ -32,7 +31,9 @@ from uwazi_admin_agent.domain.suggestion_scoring import value_languages
 
 from .errors import ApplyRefusedError
 
-_PUSHABLE: tuple[SuggestionStatus, ...] = (SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED)
+# The statuses a Run may write: still to be written, or written once and then
+# reverted (which makes the row runnable again).
+_PUSHABLE: tuple[SuggestionStatus, ...] = (SuggestionStatus.PENDING, SuggestionStatus.REVERTED)
 
 _UPDATE_OPS: frozenset[str] = UPDATE_OPS
 
@@ -67,28 +68,19 @@ def accepted_value(value: Any, rejected: list[str]) -> Any:
 
 
 def effective_value(suggestion: Suggestion) -> object:
-    """The value a Run writes for one row: the edit when present, else the proposal.
-
-    An ``EDITED`` row always uses ``edited_value``; every other pushable row
-    uses its proposal MINUS the multiselect labels the operator rejected.
-    """
-    if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
-        return _decode_edited(suggestion.edited_value)
+    """The value a Run writes for one row: its proposal minus the rejected labels."""
     return accepted_value(suggestion.proposed_value, suggestion.rejected_values)
 
 
 def select_labels(suggestion: Suggestion) -> list[str]:
     """The labels a select/multiselect Run writes: edit > explicit selection > proposal.
 
-    An ``EDITED`` row writes its decoded edit; a row carrying the operator's
-    explicit ``selected_values`` writes exactly those (an empty list writes
-    nothing — but such a row is sentinel-discarded and never pushed); every
-    other row writes its proposal minus the rejected labels. ``labels_of``
-    normalizes all three shapes, so the thesaurus lookup downstream sees plain
-    label strings.
+    A row carrying the operator's explicit ``selected_values`` writes exactly
+    those (an empty list writes nothing — but such a row is sentinel-discarded
+    and never pushed); every other row writes its proposal minus the rejected
+    labels. ``labels_of`` normalizes both shapes, so the thesaurus lookup
+    downstream sees plain label strings.
     """
-    if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
-        return labels_of(_decode_edited(suggestion.edited_value))
     if suggestion.selected_values is not None:
         return labels_of(suggestion.selected_values)
     return labels_of(accepted_value(suggestion.proposed_value, suggestion.rejected_values))
@@ -97,26 +89,15 @@ def select_labels(suggestion: Suggestion) -> list[str]:
 def relationship_targets(suggestion: Suggestion) -> list[str]:
     """The related sharedIds a relationship Run writes (pure).
 
-    An ``EDITED`` row writes its decoded edit; otherwise the operator's explicit
-    ``selected_values`` wins (an empty list writes nothing — but such a row is
-    sentinel-discarded and never pushed); a plain row writes the proposal minus
-    the rejected targets.
+    The operator's explicit ``selected_values`` wins (an empty list writes
+    nothing — but such a row is sentinel-discarded and never pushed); a plain
+    row writes the proposal minus the rejected targets.
     """
-    if suggestion.status == SuggestionStatus.EDITED and suggestion.edited_value is not None:
-        return relationship_selection(_decode_edited(suggestion.edited_value), suggestion.rejected_values, None)
     return relationship_selection(
         suggestion.proposed_value,
         suggestion.rejected_values,
         suggestion.selected_values,
     )
-
-
-def _decode_edited(text: str) -> object:
-    """Best-effort decode of an operator-typed value (JSON when it parses, else the string)."""
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return text
 
 
 def _selected(suggestion: Suggestion, selection: EntitySelection | None) -> bool:
@@ -426,7 +407,7 @@ def pushable_rows(
 ) -> list[Suggestion]:
     """The rows a Run would push, in order (pure).
 
-    Only ``ACCEPTED``/``EDITED`` rows of executable ops (``update`` rows need a
+    Only ``PENDING``/``REVERTED`` rows of executable ops (``update`` rows need a
     property name; ``create``/``delete``/``publish``/``unpublish``/
     ``set_publish_status``/``create_relationships`` rows are whole-entity; the
     merge ops behave as their target's op, with the source deletes carried in
@@ -464,7 +445,7 @@ def partition_for_apply(
 ) -> tuple[list[Suggestion], list[Suggestion]]:
     """(property_rows, whole_entity_rows) among pushable rows for the given subset (pure).
 
-    ``property_rows`` = ACCEPTED/EDITED ``update``/``update_and_delete`` rows
+    ``property_rows`` = PENDING/REVERTED ``update``/``update_and_delete`` rows
     with a ``property_name`` — the partial-update path (``build_apply_updates``
     groups them per entity). ``whole_entity_rows`` = everything else pushable:
     rows of the whole-entity ops (delete/publish/unpublish/set_publish_status/
@@ -636,7 +617,7 @@ def build_apply_updates(
     Rows group by (sharedId, language) into ONE ``{"shared_id", "language",
     "metadata": {...}}`` payload each (plus ``"title"`` when a ``_title`` row is
     present, and ``"template_name"`` when the recording carried one); an
-    ``EDITED`` row overrides its proposal. Group and key order follow first
+    proposal. Group and key order follow first
     appearance, so a batch is deterministic.
 
     Only ``update``/``update_and_delete`` rows with a property name enter this
@@ -777,12 +758,10 @@ def build_apply_creates(
             {
                 # Uwazi refuses a create whose title is EMPTY (``POST
                 # /api/entities``: "String must contain at least 1 character(s)"),
-                # and one placeholder-titleless row refused the whole Run.
-                # Only the entity's own identity is known here, so the fallback
-                # names what the row IS and stays editable in Uwazi afterwards:
-                # "<template> <source>" (and a 1-based position when the
-                # grouping carried no source id).
-                "title": payload["title"] or create_fallback_title(payload["template_name"], shared_id, order_index),
+                # and one titleless row refused the whole Run. Only the entity's
+                # own identity is known here, so the fallback names what the row
+                # IS and stays editable in Uwazi afterwards: "<template> 3".
+                "title": payload["title"] or create_fallback_title(payload["template_name"], order_index),
                 "template_name": payload["template_name"],
                 "metadata": payload["metadata"],
                 "language": language,
@@ -792,17 +771,17 @@ def build_apply_creates(
     return creates
 
 
-def create_fallback_title(template_name: str, source_id: str, position: int) -> str:
+def create_fallback_title(template_name: str, position: int) -> str:
     """The title a create with no title row is written under (pure).
 
-    "<Template> <source>" reads as what the entity is and where it came from
-    (the review table shows the same ids), and the 1-based position keeps two
-    placeholders from colliding when the record carried no id.
+    "<Template> <position>" names what the entity is without leaking the
+    recorder's ``dry-created-N`` placeholder into the entity Uwazi ends up
+    storing — that is a review-table identity, not a name, and an instance full
+    of "Rec dry-created-227" entities was exactly what shipping it produced. The
+    1-based position keeps two titleless creates from colliding.
     """
     template = str(template_name or "").strip() or "Entity"
-    source = str(source_id or "").strip()
-    base = f"{template} {source}".strip() if source else ""
-    return base if base else f"{template} {position + 1}"
+    return f"{template} {position + 1}"
 
 
 def property_scope_ids(

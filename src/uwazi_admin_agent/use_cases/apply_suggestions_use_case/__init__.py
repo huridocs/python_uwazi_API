@@ -8,7 +8,6 @@ from __future__ import annotations
 from .errors import ApplyRefusedError, ApplyWriteError, format_write_failures
 from .payloads import (
     _as_int,
-    _decode_edited,
     _failure_entry,
     _geolocation_entries,
     _in_rows,
@@ -44,7 +43,6 @@ __all__ = [
     "ApplySuggestionsUseCase",
     "ApplyWriteError",
     "_as_int",
-    "_decode_edited",
     "_failure_entry",
     "_geolocation_entries",
     "_in_rows",

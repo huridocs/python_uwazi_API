@@ -2,7 +2,7 @@
 
 A **prediction pass** is a dry run whose recorded would-be writes are persisted
 as :class:`Suggestion` rows. The review UI then lets the operator accept, edit,
-or discard each suggestion before an *apply* run pushes the accepted property
+or discard each suggestion before an *apply* run pushes the proposed property
 values to Uwazi. Everything here is a value object (frozen where it is an
 immutable record) plus the filter object the store compiles into SQL — the
 10k-entity scale guarantee depends on selection living in the filter, never in
@@ -82,8 +82,8 @@ def skip_reason_label(reason: str | None) -> str:
     can identify it without the operator having to decode snake_case.
     """
     if not reason:
-        return "This entity was not processed; no reason was provided."
-    return SKIP_REASON_LABELS.get(reason, f"This entity was not processed ({reason.replace('_', ' ')}).")
+        return "This entity was excluded; no reason was provided."
+    return SKIP_REASON_LABELS.get(reason, f"This entity was excluded ({reason.replace('_', ' ')}).")
 
 
 # Ops whose table rows carry a proposed property value (and so get current-value
@@ -146,8 +146,6 @@ class SuggestionStatus(str, Enum):
     """
 
     PENDING = "pending"
-    ACCEPTED = "accepted"
-    EDITED = "edited"
     DISCARDED = "discarded"
     APPLIED = "applied"
     REVERTED = "reverted"
@@ -181,7 +179,7 @@ class Suggestion(BaseModel):
         description=(
             "The store's row id, assigned on persistence and read back by queries. "
             "None for a freshly built suggestion (before the store assigns one). "
-            "The per-row actions (Accept/Discard/Edit) address rows by this id."
+            "The per-row actions (Run/Discard) address rows by this id."
         ),
     )
     run_id: str = Field(description="The run this prediction belongs to.")
@@ -259,6 +257,16 @@ class Suggestion(BaseModel):
             "rows become regular, runnable rows)."
         ),
     )
+    created_shared_id: str | None = Field(
+        default=None,
+        description=(
+            "For a `create`/`create_and_delete` row: the sharedId Uwazi minted when the row "
+            "was RUN. The placeholder is gone from the display once this is set — the Target "
+            "cell reads the created entity's title and links to its page. None until the "
+            "create has been applied, which is what keeps a not-yet-created entity from "
+            "pretending to exist."
+        ),
+    )
     proposed_value: Any = Field(default=None, description="The value the script would write (raw metadata shape).")
     current_value: Any = Field(default=None, description="Uwazi's current value for that key, when fetched.")
     skip_reason: str | None = Field(
@@ -277,7 +285,6 @@ class Suggestion(BaseModel):
         ),
     )
     status: SuggestionStatus = Field(default=SuggestionStatus.PENDING, description="Review state.")
-    edited_value: str | None = Field(default=None, description="Operator-supplied replacement (status=EDITED).")
     rejected_values: list[str] = Field(
         default_factory=list,
         description=(
@@ -292,8 +299,7 @@ class Suggestion(BaseModel):
             "The operator's EXPLICIT multiselect selection: the exact labels the Run writes. "
             "None = no explicit selection (the proposal minus `rejected_values` is used). "
             "An empty list means 'nothing selected' — the row becomes the sentinel-discarded "
-            "row (ALL_VALUES_REJECTED_REASON) and a Run writes nothing. An EDITED row's "
-            "`edited_value` still wins over both."
+            "row (ALL_VALUES_REJECTED_REASON) and a Run writes nothing."
         ),
     )
     basis: list[str] = Field(
@@ -352,7 +358,6 @@ class EntityReviewRow(BaseModel):
     properties: list[str] = Field(description="Distinct non-null property names, first-appearance order.")
     proposal_count: int = Field(ge=0, description="Total suggestion rows for the entity.")
     pending: int = Field(ge=0, description="Rows still in review.")
-    accepted: int = Field(ge=0, description="Rows accepted (not yet applied).")
     applied: int = Field(ge=0, description="Rows already written to Uwazi.")
     reverted: int = Field(ge=0, description="Written rows whose writes a revert undid (runnable again).")
     discarded: int = Field(ge=0, description="Rows rejected/discarded.")
@@ -404,11 +409,9 @@ class OperationReviewRow(BaseModel):
     )
     proposal_count: int = Field(ge=0, description="Total matching suggestion rows for the entity.")
     pending: int = Field(ge=0, description="Rows still in review.")
-    accepted: int = Field(ge=0, description="Rows accepted (not yet applied).")
     applied: int = Field(ge=0, description="Rows already written to Uwazi.")
     reverted: int = Field(ge=0, description="Written rows whose writes a revert undid (runnable again).")
     discarded: int = Field(ge=0, description="Rows rejected/discarded.")
-    edited: int = Field(ge=0, description="Rows carrying an operator edit.")
     validation: int = Field(
         default=0,
         ge=0,
@@ -482,13 +485,6 @@ class SuggestionFilter(BaseModel):
         ),
     )
     text: str | None = Field(default=None, description="Case-insensitive LIKE over title + sharedId.")
-    accepted_only: bool = Field(
-        default=False,
-        description=(
-            "Restrict to rows the apply path would push: ACCEPTED or EDITED. Used by "
-            "'Accept selected' so the button can reuse the current filter."
-        ),
-    )
     shared_ids: list[str] | None = Field(
         default=None,
         description=(
@@ -525,8 +521,8 @@ class SuggestionFilter(BaseModel):
         default=None,
         description=(
             "Restrict to holdout validation rows (True) or regular rows (False). None = no "
-            "constraint. The review table's 'Validation' filter sets it; the apply path sets "
-            "it to False so a Run can never push a validation row whatever its status."
+            "constraint. The apply path sets it to False so a Run can never push a validation "
+            "row whatever its status."
         ),
     )
     limit: int = Field(default=25, ge=1, description="Page size (ignored by aggregate/projection queries).")
@@ -543,6 +539,18 @@ class SuggestionFilter(BaseModel):
         default=False,
         description="True for descending order. The review page turns it on for 'modified' so the latest rows read first.",
     )
+
+    def without(self, *fields: str) -> "SuggestionFilter":
+        """A copy of this filter with some fields cleared (pure).
+
+        The review page counts each filter's options against the OTHER active
+        filters: the Status options must say how many rows remain once the
+        Property/Operation/Language/Validation choices are applied, not the
+        whole run's totals. Clearing one field at a time — ``without("status")``
+        for the Status options, ``without("op")`` for the Operation options —
+        is that count's filter.
+        """
+        return self.model_copy(update={field: None for field in fields})
 
 
 class PredictionPass(BaseModel):

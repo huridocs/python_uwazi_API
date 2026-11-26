@@ -59,7 +59,7 @@ class SuggestionStorePort(ABC):
         """Upsert suggestion rows (idempotent on run/shared_id/op/property).
 
         An upsert, not an insert: a re-run of the same pass over the same scope
-        must overwrite those rows. Operator review state (status/edited value)
+        must overwrite those rows. Operator review state (status/discard reason)
         is NOT clobbered by an upsert of the same key — the row is a prediction
         identity, so its proposal fields refresh while its review fields survive.
         """
@@ -75,7 +75,7 @@ class SuggestionStorePort(ABC):
         """Merge a refreshed pass into the SAME table, preserving only safe state.
 
         New identities insert PENDING; unchanged proposals keep the operator's
-        status; changed proposals reset PENDING except EDITED/DISCARDED; rows
+        status; changed proposals reset PENDING except DISCARDED; rows
         the script no longer produces are DELETED, except an APPLIED write which
         is kept as the run's history.
 
@@ -142,13 +142,19 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def op_status_counts(self, run_id: str) -> dict[str, dict[str, int]]:
-        """Row counts per ``op`` and per ``status`` over the whole run.
+    def op_status_counts(
+        self,
+        run_id: str,
+        f: SuggestionFilter | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Counts for every filter option, each counted against the OTHER filters.
 
-        The Op and Status filters' options: ``{"op": {value: n}, "status":
-        {value: n}}``. Counts are ROW-level (the suboperations the filters match)
-        and span the WHOLE run, so they do not shift as the operator pages or
-        narrows the table.
+        Keys: ``op``, ``status``, ``property``, ``language`` (value → rows) and
+        ``validation`` (dropdown value → rows: ``""`` regular + holdout,
+        ``"hide"`` regular only, ``"only"`` holdout only). Each dimension is
+        counted with ITS OWN filter cleared, so its options are not cancelled
+        out by the current choice, and every other active filter still narrows
+        the number. No filter counts the whole run.
         """
         ...
 
@@ -170,9 +176,8 @@ class SuggestionStorePort(ABC):
         The whole-result selection ("select all results") spans every page, so the
         bulk actions resolve their identities from the store through this
         projection. Limit/offset are ignored on purpose. ``runnable_only``
-        narrows to the statuses a Run may still write (PENDING/ACCEPTED/EDITED/
-        REVERTED), so a whole-result selection never includes already-applied or
-        discarded rows.
+        narrows to the statuses a Run may still write (PENDING/REVERTED), so a
+        whole-result selection never includes already-applied or discarded rows.
         """
         ...
 
@@ -203,11 +208,39 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
+    def record_created_ids(self, run_id: str, created: dict[str, str]) -> int:
+        """Point a run's CREATE rows at the sharedIds a Run minted for them.
+
+        ``created`` maps the row's ``dry-created-N`` placeholder to the real
+        sharedId. A placeholder absent from the map (a refused create) keeps its
+        placeholder. Returns how many rows were re-pointed.
+        """
+        ...
+
+    @abstractmethod
+    def created_shared_id_for(self, run_id: str, shared_id: str) -> str | None:
+        """The sharedId a Run minted for a CREATE row (None when no Run minted one).
+
+        ``shared_id`` may be the row's ``dry-created-N`` placeholder or the real
+        id; both resolve to the real id, which is what the per-row revert
+        deletes.
+        """
+        ...
+
+    @abstractmethod
+    def clear_created_ids(self, run_id: str, shared_ids: list[str]) -> int:
+        """Clear the minted sharedId of CREATE rows whose entity a revert deleted.
+
+        The rows become proposals again, so they must not keep linking to a
+        page that no longer exists. Returns how many rows changed.
+        """
+        ...
+
+    @abstractmethod
     def set_status(
         self,
         ids: list[int],
         status: SuggestionStatus,
-        edited_value: str | None = None,
         reason: str | None = None,
     ) -> None:
         """Set the review status of explicit rows (per-row buttons, selection bulk)."""
@@ -255,9 +288,8 @@ class SuggestionStorePort(ABC):
     def reset_statuses(self, run_id: str, ids: list[int]) -> None:
         """Return DISCARDED rows to PENDING ("Undo discard").
 
-        Only the discard state is undoable this way: ACCEPTED/EDITED/APPLIED rows
-        carry operator intent or have already been written, so they keep their
-        status.
+        Only the discard state is undoable this way: APPLIED rows have already
+        been written and keep their status.
         """
         ...
 
@@ -322,7 +354,7 @@ class SuggestionStorePort(ABC):
         The status keys count ENTITY-LANGUAGE GROUPS — the rows the review table
         itself shows — so the cards and the table always agree:
         ``total`` is the distinct (sharedId, language) count and each of
-        ``pending``/``accepted``/``edited``/``discarded``/``applied``/``reverted``
+        ``pending``/``discarded``/``applied``/``reverted``
         counts the groups carrying at least one row in that status (a group whose
         rows span statuses is counted in each). ``match_exact``/``match_mismatch``/
         ``match_new`` stay row-level: they are per-property comparison verdicts.
@@ -353,7 +385,9 @@ class SuggestionStorePort(ABC):
 
         Called after a per-entity (per-row) revert: one restore rolled the WHOLE
         entity back — every language row's write — so all the entity's APPLIED
-        rows move, across languages.
+        rows move, across languages. A CREATE row is matched through its
+        ``created_shared_id`` too, since deleting the minted entity must move
+        the rows that proposed it.
         """
         ...
 

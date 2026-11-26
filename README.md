@@ -251,7 +251,7 @@ table's `fact_check` action or its row menu). The review flow is built on the
 1. **Selection script** (`script.py`, read-only) — discovers the affected
    entities and declares one intended change per entity. Run it with **"Scan
    entities"**: a dry pass (real reads, zero writes) whose records become the
-   review table's suboperations, grouped one row per affected entity and scored
+   review table's suggestions, grouped one row per affected entity and scored
    against the values Uwazi currently holds (stored in a local SQLite file,
    `data/suggestions.db`).
 2. **Apply script** (`apply_script.py`) — applies the change to EXACTLY ONE
@@ -262,34 +262,34 @@ table's `fact_check` action or its row menu). The review flow is built on the
 On the review page:
 
 - the table lists ONE row per affected **entity** (the operation), with a
-  checkbox; expanding the row (or **Expand all**) lists its **suboperations** —
+  checkbox; expanding the row (or **Expand all**) lists its **suggestions** —
   one per property value per language, one per relationship link — each with its
   own checkbox, status badge and actions. One entity written in two languages is
   still ONE row, with one part per language;
-- **Run (N)** writes the checked suboperations through one accumulating,
+- **Run (N)** writes the checked suggestions through one accumulating,
   revertable *apply run* (`<run>-apply`). Property rows are pushed as batched
   partial updates; whole-entity rows (delete/publish/...) and creates go through
   their dedicated helpers. Ticking an operation ticks all its parts, and ticking
   its last part ticks the operation. An operation's own **Run** button runs its
-  ticked parts (all of them when none is ticked); a suboperation's **Run** writes
+  ticked parts (all of them when none is ticked); a suggestion's **Run** writes
   exactly that property. A locked part (delete/publish/merge) runs with its
   operation, since it is one action on Uwazi's side;
 - **Revert** on an operation restores that entity to the backup the run made
   BEFORE any of its writes (all its languages share one backup). A written
-  property suboperation also offers its own **Revert**, which puts back just
+  property suggestion also offers its own **Revert**, which puts back just
   that property and leaves the run's other writes in place. **Revert task** (or
   the apply run's own revert) undoes everything in one action. The **Value**
   column (and the entity window's `Value:` line) keeps the PRE-run value after a
   Run — it is the before-state the Revert restores, and running a row does not
   rewrite it; only **Sync with Uwazi** re-reads values from Uwazi;
-- the entity window (click the title, or a suboperation's **Edit** icon) shows
+- the entity window (click the title, or a suggestion's **Edit** icon) shows
   the primary PDF beside the entity's property rows; opening it from a
-  suboperation highlights that property;
+  suggestion highlights that property;
 - filters (Status, Discarded, Op, Property with its accuracy, Language, Match,
   Search) are SUBOPERATION filters: an operation whose every part a filter
   removed is not shown, and a Run under a filter writes only the parts the
   filter left. **Discard (N)** (and the per-row **Discard**) marks the checked
-  suboperations as discarded — "the end user does not want this executed". A
+  suggestions as discarded — "the end user does not want this executed". A
   discard is a MARK, not a delete: a Run never writes a discarded row, the
   reason the operator typed is stored with it, and **Restore** brings the
   operation back into the review queue. The **Discarded** filter reads both

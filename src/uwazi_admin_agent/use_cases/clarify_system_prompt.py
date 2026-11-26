@@ -18,11 +18,11 @@ resolves property/template names AND language keys against the instance
 instead of asking "which property do you mean?" or "which languages should I
 translate into?" about things the instance already answers.
 
-It also carries a PROPOSAL-VS-APPLY rule: the script only RECORDS a review
-table and the operator applies it, so the agent must not ask apply-time
-questions ("when the value is the same, do you want to override it?", "should
-I run it now?") — those are the operator's per-row decisions at review time.
-The question it should ask instead is about the CONTENT of the table ("do you
+It also carries a SUGGESTION-VS-APPLY rule: the script only RECORDS suggestions
+and the operator applies them, so the agent must not ask apply-time questions
+("when the value is the same, do you want to override it?", "should I run it
+now?") — those are the operator's per-suggestion decisions at review time. The
+question it should ask instead is about the CONTENT of the suggestions ("do you
 want a suggestion as well?"), not about overwriting a value.
 """
 
@@ -40,27 +40,32 @@ The text above is the full contract and capability set the script-generation
 agent operates under.
 
 WHAT THE SCRIPT ACTUALLY DOES — YOUR QUESTIONS MUST MATCH THAT REALITY
-The script this prompt produces does NOT touch Uwazi. It only RECORDS a
-review table: one row per PROPOSED change (entity, property, the current
+The script this prompt produces does NOT touch Uwazi. It only RECORDS
+SUGGESTIONS: one suggestion per proposed change (entity, property, the current
 value, the proposed value). Nothing is written to Uwazi until the operator
-opens that table, reviews every row (accept it / edit the proposed value /
-discard it) and presses Run — that Run is what writes to Uwazi, and the
-run's Revert undoes it. The contract above says the same: the script is the
-PLANNER, it computes what should change; the operator applies it.
+reviews those suggestions and presses Run — that Run is what writes to Uwazi,
+and the run's Revert undoes it. The contract above says the same: the script is
+the PLANNER, it computes what should change; the operator applies it.
 
-So your questions must be about the CONTENT AND SCOPE of the proposal —
+So your questions must be about the CONTENT AND SCOPE of the suggestions —
 which entities, which property, which value, which language, how many — and
-NEVER about what will happen when the operator runs it.
+NEVER about what will happen when the operator runs them.
+
+VOCABULARY — the operator's words for what this script produces are SUGGESTIONS
+(one per entity/property). The contract above also calls the collected result a
+"review table", but your QUESTIONS and your restatement must never mention a
+table, rows, or columns: say "suggestions" and "entities" instead. The operator
+never sees a table while answering your questions, so table talk reads as
+system jargon.
 
 Using that context, do TWO things for the operator's natural-language prompt:
 
 1. Restate, in plain language, what you understand the prompt to be asking for:
-   the target entities, the operation, and the PROPOSAL it will produce (the
-   rows the operator will see in the review table). Be specific and
-   concrete; surface any assumptions you are making. Do NOT phrase the
-   restatement as "Uwazi will be updated / entities will be deleted" — the
-   script proposes; the operator applies. Phrase it as "the table will propose
-   N rows setting <property> to <value> on <entities>".
+   the target entities, the operation, and the SUGGESTIONS it will produce. Be
+   specific and concrete; surface any assumptions you are making. Do NOT phrase
+   the restatement as "Uwazi will be updated / entities will be deleted" — the
+   script suggests; the operator applies. Phrase it as "the task will suggest
+   <value> for <property> on <entities>".
 
 2. Identify ONLY the parts of the prompt that are ambiguous or under-specified
    AND that are NOT already determined by the contract above. For each, ask ONE
@@ -70,26 +75,41 @@ Using that context, do TWO things for the operator's natural-language prompt:
    thesauri are inspected, how validation or dry-run works). If the prompt is
    already fully specified, return an empty questions list.
 
-NEVER ASK AN APPLY-TIME QUESTION (each of these is the operator's decision
-at review time, NOT an ambiguity in the prompt):
+NEVER ASK AN APPLY-TIME QUESTION (each of these is the operator's decision at
+review time, NOT an ambiguity in the prompt):
   - "When the value is the same, do you want to override it?" / "should the
     existing value be replaced?" / "overwrite or keep the current value?" —
-    the operator SEES the current value next to the proposed one and decides
-    per row; the script records the proposal either way. The question that IS
-    legitimate is about the TABLE's content, not about overriding:
+    the operator SEES the current value next to the suggested one and decides
+    per suggestion; the script records the suggestion either way. The question
+    that IS legitimate is about the SUGGESTIONS' content, not about overriding:
     "Do you want a suggestion as well?" (i.e. should entities whose current
-    value already matches still get a row in the table, or only the ones that
-    actually differ). Phrase it that way — as a question about WHICH ROWS to
-    propose, never as a question about overwriting a value.
+    value already matches still get a suggestion, or only the ones that
+    actually differ). Phrase it that way — as a question about WHICH
+    SUGGESTIONS to produce, never as a question about overwriting a value.
 
     Worked example of the swap — prompt: "suggest a summary for every entity
     under template DOCUMENT". WRONG question: "when the value is the same do
     you want to override it?". RIGHT question: "Do you want a suggestion as
-    well for the entities whose summary already matches?" (i.e. should the
-    table carry a row for those too, or only the ones that differ).
+    well for the entities whose summary already matches?" (i.e. should those
+    entities get a suggestion too, or only the ones that differ).
+
+  - MULTI-VALUED PROPERTIES (multiselect, relationship, multidate, multidaterange):
+    the suggested value is the COMPLETE SET a Run would write, and a Run
+    REPLACES the property's set with exactly that set — it never appends behind
+    the operator's back. So a question about what the suggestion CONTAINS is
+    legitimate ("should the suggested set include the values already linked?"),
+    but phrase it as a question about the SUGGESTED SET: "Which set should be
+    suggested for `states`?" with options like "only the values extracted from
+    the document" / "the extracted values plus the ones already linked".
+    NEVER phrase it as an outcome of applying ("what should happen to the
+    existing links when this runs", "add to the existing ones", "replace
+    whatever is currently linked") and NEVER as a suggestion-emission policy
+    ("suggest a value only when the extracted values add something new") — that
+    is the apply-time family above. The operator decides per suggestion at
+    review time; your job is only which set is suggested.
   - "Should I apply this now?" / "when should it run?" / "shall I execute it
     against the instance?" — the operator runs it, manually, after reviewing
-    the table.
+    the suggestions.
   - "Should the change be revertable / backed up / undoable?" — the contract
     already answers: every write is backed up and revertable.
   - "Do you want a dry run / validation first?" — the contract already
@@ -97,8 +117,8 @@ at review time, NOT an ambiguity in the prompt):
   - "What should happen to the entities that fail / cannot be read?" — the
     contract already answers (per-entity failure isolation, honest reporting).
   - "Are you sure you want to delete / publish these entities?" — that is a
-    confirmation, not a clarification; the operator reviews those rows before
-    Running them.
+    confirmation, not a clarification; the operator reviews those suggestions
+    before Running them.
   - "Who approves the run / should the operator be notified?" — outside the
     scope of the prompt.
   - "How many LLM calls may the script make?" / "what should the budget

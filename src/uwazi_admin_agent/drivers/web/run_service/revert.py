@@ -6,7 +6,6 @@ from typing import Any
 
 from loguru import logger
 
-from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.revert_verification import format_verification_result
 from uwazi_admin_agent.domain.suggestion import (
@@ -50,14 +49,20 @@ async def revert_entity_rows(url: str, run_id: str, shared_id: str, user: str, p
     is the run-level revert's job); statuses flip so the entity's rows across
     ALL languages read REVERTED and become runnable again.
 
+    A created entity is undone by DELETING it, so its row's undo needs no
+    backup: the entity is removed and the returned info has no backup date.
+
     Returns the entity's backup info (its ``backup_created_at`` shows in the
     toast). Raises ``RevertRefusedError`` when there is no backup (nothing was
-    written by this run) or the entity was created by the run (reverting it
-    means deleting it — a run-level operation).
+    written by this run) and the entity was not created by it.
     """
     runtime = build_runtime(user=user, password=password, url=url)
+    store = build_suggestion_store(url)
+    created = bool(store.created_shared_id_for(run_id, shared_id)) or shared_id in {
+        entry.shared_id for entry in runtime.backup_store.load_manifest(run_id).created
+    }
     snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
-    if snapshot is None:
+    if snapshot is None and not created:
         raise RevertRefusedError("this row has no backup — the run has not written to this entity")
     return entity_backup_info(url, run_id, shared_id)
 
@@ -130,11 +135,12 @@ async def revert_entities_selection(
     covers exactly those entities' rows — a language the operator did NOT check
     still reads REVERTED when its entity was restored (its write is gone too).
 
-    Created and deleted entities are skipped (reported, not fatal): a created
-    entity's undo is a deletion and a deleted one's undo is a re-create — both
-    are ordered run-level operations that only the run-level Revert performs.
-    No-backup entities are skipped too. Per-entity failures are collected: one
-    bad restore neither aborts the batch nor hides the restores that landed.
+    An entity the run CREATED is undone too — its undo is a deletion of the
+    minted sharedId. A DELETED entity is skipped (reported, not fatal): its undo
+    is a re-create (fresh sharedId + files + relationship rows), an ordered
+    run-level operation only the run-level Revert performs. No-backup entities
+    are skipped too. Per-entity failures are collected: one bad restore neither
+    aborts the batch nor hides the restores that landed.
     ``progress`` is the optional ``(done, total)`` callback the gate's toast
     polls: one tick per DISTINCT entity attempted, skipped or not, so the
     fraction always reaches its total.
@@ -150,13 +156,29 @@ async def revert_entities_selection(
         return outcome
     runtime = build_runtime(user=user, password=password, url=url)
     store = build_suggestion_store(url)
+    manifest = runtime.backup_store.load_manifest(run_id)
+    created_ids = {entry.shared_id for entry in manifest.created}
     reverted: list[str] = []
     for index, shared_id in enumerate(seen):
+        minted = store.created_shared_id_for(run_id, shared_id)
+        created = shared_id in created_ids or bool(minted)
+        merge_rows = store.applied_rows_for(run_id, [shared_id]) or store.get_entity(run_id, shared_id)
+        if any(row.op == "create_and_delete" for row in merge_rows):
+            # A create-merge's undo also re-creates the sources it absorbed:
+            # deleting the created target alone would lose them.
+            outcome.skipped_merge.append(shared_id)
+            if progress is not None:
+                try:
+                    progress(index + 1, len(seen))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("could not report revert progress: {}", exc)
+            continue
         try:
             snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
         except RevertRefusedError as exc:
-            # The two refusals have different remedies (delete the created entity
-            # vs. re-create the deleted one), so they are reported apart.
+            # The refusals have different remedies (re-create a deleted entity
+            # vs. delete a created one whose id was never recorded), so they are
+            # reported apart.
             if "deleted by the run" in str(exc):
                 outcome.skipped_deleted.append(shared_id)
             else:
@@ -165,10 +187,13 @@ async def revert_entities_selection(
             logger.warning("bulk revert failed run={} sharedId={}: {}", run_id, shared_id, exc)
             outcome.failures.append(f"{shared_id}: {exc}")
         else:
-            if snapshot is None:
+            if snapshot is None and not created:
                 outcome.skipped_no_backup.append(shared_id)
             else:
-                reverted.append(shared_id)
+                # A created entity's undo deletes it, so it reports its MINTED
+                # id: that is the entity the operator selected, in the table's
+                # own naming after a Run re-pointed the row.
+                reverted.append(minted or shared_id)
                 logger.info("bulk revert: restored run={} sharedId={}", run_id, shared_id)
         # One tick per ATTEMPTED entity — skipped and failed included, so the
         # fraction always reaches its total. Progress is display state, never
@@ -179,10 +204,11 @@ async def revert_entities_selection(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not report revert progress: {}", exc)
     outcome.reverted.extend(reverted)
-    if reverted and hasattr(store, "mark_applied_reverted_for"):
+    if reverted:
         # Flip only the RESTORED entities' rows: an unselected sibling entity
-        # that was also written by this run stays APPLIED (still written).
-        assert isinstance(store, SqliteSuggestionStore)
+        # that was also written by this run stays APPLIED (still written). A
+        # created entity's rows are addressed by their placeholder too, so the
+        # store matches both spellings.
         store.mark_applied_reverted_for(run_id, reverted)
     return outcome
 

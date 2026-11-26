@@ -56,7 +56,6 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         status = SuggestionStatus.APPLIED if old_status is SuggestionStatus.APPLIED else SuggestionStatus.PENDING
     elif str(old["op"]) == MATCHED_OP:
         status = SuggestionStatus.PENDING
-    edited_value = old["edited_value"] if status is SuggestionStatus.EDITED else None
     discard_reason = old["discard_reason"] if status is SuggestionStatus.DISCARDED else None
     reviewed_at = old["reviewed_at"] if status is old_status else now_text
     old_rejected = _value_from_json(old["rejected_values"]) or []
@@ -102,7 +101,6 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         _json_or_none(suggestion.merge_source_ids) if suggestion.merge_source_ids else None,
         _json_or_none(suggestion.merge_files) if suggestion.merge_files else None,
         status.value,
-        edited_value,
         discard_reason,
         _json_or_none(rejected_values) if rejected_values else None,
         _json_or_none(selected_values) if selected_values is not None else None,
@@ -110,6 +108,7 @@ def _reconciled_values(old: Any, suggestion: Suggestion, now_text: str) -> tuple
         suggestion.context,
         suggestion.source_shared_id,
         1 if suggestion.is_validation else 0,
+        suggestion.created_shared_id or old["created_shared_id"],
         reviewed_at,
         int(old["id"]),
     )
@@ -126,9 +125,9 @@ class WritesMixin:
         """Upsert suggestion rows, preserving operator review state.
 
         The upsert refreshes the PROPOSAL columns (proposed/current/match/title)
-        and leaves the REVIEW columns (status/edited_value/discard_reason/
-        reviewed_at) untouched for an existing identity: a re-run over the same
-        scope must not silently un-discard an operator's earlier decision.
+        and leaves the REVIEW columns (status/discard_reason/reviewed_at)
+        untouched for an existing identity: a re-run over the same scope must
+        not silently un-discard an operator's earlier decision.
         """
         if not suggestions:
             return
@@ -150,7 +149,7 @@ class WritesMixin:
                 _json_or_none(s.merge_files) if s.merge_files else None,
                 s.status.value,
                 1 if s.is_validation else 0,
-                s.edited_value,
+                s.created_shared_id,
                 _json_or_none(s.rejected_values) if s.rejected_values else None,
                 _json_or_none(s.selected_values) if s.selected_values is not None else None,
                 _json_or_none(s.basis) if s.basis else None,
@@ -169,8 +168,8 @@ class WritesMixin:
                 INSERT INTO suggestion
                     (run_id, shared_id, entity_title, template_name, op, language, property_name,
                      detail_key, proposed_value, current_value, skip_reason, match_state, merge_source_ids,
-                     merge_files, status, is_validation, edited_value, rejected_values, selected_values, basis,
-                     context, source_shared_id, discard_reason, reviewed_at, created_at)
+                     merge_files, status, is_validation, created_shared_id, rejected_values,
+                     selected_values, basis, context, source_shared_id, discard_reason, reviewed_at, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, shared_id, op, ifnull(language, ''), ifnull(property_name, ''),
                              ifnull(detail_key, ''))
@@ -186,7 +185,8 @@ class WritesMixin:
                     basis = excluded.basis,
                     context = excluded.context,
                     source_shared_id = excluded.source_shared_id,
-                    is_validation = excluded.is_validation
+                    is_validation = excluded.is_validation,
+                    created_shared_id = COALESCE(excluded.created_shared_id, suggestion.created_shared_id)
                 """,
                 rows,
             )
@@ -209,7 +209,7 @@ class WritesMixin:
         - new identity → insert PENDING;
         - same proposal → keep the operator's status, refresh the proposal
           columns (including ``current_value``);
-        - changed proposal → PENDING unless the row is EDITED/DISCARDED;
+        - changed proposal → PENDING unless the row is DISCARDED;
         - a property that starts/stops matching Uwazi → the SAME row becomes the
           incoming ``update``/``matched`` row (one row, one identity slot);
         - missing → APPLIED stays APPLIED (it really happened: the run's
@@ -316,9 +316,10 @@ class WritesMixin:
                         UPDATE suggestion
                            SET op = ?, detail_key = ?, entity_title = ?, template_name = ?,
                                proposed_value = ?, current_value = ?, skip_reason = ?, match_state = ?,
-                               merge_source_ids = ?, merge_files = ?, status = ?, edited_value = ?,
+                               merge_source_ids = ?, merge_files = ?, status = ?,
                                discard_reason = ?, rejected_values = ?, selected_values = ?, basis = ?,
-                               context = ?, source_shared_id = ?, is_validation = ?, reviewed_at = ?
+                               context = ?, source_shared_id = ?, is_validation = ?, created_shared_id = ?,
+                               reviewed_at = ?
                          WHERE id = ?
                         """,
                         updates,
@@ -395,7 +396,7 @@ class WritesMixin:
         cursor = self._execute(
             """
             UPDATE suggestion
-               SET is_validation = 0, status = ?, edited_value = NULL, discard_reason = NULL,
+               SET is_validation = 0, status = ?, discard_reason = NULL,
                    rejected_values = NULL, selected_values = NULL, reviewed_at = ?
              WHERE run_id = ? AND shared_id = ? AND is_validation = 1
             """,
@@ -442,11 +443,79 @@ class WritesMixin:
             )
             self._conn.commit()
 
+    def record_created_ids(self, run_id: str, created: dict[str, str]) -> int:
+        """Point a run's CREATE rows at the sharedIds Uwazi minted for them.
+
+        A create's rows hold the ``dry-created-N`` placeholder the recorder
+        stamped. After a Run those entities exist, so the table can show their
+        real title and link to their page instead of a placeholder that reads
+        like a broken id. Returns how many rows were re-pointed.
+
+        ``created`` maps placeholder → real sharedId; a placeholder the Run
+        refused is absent and keeps its placeholder (it can be run again).
+        """
+        if not created:
+            return 0
+        touched = 0
+        for placeholder, real_id in created.items():
+            if not real_id:
+                continue
+            cursor = self._execute(
+                "UPDATE suggestion SET created_shared_id = ? WHERE run_id = ? AND shared_id = ?",
+                (real_id, run_id, placeholder),
+            )
+            touched += int(cursor.rowcount or 0)
+        logger.info("create rows re-pointed run={} rows={}", run_id, touched)
+        return touched
+
+    def created_shared_id_for(self, run_id: str, shared_id: str) -> str | None:
+        """The sharedId Uwazi minted for a CREATE row's placeholder (None when unknown).
+
+        A create's rows keep the recorder's ``dry-created-N`` placeholder as
+        ``shared_id``; the real id lives in ``created_shared_id`` once a Run
+        minted it. The per-row revert needs the REAL id to delete the entity, so
+        it resolves it here (an already-real id resolves to itself when the run
+        recorded it as created).
+        """
+        rows = self._query(
+            """
+            SELECT created_shared_id FROM suggestion
+             WHERE run_id = ?
+               AND (shared_id = ? OR created_shared_id = ?)
+               AND created_shared_id IS NOT NULL
+             LIMIT 1
+            """,
+            (run_id, shared_id, shared_id),
+        )
+        return str(rows[0]["created_shared_id"]) if rows else None
+
+    def clear_created_ids(self, run_id: str, shared_ids: list[str]) -> int:
+        """Forget the minted ids of CREATE rows whose entity was deleted again.
+
+        Called after a per-row revert deletes the entity a Run created: the row
+        goes back to being a proposal, so it must not keep linking to a page
+        that no longer exists. Returns how many rows changed.
+        """
+        if not shared_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in shared_ids)
+        cursor = self._execute(
+            f"""
+            UPDATE suggestion
+               SET created_shared_id = NULL
+             WHERE run_id = ?
+               AND (shared_id IN ({placeholders}) OR created_shared_id IN ({placeholders}))
+               AND created_shared_id IS NOT NULL
+            """,
+            [run_id, *shared_ids, *shared_ids],
+        )
+        logger.info("cleared minted ids run={} rows={}", run_id, cursor.rowcount)
+        return int(cursor.rowcount)
+
     def set_status(
         self,
         ids: list[int],
         status: SuggestionStatus,
-        edited_value: str | None = None,
         reason: str | None = None,
     ) -> None:
         if not ids:
@@ -455,18 +524,13 @@ class WritesMixin:
         self._execute(
             f"""
             UPDATE suggestion
-               SET status = ?, edited_value = ?, discard_reason = ?, reviewed_at = ?,
-                   rejected_values = CASE WHEN ? = 'edited' THEN NULL ELSE rejected_values END,
-                   selected_values = CASE WHEN ? = 'edited' THEN NULL ELSE selected_values END
+               SET status = ?, discard_reason = ?, reviewed_at = ?
              WHERE id IN ({placeholders})
             """,
             [
                 status.value,
-                edited_value,
                 reason,
                 _dt_to_text(datetime.now().astimezone()),
-                status.value,
-                status.value,
                 *ids,
             ],
         )
@@ -629,7 +693,7 @@ class WritesMixin:
         and the review table says so instead of leaving them reading "applied".
         EVERY row of the run is marked: one revert undoes the run's whole
         accumulated manifest, across passes. Only
-        APPLIED rows move — PENDING/ACCEPTED/DISCARDED rows were never written,
+        APPLIED rows move — PENDING/DISCARDED rows were never written,
         and already-REVERTED rows stay REVERTED (idempotent across a repeat).
         """
         cursor = self._execute(
@@ -652,8 +716,11 @@ class WritesMixin:
         """Mark APPLIED rows REVERTED for exactly these sharedIds; return the count.
 
         One per-entity restore rolled back EVERY language row of the entity, so
-        all its APPLIED rows move — across languages. No
-        sharedIds (an empty list) moves nothing.
+        all its APPLIED rows move — across languages. A CREATE row names its
+        placeholder (``dry-created-N``) while ``created_shared_id`` holds the
+        id a Run minted, so a row is matched by EITHER id: deleting the created
+        entity must move the rows that recorded it. No sharedIds (an empty
+        list) moves nothing.
         """
         if not shared_ids:
             return 0
@@ -662,13 +729,15 @@ class WritesMixin:
             f"""
             UPDATE suggestion
                SET status = ?, reviewed_at = ?
-             WHERE run_id = ? AND status = ? AND shared_id IN ({placeholders})
+             WHERE run_id = ? AND status = ?
+               AND (shared_id IN ({placeholders}) OR created_shared_id IN ({placeholders}))
             """,
             [
                 SuggestionStatus.REVERTED.value,
                 _dt_to_text(datetime.now().astimezone()),
                 run_id,
                 SuggestionStatus.APPLIED.value,
+                *shared_ids,
                 *shared_ids,
             ],
         )

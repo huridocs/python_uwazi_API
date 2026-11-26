@@ -31,6 +31,7 @@ from uwazi_admin_agent.domain.relationship_values import (
 )
 from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE, effective_selection, labels_of
 from uwazi_admin_agent.domain.suggestion import (
+    CREATE_OPS,
     DISPLAY_ONLY_OPS,
     INFO_OP,
     MATCHED_OP,
@@ -44,6 +45,7 @@ from uwazi_admin_agent.domain.suggestion import (
     skip_reason_label,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
+    CONTEXT_CELL_CHARS,
     MATCH_COLORS,
     OP_COLORS,
     OPENABLE_OPS,
@@ -53,7 +55,6 @@ from uwazi_admin_agent.drivers.web.review_view import (
     TITLE_CELL_CHARS,
     match_label,
     modified_label,
-    property_caption,
     property_heading,
     truncate,
 )
@@ -81,7 +82,8 @@ OP_BORDER_COLORS: dict[str, str] = {
     "create_and_delete": "#3949ab",
     "info": "#546e7a",
     "matched": "#2e7d32",
-    "skipped": "#ef6c00",
+    "skipped": "#9e9e9e",
+    "validate": "#8e24aa",
 }
 DEFAULT_BORDER_COLOR: str = "#607d8b"
 
@@ -99,21 +101,14 @@ LOCKED_SUB_OPS: dict[str, str] = {
     "create_and_delete": "a merge creates the target and deletes its sources in one Run — select the operation",
 }
 
-# Suboperation status labels. The store keeps the review lifecycle
-# (pending/accepted/edited/discarded/applied/reverted), but the operator only
-# ever acts on three states, so those are the three words the UI speaks:
-#   pending  — still to be written. A newly recorded row is stored ACCEPTED and
-#              an operator edit EDITED; both are just "waiting to run" here, so
-#              they read as pending instead of leaking the old accept/edit
-#              workflow into the badge.
-#   applied  — APPLIED, i.e. written to Uwazi.
-#   reverted — its write was undone, so it can be run again.
-# DISCARDED stays distinct: the operator refused it (Restore exists), so it must
-# not look runnable.
+# Suboperation status labels. The store's lifecycle IS the operator's
+# vocabulary, so each state has exactly one word:
+#   pending   — still to be written.
+#   applied   — written to Uwazi.
+#   reverted  — its write was undone, so it can be run again.
+#   discarded — the operator refused it (Restore exists), so it is not runnable.
 SUB_STATUS_LABELS: dict[str, str] = {
     SuggestionStatus.PENDING.value: "pending",
-    SuggestionStatus.ACCEPTED.value: "pending",
-    SuggestionStatus.EDITED.value: "pending",
     SuggestionStatus.APPLIED.value: "applied",
     SuggestionStatus.REVERTED.value: "reverted",
     SuggestionStatus.DISCARDED.value: "discarded",
@@ -181,7 +176,7 @@ def rerun_blocked(op: str, status_label: str) -> bool:
 # bytes no entity snapshot can remove. An ``update_and_delete`` merge is NOT in
 # this set: it is one operation whose undo restores its target AND re-creates the
 # sources it deleted, so its row offers Revert like any modified entity.
-NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create", "delete", "create_and_delete", MOVE_OP})
+NON_IN_PLACE_OPS: frozenset[str] = frozenset({"delete", "create_and_delete", MOVE_OP})
 
 
 def is_selectable(op: str) -> bool:
@@ -221,6 +216,12 @@ def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
     if sub.op == INFO_OP:
         return "" if sub.proposed_value is None else str(sub.proposed_value)
     if sub.op == SKIPPED_OP:
+        # A holdout row's headline is the MEASURED property, not the skip
+        # sentence: the row exists to show what the script suggested for the
+        # entity the score checks, and the reason it suggested nothing belongs
+        # in the caption below it.
+        if sub.is_validation and sub.property_name:
+            return property_heading(sub.property_name, sub.op, labels or {})
         return skip_reason_label(sub.skip_reason)
     if sub.op == MATCHED_OP:
         return property_heading(sub.property_name, sub.op, labels or {})
@@ -234,17 +235,39 @@ def sub_label(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
 
 
 def sub_caption(sub: Suggestion, labels: dict[str, str] | None = None) -> str:
-    """The raw name shown under a suboperation's heading, or "" (pure)."""
-    if sub.op == INFO_OP:
+    """The line shown under a suboperation's heading, or "" (pure).
+
+    A PROPERTY row is named by its template label only: the internal property
+    name (``document_ref``) is an implementation identifier the operator never
+    needs, and printing it under the readable label was noise in every row. The
+    name still travels on the payload (``property_name``) because the actions
+    address rows by it.
+
+    Two other kinds of row keep a caption, and it is evidence, not an id: a
+    relationship LINK names its relation type, and a merge's structural part
+    (a copied file, a deleted source) names the source entity.
+    """
+    if sub.op in (INFO_OP, SKIPPED_OP, MATCHED_OP):
         return ""
-    if sub.op == SKIPPED_OP:
-        return ""
-    if sub.op == MATCHED_OP:
-        return property_caption(sub.property_name, labels or {})
     if sub.op == "create_relationships":
         rel = sub.proposed_value if isinstance(sub.proposed_value, dict) else {}
         return str(rel.get("relationship_type_name") or "")
-    return property_caption(sub.property_name, labels or {})
+    del labels  # the property label IS the heading; the raw name is not shown
+    return ""
+
+
+def _evidence_text(sub: Suggestion) -> str:
+    """The input text the operator judges one suggestion against (pure).
+
+    A regular row's ``context`` is the passage the script read. An EXCLUDED row
+    has no passage: its evidence is the recorded detail — the skip reason's
+    supporting text (an exception message, the page examined), kept out of the
+    value columns so it can never be mistaken for a suggestion.
+    """
+    if sub.op == SKIPPED_OP:
+        detail = "" if sub.proposed_value is None else str(sub.proposed_value).strip()
+        return detail[:CONTEXT_CELL_CHARS]
+    return (sub.context or "")[:CONTEXT_CELL_CHARS]
 
 
 def _relationship_proposed(sub: Suggestion) -> str:
@@ -273,7 +296,21 @@ def sub_values(
     if sub.op == INFO_OP:
         return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
     if sub.op == SKIPPED_OP:
-        return "—", "" if sub.proposed_value is None else truncate(sub.proposed_value)
+        # An excluded entity proposes NOTHING. Its recorded detail is the
+        # evidence for the exclusion (an exception message, the page text), so
+        # it is shown as that evidence — never as a "suggested value", where it
+        # read like a proposal the operator could run.
+        #
+        # A HOLDOUT row is different: it is evidence for the score, and the
+        # frozen label IS what the score measures against. Showing it beside an
+        # empty proposal is the difference between "the script suggested nothing
+        # and the answer was X" and an opaque row the operator cannot judge.
+        if sub.is_validation:
+            property_type = (types or {}).get(sub.property_name or "")
+            if property_type == RELATIONSHIP_TYPE:
+                return truncate(render_relationship(sub.current_value, titles), 120), "—"
+            return truncate(sub.current_value, 120, property_type), "—"
+        return "—", "—"
     property_type = (types or {}).get(sub.property_name or "")
     if sub.op == MATCHED_OP:
         if property_type == RELATIONSHIP_TYPE:
@@ -363,12 +400,12 @@ def suboperation_row(
     status_color = sub_status_color(sub.status)
     if sub.is_validation:
         # Holdout evidence is neither work nor a result of a write: it gets its
-        # own word so a validation row never reads as pending work in the table.
-        status_label, status_color = "validation", "purple-7"
+        # own word so a validation row never reads as pending work.
+        status_label, status_color = "validate", "purple-7"
     elif sub.op == MATCHED_OP:
         status_label, status_color = "matched", "green-9"
     elif sub.op == SKIPPED_OP:
-        status_label, status_color = "not processed", "deep-orange-10"
+        status_label, status_color = "excluded", "grey-7"
     current, proposed = sub_values(sub, types, titles)
     match = sub_match(sub)
     blocked = rerun_blocked(sub.op, status_label)
@@ -399,15 +436,16 @@ def suboperation_row(
     if select_type == "relationship":
         selected = relationship_selection(sub.proposed_value, sub.rejected_values, sub.selected_values)
         chosen = set(selected)
+        proposed_ids = relationship_selection(sub.proposed_value, [], None)
         decisions = [
-            {
-                "label": render_relationship([shared_id], titles),
-                "accepted": shared_id in chosen,
-            }
-            for shared_id in relationship_selection(sub.proposed_value, [], None)
+            {"label": render_relationship([shared_id], titles), "accepted": shared_id in chosen}
+            for shared_id in proposed_ids
         ]
-        selection_text = ", ".join(render_relationship([shared_id], titles) for shared_id in selected) or (
-            "— nothing (the row is discarded)"
+        # Only values the operator ADDED have no chip (the chips are the
+        # proposal, marked accepted/dropped), so those are the one case the
+        # cell still needs a line of its own.
+        extra_selection = ", ".join(
+            render_relationship([shared_id], titles) for shared_id in selected if shared_id not in set(proposed_ids)
         )
     else:
         selected = effective_selection(sub.proposed_value, sub.rejected_values, sub.selected_values) if select_type else []
@@ -419,13 +457,13 @@ def suboperation_row(
                 if label not in proposal_labels:
                     proposal_labels.append(label)
         decisions = [{"label": label, "accepted": label in selected} for label in proposal_labels]
-        selection_text = ", ".join(selected) or "— nothing (the row is discarded)"
+        extra_selection = ", ".join(label for label in selected if label not in set(proposal_labels))
     return {
         "id": sub.id,
         "key": f"sub-{sub.id}",
         "label": sub_label(sub, labels),
         "caption": sub_caption(sub, labels),
-        "context": sub.context or "",
+        "context": _evidence_text(sub),
         "name": sub.property_name or "",
         "language": sub.language or "",
         "lang": sub.language,
@@ -461,7 +499,10 @@ def suboperation_row(
         # existing payload consumers are unaffected).
         "values": decisions,
         "has_rejected": any(not decision["accepted"] for decision in decisions),
-        "selection_text": selection_text,
+        # A value the operator ADDED (from the catalog) has no chip of its own;
+        # the cell shows it on one line. When the proposal is what will be
+        # written, this is empty and nothing repeats the chips.
+        "extra_selection": extra_selection,
         "select_type": select_type,
     }
 
@@ -712,17 +753,57 @@ def operation_status(subs: Iterable[dict[str, Any]]) -> str:
 
     ``applied`` once every part is written, ``reverted`` once every part's write
     was undone (runnable again), ``discarded`` once every part is refused,
-    anything else ``pending`` — work remains. The words are the parts' own, so
-    the two levels cannot contradict each other.
+    ``mixed`` when the parts disagree (some written, some still pending), and
+    ``pending`` when nothing has happened yet. The words are the parts' own, so
+    the two levels cannot contradict each other — and ``mixed`` is explicit: a
+    row whose subrows span states used to read "pending" even with half of it
+    already in Uwazi, which hid work that landed.
     """
     states = {sub["status"] for sub in subs}
-    if states == {"applied"}:
-        return "applied"
-    if states == {"reverted"}:
-        return "reverted"
-    if states == {"discarded"}:
-        return "discarded"
-    return "pending"
+    if not states:
+        return "pending"
+    if len(states) == 1:
+        return states.pop() if next(iter(states)) in ("applied", "reverted", "discarded") else "pending"
+    if states == {"applied", "reverted"}:
+        # Every part has been written at some point: the run still holds
+        # applied writes, so "mixed" is the honest word.
+        return "mixed"
+    return "mixed" if "applied" in states else "pending"
+
+
+def status_repeats_operation(ops: Iterable[str], status: str, *, display_only: bool = False) -> bool:
+    """Whether the Status badge would only repeat the operation names (pure).
+
+    A display-only row (``matched`` / ``skipped``) has no workflow state of its
+    own: its "status" IS the outcome the operation column already prints, so a
+    second badge saying the same word is noise. The same holds when every
+    operation of the row reads exactly like the derived status (a single
+    ``delete`` row whose only part is deleted, say).
+    """
+    words = {"excluded" if op == SKIPPED_OP else op for op in ops}
+    if not words:
+        return False
+    if display_only:
+        return words == {status}
+    return words == {status}
+
+
+def operation_status_breakdown(subs: Iterable[dict[str, Any]]) -> str:
+    """The parent badge's sub-line: how the parts split across states (pure).
+
+    Empty when every part carries the same state (the badge already says it).
+    Otherwise one ``N state`` fragment per state, in first-appearance order, so
+    the operator can tell WHICH status the main row summarizes.
+    """
+    states = [sub["status"] for sub in subs]
+    ordered: list[str] = []
+    for state in states:
+        if state not in ordered:
+            ordered.append(state)
+    if len(ordered) < 2:
+        return ""
+    counts = {state: states.count(state) for state in ordered}
+    return " · ".join(f"{counts[state]} {state}" for state in ordered)
 
 
 def validated_counts(subs: Iterable[dict[str, Any]]) -> tuple[int, int]:
@@ -747,18 +828,52 @@ def validated_cell(subs: Iterable[dict[str, Any]]) -> tuple[str, str]:
     return f"{checked}/{total}", "grey-6"
 
 
-def operation_open_url(shared_id: str, ops: list[str], languages: list[str], uwazi_url: str | None) -> str | None:
+def _operation_words(item: OperationReviewRow) -> str:
+    """The Operation column's text for one review row (pure).
+
+    A run's holdout rows are evidence, not work, so they read ``validate``
+    instead of repeating the write they record. An ``update`` that the run
+    EXCLUDED reads ``excluded``. A mixed operation (some holdout, some regular)
+    keeps its real op names: it is work with evidence beside it.
+    """
+    if item.validation and item.validation >= len(item.subs) > 0:
+        return "validate"
+    return ", ".join("excluded" if op == SKIPPED_OP else op for op in item.ops)
+
+
+def _operation_colors(item: OperationReviewRow) -> list[str]:
+    """The Operation badge colors matching :func:`_operation_words` (pure)."""
+    if item.validation and item.validation >= len(item.subs) > 0:
+        return [OP_COLORS["validate"]]
+    return [OP_COLORS.get(op, "grey-7") for op in item.ops]
+
+
+def operation_open_url(
+    shared_id: str,
+    ops: list[str],
+    languages: list[str],
+    uwazi_url: str | None,
+    *,
+    created_shared_id: str | None = None,
+) -> str | None:
     """The instance's public page for the entity, or None when it has none (pure).
 
-    A create row still holds its ``dry-created`` placeholder, and a
-    publish/relink row is not about the entity's current content — the same
-    rule the entity table's link used. The language segment prefers the
+    A create row holds a ``dry-created`` placeholder until its Run mints the
+    real entity; ``created_shared_id`` is that minted id, so the row can link to
+    the entity it actually created. Without it (not run yet, or its create was
+    refused) there is nothing in Uwazi to open. A publish/relink row is not
+    about the entity's current content either. The language segment prefers the
     operation's first written language, else the instance default.
     """
-    if not uwazi_url or not OPENABLE_OPS.intersection(ops):
+    if not uwazi_url:
+        return None
+    target = created_shared_id or shared_id
+    if not created_shared_id and not OPENABLE_OPS.intersection(ops):
+        return None
+    if created_shared_id and not any(op in CREATE_OPS for op in ops):
         return None
     language = languages[0] if languages else DUMMY_LANGUAGE
-    return f"{uwazi_url.rstrip('/')}/{language}/entity/{shared_id}"
+    return f"{uwazi_url.rstrip('/')}/{language}/entity/{target}"
 
 
 def is_display_only_operation(item: OperationReviewRow) -> bool:
@@ -796,7 +911,12 @@ def operation_row(
     """
     checked = set(checked_ids)
     is_info = bool(item.ops) and all(op == INFO_OP for op in item.ops)
-    is_display_only = is_display_only_operation(item)
+    # A holdout operation is evidence whatever op its rows record: an `update`
+    # the evaluation pass produced is still NOT work, so it must render without
+    # a checkbox, a Run, a Discard or a Revert. `is_display_only_operation` only
+    # looks at the op names, and a validation row's op is a real write op.
+    all_holdout = bool(item.subs) and item.validation >= len(item.subs) and bool(item.ops)
+    is_display_only = is_display_only_operation(item) or all_holdout
     in_place = not any(op in NON_IN_PLACE_OPS for op in item.ops)
     # A merge's own row is revertable (the operation restores its target and
     # re-creates the sources it deleted), but its PARTS are not: putting one
@@ -834,10 +954,10 @@ def operation_row(
     # at the parent level too; the row's Run is already disabled (no runnable
     # part) and its checkbox derives from the parts (all unselectable).
     if item.validation and item.validation == len(rendered):
-        # Every part of this operation is holdout evidence: the parent says so.
-        # A MIXED operation (a promoted sibling beside validation rows) keeps
-        # the normal word, and each part keeps its own badge.
-        status = "validation"
+        # Every part of this operation is holdout evidence: the operation
+        # column says "validate" (the op name), and the status badge repeats it
+        # only when it does not already read that way.
+        status = "validate"
         color = "purple-7"
     if not is_display_only:
         subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey-7")))
@@ -845,7 +965,17 @@ def operation_row(
     blocked_sub = next((sub for sub in subs if sub.get("rerun_blocked")), None)
     rerun_blocked = blocked_sub is not None
     rerun_reason = str(blocked_sub.get("rerun_blocked_reason") or "") if blocked_sub is not None else ""
+    # A create's rows carry the recorder's placeholder (``dry-created-N``)
+    # until a Run mints the entity. Showing it as the "target" reads like a
+    # broken id, so the Target cell shows the title the create proposes; the
+    # created entity's real sharedId (once it exists) is what the row links to.
+    created_shared_id = next((sub.created_shared_id for sub in item.subs if sub.created_shared_id), None)
     title = item.entity_title or item.shared_id
+    if any(op in CREATE_OPS for op in item.ops) and not item.entity_title:
+        # A create with no title row has no name yet: name it by what it will
+        # be, never by the recorder's placeholder (which reads like a broken id).
+        template = item.template_names[0] if item.template_names else ""
+        title = f"New {template} entity" if template else "New entity"
     if is_info:
         # Display-only: full text (the Target cell wraps it), no link, no
         # counters, no Run/Discard/Revert/Edit action, and a dedicated status
@@ -866,6 +996,8 @@ def operation_row(
             "run_title": "Info rows are display-only",
             "run_status": "info",
             "run_status_color": RUN_STATUS_COLORS.get("info", "grey-7"),
+            "status_hidden": True,
+            "status_breakdown": "",
             "validated": "n/a",
             "validated_color": "grey-4",
             "has_validated": False,
@@ -883,9 +1015,18 @@ def operation_row(
     if is_display_only:
         # Matched/skipped: real entities, read-only results. The title, sharedId
         # and Uwazi link stay available; every action and selection is removed.
-        display_op = item.ops[0] if item.ops else ""
-        display_label = "not processed" if display_op == SKIPPED_OP else display_op
-        display_ops = ["not processed" if op == SKIPPED_OP else op for op in item.ops]
+        #
+        # A HOLDOUT row is evidence for the score, whichever op the script
+        # happened to record for it: an entity the script could not process is
+        # stored as ``skipped``, which used to print "excluded" — the word for
+        # an entity outside the plan — on a row whose whole purpose is the
+        # validation measurement the Operation filter calls ``validate``.
+        if all_holdout:
+            display_op = "validate"
+        else:
+            display_op = item.ops[0] if item.ops else ""
+        display_label = "excluded" if display_op == SKIPPED_OP else display_op
+        display_ops = ["validate"] if all_holdout else ["excluded" if op == SKIPPED_OP else op for op in item.ops]
         return {
             "row_key": item.shared_id,
             "shared_id": item.shared_id,
@@ -894,14 +1035,22 @@ def operation_row(
             "template": truncate(", ".join(item.template_names) or "—", 28),
             "languages": item.languages,
             "ops": ", ".join(display_ops),
-            "op_colors": [OP_COLORS.get(op, "grey-7") for op in item.ops],
+            "op_colors": [OP_COLORS.get("validate" if all_holdout else op, "grey-7") for op in item.ops],
             "url": operation_open_url(item.shared_id, item.ops, item.languages, uwazi_url),
             "modified": modified_label(item.modified_at),
             "rerun_blocked": False,
             "rerun_blocked_reason": "",
-            "run_title": "This row reports a result; it is display-only",
+            "run_title": (
+                "Validation evidence — this row is scored, never run"
+                if all_holdout
+                else "This row reports a result; it is display-only"
+            ),
             "run_status": display_label,
             "run_status_color": RUN_STATUS_COLORS.get(display_op, "grey-7"),
+            # A matched/skipped row's status IS its operation: one badge is
+            # enough, so the Status cell stays empty.
+            "status_hidden": status_repeats_operation(display_ops, display_label, display_only=True),
+            "status_breakdown": "",
             "validated": "n/a",
             "validated_color": "grey-4",
             "has_validated": False,
@@ -923,15 +1072,29 @@ def operation_row(
         "title_full": title,
         "template": truncate(", ".join(item.template_names) or "—", 28),
         "languages": item.languages,
-        "ops": ", ".join(item.ops),
-        "op_colors": [OP_COLORS.get(op, "grey-7") for op in item.ops],
-        "url": operation_open_url(item.shared_id, item.ops, item.languages, uwazi_url),
+        "ops": _operation_words(item),
+        "op_colors": _operation_colors(item),
+        "url": operation_open_url(
+            item.shared_id,
+            item.ops,
+            item.languages,
+            uwazi_url,
+            created_shared_id=created_shared_id,
+        ),
+        # The id a Run minted for a create row (the Target cell's link target).
+        # The sharedId is deliberately NOT rendered: the title IS the target, and
+        # an identifier column beside it read as noise.
+        "created_shared_id": created_shared_id,
         "modified": modified_label(item.modified_at),
         "rerun_blocked": rerun_blocked,
         "rerun_blocked_reason": rerun_reason,
         "run_title": rerun_reason or "Run this operation: the ticked suboperations (all of them when none is ticked)",
         "run_status": status,
-        "run_status_color": RUN_STATUS_COLORS.get(status, "purple-7" if status == "validation" else "grey-7"),
+        "run_status_color": RUN_STATUS_COLORS.get(status, "purple-7" if status == "validate" else "grey-7"),
+        "status_hidden": status_repeats_operation(item.ops, status) or status == "validate",
+        # How the parts split when they disagree ("" when they agree): the
+        # parent badge says "mixed", this line says WHICH states it mixes.
+        "status_breakdown": operation_status_breakdown(subs),
         "validated": text,
         "validated_color": color,
         "has_validated": validated_counts(subs)[1] > 0,
@@ -1059,6 +1222,7 @@ __all__ = [
     "operation_open_url",
     "operation_row",
     "operation_status",
+    "operation_status_breakdown",
     "ops_of_refs",
     "pairs_of_refs",
     "rerun_blocked",
@@ -1069,6 +1233,7 @@ __all__ = [
     "sub_match",
     "sub_refs",
     "sub_revertable",
+    "status_repeats_operation",
     "sub_status_color",
     "sub_status_label",
     "sub_values",

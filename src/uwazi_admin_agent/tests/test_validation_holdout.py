@@ -175,8 +175,8 @@ def _sub(*, is_validation: bool, status: SuggestionStatus = SuggestionStatus.PEN
 
 def test_a_run_never_pushes_a_validation_row() -> None:
     """The guard lives in the apply payload builder, not only in the view."""
-    accepted = _sub(is_validation=True, status=SuggestionStatus.ACCEPTED)
-    regular = _sub(is_validation=False, status=SuggestionStatus.ACCEPTED)
+    accepted = _sub(is_validation=True, status=SuggestionStatus.PENDING)
+    regular = _sub(is_validation=False, status=SuggestionStatus.PENDING)
     assert pushable_rows([accepted, regular]) == [regular]
 
 
@@ -185,12 +185,13 @@ def test_the_validation_filter_is_usable_by_the_store() -> None:
     assert SuggestionFilter().is_validation is None
 
 
-def test_the_table_reads_a_validation_row_as_validation_and_never_runnable() -> None:
+def test_the_table_reads_a_validation_row_as_validate_and_never_runnable() -> None:
     payload = suboperation_row(_sub(is_validation=True), checked=False, in_place=True)
-    assert payload["status"] == "validation"
+    assert payload["status"] == "validate"
     assert payload["runnable"] is False
     assert payload["selectable"] is False
     assert "validation row" in payload["note"]
+    assert payload["op"] == "update"
 
 
 def test_a_regular_row_of_the_same_shape_keeps_its_normal_payload() -> None:
@@ -226,7 +227,7 @@ def test_the_store_keeps_holdout_rows_out_of_the_work_totals(tmp_path: Path) -> 
     store = SqliteSuggestionStore(tmp_path / "s.db")
     store.add_suggestions(
         [
-            _row("a", is_validation=False, status=SuggestionStatus.ACCEPTED),
+            _row("a", is_validation=False, status=SuggestionStatus.PENDING),
             _row("b", is_validation=True),
         ]
     )
@@ -261,7 +262,7 @@ def test_promotion_turns_the_entity_into_regular_pending_work(tmp_path: Path) ->
 def test_a_new_script_version_replaces_the_validation_rows_only(tmp_path: Path) -> None:
     """A regeneration must not accumulate evidence from a script that no longer exists."""
     store = SqliteSuggestionStore(tmp_path / "s.db")
-    store.add_suggestions([_row("a", is_validation=False, status=SuggestionStatus.ACCEPTED)])
+    store.add_suggestions([_row("a", is_validation=False, status=SuggestionStatus.PENDING)])
     store.replace_validation_rows(
         "run-1",
         [_row("b", is_validation=True), _row("c", is_validation=True)],
@@ -271,3 +272,213 @@ def test_a_new_script_version_replaces_the_validation_rows_only(tmp_path: Path) 
     assert total == 1 and rows[0].shared_id == "b"
     # The regular row (and its status) is untouched by the validation write path.
     assert store.query("run-1", SuggestionFilter(is_validation=False))[1] == 1
+
+
+def test_a_validation_row_shows_the_frozen_label_as_its_current_value() -> None:
+    """The operator must see Uwazi's value beside the suggestion to judge it.
+
+    The evaluation pass records only what the script proposed; the score is
+    measured against the label frozen with the set, so that label is the row's
+    before-state.
+    """
+    from uwazi_admin_agent.domain.suggestion import Suggestion
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _with_frozen_label
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="document_ref",
+        property_type="text",
+        shared_ids=["a"],
+        labels={"a|en": [{"value": "A/HRC/37/2"}]},
+        created_at=__import__("datetime").datetime(2026, 1, 1),
+    )
+    row = Suggestion(
+        run_id="r",
+        shared_id="a",
+        op="update",
+        property_name="document_ref",
+        language="en",
+        proposed_value=[{"value": "A/HRC/37/2"}],
+    )
+
+    enriched = _with_frozen_label(row, validation)
+
+    assert enriched.is_validation is True
+    assert enriched.current_value == [{"value": "A/HRC/37/2"}]
+    assert enriched.match is True
+
+
+def test_a_validation_row_whose_label_differs_reads_as_a_mismatch() -> None:
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.suggestion import Suggestion
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _with_frozen_label
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="document_ref",
+        property_type="text",
+        shared_ids=["a"],
+        labels={"a|en": [{"value": "A/HRC/37/2"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+    row = Suggestion(
+        run_id="r",
+        shared_id="a",
+        op="update",
+        property_name="document_ref",
+        language="en",
+        proposed_value=[{"value": "A/HRC/37/9"}],
+    )
+
+    assert _with_frozen_label(row, validation).match is False
+
+
+def test_a_relationship_validation_row_reads_the_shared_frozen_label() -> None:
+    """A relationship has ONE value per entity, so the row carries no language.
+
+    The set freezes its label under the language it was sampled in. Looking the
+    label up by the row's own key alone left every relationship validation row
+    with no current value at all — the reported "the validation rows have no
+    suggestions".
+    """
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.suggestion import Suggestion
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _with_frozen_label
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="states",
+        property_type="relationship",
+        shared_ids=["a"],
+        labels={"a|en": [{"shared_id": "id-1", "title": "Japan"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+    row = Suggestion(run_id="r", shared_id="a", op="update", property_name="states", proposed_value=["id-1"])
+
+    enriched = _with_frozen_label(row, validation)
+
+    assert enriched.current_value == [{"shared_id": "id-1", "title": "Japan"}]
+    assert enriched.match is True, "a set-valued property compares ids, not rendered text"
+
+
+def test_a_property_type_that_is_per_language_never_borrows_another_language() -> None:
+    """A translation row's label is the value of ITS language, never a sibling's."""
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.suggestion import Suggestion
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _with_frozen_label
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="summary",
+        property_type="text",
+        shared_ids=["a"],
+        labels={"a|es": [{"value": "Resumen"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+    row = Suggestion(
+        run_id="r", shared_id="a", op="update", property_name="summary", language="en", proposed_value="Summary"
+    )
+
+    assert _with_frozen_label(row, validation).current_value is None
+
+
+def test_a_held_out_entity_the_script_skipped_gets_a_measured_row() -> None:
+    """The skipped row must read "validate" with the frozen label beside it.
+
+    The script's record is a `skipped` record, which the review table renders as
+    display-only; under the validation set the row is evidence for the score, so
+    it shows the measured property, the frozen label, and the script's own reason
+    for proposing nothing — never the word "excluded".
+    """
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.suggestion import OperationReviewRow
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.drivers.web import operations_view as view
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _missing_rows
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="states",
+        property_type="relationship",
+        shared_ids=["a"],
+        labels={"a|en": [{"shared_id": "id-1", "title": "Japan"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+    rows = _missing_rows([], validation, {"a": "no STATE entity matched (Japan)"})
+    assert len(rows) == 1
+    skipped_row = rows[0]
+    assert skipped_row.property_name == "states"
+    assert skipped_row.current_value == [{"shared_id": "id-1", "title": "Japan"}]
+    assert skipped_row.context == "no STATE entity matched (Japan)"
+    assert skipped_row.is_validation is True
+
+    operation = OperationReviewRow(
+        shared_id="a",
+        entity_title="A title",
+        template_names=["Rec"],
+        ops=["update"],
+        properties=["states"],
+        proposal_count=1,
+        pending=1,
+        applied=0,
+        reverted=0,
+        discarded=0,
+        validation=1,
+        match_summary="n/a",
+        has_outcome=True,
+        subs=[skipped_row],
+    )
+    payload = view.operation_row(operation)
+    assert payload["ops"] == "validate"
+    # Evidence, never work: no checkbox, no Run/Discard/Revert action.
+    assert payload["is_display_only"] is True
+    assert payload["has_checkable"] is False
+    assert payload["has_runnable"] is False
+    sub = payload["subs"][0]
+    assert sub["status"] == "validate"
+    assert sub["label"] == "states"
+    assert "Japan" in sub["current"]
+
+
+def test_a_skipped_holdout_record_is_rendered_as_the_measured_row() -> None:
+    """The recorded `skipped` op is a missing prediction, not an "excluded" outcome."""
+    from uwazi_admin_agent.domain.suggestion import OperationReviewRow, Suggestion
+    from uwazi_admin_agent.drivers.web import operations_view as view
+
+    row = Suggestion(
+        id=7,
+        run_id="r",
+        shared_id="a",
+        op="skipped",
+        status=SuggestionStatus.PENDING,
+        is_validation=True,
+        skip_reason="no_code_in_page_1",
+        proposed_value="no STATE entity matched (Japan)",
+    )
+    operation = OperationReviewRow(
+        shared_id="a",
+        entity_title="A title",
+        template_names=["Rec"],
+        ops=["skipped"],
+        properties=[],
+        proposal_count=1,
+        pending=1,
+        applied=0,
+        reverted=0,
+        discarded=0,
+        validation=1,
+        match_summary="n/a",
+        has_outcome=False,
+        subs=[row],
+    )
+    payload = view.operation_row(operation)
+    assert payload["ops"] == "validate"
+    assert payload["run_status"] == "validate"

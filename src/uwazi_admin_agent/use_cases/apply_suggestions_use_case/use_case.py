@@ -93,6 +93,8 @@ class ApplySuggestionsUseCase:
         self._cap = cap
         self._default_language = default_language
         self._publish_state: PublishStatePort | None = publish_state
+        # placeholder -> minted sharedId for the last write pass (see _write).
+        self._last_created_ids: dict[str, str] = {}
         # The template property-TYPE lookup: what lets a DATE-typed row's
         # recorded value be coerced to Uwazi's shape at the write boundary.
         # None → the write sends the value as recorded (the whole-entity path
@@ -115,9 +117,9 @@ class ApplySuggestionsUseCase:
     ) -> str:
         """Write the selected rows (optionally restricted to ``selection``).
 
-        A Run accepts first (:meth:`_accept_pending`): the reviewed table
-        commits through Run rather than per-row buttons, so the rows it pushes
-        are still PENDING.
+        The table's Runnable rows are the ones a Run writes: PENDING (never
+        written) and REVERTED (a revert undid the write, so it can run again).
+        Discarded rows stay refused and applied rows are never re-written.
 
         The Run heuristic, all rows in one pass through ONE interceptor setup:
         property rows group into per-(entity, language) update payloads; create
@@ -144,11 +146,10 @@ class ApplySuggestionsUseCase:
         Raises :class:`ApplyRefusedError` when there is nothing to run, and
         :class:`ApplyWriteError` when Uwazi refused a write — in which case
         only the writes that LANDED are marked ``APPLIED``; the rows of a refused
-        entity keep their ``ACCEPTED`` status so the operator can run them again
+        entity keep their ``PENDING`` status so the operator can run them again
         once the cause is fixed.
         """
-        self._accept_pending(run_id, selection, row_ids)
-        rows = self._all_accepted(run_id)
+        rows = self._runnable_rows(run_id)
         to_push = pushable_rows(rows, selection, row_ids)
         _, whole_entity_rows = partition_for_apply(rows, selection, row_ids)
         types = self._property_types_for_rows(rows)
@@ -222,13 +223,21 @@ class ApplySuggestionsUseCase:
         # and clear the phase note — the pass is done whatever it said.
         self._report_progress(progress, units_total, units_total, "")
         # A refused write changed nothing, so its rows must NOT read as applied:
-        # they stay ACCEPTED and the operator can run them again. Every refusal
+        # they stay PENDING and the operator can run them again. Every refusal
         # carries an identity the rows share (a real sharedId, or a create's
         # placeholder the result could not echo), so the split is by row, not by
         # guesswork.
         refused = {failure["shared_id"] for failure in failures if failure["shared_id"]}
         written = [row for row in to_push if row.shared_id not in refused]
         self._store.set_status([row.id for row in written if row.id is not None], SuggestionStatus.APPLIED)
+        # A create's rows hold a ``dry-created-N`` placeholder until this pass
+        # mints the real entity. Recording the id is what lets the Target cell
+        # show the created entity's title (and link to it) instead of asking the
+        # operator to read a placeholder that looks like a broken id.
+        self._store.record_created_ids(
+            run_id,
+            {placeholder: real for placeholder, real in self._last_created_ids.items() if placeholder not in refused},
+        )
         # ``current_value`` is NOT refreshed here on purpose. It is the row's
         # BEFORE state — the value the run is about to overwrite — and it is what
         # the review table's "Value" column and the entity window show, and what
@@ -420,58 +429,23 @@ class ApplySuggestionsUseCase:
             raws[pair] = value
         return raws
 
-    def _accept_pending(
-        self,
-        run_id: str,
-        selection: EntitySelection,
-        row_ids: list[int] | None = None,
-    ) -> None:
-        """Accept the rows a Run is about to push — a Run IS the acceptance.
+    def _runnable_rows(self, run_id: str) -> list[Suggestion]:
+        """Page through every row a Run may write (PENDING or REVERTED).
 
-        The review UI commits through its Run action (the entity selection plus
-        the confirm dialog), so the recorded rows it is about to push are still
-        PENDING. Without this step every Run would be refused as "nothing
-        accepted"; with it, the operator's selection and confirmation stand in
-        for the row-level accept that the table no longer offers.
-
-        Two source statuses are accepted: PENDING (never run) and REVERTED (a
-        revert undid the write, so the row is runnable again — the operator can
-        re-run a reverted row by row). DISCARDED rows stay refused, EDITED rows
-        keep their edits, and APPLIED rows (still written) are never re-accepted.
-
-        Scope follows the selection: the exact (sharedId, language) rows the operator
-        checked, so running the ``es`` row of a translation task accepts ONLY
-        that language's rows — its ``en`` sibling stays pending and is written
-        by a second, separate Run. The whole table when None, nothing when
-        empty. ``row_ids`` narrows acceptance to the checked SUBOPERATIONS: the
-        unchecked siblings of the same entity-language group stay pending, which
-        is what makes "run this one property" mean exactly that.
+        The review table commits through Run, so the rows it pushes are simply
+        the runnable ones — there is no separate "accepted" state any more.
+        Discarded and applied rows are excluded here (and again by
+        :func:`pushable_rows`), and the selection narrows further below.
         """
-        if selection is not None and not selection:
-            return
-        if row_ids is not None and not row_ids:
-            return
-        for status in (SuggestionStatus.PENDING, SuggestionStatus.REVERTED):
-            self._store.set_status_by_filter(
-                run_id,
-                # is_validation=False is belt AND braces: a Run never accepts a
-                # holdout row, even if a future surface forgot to hide it.
-                SuggestionFilter(
-                    status=[status],
-                    entity_languages=selection,
-                    suggestion_ids=row_ids,
-                    is_validation=False,
-                ),
-                SuggestionStatus.ACCEPTED,
-            )
-
-    def _all_accepted(self, run_id: str) -> list[Suggestion]:
-        """Page through EVERY accepted/edited row (a Run covers the whole set)."""
         rows: list[Suggestion] = []
         page_size = 1000
         offset = 0
+        statuses = [SuggestionStatus.PENDING, SuggestionStatus.REVERTED]
         while True:
-            page, _total = self._store.query(run_id, SuggestionFilter(accepted_only=True, limit=page_size, offset=offset))
+            page, _total = self._store.query(
+                run_id,
+                SuggestionFilter(status=statuses, limit=page_size, offset=offset),
+            )
             if not page:
                 return rows
             rows.extend(page)
@@ -874,4 +848,8 @@ class ApplySuggestionsUseCase:
         )
         final.mark_written(sorted(written_ids))
         self._backup_store.save_manifest(run_id, final)
+        # The sharedIds this pass minted, keyed by the placeholder its rows
+        # carry: the caller points those rows at the created entities, so the
+        # review table stops showing a ``dry-created-N`` placeholder after Run.
+        self._last_created_ids = dict(created_ids)
         return failures

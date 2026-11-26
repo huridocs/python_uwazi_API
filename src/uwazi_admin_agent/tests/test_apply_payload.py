@@ -37,9 +37,8 @@ def _s(
     language: str | None = None,
     op: str = "update",
     property_name: str | None = "excerpt",
-    status: SuggestionStatus = SuggestionStatus.ACCEPTED,
+    status: SuggestionStatus = SuggestionStatus.PENDING,
     proposed: object = "new value",
-    edited: str | None = None,
     template_name: str | None = None,
 ) -> Suggestion:
     return Suggestion(
@@ -50,7 +49,6 @@ def _s(
         property_name=property_name,
         proposed_value=proposed,
         status=status,
-        edited_value=edited,
         template_name=template_name,
     )
 
@@ -58,15 +56,15 @@ def _s(
 # --- pushable_rows -----------------------------------------------------------
 
 
-def test_pushable_accepts_accepted_and_edited_only() -> None:
+def test_pushable_accepts_pending_and_reverted_only() -> None:
     rows = [
         _s(shared_id="a", status=SuggestionStatus.PENDING),
-        _s(shared_id="b", status=SuggestionStatus.ACCEPTED),
-        _s(shared_id="c", status=SuggestionStatus.EDITED, edited='"x"'),
+        _s(shared_id="b", status=SuggestionStatus.PENDING),
+        _s(shared_id="c", status=SuggestionStatus.REVERTED),
         _s(shared_id="d", status=SuggestionStatus.DISCARDED),
         _s(shared_id="e", status=SuggestionStatus.APPLIED),
     ]
-    assert [r.shared_id for r in pushable_rows(rows)] == ["b", "c"]
+    assert [r.shared_id for r in pushable_rows(rows)] == ["a", "b", "c"]
 
 
 def test_pushable_includes_whole_entity_ops_and_skips_propertyless_updates() -> None:
@@ -102,22 +100,9 @@ def test_pushable_includes_create_rows() -> None:
 # --- effective_value ---------------------------------------------------------
 
 
-def test_edited_row_uses_its_edited_value_with_json_decoding() -> None:
-    row = _s(status=SuggestionStatus.EDITED, proposed="original", edited='[{"value": "typed"}]')
-    assert effective_value(row) == [{"value": "typed"}]
-
-
-def test_edited_row_with_plain_text_keeps_the_string() -> None:
-    row = _s(status=SuggestionStatus.EDITED, proposed="original", edited="just words")
-    assert effective_value(row) == "just words"
-
-
-def test_accepted_row_uses_its_proposal() -> None:
-    assert effective_value(_s(proposed=[{"value": "v"}])) == [{"value": "v"}]
-
-
-def test_edited_status_without_a_value_falls_back_to_the_proposal() -> None:
-    assert effective_value(_s(status=SuggestionStatus.EDITED, proposed="fallback", edited=None)) == "fallback"
+def test_a_row_writes_its_proposal_minus_the_rejected_values() -> None:
+    row = _s(proposed=["A", "B"]).model_copy(update={"rejected_values": ["B"]})
+    assert effective_value(row) == ["A"]
 
 
 # --- build_apply_updates -----------------------------------------------------
@@ -168,22 +153,6 @@ def test_title_row_becomes_a_top_level_title_field() -> None:
 def test_no_title_key_when_there_is_no_title_row() -> None:
     updates = build_apply_updates([_s(shared_id="s1", property_name="excerpt", proposed="e")])
     assert "title" not in updates[0]
-
-
-def test_edited_overrides_proposed_for_the_same_key() -> None:
-    updates = build_apply_updates(
-        [
-            _s(shared_id="s1", property_name="excerpt", proposed="proposed"),
-            _s(
-                shared_id="s1",
-                property_name="excerpt",
-                proposed="proposed",
-                status=SuggestionStatus.EDITED,
-                edited='"edited"',
-            ),
-        ]
-    )
-    assert updates[0]["metadata"]["excerpt"] == [{"value": "edited"}]
 
 
 def test_subset_restricts_the_payload() -> None:
@@ -361,30 +330,31 @@ def test_a_created_entities_clear_proposal_also_becomes_an_empty_array() -> None
 def test_a_create_without_a_title_row_gets_a_fallback_title() -> None:
     """Uwazi refuses a create whose title is empty (422 "at least 1 character(s)").
 
-    A plan that only fills metadata used to refuse at Run time with that 422 on
-    EVERY placeholder. The payload now carries a readable fallback title: what
-    the entity is plus its own placeholder id.
+    The fallback must NOT leak the recorder's ``dry-created-N`` placeholder into
+    the created entity's name — an instance full of "Rec dry-created-227"
+    entities is exactly what that produced.
     """
     creates = build_apply_creates(
         [_s(shared_id="dry-created-3", op="create", property_name="summary", proposed="s", template_name="REPORT")]
     )
-    assert creates[0]["title"] == "REPORT dry-created-3"
+    assert creates[0]["title"] == "REPORT 1"
+    assert "dry-created" not in creates[0]["title"]
 
 
-def test_a_create_without_a_title_or_source_id_is_still_positioned() -> None:
+def test_the_fallback_title_names_the_template_and_position_only() -> None:
     from uwazi_admin_agent.use_cases.apply_suggestions_use_case.payloads import create_fallback_title
 
-    assert create_fallback_title("REPORT", "", 2) == "REPORT 3"
-    assert create_fallback_title("", "x", 0) == "Entity x"
+    assert create_fallback_title("REPORT", 2) == "REPORT 3"
+    assert create_fallback_title("", 0) == "Entity 1"
 
 
 def test_build_apply_updates_skips_everything_unpushable() -> None:
     rows = [
-        _s(shared_id="a", status=SuggestionStatus.PENDING),
+        _s(shared_id="a", status=SuggestionStatus.DISCARDED),
         _s(shared_id="b", op="delete", property_name=None),
     ]
-    # A pending row never pushes and a whole-entity op carries no property row,
-    # so the update-payload grouping yields nothing pushable of its own.
+    # A discarded row never pushes and a whole-entity op carries no property
+    # row, so the update-payload grouping yields nothing pushable of its own.
     assert build_apply_updates(rows) == []
 
 
@@ -434,7 +404,9 @@ def test_create_rows_never_become_update_payloads() -> None:
             "source_shared_id": "dry-created-0",
         },
         {
-            "title": "DOCUMENT dry-created-1",
+            # The fallback names the template and position, never the recorder's
+            # placeholder (which used to become the entity's stored title).
+            "title": "DOCUMENT 2",
             "template_name": "DOCUMENT",
             "metadata": {"excerpt": [{"value": "f"}]},
             "language": None,
@@ -588,32 +560,25 @@ def test_a_created_entities_value_is_written_with_its_language() -> None:
     assert creates[0]["metadata"]["document_ref"] == [{"value": "hola", "language": "es"}]
 
 
-def test_an_edited_value_is_stamped_with_the_row_language() -> None:
-    """The operator typed a bare string in the review table; it is written in that language."""
-    rows = [_s(language="es", property_name="document_ref", status=SuggestionStatus.EDITED, edited='"typed"')]
-    updates = build_apply_updates(rows)
-    assert updates[0]["metadata"]["document_ref"] == [{"value": "typed", "language": "es"}]
-
-
 # --- partition_for_apply -------------------------------------------------------
 
 
 def test_partition_property_rows_vs_whole_entity_rows() -> None:
     rows = [
-        _s(shared_id="u", status=SuggestionStatus.ACCEPTED),  # update+property -> property path
+        _s(shared_id="u", status=SuggestionStatus.PENDING),  # update+property -> property path
         _s(shared_id="d", op="delete", property_name=None),  # whole-entity op -> script path
         _s(shared_id="p", op="publish", property_name=None),  # whole-entity op -> script path
-        _s(shared_id="x", status=SuggestionStatus.PENDING, property_name="k"),  # pending: not pushable at all
+        _s(shared_id="x", status=SuggestionStatus.DISCARDED, property_name="k"),  # discarded: not pushable
     ]
     property_rows, whole_entity_rows = partition_for_apply(rows)
     assert [r.shared_id for r in property_rows] == ["u"]
     assert [r.shared_id for r in whole_entity_rows] == ["d", "p"]
 
 
-def test_partition_keeps_edited_rows_in_both_paths() -> None:
+def test_partition_keeps_reverted_rows_in_both_paths() -> None:
     rows = [
-        _s(shared_id="u", status=SuggestionStatus.EDITED, edited='"x"'),
-        _s(shared_id="d", status=SuggestionStatus.EDITED, op="delete", property_name=None),
+        _s(shared_id="u", status=SuggestionStatus.REVERTED),
+        _s(shared_id="d", status=SuggestionStatus.REVERTED, op="delete", property_name=None),
     ]
     property_rows, whole_entity_rows = partition_for_apply(rows)
     assert [r.shared_id for r in property_rows] == ["u"]
@@ -891,12 +856,10 @@ def test_apply_updates_unknown_property_type_keeps_previous_behaviour() -> None:
 # --- the explicit multiselect selection --------------------------------------
 
 
-def test_select_labels_prefers_the_edit_then_the_selection_then_the_proposal() -> None:
+def test_select_labels_prefers_the_selection_then_the_proposal() -> None:
     row = _s(property_name="keywords", proposed=["Alpha", "Beta"])
     row = row.model_copy(update={"rejected_values": ["Beta"], "selected_values": ["Gamma"]})
     assert select_labels(row) == ["Gamma"]
-    edited = row.model_copy(update={"status": SuggestionStatus.EDITED, "edited_value": '["Delta"]'})
-    assert select_labels(edited) == ["Delta"]
     plain = _s(property_name="keywords", proposed=["Alpha", "Beta"]).model_copy(update={"rejected_values": ["Beta"]})
     assert select_labels(plain) == ["Alpha"]
 
@@ -968,9 +931,3 @@ def test_apply_creates_write_the_relationship_selection() -> None:
     creates = build_apply_creates([row], property_types={"related": "relationship"})
     # A create runs through the entity mapper, which wraps the ids itself.
     assert creates[0]["metadata"]["related"] == ["x", "y"]
-
-
-def test_an_edited_relationship_row_writes_its_typed_targets() -> None:
-    row = _s(property_name="related", proposed=[{"value": "a"}], status=SuggestionStatus.EDITED, edited='["x", "y"]')
-    updates = build_apply_updates([row], property_types={"related": "relationship"})
-    assert updates[0]["metadata"]["related"] == [{"value": "x"}, {"value": "y"}]

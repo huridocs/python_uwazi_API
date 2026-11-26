@@ -129,7 +129,7 @@ def test_table_row_shows_relationship_target_titles_not_ids() -> None:
     assert row["current"] == "Old Report"
     assert row["proposed"] == "First Report, Second Report"
     assert [chip["label"] for chip in row["values"]] == ["First Report", "Second Report"]
-    assert row["selection_text"] == "First Report, Second Report"
+    assert row["extra_selection"] == ""
 
 
 def test_table_row_marks_a_dropped_relationship_target_and_an_added_one() -> None:
@@ -146,7 +146,7 @@ def test_table_row_marks_a_dropped_relationship_target_and_an_added_one() -> Non
     )
     assert row["values"] == [{"label": "Alpha", "accepted": True}, {"label": "Beta", "accepted": False}]
     assert row["has_rejected"] is True
-    assert row["selection_text"] == "Alpha, Gamma"
+    assert row["extra_selection"] == "Gamma"
 
 
 def test_table_row_renders_a_select_as_value_chips() -> None:
@@ -154,7 +154,7 @@ def test_table_row_renders_a_select_as_value_chips() -> None:
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"topic": "select"})
     assert row["select_type"] == "select"
     assert row["values"] == [{"label": "Alpha", "accepted": False}]
-    assert row["selection_text"] == "Beta"
+    assert row["extra_selection"] == "Beta"
 
 
 def test_table_row_leaves_a_text_row_untouched() -> None:

@@ -16,7 +16,7 @@ def _row(shared_id: str, op: str, proposed: object = None) -> Suggestion:
         run_id="run-1",
         shared_id=shared_id,
         op=op,
-        status="accepted",
+        status="pending",
         proposed_value=proposed,
         template_name="Template",
     )

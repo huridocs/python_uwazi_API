@@ -1,9 +1,8 @@
 """``UwaziClient``-backed drift probe over the ``/api/v2/search`` route.
 
-Reuses the request conventions :class:`UwaziSearchProbe` established for the
-same route: the route always applies a ``term: { language }`` filter from the
-request locale, so the adapter sets ``Accept-Language`` + the ``locale``
-cookie per call; ``fields[]=sharedId&fields[]=editDate`` collapses each hit
+The route always applies a ``term: { language }`` filter from the request
+locale, so the adapter sets ``Accept-Language`` + the ``locale`` cookie per
+call; ``fields[]=sharedId&fields[]=editDate`` collapses each hit
 to the two fields the comparison needs (``buildQuery`` maps ``query.fields``
 onto Elastic ``_source.includes``); ``sort=-editDate`` rides the indexed
 ``editDate.sort`` sub-field; ``page.limit``/``page.offset`` drive pagination.

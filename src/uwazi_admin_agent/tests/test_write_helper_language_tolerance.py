@@ -7,27 +7,26 @@ have failed the dummy gate, so the script that reached execute was a best-effort
 emit). Delete/publish act on ALL language rows by ``sharedId`` (language is
 semantically irrelevant), so the helpers now accept an IGNORED ``language`` kwarg
 for signature consistency with the other helpers (the generator naturally passes
-it). These tests pin that tolerance for both the dummy-scoped and the
-backup-intercepted wrappers, with real in-memory ports (no mocks, no network).
+it). These tests pin that tolerance for the backup-intercepted wrappers, with
+real in-memory ports (no mocks, no network).
 """
 
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, override
 
-import pytest
-
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.snapshot import EntitySnapshot
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.use_cases.backup_intercept import BackupIntercept
-from uwazi_admin_agent.use_cases.script_exec_namespace import ScopeViolationError, _scoped_write_helpers
 
-# --- scoped wrappers (dummy mode) -------------------------------------------
+# --- intercepted wrappers (real mode) ---------------------------------------
 
 
 def _fake_crud(recorder: list[tuple[str, tuple, dict]]) -> tuple:
+    """Seven real callables standing in for the reused CRUD helpers (no ports)."""
+
     def _rec(name: str) -> Any:
         def fn(*args: Any, **kwargs: Any) -> Any:
             recorder.append((name, args, kwargs))
@@ -38,53 +37,6 @@ def _fake_crud(recorder: list[tuple[str, tuple, dict]]) -> tuple:
     return tuple(
         _rec(n) for n in ("create", "update", "delete", "publish", "unpublish", "set_publish_status", "create_relationships")
     )
-
-
-def test_scoped_delete_accepts_ignored_language_and_does_not_forward_it() -> None:
-    calls: list[tuple[str, tuple, dict]] = []
-    helpers = _scoped_write_helpers(_fake_crud(calls), {"D1", "D2"})
-
-    result = helpers["delete_entities"](["D1"], language="es")
-
-    assert result == [{"success": True, "shared_id": "D1"}]
-    # The underlying delete was called with just the shared_ids - language NOT forwarded.
-    assert calls == [("delete", (["D1"],), {})]
-
-
-def test_scoped_publish_helpers_accept_ignored_language() -> None:
-    calls: list[tuple[str, tuple, dict]] = []
-    helpers = _scoped_write_helpers(_fake_crud(calls), {"D1"})
-
-    helpers["publish_entities"](["D1"], language="es")
-    helpers["unpublish_entities"](["D1"], language="es")
-    helpers["set_publish_status"](["D1"], True, language="es")
-
-    names = [c[0] for c in calls]
-    assert names == ["publish", "unpublish", "set_publish_status"]
-    # No language forwarded to the underlying helpers.
-    assert all(c[2] == {} for c in calls)
-    assert calls[2] == ("set_publish_status", (["D1"], True), {})
-
-
-def test_scoped_delete_without_language_still_works() -> None:
-    calls: list[tuple[str, tuple, dict]] = []
-    helpers = _scoped_write_helpers(_fake_crud(calls), {"D1"})
-
-    helpers["delete_entities"](["D1"])
-
-    assert calls == [("delete", (["D1"],), {})]
-
-
-def test_scoped_delete_language_does_not_bypass_scope_check() -> None:
-    calls: list[tuple[str, tuple, dict]] = []
-    helpers = _scoped_write_helpers(_fake_crud(calls), {"D1"})
-
-    with pytest.raises(ScopeViolationError):
-        helpers["delete_entities"](["D1", "REAL-ID"], language="en")
-    assert calls == []  # underlying never reached
-
-
-# --- intercepted wrappers (real mode) ---------------------------------------
 
 
 class _MemBackupStore(BackupStorePort):

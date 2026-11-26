@@ -57,11 +57,9 @@ def _operation(
         languages=languages or ["en"],
         proposal_count=len(subs),
         pending=len(subs) - applied,
-        accepted=0,
         applied=applied,
         reverted=0,
         discarded=0,
-        edited=0,
         match_summary="n/a",
         has_outcome=True,
         subs=subs,
@@ -97,12 +95,13 @@ def test_sub_label_and_values_for_a_whole_entity_op() -> None:
     assert view.sub_match(sub) == "n/a"
 
 
-def test_sub_label_uses_the_property_label_and_keeps_the_raw_name_as_caption() -> None:
+def test_sub_label_uses_the_property_label_and_never_shows_the_internal_name() -> None:
+    """The label is the heading; the internal property name is not operator-facing."""
     sub = _sub(property_name="document_ref")
     assert view.sub_label(sub) == "document_ref"
     assert view.sub_label(sub, {"document_ref": "Document Ref"}) == "Document Ref"
     assert view.sub_caption(sub) == ""
-    assert view.sub_caption(sub, {"document_ref": "Document Ref"}) == "document_ref"
+    assert view.sub_caption(sub, {"document_ref": "Document Ref"}) == ""
 
 
 def test_set_publish_status_value_follows_the_flag() -> None:
@@ -117,21 +116,21 @@ def test_sub_status_vocabulary_uses_applied_for_written_rows() -> None:
     assert view.sub_status_label(SuggestionStatus.REVERTED) == "reverted"
 
 
-def test_sub_status_vocabulary_keeps_only_pending_applied_and_reverted() -> None:
-    """A recorded row is stored ACCEPTED and an edit EDITED: both still wait to
-    run, so the badge reads "pending" instead of the retired accept/edit words."""
+def test_sub_status_vocabulary_has_one_word_per_store_state() -> None:
+    """Each lifecycle state has exactly one badge word — no accept/edit aliases."""
     assert view.sub_status_label(SuggestionStatus.PENDING) == "pending"
-    assert view.sub_status_label(SuggestionStatus.ACCEPTED) == "pending"
-    assert view.sub_status_label(SuggestionStatus.EDITED) == "pending"
-    assert view.sub_status_color(SuggestionStatus.ACCEPTED) == "grey-8"
-    assert view.sub_status_color(SuggestionStatus.EDITED) == "grey-8"
+    assert view.sub_status_color(SuggestionStatus.PENDING) == "grey-8"
+    assert view.sub_status_label(SuggestionStatus.APPLIED) == "applied"
+    assert view.sub_status_label(SuggestionStatus.REVERTED) == "reverted"
+    assert view.sub_status_label(SuggestionStatus.DISCARDED) == "discarded"
 
 
 def test_operation_status_is_derived_from_its_parts() -> None:
     assert view.operation_status([{"status": "applied"}, {"status": "applied"}]) == "applied"
     assert view.operation_status([{"status": "discarded"}, {"status": "discarded"}]) == "discarded"
     assert view.operation_status([{"status": "reverted"}, {"status": "reverted"}]) == "reverted"
-    assert view.operation_status([{"status": "applied"}, {"status": "pending"}]) == "pending"
+    assert view.operation_status([{"status": "applied"}, {"status": "pending"}]) == "mixed"
+    assert view.operation_status([{"status": "pending"}, {"status": "discarded"}]) == "pending"
     assert view.operation_status([]) == "pending"
 
 
@@ -323,18 +322,19 @@ def test_suboperation_row_multiselect_without_rejections_reads_all_accepted() ->
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
     assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": True}]
     assert row["has_rejected"] is False
-    assert row["selection_text"] == "A, B"
+    # The chips ARE the written set; no second line repeats them.
+    assert row["extra_selection"] == ""
 
 
 def test_suboperation_row_reports_the_operator_selection_as_the_written_set() -> None:
     sub = _sub(1, property_name="keywords", proposed=["A", "B"])
     sub = sub.model_copy(update={"selected_values": ["A", "C"]})
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
-    # The chips are the PROPOSAL (B stays visible, marked dropped); the caption
-    # is what the Run writes, including the value the operator added.
+    # The chips are the PROPOSAL (B stays visible, marked dropped); the value the
+    # operator ADDED (C) has no chip, so it is the one extra line.
     assert row["values"] == [{"label": "A", "accepted": True}, {"label": "B", "accepted": False}]
     assert row["has_rejected"] is True
-    assert row["selection_text"] == "A, C"
+    assert row["extra_selection"] == "C"
 
 
 def test_suboperation_row_reads_an_empty_selection_as_nothing_written() -> None:
@@ -342,7 +342,7 @@ def test_suboperation_row_reads_an_empty_selection_as_nothing_written() -> None:
     sub = sub.model_copy(update={"selected_values": []})
     row = view.suboperation_row(sub, checked=True, in_place=True, types={"keywords": "multiselect"})
     assert [value["accepted"] for value in row["values"]] == [False, False]
-    assert row["selection_text"] == "— nothing (the row is discarded)"
+    assert row["extra_selection"] == ""
 
 
 # --- modified column ---------------------------------------------------------
@@ -356,8 +356,8 @@ def test_operation_row_carries_the_modified_label() -> None:
     assert row["modified"] == "2026-11-03 09:45"
 
 
-def test_operation_row_reads_a_dash_when_no_timestamp_was_recorded() -> None:
-    assert view.operation_row(_operation([_sub(1)]))["modified"] == "—"
+def test_operation_row_reads_blank_when_no_action_was_recorded() -> None:
+    assert view.operation_row(_operation([_sub(1)]))["modified"] == ""
 
 
 # --- reverted rows whose undo re-created an entity ---------------------------

@@ -109,6 +109,22 @@ def login_link(base_url: str, instance: str, user: str) -> str:
     return f"{prefix}?{query}"
 
 
+def startup_login_link(base_url: str, configured: list[str], user: str = "") -> str:
+    """The console's login link for the FIRST configured instance.
+
+    The ``instance`` parameter is mandatory on the login page: a bare ``/``
+    renders only the "open the shared link" guidance, so the URL the server
+    announces at startup must already carry it. The first configured url
+    supplies the token and ``user`` (``UWAZI_USER``, the deployment's shared
+    admin account) prefills the username. With nothing configured the bare
+    base url is returned and ``user`` is dropped — it would decorate a
+    dead-end link that renders the "no instance configured" banner.
+    """
+    if not configured:
+        return f"{base_url.rstrip('/')}/" if base_url else "/"
+    return login_link(base_url, instance_token(configured[0], configured), user)
+
+
 def page_link(path: str, instance: str, configured: list[str]) -> str:
     """An in-app page URL that carries the instance token in its query string.
 
@@ -195,4 +211,5 @@ __all__ = [
     "page_link",
     "resolve_login_target",
     "resolve_page_target",
+    "startup_login_link",
 ]

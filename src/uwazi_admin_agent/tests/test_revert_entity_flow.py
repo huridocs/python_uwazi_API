@@ -16,7 +16,6 @@ import pytest
 
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
 from uwazi_admin_agent.domain.manifest import EntityIdentity, MigrationManifest, RunStatus
-from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
 from uwazi_admin_agent.drivers.web.review_view import entity_row, revert_entity_confirmation
 from uwazi_admin_agent.ports.backup_store_port import BackupStorePort
@@ -204,8 +203,8 @@ async def test_revert_entity_without_backup_returns_none() -> None:
     assert repo.saved == []
 
 
-async def test_revert_entity_refuses_created_entity() -> None:
-    """A created entity's undo is a delete (run-level); the row revert refuses it."""
+async def test_revert_entity_deletes_a_created_entity() -> None:
+    """A created entity has no pre-run state: its row undo DELETES it."""
     repo = InMemoryEntityRepository()
     backups = InMemoryBackupStore()
     captured = datetime.now(timezone.utc)
@@ -218,8 +217,12 @@ async def test_revert_entity_refuses_created_entity() -> None:
     )
     backups.save_manifest("run1", manifest)
     use_case = RevertRunUseCase(entity_repository=repo, backup_store=backups)
-    with pytest.raises(RevertRefusedError):
-        await use_case.revert_entity("run1", "made-1")
+
+    # The undo asks Uwazi to remove the entity and records it as reverted; the
+    # rows (unwired here) would flip to REVERTED at the same time.
+    await use_case.revert_entity("run1", "made-1")
+
+    assert "made-1" in backups.load_manifest("run1").reverted_shared_ids
 
 
 async def test_revert_entity_flips_all_language_rows_of_the_entity(store: SqliteSuggestionStore) -> None:
@@ -289,7 +292,6 @@ def test_entity_row_carries_revert_tooltip_and_revertable_flag() -> None:
             ops=["update"],
             properties=["excerpt"],
             proposal_count=1,
-            accepted=0,
             pending=0,
             applied=1,
             reverted=0,
@@ -314,7 +316,6 @@ def test_entity_row_pending_row_is_not_revertable() -> None:
             ops=["delete"],
             properties=[],
             proposal_count=2,
-            accepted=0,
             pending=1,
             applied=1,
             reverted=0,
@@ -336,6 +337,14 @@ def test_revert_entity_confirmation_says_backup_time_and_all_languages() -> None
     assert "ALL languages" in message
 
 
+def test_revert_confirmation_for_a_created_entity_says_delete() -> None:
+    """A created entity's undo is a deletion; the dialog must never say "restore"."""
+    title, message = revert_entity_confirmation("REAL1", created=True)
+    assert title == "Revert create"
+    assert "Delete REAL1" in message
+    assert "restore" not in message.lower()
+
+
 def test_revert_merge_confirmation_names_the_recreated_sources_and_the_copied_files() -> None:
     title, message = revert_entity_confirmation("T", "entity backup creation 2026-02-03 10:05", merge=True)
 
@@ -344,3 +353,35 @@ def test_revert_merge_confirmation_names_the_recreated_sources_and_the_copied_fi
     assert "source entities this merge absorbed are re-created" in message
     assert "new sharedIds" in message
     assert "copied onto the target are removed again" in message
+
+
+async def test_a_create_merge_row_is_refused_because_its_sources_must_come_back() -> None:
+    """Deleting only the created target would lose the absorbed sources."""
+    from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
+    from uwazi_admin_agent.domain.suggestion import Suggestion
+
+    class Rows:
+        """The minimum of the store's read surface the revert asks for."""
+
+        def applied_rows_for(self, run_id: str, shared_ids: list[str] | None = None) -> list[Any]:
+            return [Suggestion(run_id=run_id, shared_id="made-1", op="create_and_delete", property_name="a")]
+
+        def get_entity(self, run_id: str, shared_id: str, language: str | None = None, f: Any = None) -> list[Any]:
+            return []
+
+    repo = InMemoryEntityRepository()
+    backups = InMemoryBackupStore()
+    backups.save_manifest(
+        "run1",
+        MigrationManifest(
+            run_id="run1",
+            created_at=datetime.now(timezone.utc),
+            prompt="p",
+            script="",
+            created=[EntityIdentity(shared_id="made-1", language="en")],
+        ),
+    )
+    use_case = RevertRunUseCase(entity_repository=repo, backup_store=backups, suggestion_store=Rows())
+
+    with pytest.raises(RevertRefusedError, match="create-merge"):
+        await use_case.revert_entity("run1", "made-1")

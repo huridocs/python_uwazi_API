@@ -230,7 +230,7 @@ def test_an_empty_language_selection_matches_nothing(store: SqliteSuggestionStor
 def test_status_can_be_set_for_one_language_group_only(store: SqliteSuggestionStore) -> None:
     _translation(store)
 
-    count = store.set_status_by_filter("run1", SuggestionFilter(entity_languages=[("s1", "es")]), SuggestionStatus.ACCEPTED)
+    count = store.set_status_by_filter("run1", SuggestionFilter(entity_languages=[("s1", "es")]), SuggestionStatus.PENDING)
 
     assert count == 1
     assert [row.language for row in store.get_entity("run1", "s1", "es")] == ["es"]

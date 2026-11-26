@@ -36,8 +36,6 @@ from uwazi_admin_agent.domain.suggestion_scoring import value_in_language
 RUNNABLE_STATUSES: frozenset[SuggestionStatus] = frozenset(
     {
         SuggestionStatus.PENDING,
-        SuggestionStatus.ACCEPTED,
-        SuggestionStatus.EDITED,
         SuggestionStatus.REVERTED,
     }
 )
@@ -190,8 +188,8 @@ def reconciled_status(
       with the live ones in the same pass, so the recorded old sharedIds are no
       longer stale;
     - an unchanged proposal keeps the operator's status;
-    - a changed proposal returns to PENDING, except that EDITED and DISCARDED
-      are deliberate operator decisions and survive;
+    - a changed proposal returns to PENDING, except that DISCARDED is a
+      deliberate operator decision and survives;
     - APPLIED is NOT special here: if the proposal changed, the old write no
       longer describes the table, so the row must be reviewed again.
     """
@@ -199,7 +197,7 @@ def reconciled_status(
         return SuggestionStatus.PENDING
     if same:
         return current
-    if current in (SuggestionStatus.EDITED, SuggestionStatus.DISCARDED):
+    if current is SuggestionStatus.DISCARDED:
         return current
     return SuggestionStatus.PENDING
 

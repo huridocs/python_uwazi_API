@@ -16,11 +16,12 @@ from uwazi_admin_agent.adapters.script_emitter import emit_generated_script
 from uwazi_admin_agent.configuration import (
     DUMMY_LANGUAGE,
 )
+from uwazi_admin_agent.domain.generated_script import GeneratedScript
 from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.manifest import MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.plan_intent import PlanOutcome
 from uwazi_admin_agent.domain.prompt_chat import ChatMessage, build_final_prompt_from_chat
-from uwazi_admin_agent.domain.prompt_revision import prompt_with_previous_script
+from uwazi_admin_agent.domain.prompt_revision import prompt_with_previous_script, script_repair_request
 from uwazi_admin_agent.domain.review_refresh import (
     ReconciliationSummary,
 )
@@ -38,11 +39,44 @@ from uwazi_admin_agent.use_cases.generate_predictions_use_case import (
     PredictionPassError,
 )
 from uwazi_admin_agent.use_cases.generate_script_use_case import GenerateScriptUseCase
-from uwazi_admin_agent.use_cases.generation_stages import STAGE_PLANNING, STAGE_SAVING
+from uwazi_admin_agent.use_cases.generation_stages import (
+    STAGE_PLANNING,
+    STAGE_REPAIR,
+    STAGE_SAVING,
+)
 
 from .drift import refresh_baseline_after_run
 from .models import GenerateError, TableUpdateResult
 from .wiring import _paths, _script_caps_budget, build_suggestion_store, read_run_script
+
+
+async def _repair_failed_plan(
+    use_case: GenerateScriptUseCase,
+    *,
+    prompt: str,
+    failed_script: str,
+    error: str,
+    plan_kind: str | None,
+    on_stage: Callable[[str], None] | None,
+) -> GeneratedScript | None:
+    """ONE bounded repair round for a freshly generated script that crashed.
+
+    The traceback is re-opened as the authoring turn's user prompt (see
+    :func:`script_repair_request`): the SAME use case — same model, tools and
+    budget the first generation ran with — outputs a corrected full script.
+    Returns it, or ``None`` when the repair turn itself fails. The caller
+    re-plans the corrected source with ``script_override``; a repaired script
+    that crashes again does NOT loop — the caller keeps the original crash as
+    the run's failure and the operator's Retry stays the escape hatch.
+    """
+    if on_stage is not None:
+        on_stage(STAGE_REPAIR)
+    repair_prompt = script_repair_request(prompt, failed_script, error, plan_kind)
+    try:
+        return await use_case.execute(repair_prompt, on_stage=on_stage)
+    except Exception as exc:  # noqa: BLE001 — a failed repair keeps the original crash
+        logger.warning("script repair round failed: {}", exc)
+        return None
 
 
 async def create_and_generate(
@@ -93,7 +127,7 @@ async def create_and_generate(
         try:
             from .validation import build_validation_set
 
-            build_validation_set(url, name, validation_config, user, password)
+            await build_validation_set(url, name, validation_config, user, password)
         except Exception as exc:  # noqa: BLE001 — never lose the run over an optional set
             logger.warning("validation sampling failed for run {}: {}", name, exc)
     _paths(url).prompts_path.mkdir(parents=True, exist_ok=True)
@@ -177,22 +211,70 @@ async def create_and_generate(
     try:
         await run_auto_scan(url, name, user, password, budget)
     except PredictionPassError as exc:
-        # The plan contradicted its declared kind (or the script itself failed):
-        # a run with no reviewable table is a FAILED generation, and saying so is
-        # what enables the retry affordance instead of leaving a PLANNED run with
-        # an empty table.
-        manifest.status = RunStatus.GENERATION_FAILED
-        manifest.error = str(exc)
-        manifest.error_step = "plan"
+        # 1. SELF-REPAIR, once: a script CRASH during the FIRST plan pass is a
+        #    model typo (the wrong helper name, an attribute the result object
+        #    does not have). The traceback is exactly the evidence the authoring
+        #    agent needs, so the same generation turn is re-opened with the
+        #    failed source and the crash text. An intent-gate REFUSAL is not
+        #    repaired: that is the design answering the prompt, and re-authoring
+        #    it would not know what to change.
+        repaired = (
+            None
+            if exc.refused
+            else await _repair_failed_plan(
+                use_case,
+                prompt=final_prompt,
+                failed_script=script.python_code,
+                error=str(exc),
+                plan_kind=manifest.plan_kind,
+                on_stage=on_stage,
+            )
+        )
+        # 2. Re-plan with the corrected source BEFORE it replaces anything: the
+        #    SAME declared plan kind, and a pass that crashes again (the repair
+        #    could not fix the typo) keeps the original crash as this run's
+        #    failure — no repair loop, Retry stays the escape hatch.
+        replanned: ReconciliationSummary | None = None
+        if repaired is not None:
+            if on_stage is not None:
+                on_stage(STAGE_PLANNING)
+            try:
+                replanned = await run_auto_scan(
+                    url,
+                    name,
+                    user,
+                    password,
+                    budget,
+                    script_override=repaired.python_code,
+                    plan_kind_override=manifest.plan_kind,
+                )
+            except PredictionPassError as repair_error:
+                logger.warning("run {}: the repaired script also failed to plan: {}", name, repair_error)
+        if replanned is None:
+            manifest.status = RunStatus.GENERATION_FAILED
+            manifest.error = str(exc)
+            manifest.error_step = "plan"
+            runtime.backup_store.save_manifest(name, manifest)
+            raise GenerateError(str(exc)) from exc
+        # 3. The repaired script planned cleanly under the same declared kind:
+        #    persist it — it is now the run's committed script, the one that
+        #    produced the review table the operator is about to see.
+        logger.info(
+            "run {}: the first plan pass crashed ({}); the repaired script planned cleanly",
+            name,
+            str(exc).splitlines()[0][:120],
+        )
+        emit_generated_script(repaired, run_path)
+        manifest.script = repaired.python_code
+        manifest.plan_description = repaired.description
         runtime.backup_store.save_manifest(name, manifest)
-        raise GenerateError(str(exc)) from exc
 
     # The script is committed and planned: score it against the holdout (if the
     # run has one). A scoring failure must never lose a usable run.
     try:
         from .validation import evaluate_run
 
-        evaluate_run(url, name, user, password)
+        await evaluate_run(url, name, user, password)
     except Exception as exc:  # noqa: BLE001
         logger.warning("validation scoring failed for run {}: {}", name, exc)
 
@@ -431,7 +513,7 @@ async def regenerate_from_chat(
     try:
         from .validation import evaluate_run
 
-        evaluate_run(url, run_id, user, password)
+        await evaluate_run(url, run_id, user, password)
     except Exception as exc:  # noqa: BLE001
         logger.warning("validation scoring after regeneration failed for run {}: {}", run_id, exc)
     return TableUpdateResult(

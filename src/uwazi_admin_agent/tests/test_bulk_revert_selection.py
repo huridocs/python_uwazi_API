@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 from uwazi_admin_agent.adapters.sqlite_suggestion_store import SqliteSuggestionStore
-from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter
+from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter, SuggestionStatus
 from uwazi_admin_agent.drivers.web.review_view import bulk_revert_label, unique_entities
 
 # --- pure selection helpers --------------------------------------------------
@@ -92,4 +92,35 @@ def test_mark_applied_reverted_for_does_not_touch_pending_rows() -> None:
         rows, _total = store.entity_rows("run1", SuggestionFilter(limit=100))
         assert rows[0].pending == 1
         assert rows[0].reverted == 0
+        store.close()
+
+
+# --- created entities ----------------------------------------------------------
+
+
+def test_a_created_row_is_matched_through_its_minted_id() -> None:
+    """Deleting the minted entity must flip the rows that proposed it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SqliteSuggestionStore(Path(tmp) / "suggestions.db")
+        created = Suggestion(
+            run_id="run1",
+            shared_id="dry-created-0",
+            op="create",
+            property_name="excerpt",
+            proposed_value="x",
+            status=SuggestionStatus.APPLIED,
+            created_shared_id="REAL1",
+        )
+        store.add_suggestions([created])
+
+        assert store.created_shared_id_for("run1", "dry-created-0") == "REAL1"
+        assert store.created_shared_id_for("run1", "REAL1") == "REAL1"
+        assert store.created_shared_id_for("run1", "other") is None
+
+        assert store.mark_applied_reverted_for("run1", ["REAL1"]) == 1
+        rows, _total = store.entity_rows("run1", SuggestionFilter(limit=100))
+        assert rows[0].reverted == 1
+        # The minted id is cleared: the row must stop linking to a deleted page.
+        assert store.clear_created_ids("run1", ["REAL1"]) == 1
+        assert store.created_shared_id_for("run1", "dry-created-0") is None
         store.close()

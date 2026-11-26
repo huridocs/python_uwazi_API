@@ -91,7 +91,7 @@ _QUESTION_TITLES = {
     TARGET_PROPERTY_QUESTION: "Which property should receive the suggestion?",
     EXISTING_VALUE_MODE_QUESTION: "What if the property already has a value?",
     EXISTING_VALUE_RULE_QUESTION: "What custom rule should apply to existing values?",
-    FALLBACK_MODE_QUESTION: "What if no topic clearly applies?",
+    FALLBACK_MODE_QUESTION: "What if no value clearly applies?",
     FALLBACK_VALUE_QUESTION: "What fallback value should be suggested?",
     SCOPE_QUESTION: "Which entities should be included?",
     SCOPE_FILTER_QUESTION: "What filter or condition selects the entities?",
@@ -504,6 +504,7 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             on_change=lambda event: state.update(_guided_draft_source_templates=event.value or []),
         ).props("outlined use-chips").classes("w-full")
     elif question == CREATE_SOURCE_PROPERTIES_QUESTION:
+        # Input, never a target: the Uwazi-managed dates stay available here.
         choices = [choice for template in answers.source_templates for choice in template_property_choices(schema, template)]
         _multi_answer(
             state,
@@ -514,7 +515,11 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             placeholder="e.g. title, summary, judge",
         )
     elif question == CREATE_TARGET_PROPERTIES_QUESTION:
-        choices = [choice for template in answers.templates for choice in template_property_choices(schema, template)]
+        choices = [
+            choice
+            for template in answers.templates
+            for choice in template_property_choices(schema, template, writable_only=True)
+        ]
         _multi_answer(
             state,
             "create_target_properties",

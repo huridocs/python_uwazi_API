@@ -16,9 +16,7 @@ import pytest
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
-    ScopeViolationError,
     _build_move_files_real_helper,
-    _move_files_noop_scoped,
 )
 
 # --- in-memory ports (real classes, not mocks) ------------------------------
@@ -322,24 +320,3 @@ def test_unwired_helper_raises_when_called() -> None:
 
 
 # --- scoped no-op (dummy mode) -----------------------------------------------
-
-
-def test_scoped_noop_returns_zero_in_scope() -> None:
-    scope = {"D1", "D2", "T1"}
-    move = _move_files_noop_scoped(scope)
-    result = move(["D1", "D2"], "T1")
-    assert result == {
-        "moved": 0,
-        "failed": 0,
-        "skipped": 0,
-        "note": "no-op in validation - dummies carry no uploaded files",
-    }
-
-
-def test_scoped_noop_refuses_out_of_scope() -> None:
-    scope = {"D1", "T1"}
-    move = _move_files_noop_scoped(scope)
-    with pytest.raises(ScopeViolationError):
-        move(["D1", "REAL-ID"], "T1")  # REAL-ID outside the dummy scope
-    with pytest.raises(ScopeViolationError):
-        move(["D1"], "REAL-TARGET")  # target outside scope

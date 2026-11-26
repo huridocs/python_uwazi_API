@@ -18,6 +18,7 @@ from uwazi_admin_agent.domain.drift import DriftReport, DriftStatus
 from uwazi_admin_agent.domain.file_drift import recorded_file_signatures
 from uwazi_admin_agent.domain.review_refresh import (
     PreflightResult,
+    ReconciliationSummary,
     evaluate_preflight,
 )
 from uwazi_admin_agent.domain.suggestion import (
@@ -98,13 +99,28 @@ async def update_table_from_uwazi(url: str, run_id: str, user: str, password: st
     )
     from .validation import holdout_ids
 
-    _final, summary = await use_case.run(
+    await use_case.run(
         script,
         run_id=run_id,
         budget=pass_row.budget or _script_caps_budget(),
         plan_kind=runtime.backup_store.load_manifest(run_id).plan_kind,
         exclude_scope=holdout_ids(url, run_id) or None,
     )
+    summary = use_case.last_reconciliation or ReconciliationSummary()
+
+    # Re-score the holdout. The script may be unchanged, but its validation ROWS
+    # can be stale: they were written by an earlier evaluation (an older pass,
+    # or a version of this feature that could not see the instance's reference
+    # data). The production reconcile above never touches them — it is the
+    # evaluation that owns them — so a refresh is the moment the operator's
+    # "Sync with Uwazi" brings the test set back in line with the table. A
+    # scoring failure never loses a usable table.
+    try:
+        from .validation import evaluate_run
+
+        await evaluate_run(url, run_id, user, password)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("validation scoring during table refresh failed for run {}: {}", run_id, exc)
 
     baseline_rows = await asyncio.to_thread(
         sync_drift_baseline,

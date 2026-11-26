@@ -182,11 +182,9 @@ def _info_operation() -> OperationReviewRow:
         languages=[],
         proposal_count=2,
         pending=2,
-        accepted=0,
         applied=0,
         reverted=0,
         discarded=0,
-        edited=0,
         match_summary="n/a",
         has_outcome=False,
         subs=[parent, child],
@@ -230,7 +228,7 @@ def test_pushable_rows_never_applies_info() -> None:
         shared_id="info-0",
         op=INFO_OP,
         proposed_value="display only",
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     update = Suggestion(
         id=2,
@@ -239,7 +237,7 @@ def test_pushable_rows_never_applies_info() -> None:
         op="update",
         property_name="title",
         proposed_value="new",
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
 
     assert pushable_rows([info, update]) == [update]
@@ -273,11 +271,9 @@ def _display_operation(op: str, *, reason: str | None = None) -> OperationReview
         languages=[] if op == SKIPPED_OP else ["en"],
         proposal_count=1,
         pending=1,
-        accepted=0,
         applied=0,
         reverted=0,
         discarded=0,
-        edited=0,
         match_summary="n/a",
         has_outcome=False,
         subs=[sub],
@@ -288,7 +284,7 @@ def test_skipped_reason_ids_map_to_descriptive_text() -> None:
     assert skip_reason_label("no_segmentation") == "The primary document has no usable text segmentation."
     assert skip_reason_label("no_document") == "No primary document is attached to this entity."
     assert skip_reason_label("no_code_in_page_1") == "No matching document code was found on the first page."
-    assert skip_reason_label(None).startswith("This entity was not processed")
+    assert skip_reason_label(None).startswith("This entity was excluded")
 
 
 def test_skip_record_becomes_a_per_entity_display_row() -> None:
@@ -327,14 +323,16 @@ def test_skipped_operation_shows_the_reason_and_entity_link() -> None:
     payload = view.operation_row(_display_operation(SKIPPED_OP, reason="no_segmentation"), uwazi_url="https://example.test")
 
     assert payload["url"] == "https://example.test/en/entity/entity-a"
-    assert payload["run_status"] == "not processed"
+    assert payload["run_status"] == "excluded"
     assert payload["is_display_only"] is True
     assert payload["has_runnable"] is False
     sub = payload["subs"][0]
     assert sub["label"] == "The primary document has no usable text segmentation."
     assert sub["caption"] == ""
-    assert sub["proposed"] == "first page excerpt"
-    assert sub["status"] == "not processed"
+    # The exclusion's evidence is the INPUT text, never a suggested value.
+    assert sub["proposed"] == "—"
+    assert sub["context"] == "first page excerpt"
+    assert sub["status"] == "excluded"
     assert sub["selectable"] is False
 
 
@@ -369,14 +367,14 @@ def test_pushable_rows_and_apply_partitions_exclude_matched_and_skipped() -> Non
         op=MATCHED_OP,
         property_name="document_ref",
         proposed_value="same",
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
     skipped = Suggestion(
         id=2,
         run_id="run1",
         shared_id="b",
         op=SKIPPED_OP,
-        status=SuggestionStatus.ACCEPTED,
+        status=SuggestionStatus.PENDING,
     )
 
     assert pushable_rows([matched, skipped]) == []

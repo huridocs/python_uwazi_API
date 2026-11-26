@@ -703,7 +703,6 @@ def drop_unchanged_property_rows(suggestions: list[Suggestion]) -> list[Suggesti
                         "op": MATCHED_OP,
                         "detail_key": suggestion.detail_key or suggestion.property_name,
                         "status": SuggestionStatus.PENDING,
-                        "edited_value": None,
                         "rejected_values": [],
                         "discard_reason": None,
                         "reviewed_at": None,

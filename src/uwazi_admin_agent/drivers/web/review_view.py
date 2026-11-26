@@ -39,27 +39,31 @@ from uwazi_admin_agent.domain.suggestion import (
 # with white and are hard to read. These shades keep at least ~4.5:1.
 STATUS_COLORS: dict[str, str] = {
     "pending": "grey-8",
-    "accepted": "green-9",
-    "edited": "teal-9",
-    "discarded": "red-9",
+    "discarded": "pink-10",
     "applied": "blue-9",
     "reverted": "indigo",
 }
 
+# The OPERATION badges use their own hue family, deliberately disjoint from
+# STATUS_COLORS: an operation and a status sit in two adjacent columns, and
+# sharing a color made "update" and "applied" read as the same fact. The
+# statuses keep the deep state colors (grey pending, blue applied, indigo
+# reverted, pink discarded) while every operation is named by a mid-tone hue.
 OP_COLORS: dict[str, str] = {
-    "update": "blue-9",
+    "update": "teal-10",
     "create": "cyan-10",
-    "delete": "negative",
-    "publish": "green-9",
-    "unpublish": "deep-orange-10",
-    "set_publish_status": "deep-orange-10",
+    "delete": "brown-9",
+    "publish": "light-green-9",
+    "unpublish": "orange-10",
+    "set_publish_status": "amber-10",
     "create_relationships": "purple",
-    "move_files": "teal-9",
+    "move_files": "blue-grey-9",
     "update_and_delete": "deep-purple",
-    "create_and_delete": "indigo",
-    "info": "blue-grey-8",
-    "matched": "green-9",
-    "skipped": "deep-orange-10",
+    "create_and_delete": "red-10",
+    "info": "grey-7",
+    "matched": "light-green-10",
+    "skipped": "grey-7",
+    "validate": "purple-7",
 }
 
 # The human labels of the Operation filter. Kept beside the colors so the control
@@ -76,8 +80,9 @@ OP_LABELS: dict[str, str] = {
     "update_and_delete": "merge (update + delete)",
     "create_and_delete": "merge (create + delete)",
     "info": "information",
-    "matched": "matched Uwazi value",
-    "skipped": "not processed",
+    "matched": "matches Uwazi",
+    "skipped": "excluded",
+    "validate": "validate",
 }
 
 MATCH_COLORS: dict[str, str] = {
@@ -97,10 +102,15 @@ RUN_STATUS_COLORS: dict[str, str] = {
     "applied": "blue-9",
     "reverted": "indigo",
     "pending": "grey-8",
-    "discarded": "red-9",
+    "discarded": "pink-10",
+    # An operation whose parts disagree (some written, some still to write).
+    # Orange is work-in-progress, distinct from both the blue "applied" and the
+    # grey "pending" it sits between.
+    "mixed": "deep-orange-9",
     "info": "blue-grey-8",
-    "matched": "green-9",
-    "skipped": "deep-orange-10",
+    "matched": "light-green-10",
+    "skipped": "grey-7",
+    "validate": "purple-7",
 }
 
 
@@ -110,14 +120,13 @@ RUN_STATUS_COLORS: dict[str, str] = {
 OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files", MATCHED_OP, SKIPPED_OP})
 
 # Operations whose per-entity undo is NOT an in-place restore of one live entity, so
-# their rows never offer the Revert icon: a `delete` row's undo is a re-create
-# (a fresh sharedId, files and connection rows), a `create` row's undo is a
-# deletion, and a `create_and_delete` merge's target is only a ``dry-created-N``
-# placeholder in the review rows (Uwazi has no such entity; undoing it is that
-# same deletion). An `update_and_delete` merge IS revertable from its row — it
-# restores the target and re-creates the sources it deleted — so it is absent
-# here (see RevertRunUseCase.revert_entity).
-RUN_LEVEL_ONLY_OPS: frozenset[str] = frozenset({"delete", "create", "create_and_delete"})
+# their rows never offer the Revert icon: a `delete` row's undo is a re-create (a
+# fresh sharedId, files and connection rows), and a `create_and_delete` merge's
+# target is only a ``dry-created-N`` placeholder in the review rows (Uwazi has
+# no such entity). A plain `create` IS undone from its row — the undo deletes the
+# entity the run minted — and an `update_and_delete` merge restores the target
+# and re-creates the sources it deleted, so both are absent here.
+RUN_LEVEL_ONLY_OPS: frozenset[str] = frozenset({"delete", "create_and_delete"})
 
 # ``_title`` is the review table's synthetic name for a title change — no
 # template property carries it, so it gets the same human word Uwazi uses.
@@ -136,7 +145,8 @@ RUN_OP_PHRASES: dict[str, str] = {
     "update_and_delete": "Merge (update + delete)",
     "create_and_delete": "Merge (create + delete)",
     "matched": "Already matches Uwazi",
-    "skipped": "Not processed",
+    "skipped": "Excluded",
+    "validate": "Validate",
 }
 
 
@@ -150,7 +160,7 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
     languages do the same for a translation task: "Run 2 rows (es)" says the
     Run writes the Spanish text and leaves the other languages alone.
     """
-    entities = "row" if count == 1 else "rows"
+    entities = "suggestion" if count == 1 else "suggestions"
     title = f"Run {count} {entities}"
     if languages:
         title = f"{title} ({', '.join(languages)})"
@@ -169,7 +179,12 @@ def run_confirmation(count: int, ops: list[str] | None = None, languages: list[s
     return title, f"{action} {count} {entities} in Uwazi now.{suffix}"
 
 
-def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = False) -> tuple[str, str]:
+def revert_entity_confirmation(
+    shared_id: str,
+    tooltip: str = "",
+    merge: bool = False,
+    created: bool = False,
+) -> tuple[str, str]:
     """``(title, message)`` for the per-row Revert dialog (pure).
 
     The restore rolls the WHOLE entity back — every language row the backup
@@ -182,7 +197,17 @@ def revert_entity_confirmation(shared_id: str, tooltip: str = "", merge: bool = 
     their backups with NEW sharedIds, and the files the merge copied onto the
     target are removed again (verified byte-for-byte against the sources'
     backups) — so the message spells both out.
+
+    ``created`` says the row's entity did not exist before the Run: there is no
+    backup to restore, so the undo DELETES it. The dialog says that plainly —
+    deleting an entity must never be described as a restore.
     """
+    if created:
+        return (
+            "Revert create",
+            f"Delete {shared_id}: this run created it, so undoing the creation removes the entity "
+            "and every file it was created with. Its review rows go back to pending.",
+        )
     when = f" made {tooltip.removeprefix('entity backup creation ')}" if tooltip else ""
     restored = f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup)."
     if not merge:
@@ -217,7 +242,7 @@ def bulk_discard_label(count: int) -> str:
     """The Discard button's text for a live selection of ``count`` rows (pure).
 
     The same shape as :func:`run_button_label`: the count on the button says
-    how many checked operations the Discard will mark as not-to-be-executed.
+    how many checked suggestions the Discard will mark as not-to-be-executed.
     """
     return f"Discard ({count})"
 
@@ -230,10 +255,10 @@ def discard_confirmation(count: int) -> tuple[str, str]:
     itself is asked in the same dialog (it is stored with the rows), so the
     operator can say WHY the end user does not want these executed.
     """
-    rows = "operation" if count == 1 else "operations"
+    noun = "suggestion" if count == 1 else "suggestions"
     return (
-        f"Discard {count} {rows}",
-        f"Mark {count} checked {rows} as discarded. They will NOT be applied by a Run, and the reason is stored with them.",
+        f"Discard {count} {noun}",
+        f"Mark {count} checked {noun} as discarded. They will NOT be applied by a Run, and the reason is stored with them.",
     )
 
 
@@ -361,6 +386,12 @@ def full_value(value: Any, property_type: str | None = None) -> str:
 # the title itself keeps the whole budget.
 TITLE_CELL_CHARS: int = 97
 
+# How much of a row's recorded INPUT TEXT the review table prints. The cell
+# wraps, but an unbounded passage (a whole page) would push everything else off
+# the screen, so the payload carries a window instead. 1,000 characters is a
+# long paragraph: enough to judge the extraction without opening the document.
+CONTEXT_CELL_CHARS: int = 1_000
+
 # Column widths (CSS px) for the review table's fixed columns. The Target column
 # takes whatever is left and absorbs the shrink; naming the rest here is what
 # stops a long Template/Status cell from widening the table past its container.
@@ -438,27 +469,6 @@ ACTIONS_COLUMN: str = "width: 150px"
 # not), and the cell's link carries the ellipsis.
 TITLE_COLUMN: str = "max-width: 0; width: 100%"
 
-# The sharedId is an identifier the operator copies out of the table, so it is
-# NEVER cut: the cell gives it a fixed slot wide enough for the longest id,
-# and the TITLE beside it absorbs the shrink instead (the title is the one that
-# may be long — a document title is unbounded).
-SHARED_ID_MAX_CHARS: int = 15
-SHARED_ID_CLASS: str = "review-shared-id"
-
-# The sharedId's own style. The id is set in a monospace
-# face so the reserved slot matches the characters it holds, and the ids line
-# up down the column — which is what makes them comparable at a glance.
-SHARED_ID_CSS: str = (
-    f".{SHARED_ID_CLASS} {{\n"
-    f"    flex: 0 0 auto;\n"
-    f"    min-width: {SHARED_ID_MAX_CHARS}ch;\n"
-    "    white-space: nowrap;\n"
-    "    overflow: visible;\n"
-    "    font-family: monospace;\n"
-    "    font-size: 0.9em;\n"
-    "}\n"
-)
-
 
 def property_heading(property_name: str | None, op: str, labels: dict[str, str]) -> str:
     """The heading a suggestion's property row shows to the operator (pure).
@@ -475,19 +485,6 @@ def property_heading(property_name: str | None, op: str, labels: dict[str, str])
     if property_name == TITLE_PROPERTY:
         return TITLE_LABELS[TITLE_PROPERTY]
     return labels.get(property_name) or property_name
-
-
-def property_caption(property_name: str | None, labels: dict[str, str]) -> str:
-    """The raw property name shown under the heading, or ``""`` when it adds nothing (pure).
-
-    The caption is what keeps a row identifiable: "Document Ref" is readable, but
-    an operator comparing the review against a CSV still needs ``document_ref``,
-    so the name rides along — and is dropped when the heading IS the name (no
-    label resolved), where a repeat would be noise.
-    """
-    if property_name is None:
-        return ""
-    return "" if property_heading(property_name, "update", labels) == property_name else property_name
 
 
 def match_label(match: bool | None) -> str:
@@ -538,24 +535,73 @@ def filter_options(
     labels: dict[str, str],
     counts: dict[str, int],
     selected: list[str] | str | None,
+    *,
+    drop_empty: bool = True,
 ) -> dict[str, str]:
-    """Options of a COUNTED filter control: only present values, each with its count.
+    """Options of a COUNTED filter control: only values the rows still match.
 
-    ``labels`` fixes the display order and wording; a value is listed when the
-    run actually has rows for it (``counts``). The label reads
+    ``labels`` fixes the display order and wording. The label reads
     ``update (1,204)``.
+
+    ``counts`` is the FACETED count (see
+    :meth:`~...suggestion_store.SuggestionStorePort.op_status_counts`): it
+    already reflects the other filters, so ``drop_empty`` removes the options
+    that would select nothing under them instead of offering a dead end.
 
     A SELECTED value is always kept, even when its count dropped to zero: a
     rebuild after an action must not silently clear a filter that is still set.
+    It keeps its ``(0)`` label, which tells the operator the selection is empty
+    rather than hiding the control's own state.
     """
     selected_values = _selection(selected) or []
     options: dict[str, str] = {}
     for value, label in labels.items():
-        if value in counts or value in selected_values:
-            options[value] = f"{label} ({counts.get(value, 0):,})"
+        count = counts.get(value, 0)
+        if value in selected_values:
+            options[value] = f"{label} ({count:,})"
+        elif value in counts and not (drop_empty and count == 0):
+            options[value] = f"{label} ({count:,})"
     for value in selected_values:
         if value not in options:
             options[value] = f"{value} ({counts.get(value, 0):,})"
+    return options
+
+
+def property_filter_options(
+    labels: dict[str, str],
+    counts: dict[str, int],
+    selected: str,
+) -> dict[str, str]:
+    """The Property dropdown's options: present properties, each with its count (pure).
+
+    The first option is the unfiltered ``"any property"`` (no count — it is the
+    absence of a constraint). The others come from ``counts``, which is the
+    faceted count under the rest of the filter, so a property whose every row
+    the other filters removed is not offered. The SELECTED property is kept even
+    at zero, so the control still shows what is applied.
+    """
+    options: dict[str, str] = {"": "any property"}
+    for name, count in counts.items():
+        if count <= 0 and name != selected:
+            continue
+        options[name] = f"{labels.get(name, name)} ({count:,})"
+    if selected and selected not in options:
+        options[selected] = f"{labels.get(selected, selected)} (0)"
+    return options
+
+
+def language_filter_options(
+    counts: dict[str, int],
+    selected: str,
+) -> dict[str, str]:
+    """The Language dropdown's options, counted like the Property one (pure)."""
+    options: dict[str, str] = {"": "any language"}
+    for language, count in counts.items():
+        if count <= 0 and language != selected:
+            continue
+        options[language] = f"{language} ({count:,})"
+    if selected and selected not in options:
+        options[selected] = f"{selected} (0)"
     return options
 
 
@@ -568,38 +614,33 @@ def filter_from_controls(
     language: str = "",
     offset: int = 0,
     limit: int = 25,
-    accepted_only: bool = False,
     shared_ids: list[str] | None = None,
     sort_by: str = "recorded",
     sort_desc: bool = False,
-    validation: str = "",
 ) -> SuggestionFilter:
     """Build the server-side filter from the page's raw control values (pure).
 
     Empty selections mean "no constraint" — the single-value selects use "" for
     their "all" option and the multi-selects use an empty list, and translating
     both here keeps the page's handlers trivial. ``status``/``op`` accept one
-    value or a list (the Operation and Status controls are multi-selects). ``language``
-    narrows the SUBOPERATIONS to one written language (the language-independent
-    rows are their own group and are not matched). ``shared_ids`` is the table's
-    checkbox selection passed through verbatim (``None`` = no constraint, ``[]``
-    = match nothing). ``sort_by``/``sort_desc`` are the always-visible sort
-    control's state; the store orders the WHOLE filtered set, so the order holds
-    across pages.
+    value or a list (the Operation and Status controls are multi-selects). The
+    operation ``"validate"`` is the display name of the run's holdout rows, so
+    the store receives it as an op and resolves it to ``is_validation``.
+    ``language`` narrows the SUGGESTIONS to one written language (the
+    language-independent rows are their own group and are not matched).
+    ``shared_ids`` is the table's checkbox selection passed through verbatim
+    (``None`` = no constraint, ``[]`` = match nothing). ``sort_by``/``sort_desc``
+    are the always-visible sort control's state; the store orders the WHOLE
+    filtered set, so the order holds across pages.
     """
     statuses = _selection(status)
     ops = _selection(op)
     return SuggestionFilter(
-        # The Validation control: "" = every row, "only" = holdout evidence,
-        # "hide" = regular work only. Two booleans and the absent case, so the
-        # store's existing is_validation predicate does the work.
-        is_validation=True if validation == "only" else False if validation == "hide" else None,
         status=[SuggestionStatus(s) for s in statuses] if statuses else None,
         op=ops,
         property_name=property_name or None,
         text=(text or "").strip() or None,
         languages=[language] if language else None,
-        accepted_only=accepted_only,
         shared_ids=shared_ids,
         limit=limit,
         offset=offset,
@@ -611,11 +652,10 @@ def filter_from_controls(
 def entity_is_discarded(item: EntityReviewRow) -> bool:
     """True when EVERY row of the entity group is discarded (pure).
 
-    The review table's rows are OPERATIONS (one entity in one language), and the
-    Discard action marks a whole operation: "the end user does not want this
-    executed". A group whose rows merely SPAN states (some discarded, some
-    still pending) is not discarded — work remains, so the operator has to see
-    it under "not discarded" too.
+    The review table's rows are ENTITIES, and the Discard action marks a whole
+    operation: "the end user does not want this executed". A group whose rows
+    merely SPAN states (some discarded, some still pending) is not discarded —
+    work remains, so the operator has to see it under "not discarded" too.
     """
     return item.proposal_count > 0 and item.discarded >= item.proposal_count
 
@@ -753,24 +793,14 @@ def cost_card_value(spent: float, budget: float) -> str:
 
 
 def pending_suboperation_count(counts: dict[str, int]) -> int:
-    """The header's Pending card: every part still waiting to be written (pure).
-
-    The suboperation badges map PENDING/ACCEPTED/EDITED to the one word
-    "pending" (see ``operations_view.SUB_STATUS_LABELS``), so the card must sum
-    the same three states. Reading only ``subs_pending`` made a Run whose write
-    was refused (rows left ACCEPTED) read "Pending 0" above rows labelled
-    "pending".
-    """
-    return sum(
-        int(counts.get(f"subs_{status}", 0))
-        for status in (SuggestionStatus.PENDING.value, SuggestionStatus.ACCEPTED.value, SuggestionStatus.EDITED.value)
-    )
+    """The header's Pending card: every suggestion still waiting to be written (pure)."""
+    return int(counts.get(f"subs_{SuggestionStatus.PENDING.value}", 0))
 
 
 # --- drift banner ------------------------------------------------------------
 
 # The verdict's color, used for BOTH the banner icon and the banner TEXT.
-# "drifted" is red on purpose: an out-of-date table is the one state the
+# "drifted" is red on purpose: an out-of-date list is the one state the
 # operator must not miss. "valid" is grey, not green: being up to date is the
 # resting state, so it must not compete with the red warning for attention.
 DRIFT_STATUS_COLORS: dict[str, str] = {
@@ -832,9 +862,14 @@ def section_toggle_label(section: str, visible: bool) -> str:
 
 
 def table_update_label(updated_at: Any) -> str:
-    """When the table was last synced with Uwazi, beside the sync action (pure)."""
+    """When the list was last synced with Uwazi ("" when it never has been).
+
+    A never-synced run says nothing here: the drift banner already states the
+    outcome of the last check, and a second sentence about the absence of a
+    sync only added noise to the line.
+    """
     if updated_at is None:
-        return "Never synced with Uwazi"
+        return ""
     try:
         return f"Synced with Uwazi {updated_at:%Y-%m-%d %H:%M} UTC"
     except (ValueError, TypeError):
@@ -842,18 +877,18 @@ def table_update_label(updated_at: Any) -> str:
 
 
 def modified_label(value: Any) -> str:
-    """One operation's last review activity, as the review table writes it (pure).
+    """When the operator last acted on this operation, as the table writes it (pure).
 
-    A row that has never been reviewed still has a modified date — the moment it
-    was recorded — so the column is never blank for a visible operation. Only a
-    legacy row with neither timestamp reads ``—``.
+    Empty until an action actually happens: a freshly recorded row has no review
+    activity, so the column stays blank instead of showing the recording time
+    as if the operator had touched it.
     """
     if value is None:
-        return "—"
+        return ""
     try:
         return f"{value:%Y-%m-%d %H:%M}"
     except (ValueError, TypeError):
-        return "—"
+        return ""
 
 
 def sort_direction_label(sort_by: str, sort_desc: bool) -> str:
@@ -906,13 +941,11 @@ __all__ = [
     "OPS_COLUMN",
     "RUN_OP_PHRASES",
     "RUN_STATUS_COLORS",
-    "SHARED_ID_CLASS",
-    "SHARED_ID_CSS",
-    "SHARED_ID_MAX_CHARS",
     "SKIPPED_OP",
     "STATUS_COLUMN",
     "STATUS_COLORS",
     "TEMPLATE_COLUMN",
+    "CONTEXT_CELL_CHARS",
     "TITLE_CELL_CHARS",
     "TITLE_COLUMN",
     "bulk_discard_label",
@@ -930,7 +963,6 @@ __all__ = [
     "format_cost",
     "match_label",
     "modified_label",
-    "property_caption",
     "bulk_revert_label",
     "property_heading",
     "pending_suboperation_count",

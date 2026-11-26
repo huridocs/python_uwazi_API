@@ -20,7 +20,6 @@ from pydantic import Field
 
 from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
-from uwazi_admin_agent.ports.search_probe_port import SearchProbePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_agent.use_cases.tools.dependencies import UwaziAgentToolsDependencies
@@ -32,13 +31,6 @@ class AdminAgentDeps(UwaziAgentToolsDependencies):
     entity_repository: EntityRepositoryPort | None = Field(
         default=None,
         description="Raw entity repository for planning-time reads. Set by build_runtime.",
-    )
-    search_probe: SearchProbePort | None = Field(
-        default=None,
-        description=(
-            "ES search probe for generation-time discovery sampling. When None the "
-            "sampling degrades gracefully (backward-compatible; tests stay green)."
-        ),
     )
     file_repository: FileRepositoryPort | None = Field(
         default=None,

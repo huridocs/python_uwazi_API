@@ -13,6 +13,7 @@ from uwazi_admin_agent.drivers.links import (
     page_link,
     resolve_login_target,
     resolve_page_target,
+    startup_login_link,
 )
 
 CONFIGURED = ["https://global-rep.uwazi.io", "http://localhost:3000"]
