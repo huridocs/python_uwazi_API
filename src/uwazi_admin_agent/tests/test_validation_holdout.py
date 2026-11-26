@@ -488,7 +488,11 @@ def test_a_skipped_holdout_record_is_rendered_as_the_measured_row() -> None:
     )
     payload = view.operation_row(operation)
     assert payload["ops"] == "validate"
-    assert payload["run_status"] == "validate"
+    # The Status cell carries the frozen-label VERDICT ("match"/"mismatch"), not
+    # the word "validate" the Operation column already prints: a missing
+    # prediction is a mismatch, and the operator opened the table to read it.
+    assert payload["run_status"] == "mismatch"
+    assert payload["status_hidden"] is False
 
 
 # --- the operator's set edits must be VISIBLE in the table -------------------

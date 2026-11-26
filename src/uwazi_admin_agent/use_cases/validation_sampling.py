@@ -42,7 +42,11 @@ from uwazi_admin_agent.domain.validation import (
     label_key,
     validation_property_name,
 )
-from uwazi_admin_agent.domain.validation_selector import selector_entity_dicts, selector_shared_ids
+from uwazi_admin_agent.domain.validation_selector import (
+    selector_entity_dicts,
+    selector_shared_ids,
+    shared_ids_in_text,
+)
 from uwazi_admin_agent.use_cases.script_exec_namespace import (
     build_validation_selector_namespace,
     run_script_sync,
@@ -132,8 +136,20 @@ async def resolve_validation_set(
 
     ``config.mode`` decides the source: ``automatic`` scans the selected
     templates; ``custom`` runs the operator's selector snippet. Both keep only
-    entities carrying a value for the measured property. ``none`` returns None
-    without a read.
+    entities carrying a value for the measured property — a blank label is not
+    a measurement, so such an entity cannot be scored and is not part of the set.
+    ``none`` returns None without a read.
+
+    A CUSTOM selection whose snippet finds nothing falls back to the shared ids
+    the operator NAMED in their description ("these shared ids: abc123, def456").
+    That is the reported failure: the selector could return an empty result (or
+    the model wrote an id it was not given), and the set silently came out empty
+    or of some other entities, so the table never showed the rows the operator
+    asked to be scored. The identifiers they typed ARE the request.
+
+    A selector that FAILS still propagates: its error is a real problem the
+    operator must see (the caller reports it), and replacing their rule with a
+    different one would silently score something nobody asked for.
     """
     if config.mode == VALIDATION_NONE or not config.property_name.strip():
         return None
@@ -141,19 +157,33 @@ async def resolve_validation_set(
     wanted = max(1, int(config.sample_size))
     limit = wanted * _SCAN_MULTIPLIER
 
-    candidates: list[Any] = []
     selection_code = (config.selector_code or "").strip()
-    if config.mode == VALIDATION_CUSTOM and selection_code:
+    named = [str(shared_id).strip() for shared_id in config.shared_ids if str(shared_id).strip()]
+    if named:
+        # The sample's members are already known (a duplicated task, or an
+        # operator who named them): freeze exactly those, re-reading their
+        # labels. Asking the model again could pick other entities, which is
+        # how a copied task ended up scoring a different population.
+        entities_by_id = await _entities_by_id(entity_api, named, {}, config.language)
+        shared_ids, labels = _selected(named, entities_by_id, property_name, config.language, wanted)
+    elif config.mode == VALIDATION_CUSTOM and selection_code:
         raw = await asyncio.to_thread(_run_selector, entity_api, selection_code)
         selected = selector_shared_ids(raw)
         entities_by_id: dict[str, Any] = dict(selector_entity_dicts(raw))
-        missing = [shared_id for shared_id in selected if shared_id not in entities_by_id]
-        if missing:
-            fetched = await entity_api.get_entities_by_shared_ids(missing, config.language, limit=len(missing))
-            for entity in fetched:
-                entities_by_id.setdefault(str(getattr(entity, "shared_id", "") or ""), entity)
+        if not selected:
+            named = shared_ids_in_text(config.selector_explanation)
+            if named:
+                logger.info(
+                    "validation selector chose nothing for run={}; falling back to the {} id(s) named in the description",
+                    run_id,
+                    len(named),
+                )
+                selected = named
+        fetched_by_id = await _entities_by_id(entity_api, selected, entities_by_id, config.language)
+        entities_by_id.update(fetched_by_id)
         shared_ids, labels = _selected(selected, entities_by_id, property_name, config.language, wanted)
     else:
+        candidates: list[Any] = []
         templates = config.template_names or [None]
         for template_name in templates:
             if template_name is None:
@@ -176,8 +206,37 @@ async def resolve_validation_set(
         mode=VALIDATION_AUTOMATIC if config.mode == VALIDATION_AUTOMATIC else VALIDATION_CUSTOM,
         input_properties=sorted({str(name).strip() for name in config.input_properties if str(name).strip()}),
         selector_explanation=(config.selector_explanation or "").strip() if config.mode == VALIDATION_CUSTOM else "",
+        selector_code=selection_code,
         created_at=now or datetime.now(timezone.utc),
     )
+
+
+async def _entities_by_id(
+    entity_api: EntityApiPort,
+    selected: list[str],
+    known: dict[str, Any],
+    language: str,
+) -> dict[str, Any]:
+    """Fetch the selected entities the selector did not return (pure I/O, best-effort).
+
+    A selector may set ``result`` to bare ids (``query_entities(mode="by_ids")``
+    read through ``[d["shared_id"] for d in dicts]``, or the operator's own
+    list), so the caller needs the entities themselves for their labels.
+    """
+    missing = [shared_id for shared_id in selected if shared_id not in known]
+    if not missing:
+        return {}
+    try:
+        fetched = await entity_api.get_entities_by_shared_ids(missing, language, limit=len(missing))
+    except Exception as exc:  # noqa: BLE001 — an id the instance refuses is simply not selected
+        logger.warning("validation: could not read the selected entities: {}", exc)
+        return {}
+    found: dict[str, Any] = {}
+    for entity in fetched:
+        shared_id = str(getattr(entity, "shared_id", "") or "")
+        if shared_id:
+            found.setdefault(shared_id, entity)
+    return found
 
 
 def _selected_from_entities(

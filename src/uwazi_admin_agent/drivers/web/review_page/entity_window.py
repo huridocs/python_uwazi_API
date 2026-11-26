@@ -284,18 +284,18 @@ def _entity_is_revertable(
 
     The Revert is entity-wide, not a property action, so it is decided from the
     UNFILTERED language group: a filter that hides the applied rows must not
-    hide their undo. The same rule as the table applies — a deleted entity, a
-    create-merge (its target is a dry-created placeholder) and a file copy
-    revert at run level, not from this button. A CREATED entity is revertable:
-    its undo deletes the entity the run minted. An ``update_and_delete`` merge
-    is revertable too: its undo restores the target and re-creates the sources
-    it deleted.
+    hide their undo. The same rule as the table applies — a create-merge (its
+    target is a dry-created placeholder) and a file copy revert at run level, not
+    from this button. A CREATED entity is revertable (its undo deletes the entity
+    the run minted), a DELETED entity is revertable (its undo re-creates it from
+    the backup), and an ``update_and_delete`` merge is revertable too (its undo
+    restores the target and re-creates the sources it deleted).
     """
     rows = get_entity_suggestions(page_instance_url(), state["run_id"], shared_id, language) or suggestions
     in_place = not any(s.op in NON_IN_PLACE_OPS for s in rows)
     # The table's own rule: an entity with at least one applied row that is not
-    # run-level-only. That covers a whole-entity op (publish/unpublish) whose
-    # undo the snapshot restore also performs, a created entity (deleted on
+    # run-level-only. That covers a whole-entity op (publish/unpublish, delete)
+    # whose undo the snapshot restore also performs, a created entity (deleted on
     # undo), not just property writes.
     return in_place and any(s.status is SuggestionStatus.APPLIED for s in rows)
 
@@ -308,6 +308,16 @@ def _entity_is_created(suggestions: list[Suggestion]) -> bool:
     restore and its undo is a deletion.
     """
     return any(s.op in CREATE_OPS for s in suggestions)
+
+
+def _entity_is_deleted(suggestions: list[Suggestion]) -> bool:
+    """Whether this group's rows describe an entity the run DELETED (pure).
+
+    A ``delete`` row names an entity that existed before the Run and no longer
+    does, so its undo RE-CREATES it from the backup (with a fresh sharedId); the
+    confirmation says so rather than promising the old id back.
+    """
+    return any(s.op == "delete" for s in suggestions)
 
 
 def _close_entity_window(state: dict[str, Any]) -> None:
@@ -1322,6 +1332,7 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
         tooltip_text,
         merge=entity_is_merge(page_instance_url(), state["run_id"], shared_id),
         created=_entity_is_created(rows),
+        deleted=_entity_is_deleted(rows),
     )
     _simple_confirm(title, message, _confirm)
 

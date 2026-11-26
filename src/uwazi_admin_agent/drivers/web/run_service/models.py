@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
+from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.manifest import AppliedWrite, RewiredRelationship, RunStatus
 from uwazi_admin_agent.domain.plan_intent import PlanOutcome
 from uwazi_admin_agent.domain.review_refresh import (
@@ -59,6 +61,12 @@ class RunDetail:
     # ``None`` = generated before the declaration existed (legacy/seeded run).
     plan_kind: str | None = None
     plan_description: str | None = None
+    # The settings a DUPLICATE copies: the script-LLM allowance the operator
+    # approved and the test-set recipe they configured. Both live on the manifest
+    # (recorded at task creation), so a task that never reached a planning pass
+    # still hands its settings on.
+    llm_budget: LlmBudget | None = None
+    validation_config: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -187,13 +195,6 @@ class BulkRevertOutcome(BaseModel):
             "absorbed, which only the ordered run-level revert performs."
         ),
     )
-    skipped_deleted: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Selected entities the run DELETED — their undo is a re-create, which only the ordered "
-            "run-level revert can do (fresh sharedId + files + connection rows), refused here."
-        ),
-    )
     skipped_no_backup: list[str] = Field(
         default_factory=list,
         description="Selected entities with no backup — the run never wrote to them.",
@@ -210,8 +211,6 @@ class BulkRevertOutcome(BaseModel):
             parts.append(f"{len(self.skipped_created)} created-by-run without a recorded id")
         if self.skipped_merge:
             parts.append(f"{len(self.skipped_merge)} create-merge (revert at run level)")
-        if self.skipped_deleted:
-            parts.append(f"{len(self.skipped_deleted)} deleted-by-run (revert at run level)")
         if self.skipped_no_backup:
             parts.append(f"{len(self.skipped_no_backup)} without backup")
         if self.failures:

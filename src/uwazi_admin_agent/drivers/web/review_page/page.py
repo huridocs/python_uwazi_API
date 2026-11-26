@@ -282,8 +282,10 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
     """
     # The menu is nested INSIDE the button: Quasar anchors a menu to its
     # parent element, so a sibling menu would hang off the whole toolbar row
-    # instead of the button that opens it.
-    with ui.button(icon="menu", on_click=lambda: menu.open()).props("flat dense color=secondary"):
+    # instead of the button that opens it. ``q-ml-auto`` keeps it pinned to the
+    # row's far right even when the performance line beside it is hidden (the
+    # row's ``justify-between`` would otherwise anchor the lone button left).
+    with ui.button(icon="menu", on_click=lambda: menu.open()).props("flat dense color=secondary").classes("q-ml-auto"):
         with ui.menu() as menu:
             state["_filters_item"], state["_filters_label"] = _menu_item(
                 "filter_alt",

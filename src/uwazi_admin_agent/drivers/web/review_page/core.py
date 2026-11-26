@@ -65,6 +65,7 @@ from uwazi_admin_agent.drivers.web.review_view import (
     filter_options,
     language_filter_options,
     pending_suboperation_count,
+    performance_visible,
     property_filter_options,
     review_sort_pagination,
     run_button_label,
@@ -1120,11 +1121,29 @@ def _refresh_all(state: dict[str, Any]) -> None:
         _refresh_run_badge(state)
         _render_summary(state)
         _refresh_filter_counts(state)
+        _repaint_drift_from_store(state)
         if state["offset"] >= state["total"] and state["offset"] > 0:
             state["offset"] = (_page_count(state) - 1) * REVIEW_PAGE_SIZE
         _reload_table(state)
     except Exception:  # noqa: BLE001 — a refresh failure must not break the page
         logger.exception("review refresh failed")
+
+
+def _repaint_drift_from_store(state: dict[str, Any]) -> None:
+    """Repaint the drift banner from the STORED verdict (local read, no network).
+
+    A Run/Revert now re-syncs the baseline and records a VALID verdict, but the
+    banner was only ever repainted by a drift CHECK — so the page kept the red
+    "Out of date" line the check painted before the write, right after the write
+    that fixed it. Reading the verdict back and applying it keeps the banner
+    honest without paying a probe per refresh.
+    """
+    try:
+        stored = get_drift_state(state["instance_url"], state["run_id"])
+    except Exception as exc:  # noqa: BLE001 — the banner is display state, never an error path
+        logger.debug("could not read the drift verdict for {}: {}", state["run_id"], exc)
+        return
+    _apply_drift_state(state, stored)
 
 
 def _refresh_expand_button(state: dict[str, Any]) -> None:
@@ -1591,7 +1610,8 @@ def _revert_from_state(state: dict[str, Any]) -> None:
         f"Restore {len(entities)} entit{'' if len(entities) == 1 else 'ies'} to the backup the run made "
         "BEFORE any of its writes. ALL languages of each entity are restored (they share one backup); "
         "only the checked entities are reverted. Entities the run CREATED have no backup — they are "
-        "DELETED instead (their rows go back to pending)."
+        "DELETED instead (their rows go back to pending). Entities the run DELETED are re-created from "
+        "their backup with a NEW sharedId (the old one cannot be reused)."
     )
     _simple_confirm(title, message, _confirm)
 
@@ -1704,13 +1724,16 @@ def _performance_row(state: dict[str, Any]) -> None:
     A ROW, not a card: the number the operator opens the page with is a single
     figure with its state word, and boxing it as one more card in a strip of
     cards made it compete with the counters (and buried it inside a collapsible
-    section). It is ALWAYS visible, at the top of the page: a run whose score is
-    hidden reads as a run without one.
+    section). It sits at the top of the page, next to the menu.
+
+    A run with NO test set shows no line at all (see ``performance_visible``):
+    there is no property to name and no number to report, and an idle "Add a
+    test set" strip above the table reads as a broken feature.
 
     The state is stated in words (``Unseen``, ``Used for fixes``, ``Stale``,
-    ``No test set``): a number without that word reads as a promise it does not
-    make. It is NOT shown in the property filter (the filter answers a different
-    question: how a suggestion compares with Uwazi's current value).
+    ``Not scored yet``): a number without that word reads as a promise it does
+    not make. It is NOT shown in the property filter (the filter answers a
+    different question: how a suggestion compares with Uwazi's current value).
     """
     holder = ui.row().classes("items-center gap-2 no-wrap")
     state["_performance_holder"] = holder
@@ -1727,25 +1750,24 @@ def _render_performance(state: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001 — the line degrades, the page never breaks
         logger.warning("validation card failed: {}", exc)
         return
+    # A run with no test set has no performance to report: hide the whole line
+    # instead of painting an idle "No test set" strip above the table.
+    if not performance_visible(summary):
+        holder.clear()
+        holder.set_visibility(False)
+        return
+    holder.set_visibility(True)
     holder.clear()
     with holder:
-        validation = summary.get("set")
+        validation = summary["set"]
         score = summary.get("score")
         state_word = {
-            "none": "No test set",
             "fresh": "Unseen test set",
             "pending": "Test set ready — not scored yet",
             "stale": "Test set changed — score out of date",
             "contaminated": "Used for fixes — regression score only",
         }.get(summary["state"], summary["state"])
         color = "teal" if summary["state"] == "fresh" else "orange"
-        if validation is None or summary["state"] == "none":
-            ui.icon("speed", color="grey-6").classes("text-body2")
-            ui.label("Performance").classes("text-body2 text-grey-7")
-            ui.label("—").classes("text-h6 text-bold text-grey-6")
-            ui.badge(state_word).props("color=grey-7 outline")
-            ui.label("Add a test set in the wizard to measure this task").classes("text-caption text-grey-6")
-            return
         label = _validation_property_text(state, validation.property_name)
         ui.icon("speed", color="primary").classes("text-body2")
         ui.label(f"Performance · {label}").classes("text-body2 text-grey-7")

@@ -213,3 +213,52 @@ def test_a_create_flow_target_choice_never_offers_the_managed_dates() -> None:
     schema = _schema()
     assert GOAL_CREATE == "create"
     assert "creationDate" not in dict(template_property_choices(schema, "Judgment", writable_only=True))
+
+
+# --- the selector's real return shapes and the named-id fallback -------------
+
+
+def test_an_error_string_is_never_read_as_a_shared_id() -> None:
+    """``query_entities(mode="by_ids")`` returns a LIST; using it as an object errors."""
+    assert selector_shared_ids("Error: 'by_ids' mode requires `shared_ids` (a non-empty list).") == []
+
+
+def test_by_ids_selector_reads_the_entity_dicts_it_gets() -> None:
+    """The bound helper returns entity dicts, so the snippet must read ``d["shared_id"]``."""
+    api = _InMemoryEntityApi([_entity("a"), _entity("b")])
+    code = "result = [d['shared_id'] for d in query_entities(mode='by_ids', shared_ids=['a'])]\n"
+
+    validation = asyncio.run(resolve_validation_set(api, "run-1", _config(code)))
+
+    assert validation is not None
+    assert validation.shared_ids == ["a"]
+
+
+def test_a_selector_that_selects_nothing_falls_back_to_the_ids_the_operator_named() -> None:
+    """The reported failure: "these shared ids: ..." produced an EMPTY set."""
+    first, second, other = "6g14bm8ub1a", "9fp3cucotxf", "zzzzzzzzzzz"
+    api = _InMemoryEntityApi([_entity(first), _entity(second), _entity(other)])
+    config = _config("result = []", selector_explanation=f"these shared ids: {first}, {second}")
+
+    validation = asyncio.run(resolve_validation_set(api, "run-1", config))
+
+    assert validation is not None
+    assert set(validation.shared_ids) == {first, second}
+
+
+def test_a_named_sample_is_used_verbatim_without_running_the_selector() -> None:
+    """A copied task's frozen sample must not be re-selected by the model."""
+    api = _InMemoryEntityApi([_entity("a"), _entity("b"), _entity("c")])
+    config = _config("raise AssertionError('the selector must not run')").model_copy(update={"shared_ids": ["c"]})
+
+    validation = asyncio.run(resolve_validation_set(api, "run-1", config))
+
+    assert validation is not None
+    assert validation.shared_ids == ["c"]
+
+
+def test_shared_ids_in_text_finds_the_identifiers_an_operator_typed() -> None:
+    from uwazi_admin_agent.domain.validation_selector import shared_ids_in_text
+
+    found = shared_ids_in_text("use entities with shared id 6g14bm8ub1a, 9fp3cucotxf")
+    assert "6g14bm8ub1a" in found and "9fp3cucotxf" in found

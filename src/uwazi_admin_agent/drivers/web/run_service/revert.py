@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -13,7 +14,9 @@ from uwazi_admin_agent.domain.suggestion import (
     is_revertable_merge,
 )
 from uwazi_admin_agent.drivers.runtime import build_backup_store, build_runtime
+from uwazi_admin_agent.use_cases import drift_service
 
+from .drift import _template_id_resolver
 from .models import BulkRevertOutcome, EntityBackupInfo, RevertVerificationError
 from .wiring import build_suggestion_store
 
@@ -61,9 +64,17 @@ async def revert_entity_rows(url: str, run_id: str, shared_id: str, user: str, p
     created = bool(store.created_shared_id_for(run_id, shared_id)) or shared_id in {
         entry.shared_id for entry in runtime.backup_store.load_manifest(run_id).created
     }
+    deleted = shared_id in {entry.shared_id for entry in runtime.backup_store.load_manifest(run_id).deleted}
     snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
     if snapshot is None and not created:
+        if deleted:
+            raise RevertRefusedError(
+                "this row's entity was deleted by the run, but its backup is missing — nothing to restore"
+            )
         raise RevertRefusedError("this row has no backup — the run has not written to this entity")
+    # The restore wrote Uwazi: re-capture the baseline so the next drift check
+    # does not report this very revert as someone else's change.
+    await _refresh_baseline_after_revert(runtime, url, run_id)
     return entity_backup_info(url, run_id, shared_id)
 
 
@@ -114,7 +125,11 @@ async def revert_suboperation(
     by the run (those undos stay run-level).
     """
     runtime = build_runtime(user=user, password=password, url=url)
-    return await runtime.revert_use_case.revert_property(run_id, shared_id, language, property_name, suggestion_id)
+    row_language = await runtime.revert_use_case.revert_property(run_id, shared_id, language, property_name, suggestion_id)
+    # The property write-back moved this row's editDate: keep the baseline in
+    # step so the drift banner does not flag the operator's own undo.
+    await _refresh_baseline_after_revert(runtime, url, run_id)
+    return row_language
 
 
 async def revert_entities_selection(
@@ -136,10 +151,10 @@ async def revert_entities_selection(
     still reads REVERTED when its entity was restored (its write is gone too).
 
     An entity the run CREATED is undone too — its undo is a deletion of the
-    minted sharedId. A DELETED entity is skipped (reported, not fatal): its undo
-    is a re-create (fresh sharedId + files + relationship rows), an ordered
-    run-level operation only the run-level Revert performs. No-backup entities
-    are skipped too. Per-entity failures are collected: one bad restore neither
+    minted sharedId. An entity the run DELETED is undone by RE-CREATING it from
+    its backup (a fresh sharedId, its captured files and connection rows), the
+    same ordered subset the run-level revert performs for that one entity. No-backup
+    entities are skipped. Per-entity failures are collected: one bad restore neither
     aborts the batch nor hides the restores that landed.
     ``progress`` is the optional ``(done, total)`` callback the gate's toast
     polls: one tick per DISTINCT entity attempted, skipped or not, so the
@@ -158,6 +173,7 @@ async def revert_entities_selection(
     store = build_suggestion_store(url)
     manifest = runtime.backup_store.load_manifest(run_id)
     created_ids = {entry.shared_id for entry in manifest.created}
+    deleted_ids = {entry.shared_id for entry in manifest.deleted}
     reverted: list[str] = []
     for index, shared_id in enumerate(seen):
         minted = store.created_shared_id_for(run_id, shared_id)
@@ -176,11 +192,12 @@ async def revert_entities_selection(
         try:
             snapshot = await runtime.revert_use_case.revert_entity(run_id, shared_id)
         except RevertRefusedError as exc:
-            # The refusals have different remedies (re-create a deleted entity
-            # vs. delete a created one whose id was never recorded), so they are
-            # reported apart.
-            if "deleted by the run" in str(exc):
-                outcome.skipped_deleted.append(shared_id)
+            # The refusals have different remedies — a create whose minted id was
+            # never recorded, versus a row with nothing to restore — so they are
+            # reported apart. A DELETED entity's refusal means its backup is gone.
+            logger.warning("bulk revert refused run={} sharedId={}: {}", run_id, shared_id, exc)
+            if shared_id in deleted_ids:
+                outcome.skipped_no_backup.append(shared_id)
             else:
                 outcome.skipped_created.append(shared_id)
         except Exception as exc:  # noqa: BLE001 — one bad restore must not lose the rest
@@ -210,7 +227,35 @@ async def revert_entities_selection(
         # created entity's rows are addressed by their placeholder too, so the
         # store matches both spellings.
         store.mark_applied_reverted_for(run_id, reverted)
+        # The restores wrote Uwazi (re-creates minted fresh ids): re-capture the
+        # baseline, or the next check blames the operator's own revert.
+        await _refresh_baseline_after_revert(runtime, url, run_id)
     return outcome
+
+
+async def _refresh_baseline_after_revert(runtime: Any, url: str, run_id: str) -> None:
+    """Re-capture the drift baseline after a restore (best effort, never fails the revert).
+
+    A revert is a WRITE to Uwazi: every restored row's editDate moved, and a
+    re-created (deleted-then-restored) entity carries a brand-new sharedId. Left
+    alone, the very next drift check compares live Uwazi against a baseline
+    recorded BEFORE the undo and paints "Out of date" — with a detail naming the
+    changes this table just performed. The baseline must describe the state the
+    revert left behind, so it is re-synced here, exactly like a Run does after it
+    writes.
+
+    Threaded: it is a paged ``/api/v2/search`` per language.
+    """
+    try:
+        await asyncio.to_thread(
+            drift_service.refresh_baseline_after_run,
+            build_suggestion_store(url),
+            runtime.drift_probe,
+            _template_id_resolver(runtime),
+            run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — the restore landed; bookkeeping must not fail it
+        logger.warning("post-revert drift baseline sync failed for {}: {}", run_id, exc)
 
 
 async def revert_run(url: str, run_id: str, user: str, password: str) -> None:
@@ -222,6 +267,10 @@ async def revert_run(url: str, run_id: str, user: str, password: str) -> None:
     """
     runtime = build_runtime(user=user, password=password, url=url)
     await runtime.revert_use_case.revert(run_id)
+    # The restore wrote Uwazi (and re-created deleted entities under fresh ids):
+    # re-capture the baseline so the next drift check compares against the state
+    # this revert produced, not the pre-revert one.
+    await _refresh_baseline_after_revert(runtime, url, run_id)
     result = await runtime.verify_use_case.verify(run_id)
     if not result.ok:
         detail = format_verification_result(result)

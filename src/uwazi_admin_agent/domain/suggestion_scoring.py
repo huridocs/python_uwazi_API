@@ -26,6 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from uwazi_admin_agent.domain.date_values import coerce_date_property_value, is_date_property_type
 from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
 from uwazi_admin_agent.domain.property_language_scope import is_per_language_property_type
+from uwazi_admin_agent.domain.relationship_values import RELATIONSHIP_TYPE, SELECT_TYPE, shared_ids_of
+from uwazi_admin_agent.domain.select_values import MULTISELECT_TYPE
 from uwazi_admin_agent.domain.suggestion import (
     CREATE_OPS,
     DISPLAY_ONLY_OPS,
@@ -41,6 +43,12 @@ from uwazi_admin_agent.domain.suggestion import (
     SuggestionOp,
     SuggestionStatus,
 )
+
+# The property types whose value is a SET the operator accepts value by value.
+# ``select`` is single-valued by Uwazi's schema, but its stored shape is still a
+# list whose rendered text is not comparable with a bare label, so it takes the
+# same set rule.
+THESAURUS_TYPES: frozenset[str] = frozenset({SELECT_TYPE, MULTISELECT_TYPE})
 
 # Whole-entity ops (no per-property breakdown): one suggestion per record.
 _WHOLE_ENTITY_OPS: frozenset[str] = frozenset(
@@ -807,7 +815,85 @@ def value_language(value: Any) -> str | None:
     return languages[0] if len(languages) == 1 else None
 
 
-def compare_values(proposed: Any, current: Any) -> bool | None:
+def _label_keys(value: Any) -> set[tuple[str, str]] | None:
+    """``{(group, label)}`` keys of one thesaurus value, or None when it has none (pure).
+
+    A grouped thesaurus entry (``{"label": "Child", "parent": {"label": "Group"}}``)
+    keys as ``("Group", "Child")``; a label written as ``"Group: Child"`` keys
+    the same way; a bare label keys with an empty group. The group is what
+    tells two same-named children of different groups apart, so it is kept
+    whenever the value carries it.
+    """
+    if not isinstance(value, (list, tuple, set, str)):
+        return None
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    keys: set[tuple[str, str]] = set()
+    for item in items:
+        group = ""
+        label = ""
+        if isinstance(item, dict):
+            label = str(item.get("label", item.get("value", "")) or "").strip()
+            parent = item.get("parent")
+            if isinstance(parent, dict):
+                group = str(parent.get("label") or "").strip()
+        else:
+            label = str(item if item is not None else "").strip()
+        if not group and ": " in label:
+            group, _, label = label.partition(": ")
+            group, label = group.strip(), label.strip()
+        if label:
+            keys.add((group, label))
+    return keys or None
+
+
+def _id_set(value: Any) -> set[str] | None:
+    """The related sharedIds a relationship value carries, or None (pure)."""
+    if not isinstance(value, (list, tuple, set, str)):
+        return None
+    ids = {shared_id.strip() for shared_id in shared_ids_of(value) if shared_id.strip()}
+    return ids or None
+
+
+def value_sets_match(proposed: Any, current: Any, property_type: str | None) -> bool | None:
+    """Whether two VALUE-SET properties hold the same set, or None when unknown (pure).
+
+    A ``relationship`` is a set of related sharedIds and a ``multiselect`` /
+    ``select`` a set of thesaurus labels; Uwazi stores neither in a canonical
+    order and renders a relationship entry with the TARGET'S TITLE beside its id.
+    Comparing their rendered text therefore reported every correct link as a
+    mismatch (the proposal carries the id, the stored value carries "Japan"), and
+    every multiselect whose values came back in another order.
+
+    ``property_type`` is what makes this safe: a free-text value must never be
+    read as a set ("HRC: Resolution" is a paragraph, not a grouped thesaurus
+    value), so only the declared set-valued types take this path. ``None`` — the
+    type was not resolved — falls back to the caller's display-equality rule.
+    """
+    kind = (property_type or "").strip().lower()
+    if kind == RELATIONSHIP_TYPE:
+        proposed_ids, current_ids = _id_set(proposed), _id_set(current)
+        if proposed_ids is None or current_ids is None:
+            return None
+        return proposed_ids == current_ids
+    if kind in THESAURUS_TYPES:
+        proposed_keys, current_keys = _label_keys(proposed), _label_keys(current)
+        if proposed_keys is None or current_keys is None:
+            return None
+        if proposed_keys == current_keys:
+            return True
+        # A grouped entry and its bare spelling are the same value ("HRC: Child"
+        # vs a "Child" entry whose parent is "HRC"); two DIFFERENT groups sharing
+        # a child name are not, which is why the group only collapses when one
+        # side carries no group information at all.
+        proposed_groups = {group for group, _label in proposed_keys}
+        current_groups = {group for group, _label in current_keys}
+        if ("" in proposed_groups) != ("" in current_groups):
+            return {label for _group, label in proposed_keys} == {label for _group, label in current_keys}
+        return False
+    return None
+
+
+def compare_values(proposed: Any, current: Any, property_type: str | None = None) -> bool | None:
     """Whether ``proposed`` matches ``current``, or None when there is nothing to compare.
 
     ``None`` current (missing key / absent entity value) means the suggestion
@@ -816,10 +902,24 @@ def compare_values(proposed: Any, current: Any) -> bool | None:
     :func:`~uwazi_admin_agent.domain.metadata_diff.format_metadata_value` before
     comparison, so a list-vs-joined-text difference is never reported as a
     change (the same display-equality rule the review table's match uses). Pure.
+
+    Display equality is checked FIRST, so every value the table renders
+    identically stays a match; only then are the two shapes the rendered text
+    cannot settle — the multiselect/select and relationship VALUE SETS, whose
+    type ``property_type`` names — compared as sets (see
+    :func:`value_sets_match`). Without that pass a relationship whose proposal
+    was the correct id read as a mismatch against Uwazi's
+    ``{"value": id, "label": title}`` entry, and a multiselect that came back in
+    another order read as a change the Run would make.
     """
     if current is None:
         return None
-    return format_metadata_value(proposed) == format_metadata_value(current)
+    if format_metadata_value(proposed) == format_metadata_value(current):
+        return True
+    matched = value_sets_match(proposed, current, property_type)
+    if matched is not None:
+        return matched
+    return False
 
 
 class PropertyAccuracy(BaseModel):
@@ -896,4 +996,5 @@ __all__ = [
     "value_in_language",
     "value_language",
     "value_languages",
+    "value_sets_match",
 ]

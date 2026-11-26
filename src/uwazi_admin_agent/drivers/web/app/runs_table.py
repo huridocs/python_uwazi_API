@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from loguru import logger
 from nicegui import app, context, ui
 
 from uwazi_admin_agent.domain.run_name import free_copy_name
@@ -23,8 +24,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     export_tasks_csv,
     get_run,
     list_runs,
-    validation_config_from_set,
-    validation_summary,
+    run_validation_config,
 )
 from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
@@ -68,7 +68,10 @@ def _columns() -> list[dict[str, Any]]:
             "sortable": True,
             "style": "min-width: 190px",
         },
-        {"name": "created", "label": "Created", "field": "created", "align": "left", "sortable": True},
+        # Creation time, NEWEST FIRST by default (the table's initial sort).
+        # ``field`` is the numeric epoch so a header click orders chronologically
+        # rather than lexically; the slot below prints the human timestamp.
+        {"name": "created", "label": "Created", "field": "created_ts", "align": "left", "sortable": True},
         {"name": "last_executed", "label": "Last execution", "field": "last_executed", "align": "left", "sortable": True},
         {"name": "modified", "label": "Modified", "field": "modified", "align": "right", "sortable": True},
         {"name": "deleted", "label": "Deleted", "field": "deleted", "align": "right", "sortable": True},
@@ -87,7 +90,17 @@ def _build_runs_table() -> ui.table:
     while an open ``q-menu`` (rendered in a portal) survives untouched.
     """
     table = (
-        ui.table(rows=_run_rows(), columns=_columns(), row_key="id", pagination={"rowsPerPage": 0})
+        ui.table(
+            rows=_run_rows(),
+            columns=_columns(),
+            row_key="id",
+            # Newest task first: creation time, descending. The server already
+            # returns the rows in that order (``list_runs`` sorts by
+            # ``created_at``), and this makes the table's own sort agree with
+            # it — including the arrow it draws and the sort a header click
+            # toggles from.
+            pagination={"rowsPerPage": 0, "sortBy": "created", "descending": True},
+        )
         .props("selection=multiple")
         .classes("w-full")
     )
@@ -132,6 +145,14 @@ def _build_runs_table() -> ui.table:
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="props.row.busy || {_IN_FLIGHT_JS}"
                    @click="$parent.$emit('rowmenu', props.row, $event)" />
+        </q-td>
+        """,
+    )
+    table.add_slot(
+        "body-cell-created",
+        """
+        <q-td :props="props">
+            <span class="text-no-wrap">{{ props.row.created }}</span>
         </q-td>
         """,
     )
@@ -207,6 +228,18 @@ def _rowmenu_retry(run_id: str) -> None:
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         operation_gate.release_run(instance, run_id, "creating")
         return
+    # The retry DELETES the run before regenerating it, which also removes its
+    # validation set. Read the settings the retry must reproduce FIRST: without
+    # them the second attempt ran with the deny-by-default allowance and no test
+    # set, so a task the operator had configured came back weaker than its source.
+    try:
+        pass_row = current_pass(instance, run_id)
+        retry_budget = pass_row.budget if pass_row is not None else detail.llm_budget
+        retry_validation = run_validation_config(instance, run_id)
+    except Exception as exc:  # noqa: BLE001 — a settings read must not block a retry
+        logger.warning("could not read the settings of {} for its retry: {}", run_id, exc)
+        retry_budget = detail.llm_budget
+        retry_validation = None
     try:
         delete_run(instance, run_id)
     except Exception:
@@ -226,6 +259,8 @@ def _rowmenu_retry(run_id: str) -> None:
         instance=instance,
         validated_prompt=detail.validated_prompt,
         claimed=True,
+        budget=retry_budget,
+        validation_config=retry_validation,
     )
 
 
@@ -260,9 +295,13 @@ def _rowmenu_duplicate(run_id: str) -> None:
         # approved LLM allowance and the test-set recipe (measured property,
         # sampling mode/filter) belong to the task, and dropping them silently
         # made the copy a weaker task that spent the default allowance and had
-        # no performance score.
+        # no performance score. The recipe comes from the FROZEN SET when the run
+        # has one, else from the manifest (`detail`), which records it at
+        # creation — so a task whose set could not be built still hands on what
+        # the operator asked for.
         pass_row = current_pass(instance, run_id)
-        prefill_validation = validation_config_from_set(validation_summary(instance, run_id).get("set"))
+        prefill_validation = run_validation_config(instance, run_id)
+        prefill_budget = pass_row.budget if pass_row is not None else detail.llm_budget
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -270,7 +309,7 @@ def _rowmenu_duplicate(run_id: str) -> None:
         prefill_name=free_copy_name(run_id, taken),
         prefill_prompt=detail.prompt,
         prefill_validated_prompt=detail.validated_prompt,
-        prefill_budget=pass_row.budget if pass_row is not None else None,
+        prefill_budget=prefill_budget,
         prefill_validation=prefill_validation,
     )
 

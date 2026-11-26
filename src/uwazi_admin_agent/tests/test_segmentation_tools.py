@@ -5,7 +5,11 @@ Pure tests only: real :class:`Segmentation` / :class:`Paragraph` inputs, real
 Uwazi instance.
 """
 
-from uwazi_admin_agent.use_cases.segmentation_tools import format_segmentation, segmentation_to_dict
+from uwazi_admin_agent.use_cases.segmentation_tools import (
+    SEGMENT_TYPE_LABELS,
+    format_segmentation,
+    segmentation_to_dict,
+)
 from uwazi_api.domain.segmentation import Paragraph, Segmentation
 
 
@@ -47,10 +51,22 @@ def test_segmentation_to_dict_builds_plain_script_shape() -> None:
     assert all("left" in p and "top" in p and "text" in p for p in out["paragraphs"])
 
 
+def test_segmentation_to_dict_orders_paragraphs_and_joins_text() -> None:
+    """Reading a document must not require hand-filtering paragraphs: `text` is
+    every paragraph in reading order, and `paragraphs` comes pre-ordered too."""
+    seg = _seg([_para(2, 0.0, "two"), _para(1, 15.0, "one bottom"), _para(1, 0.0, "one top")])
+
+    out = segmentation_to_dict(seg)
+
+    assert [p["text"] for p in out["paragraphs"]] == ["one top", "one bottom", "two"]
+    assert out["text"] == "one top\none bottom\ntwo"
+
+
 def test_segmentation_to_dict_empty_paragraphs_zero_pages() -> None:
     out = segmentation_to_dict(_seg([]))
 
     assert out["pages"] == 0
+    assert out["text"] == ""
     assert out["paragraphs"] == []
 
 
@@ -59,9 +75,64 @@ def test_format_segmentation_renders_header_and_paragraph_lines() -> None:
 
     out = format_segmentation(seg)
 
-    assert out.startswith("file: doc.pdf (status=ready, pages=1, paragraphs=2)")
-    assert "[page 1] first" in out
-    assert "[page 1] second" in out
+    assert out.startswith("file: doc.pdf (status=ready, pages=1, paragraphs=2, types=paragraph)")
+    assert "[page 1] (paragraph) first" in out
+    assert "[page 1] (paragraph) second" in out
+
+
+def test_format_segmentation_shows_uwazi_segment_labels_verbatim() -> None:
+    """The authoring agent must see Uwazi's wire labels ("Section header"), not
+    the internal enum ids: a generated script that filtered on `section_header`
+    kept zero paragraphs and skipped every entity as `no_segmentation`."""
+    seg = _seg(
+        [
+            Paragraph(
+                left=0.0,
+                top=0.0,
+                width=10.0,
+                height=10.0,
+                pageNumber=1,
+                text="United Nations",
+                type="Page header",
+            ),
+            Paragraph(
+                left=0.0,
+                top=20.0,
+                width=10.0,
+                height=10.0,
+                pageNumber=1,
+                text="Introduction",
+                type="Section header",
+            ),
+        ]
+    )
+
+    out = format_segmentation(seg)
+
+    assert "Section header" in out
+    assert "Page header" in out
+    assert "[page 1] (Section header) Introduction" in out
+    assert "section_header" not in out.lower()
+    assert "Section header, Page header" in out or "Page header, Section header" in out
+
+
+def test_segment_type_labels_are_the_wire_vocabulary() -> None:
+    """The exported label list is what the prompt tells the agent to filter on."""
+    assert SEGMENT_TYPE_LABELS == (
+        "Text",
+        "Title",
+        "Section header",
+        "List item",
+        "Table",
+        "Picture",
+        "Caption",
+        "Formula",
+        "Footnote",
+        "Page header",
+        "Page footer",
+        "Other",
+    )
+    assert "section_header" not in SEGMENT_TYPE_LABELS
 
 
 def test_format_segmentation_reports_page_count_as_highest_page_number() -> None:
@@ -71,7 +142,7 @@ def test_format_segmentation_reports_page_count_as_highest_page_number() -> None
 
     out = format_segmentation(seg)
 
-    assert out.startswith("file: doc.pdf (status=ready, pages=3, paragraphs=3)")
+    assert out.startswith("file: doc.pdf (status=ready, pages=3, paragraphs=3, types=paragraph)")
 
 
 def test_format_segmentation_orders_by_page_then_top() -> None:

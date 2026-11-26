@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from uwazi_admin_agent.domain.deleted_file import DeletedFile
+from uwazi_admin_agent.domain.llm_budget import LlmBudget
 from uwazi_admin_agent.domain.snapshot import EntityIdentity
 
 
@@ -185,6 +186,26 @@ class MigrationManifest(BaseModel):
             "The script's `result` variable (stringified) captured after execution. "
             "For a query/return-value task this is the answer the operator asked for; "
             "for a mutation task it is the script's summary string. None until the run executes."
+        ),
+    )
+    llm_budget: LlmBudget | None = Field(
+        default=None,
+        description=(
+            "The script-LLM allowance the operator approved in the wizard. Stored here, at "
+            "task creation, so a DUPLICATE of the task carries the same allowance even when "
+            "the run never reached a planning pass (the pass row that holds the budget is "
+            "written by the planning pass itself, so a generation failure used to lose it)."
+        ),
+    )
+    validation_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The test-set recipe the operator chose in the wizard (mode, measured property, "
+            "templates, sample size, custom-selector description and language), stored as a "
+            "PLAIN DICT so this module keeps no import edge back to ``domain.validation`` — "
+            "``domain.metadata_diff`` imports this module, and validation's scoring chain "
+            "reaches it. A duplicate re-runs the recipe for its own run; see "
+            "``drivers.web.run_service.validation.validation_config_from_dict``."
         ),
     )
 

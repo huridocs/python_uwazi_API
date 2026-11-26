@@ -60,6 +60,7 @@ from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
 from uwazi_admin_agent.use_cases.generate_predictions_use_case import hydrate_current_values
 from uwazi_admin_agent.use_cases.script_exec_namespace import build_dry_run_namespace, run_script_sync
+from uwazi_admin_agent.use_cases.script_exec_namespace.scope import hidden_measured_property
 from uwazi_admin_agent.use_cases.throttle_controller import ThrottleController
 from uwazi_agent.ports.entity_api_port import EntityApiPort
 
@@ -111,13 +112,12 @@ class ValidationEvaluationUseCase:
         script: str,
         validation: ValidationSet,
         now: datetime | None = None,
-        hidden_property: str | None = None,
     ) -> ValidationScore:
         """Run ``script`` over the instance and score it on the frozen entities."""
         if self._entity_api is None:
             raise RuntimeError("validation evaluation needs the entity API to run the script")
         started = time.monotonic()
-        records = await asyncio.to_thread(self._run_script, script, hidden_property)
+        records = await asyncio.to_thread(self._run_script, script, validation)
         held = set(validation.shared_ids)
         held_records = [record for record in records if _addresses(record, held)]
         # A `skipped` record IS the script failing to propose a value for a
@@ -173,19 +173,18 @@ class ValidationEvaluationUseCase:
         )
         return score
 
-    def _run_script(self, script: str, hidden_property: str | None = None) -> list[dict[str, Any]]:
+    def _run_script(self, script: str, validation: ValidationSet) -> list[dict[str, Any]]:
         """Execute the script against the instance exactly as the planning pass does.
 
-        NO entity allow-list. The old version restricted every read to the
-        held-out ids, which broke the ordinary classify-by-relationship shape: a
-        script that resolves a name against a catalog template (``STATE``, a
-        thesaurus-like set) got an empty catalog and recorded ``skipped`` for
-        every held-out entity, so its score was 0 for a script that works.
-
-        The score must measure the script the operator will run: same reads,
-        recorded writes. Only the rows that address a held-out entity are kept
-        (and scored), so a full pass costs the same reads the planning pass
-        already does and nothing is narrowed that the script itself can see.
+        The scored entities are what the pass must cover, so the namespace is
+        scoped to them — see ``validation_evaluation_reads``. Restricting the
+        whole instance (the old allow-list) broke the ordinary
+        classify-by-relationship shape: a script that resolves a name against a
+        catalog template (``STATE``, a thesaurus-like set) got an empty catalog
+        and recorded ``skipped`` for every held-out entity, so its score was 0
+        for a script that works. Restricting NOTHING broke the opposite way: the
+        script discovered the whole instance, spent its budget there and could
+        slice the sample away entirely.
 
         The LLM helpers are bound exactly as in the planning pass (a fresh
         ledger over the run's approved budget) whenever the runtime is wired: a
@@ -197,9 +196,11 @@ class ValidationEvaluationUseCase:
         unbudgeted money; either way the halt is reported and the rows recorded
         before it still count.
 
-        ``hidden_property`` is the measured property: its stored value is never
-        returned by the discovery reads, so the proposal cannot be a restatement
-        of the very value the score compares it against.
+        The measured property's STORED value is hidden from the discovery reads
+        (see ``hidden_measured_property``): the proposal must not be able to
+        restate the very value the score compares it against, which is what
+        turned one validation sample into evidence for a value the document
+        never mentioned.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -221,7 +222,9 @@ class ValidationEvaluationUseCase:
                 llm_ledger=ledger,
                 llm_cache=self._llm_cache,
                 apply_mode=self._llm_runtime is not None,
-                hidden_property=hidden_property,
+                hidden_property=hidden_measured_property(validation.property_name, validation.input_properties),
+                evaluation_scope=set(validation.shared_ids),
+                evaluation_templates=set(validation.template_names),
             )
             _result, error = run_script_sync(script, namespace)
         finally:

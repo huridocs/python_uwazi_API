@@ -15,7 +15,7 @@ from __future__ import annotations
 from pydantic_ai import Agent, UsageLimits
 from pydantic_ai.models import Model
 
-from uwazi_admin_agent.configuration import MAX_LLM_CALLS
+from uwazi_admin_agent.configuration import LLM_MAX_OUTPUT_TOKENS, MAX_LLM_CALLS
 from uwazi_admin_agent.domain.validation_selector import (
     SELECTOR_SYSTEM_PROMPT,
     ValidationSelector,
@@ -37,7 +37,17 @@ class GenerateValidationSelectorUseCase:
 
     @staticmethod
     def _build_agent(model: Model, system_prompt: str) -> Agent[None, ValidationSelector]:
-        return Agent(model, system_prompt=system_prompt, output_type=ValidationSelector)
+        # The same per-call OUTPUT budget the script generator uses: a reasoning
+        # model spends the provider's default limit before emitting its answer,
+        # and pydantic-ai then aborts the whole turn. That abort happened inside
+        # run creation, where it only became a "no test set" warning — the
+        # reported "the wizard's test set never works".
+        return Agent(
+            model,
+            system_prompt=system_prompt,
+            output_type=ValidationSelector,
+            model_settings={"max_tokens": LLM_MAX_OUTPUT_TOKENS},
+        )
 
     async def execute(
         self,

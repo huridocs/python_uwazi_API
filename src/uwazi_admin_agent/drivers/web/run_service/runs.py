@@ -30,7 +30,13 @@ def _touch_counts(manifest: MigrationManifest) -> tuple[int, int, int, int]:
 
 
 def list_runs(url: str) -> list[RunSummary]:
-    """Return all persisted runs (skips folders whose manifest is unreadable)."""
+    """Return all persisted runs (skips folders whose manifest is unreadable).
+
+    Order is the TABLE's job: every summary carries ``created_at``, and the runs
+    table sorts by it (newest first) so the task just created sits at the top.
+    No sort here: a caller that wants another order (an export, a name list)
+    gets the store's own listing rather than a second, hidden policy.
+    """
     store = build_backup_store(url)
     summaries: list[RunSummary] = []
     for run_id in store.list_runs():
@@ -78,6 +84,8 @@ def get_run(url: str, run_id: str) -> RunDetail:
         error=manifest.error,
         plan_kind=manifest.plan_kind,
         plan_description=manifest.plan_description,
+        llm_budget=manifest.llm_budget,
+        validation_config=manifest.validation_config,
     )
 
 

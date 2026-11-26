@@ -28,7 +28,7 @@ from uwazi_admin_agent.domain.validation import (
     split_label_key,
     validation_state,
 )
-from uwazi_admin_agent.drivers.runtime import build_runtime
+from uwazi_admin_agent.drivers.runtime import build_backup_store, build_runtime
 from uwazi_admin_agent.use_cases.evaluate_validation_use_case import ValidationEvaluationUseCase
 from uwazi_admin_agent.use_cases.generate_validation_selector_use_case import (
     GenerateValidationSelectorUseCase,
@@ -171,7 +171,6 @@ async def evaluate_run(url: str, run_id: str, user: str, password: str) -> Valid
         script,
         validation,
         now=datetime.now(timezone.utc),
-        hidden_property=hidden_property(url, run_id),
     )
     store.save_score(score)
     rows = use_case.last_rows
@@ -328,6 +327,10 @@ def validation_config_from_set(validation: ValidationSet | None) -> ValidationCo
     rules) — copying the frozen labels would measure the new script against
     values frozen for another run. The language is inferred from the frozen
     labels, which is the only place the set records it.
+
+    The CUSTOM selector snippet travels too: re-authoring it would ask the LLM a
+    second time (and could answer differently), so the duplicate freezes the
+    same entities its source chose.
     """
     if validation is None:
         return None
@@ -343,10 +346,66 @@ def validation_config_from_set(validation: ValidationSet | None) -> ValidationCo
         property_type=validation.property_type,
         template_names=list(validation.template_names),
         sample_size=max(1, len(validation.shared_ids)),
+        selector_code=validation.selector_code,
         selector_explanation=validation.selector_explanation,
+        shared_ids=list(validation.shared_ids),
         language=language,
         input_properties=list(validation.input_properties),
     )
+
+
+def validation_config_to_dict(config: ValidationConfig | None) -> dict[str, Any] | None:
+    """One config as a JSON-ready dict for the manifest (pure).
+
+    ``None`` stays ``None`` (the run keeps no test set). The manifest cannot hold
+    the pydantic model without an import edge from ``domain.manifest`` into this
+    module's scoring chain, so the wizard's choice is stored as plain data.
+    """
+    if config is None:
+        return None
+    return config.model_dump(mode="json")
+
+
+def validation_config_from_dict(data: Any) -> ValidationConfig | None:
+    """The config a manifest stored, or ``None`` when there is none (pure).
+
+    A malformed dict (a legacy hand-written manifest, a renamed field) reads as
+    "no recipe" instead of failing the duplicate: the operator gets a task
+    without a test set, not a stack trace. A dict with no recognized field is
+    exactly that case — pydantic would fill every field with its default and
+    hand back a "none" recipe nobody chose.
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+    if not set(data).intersection(ValidationConfig.model_fields):
+        logger.warning("ignoring a stored validation recipe with no known field: {}", data)
+        return None
+    try:
+        return ValidationConfig.model_validate(data)
+    except Exception:  # noqa: BLE001 — a broken recipe must not break the wizard
+        logger.warning("could not read a stored validation recipe: {}", data)
+        return None
+
+
+def run_validation_config(url: str, run_id: str) -> ValidationConfig | None:
+    """The test-set recipe a run was CREATED with (pure-ish; on-disk reads only).
+
+    The FROZEN SET wins when there is one: it is the truth about what the run
+    measured (the operator may have edited the set since creation). Otherwise the
+    recipe recorded on the manifest at creation is used — which is exactly the
+    case a duplicate needs, because a run whose set could not be built still knows
+    what the operator asked for.
+    """
+    store = validation_store(url, run_id)
+    from_set = validation_config_from_set(store.load_set())
+    if from_set is not None:
+        return from_set
+    try:
+        manifest = build_backup_store(url).load_manifest(run_id)
+    except Exception as exc:  # noqa: BLE001 — a missing manifest has no recipe
+        logger.warning("could not read the manifest of {} for its test-set recipe: {}", run_id, exc)
+        return None
+    return validation_config_from_dict(manifest.validation_config)
 
 
 def _validation_filter(shared_id: str) -> SuggestionFilter:
@@ -364,7 +423,10 @@ __all__ = [
     "promote_validation_row",
     "read_validation_label",
     "remove_validation_row",
+    "run_validation_config",
+    "validation_config_from_dict",
     "validation_config_from_set",
+    "validation_config_to_dict",
     "validation_store",
     "validation_summary",
 ]

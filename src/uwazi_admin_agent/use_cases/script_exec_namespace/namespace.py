@@ -56,7 +56,12 @@ from .files import (
     _build_translate_text_real_helper,
 )
 from .reads import _real_full_entities_factory, _real_sync_query_entities_factory
-from .scope import _excluded_entity_reads, _measured_property_guarded_reads, _scoped_entity_reads
+from .scope import (
+    _excluded_entity_reads,
+    _measured_property_guarded_reads,
+    _scoped_entity_reads,
+    validation_evaluation_reads,
+)
 
 #: Wall-clock ceiling for one generated-script pass. Generous enough for a
 #: 10k-entity bulk read on a remote instance; it exists to stop an accidental
@@ -210,6 +215,8 @@ def build_dry_run_namespace(
     target_shared_id: str | None = None,
     apply_mode: bool = False,
     hidden_property: str | None = None,
+    evaluation_scope: set[str] | None = None,
+    evaluation_templates: set[str] | None = None,
 ) -> dict[str, Any]:
     """Construct the dry-run exec namespace: REAL reads, recorded writes.
 
@@ -257,6 +264,13 @@ def build_dry_run_namespace(
       otherwise an extraction that only echoes ``metadata[prop]`` scores
       perfectly while learning nothing, which is exactly how a validation
       sample ended up carrying a value the document never mentioned.
+    - ``evaluation_scope``: the frozen sample's sharedIds, for the SCORING pass
+      (see :func:`validation_evaluation_reads`). A query against one of the run's
+      own target templates yields only those entities — the script cannot spend
+      its budget on the rest of the instance or slice the sample away — while a
+      query against any OTHER template (a reference catalog) passes through
+      untouched. ``evaluation_templates`` names those target templates; empty
+      means "every template is a target".
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
@@ -306,6 +320,15 @@ def build_dry_run_namespace(
         _excluded_entity_reads(namespace, set(exclude_scope))
     if target_shared_id is not None:
         _scoped_entity_reads(namespace, {target_shared_id})
+    if evaluation_scope:
+        # The SCORING pass: only the frozen sample is discoverable, per target
+        # template (see ``validation_evaluation_reads``).
+        validation_evaluation_reads(
+            namespace,
+            set(evaluation_scope),
+            set(evaluation_templates or ()),
+            hidden_property,
+        )
     if hidden_property:
         # Applied LAST so it wraps whatever scope/exclusion wrappers came
         # before: the measured property's stored value is the one thing no read

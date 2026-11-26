@@ -117,8 +117,13 @@ good, then emit ExtractorFunction with honest samples_total/samples_matched
 numbers and notes about unmatched samples.
 WHEN the values live in the entity's PRIMARY DOCUMENT (a PDF) rather than an
 uploaded HTML file: sample with `peek_segmentation_by_entity` (page-ordered
-paragraphs), author the same `def extract(text, ctx)`, and use `dateparse.parse`
-for dates and `textmatch.wratio` for label/paragraph matching.
+paragraphs, each line prefixed `[page N] (Label) text`), author the same
+`def extract(text, ctx)`, and use `dateparse.parse` for dates and
+`textmatch.wratio` for label/paragraph matching. The `(Label)` is Uwazi's own
+segment label ("Text", "Title", "Section header", "List item", "Page header",
+"Page footer", "Table", ...) — filter on those literal strings if at all, never
+on `section_header`/`list`/`paragraph`; a filter on an invented label yields an
+empty text and no extraction.
 OPTIONAL EVIDENCE: when several strategies look plausible, call
 `benchmark_extractor` with 2-3 candidate sources under distinct labels and the
 target property names; it scores each against the values the sampled entities

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -156,6 +157,8 @@ def _apply_hydration(
     raws: dict[tuple[str, str], dict[str, Any]],
     default_language: str,
     template_labels: TemplateLabelPort | None = None,
+    property_types: dict[str, str] | None = None,
+    type_lookup: Callable[[str], dict[str, str]] | None = None,
 ) -> None:
     """Fill each row from the raw of ITS OWN entity-language pair (pure).
 
@@ -165,7 +168,20 @@ def _apply_hydration(
     with its default row (the raw says ``language="en"``), that value belongs
     to another language and must not be shown as this row's current value — the
     row is a new translation, so ``current_value`` stays ``None``.
+
+    ``property_types`` (property name → Uwazi type) is what lets the match
+    comparison read a multiselect as a SET of labels and a relationship as a set
+    of sharedIds. Without it a relationship proposal (bare ids) never equals the
+    stored ``{"value": id, "label": title}`` entry, and the table showed every
+    correct link as a pending change instead of a match.
+
+    ``type_lookup`` is the fallback for a record that does not name its
+    template: it resolves the property types of the entity's OWN template, so a
+    script that omitted ``template_name`` still gets an honest match verdict
+    rather than a permanently "new" row.
     """
+    types = dict(property_types or {})
+    resolved_by_template: dict[str, dict[str, str]] = {}
     for index, suggestion in enumerate(suggestions):
         if suggestion.op == INFO_OP:
             # Display-only rows name no entity, so there is nothing to hydrate.
@@ -197,7 +213,11 @@ def _apply_hydration(
             )
             current = None if answered_other_row else _extract_property(raw, suggestion.property_name, suggestion.language)
             updates["current_value"] = current
-            updates["match"] = compare_values(suggestion.proposed_value, current)
+            updates["match"] = compare_values(
+                suggestion.proposed_value,
+                current,
+                _type_of(suggestion.property_name, types, raw, type_lookup, resolved_by_template),
+            )
         if not suggestion.entity_title:
             updates["entity_title"] = str(raw.get("title") or "")
         if not suggestion.template_name:
@@ -206,11 +226,42 @@ def _apply_hydration(
             suggestions[index] = suggestion.model_copy(update=updates)
 
 
+def _type_of(
+    property_name: str,
+    types: dict[str, str],
+    raw: dict[str, Any],
+    lookup: Callable[[str], dict[str, str]] | None,
+    cache: dict[str, dict[str, str]],
+) -> str | None:
+    """One property's Uwazi type, from the record's templates or the entity's own (pure-ish).
+
+    The records name their template, so ``types`` normally answers. A record
+    that omitted it falls back to the raw entity's ``template`` id — resolved
+    once per template per pass — so the match comparison still knows a
+    relationship from a paragraph.
+    """
+    known = types.get(property_name)
+    if known:
+        return known
+    template = raw.get("template") if isinstance(raw, dict) else None
+    if not lookup or not isinstance(template, str) or not template:
+        return None
+    if template not in cache:
+        try:
+            cache[template] = dict(lookup(template))
+        except Exception as exc:  # noqa: BLE001 — a lookup failure degrades to "unknown"
+            logger.warning("could not resolve the property types of template {}: {}", template, exc)
+            cache[template] = {}
+    return cache[template].get(property_name)
+
+
 def hydrate_current_values(
     entity_repository: EntityRepositoryPort | None,
     suggestions: list[Suggestion],
     default_language: str,
     template_labels: TemplateLabelPort | None = None,
+    property_types: dict[str, str] | None = None,
+    type_lookup: Callable[[str], dict[str, str]] | None = None,
 ) -> None:
     """Fill each row's before-state and its display identity from the live raws.
 
@@ -238,7 +289,7 @@ def hydrate_current_values(
         return
     pairs = {(suggestions[index].shared_id, _raw_language(suggestions[index], default_language)) for index in indexes}
     raws = _fetch_raws(entity_repository, pairs)
-    _apply_hydration(suggestions, raws, default_language, template_labels)
+    _apply_hydration(suggestions, raws, default_language, template_labels, property_types, type_lookup)
 
 
 class GeneratePredictionsUseCase:
@@ -385,11 +436,8 @@ class GeneratePredictionsUseCase:
         #    reveals that a proposed value equals the stored one; the outcome
         #    filter turns such rows into display-only ``matched`` evidence. Both
         #    must run BEFORE the gate can judge.
-        suggestions = records_to_suggestions(
-            run_id,
-            records,
-            property_types=self._property_types_for(records),
-        )
+        types = self._property_types_for(records)
+        suggestions = records_to_suggestions(run_id, records, property_types=types)
         if is_validation_pass:
             # Every row this pass records is HOLDOUT EVIDENCE, never work: the
             # table shows it for scoring and the apply path refuses it.
@@ -401,6 +449,8 @@ class GeneratePredictionsUseCase:
                 suggestions,
                 self._default_language,
                 self._template_labels,
+                types,
+                self._property_types.property_types if self._property_types is not None else None,
             )
             suggestions = drop_unchanged_property_rows(suggestions)
 

@@ -189,15 +189,13 @@ class BaseMixin:
             await self._revert_created(run_id, shared_id, manifest)
             return None
         if shared_id in {e.shared_id for e in manifest.deleted}:
-            # A deleted entity has no row to update: its undo is a RE-CREATE
-            # (fresh sharedId + files + relationship rows), which only the
-            # ordered run-level revert can do. Attempting the per-entity update
-            # used to 404 against the dead id, skip silently, and report
-            # success while nothing was restored.
-            raise RevertRefusedError(
-                "this row's entity was deleted by the run — use the run-level Revert "
-                "(the undo re-creates the entity; an in-place restore is impossible)"
-            )
+            # A deleted entity has no live row to update: its undo is a RE-CREATE
+            # from the first-touch snapshot (fresh sharedId, files re-uploaded,
+            # connection rows replayed, inbound relationship refs re-applied).
+            # That is the SAME ordered action list the run-level revert builds,
+            # narrowed to this one entity, so a delete row is revertable from the
+            # table exactly like a modified one.
+            return await self._revert_deleted(run_id, shared_id, manifest)
         try:
             snapshot = self._backup_store.load_snapshot(run_id, shared_id)
         except FileNotFoundError:
@@ -229,6 +227,54 @@ class BaseMixin:
         manifest.mark_reverted([shared_id])
         self._backup_store.save_manifest(run_id, manifest)
         self._flip_rows_reverted(run_id, [shared_id])
+        self._finalize_partial_revert(run_id, manifest)
+        return snapshot
+
+    async def _revert_deleted(self, run_id: str, shared_id: str, manifest: Any) -> EntitySnapshot | None:
+        """Undo ONE delete row: re-create the entity from its first-touch snapshot.
+
+        The run-level revert does this for every deleted entity; a delete ROW's
+        own Revert is the same ordered subset, built by
+        :func:`~uwazi_admin_agent.domain.revert.build_revert_actions` with
+        ``shared_ids={shared_id}`` so it also re-applies the relationship refs
+        the delete cascade stripped and re-uploads the entity's captured files.
+
+        The re-create mints a FRESH sharedId (Uwazi cannot resurrect the old
+        one), checkpointed on the manifest so a resumed revert does not mint a
+        second copy. The recorded row keeps the OLD id, which is why a reverted
+        delete cannot be run again (``rerun_blocked``); Sync with Uwazi
+        re-reads the operation from live state.
+
+        Returns the restored backup (its ``captured_at`` feeds the toast), or
+        ``None`` when the run holds no snapshot for the entity.
+        """
+        try:
+            snapshot = self._backup_store.load_snapshot(run_id, shared_id)
+        except FileNotFoundError as exc:
+            raise RevertRefusedError(
+                "this row's entity was deleted by the run, but its backup is missing — nothing to restore"
+            ) from exc
+        actions = build_revert_actions(
+            manifest,
+            lambda sid: self._backup_store.load_snapshot(run_id, sid),
+            self._load_current_hubs,
+            shared_ids={shared_id},
+        )
+        for action in actions:
+            await self._execute_action(action, run_id, manifest)
+        # The action list already restored the entity's content, files and
+        # connection rows; the manifest's per-entity bookkeeping is what the
+        # table's counts and a later run-level revert read.
+        restored_id = self._restored_shared_id_for(manifest, shared_id) or shared_id
+        manifest.mark_reverted([shared_id])
+        self._backup_store.save_manifest(run_id, manifest)
+        logger.info(
+            "revert deleted entity: run={} old sharedId={} new sharedId={}",
+            run_id,
+            shared_id,
+            restored_id,
+        )
+        self._flip_rows_reverted(run_id, [shared_id, restored_id])
         self._finalize_partial_revert(run_id, manifest)
         return snapshot
 

@@ -105,6 +105,7 @@ def _new_task_wizard(
     # the budget is written into the caps controls below so the same
     # ``_wizard_budget`` path serves both fresh and duplicated tasks.
     state["_validation_config_override"] = prefill_validation
+    _seed_validation_state(state, prefill_validation)
     if prefill_name or prefill_prompt:
         state["_prompt_base"] = base_prompt
         state["validated_prompt"] = base_prompt
@@ -141,6 +142,33 @@ def _new_task_wizard(
         if prefill_name or prefill_prompt:
             stepper.set_value("generate")
             _show_generate_prompt(state)
+
+
+def _seed_validation_state(state: dict[str, Any], config: Any | None) -> None:
+    """Put a source task's test-set settings into the wizard's own fields (pure-ish).
+
+    A duplicate opens ON the Generate step, so the test-set widgets are never
+    built for it at that point; without seeding the state they would come up
+    blank when the operator presses Back, and ``_wizard_validation_config``
+    reads the state keys (not the override) for every re-render. The override is
+    still what a wizard that never visits the step submits, so editing the
+    request drops it (see ``_advance_with_prompt``) and the fields below are what
+    the rebuild shows.
+    """
+    if config is None:
+        return
+    mode = str(getattr(config, "mode", "") or "none")
+    state["_validation_mode_value"] = mode
+    state["_validation_property_name"] = str(getattr(config, "property_name", "") or "")
+    state["_validation_size_value"] = getattr(config, "sample_size", None)
+    state["_validation_filter_value"] = str(getattr(config, "selector_explanation", "") or "")
+    # The source run's sample is already frozen: hand the duplicate the SAME
+    # entities and the selector that chose them, so it neither re-asks the LLM
+    # (whose second answer could pick others) nor silently changes the score's
+    # population. Editing the request clears this (``_advance_with_prompt``).
+    if mode == "custom":
+        state["_validation_selector_code"] = str(getattr(config, "selector_code", "") or "")
+        state["_validation_shared_ids"] = list(getattr(config, "shared_ids", ()) or ())
 
 
 def _wizard_step_task(
@@ -256,8 +284,11 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
         state["_prompt_base"] = prompt
         state["_clarify_base"] = prompt
         # A duplicate's test-set recipe belongs to the SOURCE request. Once the
-        # operator edits the request, the copy must configure its own set.
+        # operator edits the request, the copy must configure its own set: drop
+        # both the inherited recipe and the sample entities frozen for it.
         state["_validation_config_override"] = None
+        state["_validation_selector_code"] = ""
+        state["_validation_shared_ids"] = []
     state["prompt"] = prompt
     state["final_prompt"] = state.get("validated_prompt") or prompt
     state["_validation_done"] = False
@@ -268,7 +299,7 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
     # there is no label to score against when the task creates entities or runs
     # a custom rule, so those walk straight past the step. Rebuild the content
     # HERE (not only at build time) so it follows the goal just chosen.
-    _render_test_set_step(state)
+    _render_test_set_step(state, visited=True)
     _sync_test_set_step(state)
     stepper.set_value("test_set" if _validation_goal(state) == GOAL_FILL else "caps")
 
@@ -537,6 +568,7 @@ def _wizard_confirm(state: dict[str, Any]) -> None:
 def _show_generate_prompt(state: dict[str, Any]) -> None:
     """Update the generate step's prompt display to the current final prompt."""
     _refresh_generate_prompt(state)
+    _render_generate_settings(state)
 
 
 def _refresh_generate_prompt(state: dict[str, Any]) -> None:
@@ -564,13 +596,25 @@ def _validation_goal(state: dict[str, Any]) -> str:
     so ``_guided_answers`` may still hold a stale fill goal from a previous
     pick; the prompt source wins there. It has no measured property, hence no
     test set either.
+
+    A DUPLICATE carries its source run's recipe (``_validation_config_override``)
+    and never walked the guided questions, so it has no goal of its own: the
+    recipe is what says the task measures a property, and that keeps the test-set
+    step in the wizard's path — pressing Back from the Generate step has to land
+    on the settings the copy inherited, not skip past them.
     """
     source = state.get("_prompt_source")
     if source == GOAL_CUSTOM:
         return GOAL_CUSTOM
     if source is None and _goal_of(state) == GOAL_CUSTOM:
         return GOAL_CUSTOM
-    return _goal_of(state)
+    goal = _goal_of(state)
+    if goal:
+        return goal
+    override = state.get("_validation_config_override")
+    if str(getattr(override, "mode", "") or "") not in ("", "none"):
+        return GOAL_FILL
+    return ""
 
 
 def _goal_of(state: dict[str, Any]) -> str:
@@ -593,7 +637,7 @@ def _wizard_step_validation(state: dict[str, Any], stepper: Any, dialog: Any) ->
         _render_test_set_step(state)
 
 
-def _render_test_set_step(state: dict[str, Any]) -> None:
+def _render_test_set_step(state: dict[str, Any], *, visited: bool = False) -> None:
     """(Re)build the test-set step's content for the current goal.
 
     ONLY the fill-a-property flow offers the picker: a measured property is a
@@ -601,6 +645,9 @@ def _render_test_set_step(state: dict[str, Any]) -> None:
     the guided questions carry its template). Entity-creation and custom tasks
     get a plain statement instead — no radio, no fields, no way to park the
     wizard on a picker that could never sample anything.
+
+    ``visited`` says the operator ARRIVED here, so what the step now holds is
+    their own choice and overrides a duplicated task's inherited recipe.
     """
     container = state.get("_test_set_container")
     if container is None or container.is_deleted:
@@ -613,20 +660,25 @@ def _render_test_set_step(state: dict[str, Any]) -> None:
         # (an entity-creation task has no label data to score against).
         if _validation_goal(state) != GOAL_FILL:
             return
+        state["_validation_step_visited"] = bool(state.get("_validation_step_visited")) or visited
         ui.label("Keep a fair test set?").classes("text-h6 q-mb-sm")
         ui.label(
             "A test set is a few entities kept away from the AI. The finished task is scored on them, "
             "so you see how well it really works instead of how well it fits the examples the AI read. "
             "Those entities are not changed by the task unless you promote them later."
         ).classes("text-body2 text-grey-7 q-mb-md")
+        # The mode lives in the STATE, not only in the widget: this render runs
+        # again whenever the step is re-entered (Back from the allowance, a
+        # duplicated task), and a radio rebuilt from a literal default silently
+        # reset the operator's choice to "automatic" every time.
         state["_validation_mode"] = ui.radio(
             {
                 "none": "No test set — just run the task",
                 "automatic": "Pick a sample automatically (recommended)",
                 "custom": "Describe how to choose the sample (the AI writes the selector when the task is generated)",
             },
-            value="automatic",
-            on_change=lambda _event: _render_validation_fields(state),
+            value=str(state.get("_validation_mode_value") or "automatic"),
+            on_change=lambda event: _validation_mode_changed(state, event.value),
         ).classes("wizard-options w-full")
         with ui.column().classes("w-full") as fields:
             state["_validation_fields"] = fields
@@ -637,6 +689,17 @@ def _render_test_set_step(state: dict[str, Any]) -> None:
                 "color=primary"
             )
         _render_validation_fields(state)
+
+
+def _validation_mode_changed(state: dict[str, Any], value: Any) -> None:
+    """Record the chosen mode, then show the fields it needs.
+
+    Storing it in the state is what survives a re-render of the step (see
+    ``_render_test_set_step``); the widget alone is recreated each time.
+    """
+    state["_validation_mode_value"] = str(value or "none")
+    state["_validation_step_visited"] = True
+    _render_validation_fields(state)
 
 
 def _wizard_validation_back(state: dict[str, Any]) -> None:
@@ -668,7 +731,12 @@ def _wizard_validation_next(state: dict[str, Any], stepper: Any) -> None:
 
 
 def _validation_templates(answers: Any) -> list[str]:
-    """The task's target templates (source templates as a create-flow fallback)."""
+    """The task's target templates (source templates as a create-flow fallback).
+
+    A wizard that carries a duplicated task's recipe has no guided answers of its
+    own: the source run's templates are the population the copy still samples
+    from, so they answer for it.
+    """
     templates = [str(name) for name in getattr(answers, "templates", ()) or () if str(name).strip()]
     if not templates:
         templates = [str(name) for name in getattr(answers, "source_templates", ()) or () if str(name).strip()]
@@ -707,7 +775,7 @@ def _render_validation_fields(state: dict[str, Any]) -> None:
     container = state.get("_validation_fields")
     if container is None or container.is_deleted:
         return
-    mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
+    mode = str(state.get("_validation_mode_value") or getattr(state.get("_validation_mode"), "value", "none") or "none")
     container.clear()
     with container:
         if mode == "none":
@@ -774,7 +842,9 @@ def _render_validation_fields(state: dict[str, Any]) -> None:
                 .props("outlined autogrow")
                 .classes("w-full")
             )
-        if not _validation_templates(state.get("_guided_answers")):
+        if not _validation_templates(state.get("_guided_answers")) and not getattr(
+            state.get("_validation_config_override"), "template_names", None
+        ):
             # The sample is drawn per template; with no template there is no
             # population to sample from. Saying so is honest — silently creating
             # no set would look like the feature did nothing.
@@ -800,9 +870,10 @@ def _validation_property_label(state: dict[str, Any], name: str) -> str:
 def _wizard_validation_config(state: dict[str, Any]):
     """The wizard's validation answer as a :class:`ValidationConfig` (or None)."""
     override = state.get("_validation_config_override")
-    if override is not None:
+    if override is not None and not state.get("_validation_step_visited"):
         # A duplicate carries the source run's test-set recipe; the picker was
-        # never shown for it, so the override is the only place it can live.
+        # never shown for it, so the override is the only place it can live. Once
+        # the operator opens the step, the fields below are their own answer.
         return override
     try:
         from uwazi_admin_agent.domain.validation import (
@@ -818,7 +889,7 @@ def _wizard_validation_config(state: dict[str, Any]):
     # stale widget from a previous render might still carry.
     if _validation_goal(state) != GOAL_FILL:
         return ValidationConfig(mode=VALIDATION_NONE)
-    mode = str(getattr(state.get("_validation_mode"), "value", "none") or "none")
+    mode = str(state.get("_validation_mode_value") or getattr(state.get("_validation_mode"), "value", "none") or "none")
     if mode == VALIDATION_NONE:
         return ValidationConfig(mode=VALIDATION_NONE)
     property_widget = state.get("_validation_property")
@@ -831,6 +902,13 @@ def _wizard_validation_config(state: dict[str, Any]):
         return ValidationConfig(mode=VALIDATION_NONE)
     answers = state.get("_guided_answers")
     templates = _validation_templates(answers)
+    if not templates:
+        # A duplicate inherited its population from the source run.
+        templates = [
+            str(name)
+            for name in getattr(state.get("_validation_config_override"), "template_names", ()) or ()
+            if str(name).strip()
+        ]
     size_widget = state.get("_validation_size")
     raw_size = getattr(size_widget, "value", None)
     if raw_size is None:
@@ -848,15 +926,26 @@ def _wizard_validation_config(state: dict[str, Any]):
     # ``build_validation_set``), so the operator never waits on an LLM turn
     # while filling the wizard.
     explanation = str(raw_filter or "").strip() if mode == VALIDATION_CUSTOM else ""
-    selector_code = ""
+    # A wizard that carries a frozen sample (a duplicate) keeps it: the selector
+    # that chose it travels too, and its members are named explicitly so the new
+    # run scores the same population. A FRESH wizard has neither — the snippet is
+    # authored at generation time (see ``build_validation_set``), so the operator
+    # never waits on an LLM turn while filling the form.
+    selector_code = str(state.get("_validation_selector_code") or "") if mode == VALIDATION_CUSTOM else ""
+    shared_ids = (
+        [str(shared_id) for shared_id in state.get("_validation_shared_ids") or [] if str(shared_id).strip()]
+        if mode != VALIDATION_NONE
+        else []
+    )
     return ValidationConfig(
         mode=mode,
         property_name=validation_property_name(property_name),
         property_type=_validation_property_type(state, property_name),
         template_names=templates,
-        sample_size=max(5, min(200, size)),
+        sample_size=max(1, min(200, size)),
         selector_code=selector_code,
         selector_explanation=explanation,
+        shared_ids=shared_ids,
         language=_wizard_default_language(answers),
         # What the wizard DECLARED as input. The measured property is hidden from
         # the script's reads unless it is one of these: "read the property you
@@ -868,16 +957,18 @@ def _wizard_validation_config(state: dict[str, Any]):
 def _declared_input_properties(answers: Any, measured_property: str) -> list[str]:
     """The properties the guided answers declared as INPUTS (pure).
 
-    Two sources: the source metadata properties the operator checked, and the
-    target property when the scope is "only entities where it is currently
-    empty" (that filter necessarily reads it). Everything else is not an input,
-    so a measured property that is not listed here is hidden from the script.
-    """
-    from uwazi_admin_agent.domain.guided_task import SCOPE_EMPTY
+    The source metadata properties the operator checked, and nothing else.
 
+    The target property is deliberately NOT added for the "only entities where
+    it is currently empty" scope: that is a SCOPE, not a permission to read the
+    target. The script's job is to PROPOSE the value, and a validation entity
+    always carries one (an empty one cannot be scored). Letting the empty-scope
+    script read the stored value hid every held-out entity from the scoring pass
+    — it proposed nothing for all of them — and made the score measure whether
+    the entity was already filled rather than whether the extraction is right.
+    """
     declared = [str(name).strip() for name in getattr(answers, "metadata_properties", ()) or () if str(name).strip()]
-    if str(getattr(answers, "entity_scope", "") or "") == SCOPE_EMPTY and measured_property.strip():
-        declared.append(measured_property.strip())
+    del measured_property
     return sorted(set(declared))
 
 
@@ -978,6 +1069,13 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
     with ui.step(name="generate", title="Generate", icon="auto_awesome"):
         ui.label("Review and generate the task.").classes("text-body1 q-mb-md")
         ui.label().bind_text_from(state, "name", backward=lambda v: f"Run: {v}").classes("text-h6")
+        # A DUPLICATE opens on this step, so this is the only place the settings it
+        # carried over are visible before Generate: the approved AI allowance and
+        # the test set it will score against. Without it the copy went straight to
+        # "generate this prompt" and the operator could not tell whether those
+        # settings had travelled.
+        state["_generate_settings"] = ui.column().classes("w-full q-mb-md")
+        _render_generate_settings(state)
         ui.label("Final prompt (sent to the LLM)").classes("text-subtitle1 text-grey-7 q-mt-md")
         prompt_display = (
             ui.textarea().classes("w-full font-mono").props("readonly outlined autogrow").style("min-height: 120px")
@@ -991,6 +1089,52 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
                 icon="auto_awesome",
                 on_click=lambda: _wizard_generate(state, dialog),
             )
+    _render_generate_settings(state)
+
+
+def _render_generate_settings(state: dict[str, Any]) -> None:
+    """Paint the allowance and the test set the task will actually use (pure-ish).
+
+    Read from the same builders Generate submits (``_wizard_budget`` and
+    ``_wizard_validation_config``), so the line can never advertise a setting the
+    run was not created with.
+    """
+    holder = state.get("_generate_settings")
+    if holder is None or getattr(holder, "is_deleted", False):
+        return
+    holder.clear()
+    with holder:
+        budget = _wizard_budget(state)
+        if budget.max_cost > 0 or budget.max_requests > 0:
+            ui.label(f"AI allowance: ${budget.max_cost:.2f} · {budget.max_requests:,} request(s)").classes(
+                "text-body2 text-grey-8"
+            )
+        else:
+            ui.label("AI allowance: none — the task must compute its values from the data itself").classes(
+                "text-body2 text-grey-8"
+            )
+        config = _validation_config_override_or_state(state)
+        if config is None or str(getattr(config, "mode", "none")) == "none":
+            ui.label("Test set: none — the task will not be scored").classes("text-body2 text-grey-8")
+            return
+        measured = str(getattr(config, "property_name", "") or "")
+        size = getattr(config, "sample_size", 0)
+        how = "chosen by a custom rule" if str(getattr(config, "mode", "")) == "custom" else "picked automatically"
+        noun = "entity" if size == 1 else "entities"
+        ui.label(f"Test set: {size} {noun} ({how}), measuring {measured or 'a property'}").classes("text-body2 text-grey-8")
+
+
+def _validation_config_override_or_state(state: dict[str, Any]) -> Any:
+    """The recipe Generate would submit, without the picker widgets being built.
+
+    ``_wizard_validation_config`` is the ONE builder Generate uses; it already
+    prefers an inherited recipe until the operator opens the step, and reads the
+    step's own state keys otherwise — so a duplicate (whose widgets were never
+    built) still reports what it will submit.
+    """
+    if _validation_goal(state) != GOAL_FILL and state.get("_validation_config_override") is None:
+        return None
+    return _wizard_validation_config(state)
 
 
 def _start_generation(

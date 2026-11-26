@@ -47,6 +47,28 @@ def shared_ids_of(value: Any) -> list[str]:
     return ids
 
 
+def embedded_titles(value: Any) -> dict[str, str]:
+    """``{sharedId: title}`` for the titles a relationship value ALREADY carries (pure).
+
+    Uwazi's raw read shape is ``[{"value": <id>, "label": <title>}]``, so the
+    entity's current value names its own targets. Using that map before any
+    lookup keeps the review table readable even when the title lookup is
+    unavailable (an unreachable instance, a page whose catalog read failed).
+    A ``{"shared_id", "title"}`` dict is accepted too — that is the shape the
+    entity API's read view uses.
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    found: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        shared_id = str(item.get("value") or item.get("shared_id") or item.get("sharedId") or "").strip()
+        title = str(item.get("title") or item.get("label") or "").strip()
+        if shared_id and title and title != shared_id:
+            found.setdefault(shared_id, title)
+    return found
+
+
 def relationship_title(shared_id: str, titles: dict[str, str] | None = None) -> str:
     """The display text for one related entity (pure): its title, else its id.
 
@@ -60,12 +82,16 @@ def relationship_title(shared_id: str, titles: dict[str, str] | None = None) -> 
 def render_relationship(value: Any, titles: dict[str, str] | None = None) -> str:
     """Render a relationship value as ``"Title, Title"`` (pure).
 
-    ``—`` for an empty value, matching every other metadata renderer.
+    ``—`` for an empty value, matching every other metadata renderer. A title
+    the VALUE embeds wins only where the caller's map has none: an explicit
+    lookup is the fresher answer (an entity may have been renamed).
     """
     ids = shared_ids_of(value)
     if not ids:
         return "—"
-    return ", ".join(relationship_title(shared_id, titles) for shared_id in ids)
+    known = dict(embedded_titles(value))
+    known.update({key: title for key, title in (titles or {}).items() if title})
+    return ", ".join(relationship_title(shared_id, known) for shared_id in ids)
 
 
 def relationship_selection(proposal: Any, rejected: list[str], selected: list[str] | None) -> list[str]:
@@ -152,6 +178,7 @@ __all__ = [
     "PICKABLE_TYPES",
     "RELATIONSHIP_TYPE",
     "SELECT_TYPE",
+    "embedded_titles",
     "relationship_options",
     "relationship_selection",
     "relationship_title",

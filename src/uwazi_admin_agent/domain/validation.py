@@ -98,6 +98,15 @@ class ValidationConfig(BaseModel):
         default="",
         description="The operator's own description of how the test entities should be chosen.",
     )
+    shared_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The entities the sample must be drawn from, when they are already known — a DUPLICATE "
+            "of a task whose set was frozen, or an operator who named them. They are used verbatim "
+            "(their labels are re-read for the new run, so the score still measures live values), "
+            "so a copy scores the same population without asking the LLM to choose again."
+        ),
+    )
     language: str = Field(default="en", description="Entity row the sample and its labels are read in.")
     input_properties: list[str] = Field(
         default_factory=list,
@@ -140,6 +149,14 @@ class ValidationSet(BaseModel):
     selector_explanation: str = Field(
         default="",
         description="The operator's description of how this sample was chosen (custom mode).",
+    )
+    selector_code: str = Field(
+        default="",
+        description=(
+            "The read-only selector snippet that chose this sample (custom mode). Kept with the "
+            "set so a DUPLICATE re-runs the SAME selection instead of asking the LLM to author a "
+            "second one, which could pick other entities."
+        ),
     )
     version: int = Field(default=1, ge=1, description="Bumped on every membership/label edit; scores are per version.")
     contaminated_at: datetime | None = Field(

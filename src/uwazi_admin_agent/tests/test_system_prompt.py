@@ -681,6 +681,21 @@ def test_prompt_has_document_extraction_section() -> None:
         assert token in SYSTEM_PROMPT, token
 
 
+def test_prompt_pins_the_verbatim_segment_labels() -> None:
+    """`p["type"]` is Uwazi's wire LABEL ("Section header"), not its enum id.
+
+    A live run filtered every paragraph on `{"text", "title", "section_header",
+    "list"}`, kept ZERO paragraphs on documents whose segmentations were ready,
+    and reported all of their entities as `no_segmentation`. The prompt must
+    name the labels the API actually returns and forbid inventing one.
+    """
+    assert '"Section header"' in SYSTEM_PROMPT
+    assert '"List item"' in SYSTEM_PROMPT
+    assert "never assume a document contains a given type" in SYSTEM_PROMPT
+    # And the skip reason must not be reused for a filter that kept nothing.
+    assert "that is `no_match`" in SYSTEM_PROMPT
+
+
 def test_prompt_offers_the_strategy_benchmark_with_the_mismatch_rule() -> None:
     """The generation agent must know it can MEASURE a strategy, and must prefer
     zero mismatches over coverage (a wrong value is written; a missing one is not)."""

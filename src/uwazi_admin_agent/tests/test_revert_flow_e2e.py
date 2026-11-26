@@ -224,7 +224,6 @@ def test_reverting_one_selected_entity_leaves_its_sibling_applied(workspace: Adm
     assert outcome.reverted == [first_id]
     assert outcome.failures == []
     assert outcome.skipped_created == []
-    assert outcome.skipped_deleted == []
 
     assert ws.text(first_id, language) == "original-0"
     assert ws.text(second_id, language) == ws.value("selection")

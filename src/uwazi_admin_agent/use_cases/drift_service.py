@@ -97,6 +97,22 @@ def baseline_max(store: DriftStorePort, run_id: str) -> int | None:
     return max(values) if values else None
 
 
+def run_removed_ids(manifest: Any) -> set[str]:
+    """The entities whose absence is the run's OWN writing (pure).
+
+    Two cases, both the run's own doing and therefore never drift:
+
+    * ``deleted`` — the run deleted them (through this very review table, so a
+      completed Delete task must not read back as "Deleted in Uwazi");
+    * a ``created`` entity whose revert already undid it — the revert's undo of
+      a create is a deletion, so it has vanished too. Only entities the revert
+      actually marked reverted count; a create still standing is present live
+      and never reaches the missing branch.
+    """
+    created_and_reverted = {entry.shared_id for entry in manifest.created} & set(manifest.reverted_shared_ids)
+    return {entry.shared_id for entry in manifest.deleted} | created_and_reverted
+
+
 def dominant_template_name(store: DriftStorePort, run_id: str) -> str | None:
     """The most frequent template name among the run's rows (None when none)."""
     rows, _total = store.entity_rows(run_id, unfiltered())
@@ -185,6 +201,7 @@ def scan_drift_report(
 ) -> DriftReport:
     """Full paged diff against the baseline for one resolved template id."""
     manifest = backup_store.load_manifest(run_id)
+    aliases = {entry.shared_id: entry.restored_shared_id for entry in manifest.deleted if entry.restored_shared_id}
     run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
     languages = languages_for_run(run_id, store)
     live: list[dict[str, Any]] = []
@@ -209,6 +226,8 @@ def scan_drift_report(
         languages_failed=scan_failed,
         checked_at=now,
         files=file_entries,
+        aliases=aliases,
+        removed_by_run=run_removed_ids(manifest),
     )
 
 
@@ -232,6 +251,7 @@ def sync_drift_baseline(
     now = datetime.now(timezone.utc)
     languages = languages_for_run(run_id, store)
     rows: list[DriftBaselineRow] = []
+    scan_failed: list[str] = []
     try:
         if template_id:
             for language in languages:
@@ -239,6 +259,7 @@ def sync_drift_baseline(
                     scanned = drift_probe.scan_template(template_id, language)
                 except Exception as exc:  # noqa: BLE001 — one language failing keeps the others
                     logger.warning("drift baseline scan failed {}: {}", language, exc)
+                    scan_failed.append(language)
                     continue
                 for shared_id, edit_date in scanned.items():
                     rows.append(
@@ -272,14 +293,31 @@ def sync_drift_baseline(
         logger.warning("drift baseline sync failed for {}: {}", run_id, exc)
         return 0
     store.replace_drift_baseline(run_id, rows)
-    # Reset knowledge of drift: the sync re-captured everything known.
+    # The sync re-captured everything the probe compares against, from live
+    # Uwazi, moments ago — but only for the languages that scanned. A language
+    # that failed leaves a HOLE in that baseline, so the honest verdict is
+    # UNKNOWN ("not checked yet"), never "Up to date": claiming VALID over a
+    # partial capture would hide exactly the drift this feature exists to catch.
+    if scan_failed:
+        store.set_drift_state(
+            run_id,
+            status=DriftStatus.UNKNOWN,
+            checked_at=now,
+            checked_by="sync",
+            live_count=live_count,
+            detail=f"baseline incomplete ({', '.join(scan_failed)})",
+        )
+        return len(rows)
+    # Complete capture: the table cannot be stale relative to a baseline taken
+    # from live Uwazi a moment ago, so the post-Run/post-revert banner must read
+    # "Up to date" — not an internal "baseline synced" caption.
     store.set_drift_state(
         run_id,
-        status=DriftStatus.UNKNOWN,
+        status=DriftStatus.VALID,
         checked_at=now,
         checked_by="sync",
         live_count=live_count,
-        detail="baseline synced",
+        detail=None,
     )
     return len(rows)
 
@@ -319,6 +357,12 @@ def check_drift(
         )
         return state
     manifest = backup_store.load_manifest(run_id)
+    # The alias mapping keeps a reverted DELETE from reading as drift: the diff
+    # treats the minted id as the baseline entry's presence (no NEW, no MISSING).
+    # The minted id is deliberately NOT added to ``run_written`` — the baseline
+    # re-sync after the revert records its editDate, so a LATER human edit of the
+    # restored entity is still reported as MODIFIED.
+    aliases = {entry.shared_id: entry.restored_shared_id for entry in manifest.deleted if entry.restored_shared_id}
     run_written = {e.shared_id for e in (*manifest.modified, *manifest.created, *manifest.deleted)}
 
     baseline_max_edit_date = baseline_max(store, run_id)
@@ -387,10 +431,31 @@ def check_drift(
                     languages_failed=scan_failed,
                     checked_at=now,
                     files=file_entries,
+                    aliases=aliases,
+                    removed_by_run=run_removed_ids(manifest),
                 )
+                live_count_stored = live_count if live_count is not None else baseline_count_value
+                if report.total() == 0 and not report.languages_failed:
+                    # The probe/count flagged something the full diff then
+                    # explained away: the run's own re-created entities (their
+                    # fresh ids move the count and the editDates), or rows the
+                    # diff correctly attributes to the run itself. Painting
+                    # "Out of date" with an empty summary told the operator
+                    # Uwazi had drifted because of the change they just made
+                    # from this very table.
+                    store.set_drift_state(
+                        run_id,
+                        status=DriftStatus.VALID,
+                        checked_at=now,
+                        checked_by=by,
+                        baseline_max_edit_date=baseline_max_edit_date,
+                        live_count=live_count_stored,
+                        detail=None,
+                    )
+                    final_valid = store.drift_state(run_id)
+                    return final_valid or DriftStateRow(run_id=run_id, status=DriftStatus.VALID, checked_at=now)
                 detail = drift_detail(report)
                 status = DriftStatus.DRIFTED
-                live_count_stored = live_count if live_count is not None else baseline_count_value
                 store.set_drift_state(
                     run_id,
                     status=status,
@@ -486,6 +551,7 @@ __all__ = [
     "file_drift_entries",
     "languages_for_run",
     "refresh_baseline_after_run",
+    "run_removed_ids",
     "scan_drift_report",
     "sync_drift_baseline",
     "unfiltered",

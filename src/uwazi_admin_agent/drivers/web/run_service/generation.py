@@ -79,6 +79,18 @@ async def _repair_failed_plan(
         return None
 
 
+def _config_dict(validation_config: Any | None) -> dict[str, Any] | None:
+    """The wizard's test-set recipe as plain data for the manifest (pure).
+
+    A plain dict keeps ``domain.manifest`` free of an import edge into the
+    validation scoring chain (``domain.metadata_diff`` → ``manifest``).
+    """
+    if validation_config is None:
+        return None
+    dump = getattr(validation_config, "model_dump", None)
+    return dump(mode="json") if callable(dump) else None
+
+
 async def create_and_generate(
     url: str,
     name: str,
@@ -123,11 +135,24 @@ async def create_and_generate(
     # reads the instance once, and from the moment the set exists every
     # authoring read through build_runtime excludes those entities. AFTER the
     # existence check: a refused duplicate must not overwrite another run's set.
+    #
+    # A set that could NOT be built is a normal outcome of a test-set recipe with
+    # no matching entities (the operator may even WANT a small scope): it is
+    # logged for support and otherwise silent. The run is usable and simply runs
+    # without a performance score — the empty validation card says that on its
+    # own. Warning about it above the table told the operator something is broken
+    # when nothing is.
     if validation_config is not None:
         try:
             from .validation import build_validation_set
 
-            await build_validation_set(url, name, validation_config, user, password)
+            frozen = await build_validation_set(url, name, validation_config, user, password)
+            if frozen is None:
+                logger.info(
+                    "no validation set built for run {} (property {!r}): running without a score",
+                    name,
+                    validation_config.property_name,
+                )
         except Exception as exc:  # noqa: BLE001 — never lose the run over an optional set
             logger.warning("validation sampling failed for run {}: {}", name, exc)
     _paths(url).prompts_path.mkdir(parents=True, exist_ok=True)
@@ -185,6 +210,8 @@ async def create_and_generate(
             snapshot_dir=str(run_path),
             error=str(exc),
             error_step="generate",
+            llm_budget=budget,
+            validation_config=_config_dict(validation_config),
         )
         runtime.backup_store.save_manifest(name, manifest)
         raise GenerateError(str(exc)) from exc
@@ -199,6 +226,8 @@ async def create_and_generate(
         plan_description=script.description,
         status=RunStatus.PLANNED,
         snapshot_dir=str(run_path),
+        llm_budget=budget,
+        validation_config=_config_dict(validation_config),
     )
     runtime.backup_store.save_manifest(name, manifest)
 

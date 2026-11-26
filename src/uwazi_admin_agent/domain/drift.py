@@ -259,6 +259,8 @@ def build_report(
     languages_failed: list[str],
     checked_at: datetime,
     files: list[DriftEntry] | None = None,
+    aliases: dict[str, str] | None = None,
+    removed_by_run: set[str] | None = None,
 ) -> DriftReport:
     """The full baseline↔live diff (pure).
 
@@ -273,9 +275,27 @@ def build_report(
     * ``files`` are the file-set entries the caller computed separately (see
       :mod:`uwazi_admin_agent.domain.file_drift`) — editDate cannot see them.
 
+    ``aliases`` maps a baseline sharedId to the id Uwazi minted when this run's
+    REVERT re-created it (``EntityIdentity.restored_shared_id``). Uwazi cannot
+    resurrect a deleted sharedId, so a delete's undo is a new entity: without
+    the alias the run's own revert reads as "1 new in uwazi, 1 deleted in
+    uwazi" forever. With it the alias counts as the baseline entry's presence
+    (no NEW, no MISSING); ``excluded_ids`` must carry the alias too, so the
+    fresh editDate of our own re-create cannot read as MODIFIED.
+
     A live hit without a parseable editDate cannot prove modification; it
     still counts for presence (its id is not 'missing').
+
+    ``removed_by_run`` names the entities the run ITSELF deleted (the manifest's
+    deleted touch-set). Their absence is the run's own write, not drift: a
+    Delete task applied from this very table would otherwise report every entity
+    it removed as "Deleted in Uwazi" — the operator reading their own deletion
+    back as someone else's change. A run-MODIFIED entity that later vanishes is
+    still reported, because only the manifest's deleted set lands here.
     """
+    aliases = aliases or {}
+    removed_by_run = removed_by_run or set()
+    alias_targets = set(aliases.values())
     modified: list[DriftEntry] = []
     new: list[DriftEntry] = []
     live_ids: set[str] = set()
@@ -286,13 +306,21 @@ def build_report(
         if isinstance(record.get("edit_date"), int) and not isinstance(record.get("edit_date"), bool):
             live_date = record["edit_date"]
         if shared_id not in baseline:
+            # A re-created entity IS its baseline entry: the id changed, the
+            # entity did not. Never report our own revert as drift.
+            if shared_id in alias_targets:
+                continue
             new.append(DriftEntry(shared_id=shared_id, kind=DriftKind.NEW, edit_date=live_date))
             continue
         base = baseline.get(shared_id)
         if base is not None and live_date is not None and live_date > base and shared_id not in excluded_ids:
             modified.append(DriftEntry(shared_id=shared_id, kind=DriftKind.MODIFIED, edit_date=live_date))
     missing = (
-        [DriftEntry(shared_id=sid, kind=DriftKind.MISSING) for sid in baseline if sid not in live_ids]
+        [
+            DriftEntry(shared_id=sid, kind=DriftKind.MISSING)
+            for sid in baseline
+            if sid not in live_ids and aliases.get(sid) not in live_ids and sid not in removed_by_run
+        ]
         if not languages_failed
         else []
     )

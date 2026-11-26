@@ -43,18 +43,24 @@ side must never read, used to score the script honestly.
   is the namespace it runs in (reads only, no writers, no LLM helpers, no
   `random`).
 - `use_cases/evaluate_validation_use_case.py` — scores the committed script by
-  running it with the PRODUCTION read surface (no entity allow-list) and keeping
-  only the rows that address a held-out entity; writes are recorded, never
-  applied. It must see the same instance the planning pass sees: a
-  classify-by-relationship script resolves its names against a catalog template,
-  and scoping reads to the holdout starved that catalog — every held-out entity
-  then recorded `skipped` and a working script scored 0. The script's own
-  `llm_complete`/`llm_map` calls are bound exactly as the planning pass binds
-  them: under the run's approved budget and a fresh ledger (a caller that wires
-  none gets a deny-all ceiling). Evaluating with them unbound made every
-  LLM-driven row `skipped` and scored a working script at 0. A row the script
-  produced no measured value for still appears, carrying the frozen label and
-  the script's own skip reason.
+  running it and keeping only the rows that address a held-out entity; writes
+  are recorded, never applied. The namespace is scoped by
+  `scope.validation_evaluation_reads`: a query against one of the run's own
+  TARGET templates yields only the frozen sample, while a query against any
+  OTHER template (the thesaurus-like catalog a classify-by-relationship script
+  resolves names against) passes through untouched. Both extremes are wrong: an
+  entity-wide allow-list starved that catalog (every held-out entity recorded
+  `skipped`, a working script scored 0), and no restriction at all let the script
+  discover the whole instance, spend its budget there and slice the sample away.
+  A filter on the MEASURED property is dropped for the pass
+  (`scope.evaluation_filters`): "only the entities where it is empty" selects
+  exactly the entities the score cannot use, since every held-out entity carries
+  a frozen label. The script's own `llm_complete`/`llm_map` calls are bound
+  exactly as the planning pass binds them: under the run's approved budget and a
+  fresh ledger (a caller that wires none gets a deny-all ceiling). Evaluating
+  with them unbound made every LLM-driven row `skipped` and scored a working
+  script at 0. A row the script produced no measured value for still appears,
+  carrying the frozen label and the script's own skip reason.
 - `use_cases/script_exec_namespace/scope.py` — `_scoped_entity_reads(...,
   exclude=...)` and `_excluded_entity_reads`: the PRODUCTION planning pass also
   drops the held-out ids, so the review table never proposes writes for them.
@@ -64,7 +70,9 @@ side must never read, used to score the script honestly.
   declared that property as an input (`ValidationSet.input_properties`). A
   proposal computed from the value it replaces scores perfectly while proving
   nothing — that is how a validation sample ended up carrying a value the
-  document never mentioned.
+  document never mentioned. The "empty property" SCOPE is not an input
+  declaration: the held-out entities are exempted from its filter instead
+  (above), so the script still cannot read the value it proposes.
 
 Rows of the validation pass carry `Suggestion.is_validation`. They are evidence,
 never work: `payloads.pushable_rows`, the store's selection projection, the
@@ -76,14 +84,43 @@ regular PENDING work. A production reconcile never deletes a validation row.
 The measured property is ONE per run: the always-visible Performance line at the
 top of the review page states which, as a percentage with the metric named in its
 caption, and the review table's property filter carries no score at all (two
-numbers would compete).
+numbers would compete). A run with no test set shows NO such line: there is no
+property to name and no number to report (`review_view.performance_visible`).
 
 The wizard's custom test set is a PROMPT, not a button: the operator describes
 the filter and the maximum entity count, and `build_validation_set` asks the LLM
 for the read-only selector at task-creation time (so filling the wizard never
-waits on a model turn). Validation rows are shown as the `validate` operation
-with Uwazi's frozen label as their current value, so the operator can judge each
-suggestion against the value the score measures.
+waits on a model turn). The selector's system prompt states the bound helpers'
+REAL return shapes — `query_entities(mode="by_ids")` returns entity dicts, the
+search modes return an object with a `.summary` — and the entity metadata's
+per-type shape, because a snippet written against a shape that does not exist
+raised `AttributeError` and the set silently came out empty. A selector that
+selects nothing falls back to the shared ids the operator typed in their
+description. Validation rows are shown as the `validate` operation with Uwazi's
+frozen label as their current value AND the comparison verdict (`match` /
+`mismatch`) as their status, so the operator can judge each suggestion against
+the value the score measures.
+
+## Task settings a copy carries
+
+The wizard's two task-level decisions — the script-LLM allowance and the test-set
+recipe — are recorded on the run's MANIFEST at creation (`llm_budget`,
+`validation_config`), not only on the planning pass row / the frozen set. A
+duplicate (and the row menu's Retry, which deletes the run first) reads them back
+through `run_service.validation.run_validation_config`: the frozen set wins when
+there is one, the manifest's recipe otherwise, so a task whose set could not be
+built still hands on what the operator asked for. A custom recipe keeps its
+selector snippet and its sampled sharedIds, so a copy scores the SAME population
+instead of asking the model to choose again. A set that could not be built
+records a warning on the manifest, which the review page reports — silence read
+as "the validation table is broken".
+
+## Runs table
+
+Creation time, newest first, is the default order. `list_runs` keeps the store's
+listing; the row payload carries a numeric `created_ts` (the `Created` column's
+sort field, rendered through a slot as the human timestamp) and the table starts
+with `sortBy="created", descending=True`.
 
 ## End-to-end flow
 

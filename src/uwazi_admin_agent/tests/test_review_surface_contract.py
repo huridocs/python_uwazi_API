@@ -126,12 +126,19 @@ def test_a_created_entity_is_revertable_from_its_row() -> None:
     assert payload["revertable"] is True
 
 
-def test_a_delete_row_is_still_run_level_only() -> None:
-    """A delete's undo re-creates the entity with a new id — not an in-place undo."""
+def test_a_delete_row_is_revertable_from_its_operation() -> None:
+    """A delete's undo RE-CREATES the entity from its backup (fresh sharedId).
+
+    The re-create is the same ordered action list the run-level revert builds,
+    narrowed to that entity, so the row offers Revert — and an applied delete is
+    therefore selectable (its only part is locked, the operation carries the undo).
+    """
     deleted = _sub(op="delete", property_name=None, status=SuggestionStatus.APPLIED)
     payload = view.operation_row(_row([deleted], ops=["delete"]))
 
-    assert payload["revertable"] is False
+    assert payload["in_place"] is True
+    assert payload["revertable"] is True
+    assert payload["has_selectable"] is True
 
 
 def test_a_multivalue_proposal_renders_one_chip_per_value_and_no_repeat_line() -> None:
@@ -188,3 +195,59 @@ def test_every_real_operation_hue_is_distinct_from_every_workflow_status_hue() -
     display_ops = {"info", "matched", "skipped"}
     real_ops = {name: color for name, color in OP_COLORS.items() if name not in display_ops}
     assert set(real_ops.values()).isdisjoint(workflow.values())
+
+
+# --- performance line ---------------------------------------------------------
+
+
+def test_the_performance_line_is_hidden_without_a_test_set() -> None:
+    """A run with no test set has no score to report; the line is omitted entirely."""
+    from uwazi_admin_agent.drivers.web.review_view import performance_visible
+
+    assert performance_visible({"state": "none", "set": None, "score": None}) is False
+    # A set with no stored verdict yet still gets the line ("not scored yet").
+    assert performance_visible({"state": "none", "set": object(), "score": None}) is False
+    for state in ("fresh", "pending", "stale", "contaminated"):
+        assert performance_visible({"state": state, "set": object(), "score": None}) is True
+
+
+def test_a_validation_operation_badge_carries_the_verdict_not_the_word_validate() -> None:
+    """The Operation column says "validate"; the Status column must say the verdict."""
+    matched = _sub(id=1, property_name="states", match=True)
+    matched = matched.model_copy(update={"is_validation": True})
+    row = view.operation_row(_holdout_row([matched]))
+
+    assert row["ops"] == "validate"
+    assert row["run_status"] == "match"
+    assert row["run_status_color"] == "green-9"
+    assert row["status_hidden"] is False
+
+
+def test_a_validation_operation_with_one_wrong_value_reads_mismatch() -> None:
+    right = _sub(id=1, property_name="states", match=True).model_copy(update={"is_validation": True})
+    wrong = _sub(id=2, property_name="states", match=False).model_copy(update={"is_validation": True})
+    row = view.operation_row(_holdout_row([right, wrong]))
+
+    assert row["run_status"] == "mismatch"
+    assert row["run_status_color"] == "red-9"
+    assert row["status_breakdown"] == "1 match · 1 mismatch"
+
+
+def _holdout_row(subs: list[Suggestion]) -> OperationReviewRow:
+    return OperationReviewRow(
+        shared_id="held",
+        entity_title="Held-out entity",
+        template_names=["Rec"],
+        ops=["update"],
+        properties=["states"],
+        languages=[],
+        proposal_count=len(subs),
+        pending=len(subs),
+        applied=0,
+        reverted=0,
+        discarded=0,
+        validation=len(subs),
+        match_summary="exact",
+        has_outcome=True,
+        subs=subs,
+    )

@@ -31,7 +31,6 @@ from uwazi_admin_agent.domain.backup_decision import decide_backup, populate_man
 from uwazi_admin_agent.domain.manifest import EntityIdentity, MigrationManifest, RunStatus
 from uwazi_admin_agent.domain.publish_state import PublishState
 from uwazi_admin_agent.domain.revert import build_revert_actions
-from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.domain.revert_verification import verify_revert
 from uwazi_admin_agent.domain.snapshot import EntityRowSnapshot, EntitySnapshot
 from uwazi_admin_agent.domain.suggestion import Suggestion, SuggestionFilter
@@ -275,15 +274,36 @@ async def test_restore_of_a_vanished_entity_fails_loudly() -> None:
     assert manifest.status is RunStatus.FAILED
 
 
-async def test_per_entity_revert_refuses_a_deleted_entity() -> None:
+async def test_per_entity_revert_resumes_a_deleted_entitys_checkpointed_recreate() -> None:
+    """A delete row's undo re-creates the entity; an interrupted revert resumes it.
+
+    The manifest already checkpointed the minted id (``restored_shared_id``), so
+    the per-entity undo must REUSE it instead of creating a second copy.
+    """
     manifest = _manifest(deleted=[EntityIdentity(shared_id="D", restored_shared_id="D_new")])
     store = _Store(manifest, {"D": _snapshot("D")})
     repo = _Repo(live={"D_new"})
 
-    with pytest.raises(RevertRefusedError, match="deleted by the run"):
-        await RevertRunUseCase(repo, store).revert_entity("run1", "D")
+    restored = await RevertRunUseCase(repo, store).revert_entity("run1", "D")
 
-    assert repo.saved == []
+    assert restored is not None
+    assert restored.shared_id == "D"
+    assert repo.created == []
+    assert "D" in manifest.reverted_shared_ids
+
+
+async def test_per_entity_revert_recreates_a_deleted_entity_with_a_fresh_id() -> None:
+    """No checkpoint yet: the undo mints the new sharedId from the backup."""
+    manifest = _manifest(deleted=[EntityIdentity(shared_id="D")])
+    store = _Store(manifest, {"D": _snapshot("D")})
+    repo = _Repo(live=set())
+
+    restored = await RevertRunUseCase(repo, store).revert_entity("run1", "D")
+
+    assert restored is not None
+    assert len(repo.created) == 1
+    assert manifest.deleted[0].restored_shared_id == "new-1"
+    assert "D" in manifest.reverted_shared_ids
 
 
 # --- 4. publish state + connection hubs --------------------------------------

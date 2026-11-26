@@ -32,7 +32,32 @@ from pydantic_ai import RunContext
 
 from uwazi_admin_agent.use_cases.admin_agent_deps import AdminAgentDeps
 from uwazi_admin_agent.use_cases.peek_file_tools import _truncate_peek
-from uwazi_api.domain.segmentation import Segmentation
+from uwazi_api.domain.segmentation import Paragraph, Segmentation
+
+#: Uwazi's segment labels, verbatim as the API returns them
+#: (``SegmentTypeNames`` in the Uwazi source). The generation agent must filter
+#: paragraphs on THESE strings — the snake_case form (``section_header``) is an
+#: internal Uwazi enum name that never reaches a script, and filtering on it
+#: drops every paragraph.
+SEGMENT_TYPE_LABELS: tuple[str, ...] = (
+    "Text",
+    "Title",
+    "Section header",
+    "List item",
+    "Table",
+    "Picture",
+    "Caption",
+    "Formula",
+    "Footnote",
+    "Page header",
+    "Page footer",
+    "Other",
+)
+
+
+def _ordered(seg: Segmentation) -> list[Paragraph]:
+    """Paragraphs in natural reading order (pure)."""
+    return sorted(seg.paragraphs, key=lambda p: (p.page_number, p.top, p.left))
 
 
 def segmentation_to_dict(seg: Segmentation) -> dict:
@@ -43,31 +68,55 @@ def segmentation_to_dict(seg: Segmentation) -> dict:
     ``paragraphs`` each carrying ``page_number``, ``text``, and geometry. ``pages``
     is the highest paragraph ``page_number`` (pages are 1-indexed, so the max equals
     the total number of pages that carry text).
+
+    ``type`` is passed through VERBATIM as Uwazi's own segment label (``Text``,
+    ``Section header``, ``List item``, ``Page header``, …), because that is what
+    the wire API returns; see :data:`SEGMENT_TYPE_LABELS`.
+
+    ``paragraphs`` is page-ordered (``page_number``, ``top``, ``left``) and
+    ``text`` is every paragraph's text joined with newlines in that same order.
+    The joined field exists so a READ-the-document script never has to
+    hand-filter paragraphs at all — the one filter a generated script wrote
+    against invented label ids kept zero paragraphs and skipped every entity.
     """
     page_count = max((p.page_number for p in seg.paragraphs), default=0)
+    ordered = _ordered(seg)
     return {
         "filename": seg.filename,
         "status": seg.status,
         "pages": page_count,
-        "paragraphs": [p.model_dump() for p in seg.paragraphs],
+        "text": "\n".join(p.text for p in ordered),
+        "paragraphs": [p.model_dump() for p in ordered],
     }
 
 
 def format_segmentation(seg: Segmentation) -> str:
     """Render a :class:`Segmentation` as page-ordered text (pure; unit-testable).
 
-    Output is a header line (filename, status, page count, paragraph count)
-    followed by one line per paragraph — ``[page N] text`` — ordered by
-    ``(page_number, top, left)`` (natural reading order). The page count is the
-    highest paragraph ``page_number`` (pages are 1-indexed, so the max equals the
-    total number of pages that carry text). Oversized output is truncated
-    head-and-tail via :func:`~uwazi_admin_agent.use_cases.peek_file_tools._truncate_peek`
-    so a long document stays within the LLM context.
+    Output is a header line (filename, status, page count, paragraph count, and
+    the DISTINCT segment labels present) followed by one line per paragraph —
+    ``[page N] (Label) text`` — ordered by ``(page_number, top, left)`` (natural
+    reading order).
+
+    The label is rendered on every line, and the header lists the distinct ones,
+    so the authoring agent sees Uwazi's actual vocabulary instead of inventing
+    one: a script that filtered on ``section_header``/``list`` (the enum names)
+    silently kept zero paragraphs and skipped every entity as
+    ``no_segmentation``. The page count is the highest paragraph
+    ``page_number`` (pages are 1-indexed, so the max equals the total number of
+    pages that carry text). Oversized output is truncated head-and-tail via
+    :func:`~uwazi_admin_agent.use_cases.peek_file_tools._truncate_peek` so a long
+    document stays within the LLM context.
     """
     page_count = max((p.page_number for p in seg.paragraphs), default=0)
-    header = f"file: {seg.filename} (status={seg.status}, pages={page_count}, paragraphs={len(seg.paragraphs)})"
-    ordered = sorted(seg.paragraphs, key=lambda p: (p.page_number, p.top, p.left))
-    body = "\n".join(f"[page {p.page_number}] {p.text}" for p in ordered)
+    ordered = _ordered(seg)
+    labels = ", ".join(sorted({p.type for p in ordered}))
+    header = (
+        f"file: {seg.filename} (status={seg.status}, pages={page_count}, paragraphs={len(seg.paragraphs)}"
+        + (f", types={labels}" if labels else "")
+        + ")"
+    )
+    body = "\n".join(f"[page {p.page_number}] ({p.type}) {p.text}" for p in ordered)
     text = f"{header}\n{body}" if body else header
     return _truncate_peek(text)
 

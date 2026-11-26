@@ -26,6 +26,7 @@ from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
 from uwazi_admin_agent.domain.relationship_values import (
     RELATIONSHIP_TYPE,
     SELECT_TYPE,
+    embedded_titles,
     relationship_selection,
     render_relationship,
 )
@@ -148,8 +149,10 @@ def rerun_blocked_reason(op: str) -> str:
     (or, for a merge, copy from dead sources). Re-pointing the row automatically
     is not safe: the old→new mapping is per entity and the related row values
     would need the same remap. The row therefore stays visible and reverted, but
-    its Run is refused, with this text as the explanation. A later Sync with
-    Uwazi re-reads the operation from live state and resets it to PENDING (see
+    its Run is refused, with this text as the explanation. The undo itself IS
+    available from the row (a reverted delete/merge is not re-runnable, but the
+    reverted state is what its Revert produced); a later Sync with Uwazi
+    re-reads the operation from live state and resets it to PENDING (see
     :func:`uwazi_admin_agent.domain.review_refresh.reconciled_status`).
     """
     if op == "delete":
@@ -171,12 +174,15 @@ def rerun_blocked(op: str, status_label: str) -> bool:
 
 
 # Operations whose OPERATION-level undo is not an in-place restore of one live entity:
-# a create's undo is a deletion, a delete's is a re-create, a create-merge's
-# target exists only as a ``dry-created-N`` placeholder, and a file copy appends
-# bytes no entity snapshot can remove. An ``update_and_delete`` merge is NOT in
-# this set: it is one operation whose undo restores its target AND re-creates the
-# sources it deleted, so its row offers Revert like any modified entity.
-NON_IN_PLACE_OPS: frozenset[str] = frozenset({"delete", "create_and_delete", MOVE_OP})
+# a create's undo is a deletion, a create-merge's target exists only as a
+# ``dry-created-N`` placeholder, and a file copy appends bytes no entity
+# snapshot can remove. An ``update_and_delete`` merge is NOT in this set: it is
+# one operation whose undo restores its target AND re-creates the sources it
+# deleted, so its row offers Revert like any modified entity. A plain ``delete``
+# is NOT in it either: its undo re-creates the deleted entity from its backup
+# (with a fresh sharedId), and the per-entity revert performs exactly that, so
+# its applied row is revertable from the table like any other write.
+NON_IN_PLACE_OPS: frozenset[str] = frozenset({"create_and_delete", MOVE_OP})
 
 
 def is_selectable(op: str) -> bool:
@@ -420,7 +426,7 @@ def suboperation_row(
     # A WRITTEN row is still a selection target: the top Revert acts on the
     # entities the operator checks, and an applied row was the one thing that
     # could not be checked. ``in_place`` is the operation-level undo rule (a
-    # delete or a create-merge reverts at run level, a plain update/create row
+    # create-merge reverts at run level, a plain update/create/delete row
     # reverts here), so an applied part of such an operation enters the
     # selection for REVERT only — never for Run or Discard.
     revert_selectable = (
@@ -432,8 +438,13 @@ def suboperation_row(
         note = rerun_blocked_reason(sub.op)
     elif sub.is_validation:
         note = "validation row — evidence for the score; promote the entity to run it"
-    elif revert_selectable:
+    elif revert_selectable and selectable:
         note = "already applied — select it to revert this write"
+    elif revert_selectable:
+        # A LOCKED part (a delete's whole-entity write) has no checkbox: its
+        # applied state is undone from the OPERATION row's Revert, which the
+        # operation's own tick selects.
+        note = "already applied — select the operation to revert it"
     else:
         note = lock_note(sub.op) if not is_selectable(sub.op) else non_runnable_note(status_label)
     property_type = (types or {}).get(sub.property_name or "")
@@ -454,15 +465,21 @@ def suboperation_row(
         selected = relationship_selection(sub.proposed_value, sub.rejected_values, sub.selected_values)
         chosen = set(selected)
         proposed_ids = relationship_selection(sub.proposed_value, [], None)
+        # The PROPOSAL carries bare sharedIds; the entity's CURRENT value carries
+        # the titles Uwazi read (``{"value": id, "label": title}``). Merging them
+        # keeps a chip readable even when the page's title lookup is unavailable —
+        # otherwise the operator reads "id-1" beside a "Japan" current value.
+        chip_titles = dict(embedded_titles(sub.current_value))
+        chip_titles.update({key: title for key, title in (titles or {}).items() if title})
         decisions = [
-            {"label": render_relationship([shared_id], titles), "accepted": shared_id in chosen}
+            {"label": render_relationship([shared_id], chip_titles), "accepted": shared_id in chosen}
             for shared_id in proposed_ids
         ]
         # Only values the operator ADDED have no chip (the chips are the
         # proposal, marked accepted/dropped), so those are the one case the
         # cell still needs a line of its own.
         extra_selection = ", ".join(
-            render_relationship([shared_id], titles) for shared_id in selected if shared_id not in set(proposed_ids)
+            render_relationship([shared_id], chip_titles) for shared_id in selected if shared_id not in set(proposed_ids)
         )
     else:
         selected = effective_selection(sub.proposed_value, sub.rejected_values, sub.selected_values) if select_type else []
@@ -784,10 +801,18 @@ def operation_status(subs: Iterable[dict[str, Any]]) -> str:
     the two levels cannot contradict each other — and ``mixed`` is explicit: a
     row whose subrows span states used to read "pending" even with half of it
     already in Uwazi, which hid work that landed.
+
+    A validation operation's parts carry the frozen-label verdicts
+    (``match``/``mismatch``) instead of a lifecycle state, so those words are
+    carried through the same rule: every part matching reads ``match``, every
+    part differing reads ``mismatch``, and a mix reads ``mismatch`` (some value
+    the score measures is wrong, which is what the operator must see).
     """
     states = {sub["status"] for sub in subs}
     if not states:
         return "pending"
+    if states <= {"match", "mismatch"}:
+        return "match" if states == {"match"} else "mismatch"
     if len(states) == 1:
         return states.pop() if next(iter(states)) in ("applied", "reverted", "discarded") else "pending"
     if states == {"applied", "reverted"}:
@@ -976,15 +1001,11 @@ def operation_row(
     status = operation_status([payload for _sub, payload in rendered])
     subs = [payload for sub, payload in rendered if not is_merge_anchor(sub) and not is_file_move_row(sub)]
     text, color = validated_cell(subs)
-    # An operation whose every part is holdout evidence gets the validation word
-    # at the parent level too; the row's Run is already disabled (no runnable
-    # part) and its checkbox derives from the parts (all unselectable).
-    if item.validation and item.validation == len(rendered):
-        # Every part of this operation is holdout evidence: the operation
-        # column says "validate" (the op name), and the status badge repeats it
-        # only when it does not already read that way.
-        status = "validate"
-        color = "purple-7"
+    # An operation whose every part is holdout evidence keeps its derived verdict
+    # (``match``/``mismatch``, see ``operation_status``) so the Status cell answers
+    # "did the script get the held-out value right?" — the one question these rows
+    # exist for. The Operation column already says "validate" (``_operation_words``),
+    # so the verdict is the only thing the badge can add.
     if not is_display_only:
         subs.extend(merge_detail_rows(item.subs, status=status, status_color=RUN_STATUS_COLORS.get(status, "grey-7")))
         subs.extend(file_move_detail_rows(item.subs))
@@ -1053,6 +1074,14 @@ def operation_row(
             display_op = item.ops[0] if item.ops else ""
         display_label = "excluded" if display_op == SKIPPED_OP else display_op
         display_ops = ["validate"] if all_holdout else ["excluded" if op == SKIPPED_OP else op for op in item.ops]
+        # A validation operation's Status badge is the frozen-label verdict its
+        # parts carry (``match``/``mismatch``), never the word "validate" again:
+        # the Operation column already says that, and the operator opened the
+        # table to see whether the script got the held-out values right.
+        verdict_status = status if all_holdout else display_label
+        verdict_color = (
+            RUN_STATUS_COLORS.get(status, "purple-7") if all_holdout else RUN_STATUS_COLORS.get(display_op, "grey-7")
+        )
         return {
             "row_key": item.shared_id,
             "shared_id": item.shared_id,
@@ -1071,12 +1100,15 @@ def operation_row(
                 if all_holdout
                 else "This row reports a result; it is display-only"
             ),
-            "run_status": display_label,
-            "run_status_color": RUN_STATUS_COLORS.get(display_op, "grey-7"),
+            "run_status": verdict_status,
+            "run_status_color": verdict_color,
             # A matched/skipped row's status IS its operation: one badge is
-            # enough, so the Status cell stays empty.
-            "status_hidden": status_repeats_operation(display_ops, display_label, display_only=True),
-            "status_breakdown": "",
+            # enough, so the Status cell stays empty. A validation row is the
+            # exception — its verdict is the reading the operator came for.
+            "status_hidden": (
+                False if all_holdout else status_repeats_operation(display_ops, display_label, display_only=True)
+            ),
+            "status_breakdown": operation_status_breakdown(subs) if all_holdout else "",
             "validated": "n/a",
             "validated_color": "grey-4",
             "has_validated": False,
@@ -1128,10 +1160,13 @@ def operation_row(
         "has_runnable": any(sub.get("runnable") for sub in subs) and not rerun_blocked,
         # Whether ANY part is selectable at all (Run or Revert). The row
         # checkbox is enabled on this: an applied operation has nothing to run,
-        # but its write is exactly what the top Revert restores. A locked part
-        # (a delete's whole-entity write) has no checkbox of its own, yet the
-        # operation MUST be selectable so its Run can be triggered.
-        "has_selectable": any(sub.get("selectable") or sub.get("runnable") for sub in subs) and not rerun_blocked,
+        # but its write is exactly what the top Revert restores — including a
+        # `delete`, whose only part is locked (no checkbox of its own) yet whose
+        # undo (a re-create) is offered from the operation row. A locked part (a
+        # merge's source delete) has no checkbox of its own, yet the operation
+        # MUST be selectable so its Run can be triggered.
+        "has_selectable": any(sub.get("selectable") or sub.get("runnable") or sub.get("revert_selectable") for sub in subs)
+        and not rerun_blocked,
         "border_color": OP_BORDER_COLORS.get(item.ops[0] if item.ops else "", DEFAULT_BORDER_COLOR),
         "in_place": in_place,
         "revertable": in_place and item.applied > 0,

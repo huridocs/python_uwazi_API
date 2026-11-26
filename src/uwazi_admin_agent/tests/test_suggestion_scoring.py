@@ -365,6 +365,47 @@ def test_compare_values_display_equality() -> None:
     assert compare_values([{"label": "Topic A", "value": "topic_a"}], ["Topic A"]) is True
 
 
+def test_a_relationship_proposal_matches_the_stored_ids_whatever_the_titles() -> None:
+    """The stored value carries the target's TITLE beside its id; the proposal does not.
+
+    Rendering both to text reported every correct link as a mismatch — the
+    reported "the match operation never shows for a relationship".
+    """
+    stored = [{"value": "id-1", "label": "Japan"}, {"value": "id-2", "label": "Chile"}]
+    assert compare_values(["id-1", "id-2"], stored, "relationship") is True
+    # Order is not part of the value: Uwazi stores a set.
+    assert compare_values([{"value": "id-2"}, {"value": "id-1"}], stored, "relationship") is True
+    assert compare_values(["id-1"], stored, "relationship") is False
+    assert compare_values(["id-1", "id-9"], stored, "relationship") is False
+
+
+def test_a_multiselect_proposal_matches_in_any_order() -> None:
+    """A thesaurus value is a SET: the same labels in another order are the same value."""
+    assert compare_values(["Alpha", "Beta"], ["Beta", "Alpha"], "multiselect") is True
+    assert compare_values(["Alpha"], ["Alpha", "Beta"], "multiselect") is False
+    assert compare_values(["Alpha"], ["Alpha"], "select") is True
+
+
+def test_a_grouped_thesaurus_label_matches_its_bare_spelling() -> None:
+    stored = [{"label": "Resolution", "parent": {"label": "HRC"}}]
+    assert compare_values(["HRC: Resolution"], stored, "multiselect") is True
+    assert compare_values(["Resolution"], stored, "multiselect") is True
+    # A DIFFERENT group sharing the child's name is not the same value.
+    assert compare_values(["GA: Resolution"], stored, "multiselect") is False
+
+
+def test_a_paragraph_is_never_read_as_a_thesaurus_set() -> None:
+    """Without a declared set type, "HRC: X" is text, not a grouped label."""
+    assert compare_values(["HRC: Resolution"], ["Resolution"]) is False
+
+
+def test_text_values_keep_the_display_equality_rule() -> None:
+    """Only the value SETS get the set comparison; a scalar keeps rendering equality."""
+    assert compare_values("Case 1", "Case 1") is True
+    assert compare_values("Case 1", "Case 2") is False
+    assert compare_values("1", [1]) is True
+
+
 # --- score_accuracy ----------------------------------------------------------
 
 

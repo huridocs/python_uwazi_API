@@ -22,6 +22,9 @@ from loguru import logger
 
 from uwazi_admin_agent.domain.revert_gate import RevertRefusedError
 from uwazi_admin_agent.drivers.runtime import build_runtime
+from uwazi_admin_agent.drivers.web.run_service.drift import _template_id_resolver as _drift_template_resolver
+from uwazi_admin_agent.drivers.web.run_service.wiring import build_suggestion_store
+from uwazi_admin_agent.use_cases import drift_service
 
 
 def run_revert(run_name: str) -> int:
@@ -39,6 +42,19 @@ async def _run_revert_async(run_name: str) -> int:
     except RevertRefusedError as exc:
         print(f"revert: run={run_name} refused: {exc}", flush=True)
         return 1
+    # Re-capture the drift baseline: the restore wrote Uwazi (and re-created the
+    # deleted entities under fresh ids), so the review page's next drift check
+    # must compare against the state this revert left, not the pre-revert one.
+    try:
+        await asyncio.to_thread(
+            drift_service.refresh_baseline_after_run,
+            build_suggestion_store(runtime.url),
+            runtime.drift_probe,
+            _drift_template_resolver(runtime),
+            run_name,
+        )
+    except Exception as exc:  # noqa: BLE001 — the restore landed; bookkeeping must not fail it
+        logger.warning("post-revert drift baseline sync failed for {}: {}", run_name, exc)
 
     manifest = runtime.backup_store.load_manifest(run_name)
     print(f"revert: run={run_name} status={manifest.status.value}")

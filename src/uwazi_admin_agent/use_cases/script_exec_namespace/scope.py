@@ -176,6 +176,164 @@ def full_mode_usage_error(mode: str) -> str:
     )
 
 
+# --- validation-evaluation read scoping ---------------------------------------
+
+
+# The property key a filter dict/model names. Both shapes reach here (a script
+# writes plain dicts; the bound helper coerces them, but the wrapper runs first).
+def _filter_property(item: Any) -> str:
+    """The property a filter entry constrains, whichever shape it takes (pure)."""
+    if isinstance(item, dict):
+        return str(item.get("property_name") or "")
+    return str(getattr(item, "property_name", "") or "")
+
+
+def _measured_property_aliases(measured_property: str | None) -> set[str]:
+    """The keys a filter on the measured property can spell (pure)."""
+    name = (measured_property or "").strip()
+    if not name:
+        return set()
+    if name == TITLE_PROPERTY:
+        return {TITLE_PROPERTY, "title"}
+    return {name}
+
+
+def evaluation_filters(filters: Any, measured_property: str | None) -> Any:
+    """Drop any filter on the MEASURED property, for the scoring pass (pure).
+
+    The evaluation pass must see the held-out entities, and a task scoped to
+    "only entities where the target property is empty" expresses that scope as a
+    server-side filter on the measured property — a filter every held-out entity
+    is, by construction, on the wrong side of (its label IS the stored value).
+    Running the unmodified query produced zero records and a score of 0 with no
+    validation rows at all, which is exactly the "test set is broken" report.
+
+    Dropping the filter is safe because the value itself stays hidden from the
+    script (``hidden_measured_property``): the proposal still cannot be a
+    restatement of the value the score compares it against. The scope is a
+    targeting decision the evaluation replaces with "these exact entities".
+
+    ``None``/an empty list stays ``None`` so the helper's default behaviour is
+    unchanged.
+    """
+    if not filters:
+        return filters
+    aliases = _measured_property_aliases(measured_property)
+    if not aliases:
+        return filters
+    kept = [item for item in filters if _filter_property(item) not in aliases]
+    return kept or None
+
+
+def validation_evaluation_reads(
+    namespace: dict[str, Any],
+    held_ids: set[str],
+    target_templates: set[str],
+    measured_property: str | None,
+) -> None:
+    """Scope a dry-run namespace to the entities the score measures (in place).
+
+    The evaluation pass is the planning pass over the SAME script, restricted to
+    the frozen sample. Without this the script discovered the whole instance
+    (hundreds of entities), so it spent its LLM budget before reaching the
+    held-out ones and could SLICE THEM AWAY entirely (``dicts[:5]``) — the score
+    then measured nothing while the table showed no validation rows.
+
+    The restriction is TEMPLATE-AWARE, which is the part the old allow-list got
+    wrong: a query against one of the run's own target templates yields only the
+    held-out entities, while a query against any OTHER template (a thesaurus-like
+    reference catalog the task looks values up in) passes through untouched. An
+    empty ``target_templates`` means the set was sampled across every template,
+    so every template is a target.
+
+    ``measured_property`` is the one filter that is dropped (see
+    :func:`evaluation_filters`): it encodes "only the empty ones", and none of
+    the scored entities is empty.
+    """
+    if not held_ids:
+        return
+    targets = set(target_templates) or None
+    base_query = namespace["query_entities"]
+    base_full = namespace["query_entities_full"]
+
+    def _is_target_template(template_name: str | None) -> bool:
+        return targets is None or (template_name or "") in targets
+
+    def query_entities(
+        mode: str,
+        language: str = "en",
+        limit: int = 10000,
+        search_term: str | None = None,
+        template_name: str | None = None,
+        filters: list | None = None,
+        published: bool | None = None,
+        shared_ids: list[str] | None = None,
+    ) -> Any:
+        if mode == "by_ids":
+            wanted = [shared_id for shared_id in (shared_ids or []) if shared_id in held_ids]
+            if not wanted:
+                return []
+            return base_query(mode=mode, language=language, limit=limit, shared_ids=wanted)
+        if not _is_target_template(template_name):
+            return base_query(
+                mode,
+                language=language,
+                limit=limit,
+                search_term=search_term,
+                template_name=template_name,
+                filters=filters,
+                published=published,
+            )
+        # A target-template scan must be wide enough to CONTAIN the sample: the
+        # held-out ids are scattered through the template, so the script's own
+        # (possibly small) limit is widened before the scope narrows it again.
+        result = base_query(
+            mode,
+            language=language,
+            limit=max(int(limit or 0), len(held_ids)),
+            search_term=search_term,
+            template_name=template_name,
+            filters=evaluation_filters(filters, measured_property),
+            published=published,
+        )
+        return scope_read_result(result, held_ids)
+
+    def query_entities_full(
+        mode: str,
+        language: str = "en",
+        limit: int = 10000,
+        search_term: str | None = None,
+        template_name: str | None = None,
+        filters: list | None = None,
+        published: bool | None = None,
+        shared_ids: list[str] | None = None,
+    ) -> Any:
+        _ = shared_ids  # ignored by the bound helper's contract
+        if not _is_target_template(template_name):
+            return base_full(
+                mode,
+                language=language,
+                limit=limit,
+                search_term=search_term,
+                template_name=template_name,
+                filters=filters,
+                published=published,
+            )
+        result = base_full(
+            mode,
+            language=language,
+            limit=max(int(limit or 0), len(held_ids)),
+            search_term=search_term,
+            template_name=template_name,
+            filters=evaluation_filters(filters, measured_property),
+            published=published,
+        )
+        return scope_read_result(result, held_ids)
+
+    namespace["query_entities"] = query_entities
+    namespace["query_entities_full"] = query_entities_full
+
+
 # --- measured-property guard -------------------------------------------------
 
 # The key a per-language property's value is stored under inside a raw/entity
@@ -260,13 +418,20 @@ def hidden_measured_property(measured_property: str, input_properties: Iterable[
     """The property whose stored value a planning pass must not read (pure).
 
     The rule the operator chose in the wizard decides it: a value is a legitimate
-    INPUT only when the wizard declared it as one (a source metadata property,
-    or the target property itself when the scope is "only entities where it is
-    currently empty"). Otherwise the property being proposed is also the
-    property being measured, and letting the script read today's value turns
-    "extract it from the document" into "echo what is already stored" — which
-    scores perfectly while proving nothing, and contaminates the validation
-    sample with the very value the score compares against.
+    INPUT only when the wizard declared it as one (a source metadata property).
+    Otherwise the property being proposed is also the property being measured,
+    and letting the script read today's value turns "extract it from the
+    document" into "echo what is already stored" — which scores perfectly while
+    proving nothing, and contaminates the validation sample with the very value
+    the score compares against.
+
+    "Only entities where the target property is empty" does NOT make the
+    measured property an input. That scope is about WHICH entities the task
+    visits, and a validation entity carries a frozen VALUE (an empty one is not
+    measurable at all), so the script must still see the property as absent
+    while proposing it: reading it would be the forbidden peek. The scope's own
+    filter is what the script expresses, and the held-out entities are exempted
+    from it (see ``ValidationEvaluationUseCase._run_script``).
 
     ``None`` means nothing is hidden (no measured property). The title alias is
     normalized so ``title`` and ``_title`` name the same value.

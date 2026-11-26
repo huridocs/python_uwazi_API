@@ -111,6 +111,11 @@ RUN_STATUS_COLORS: dict[str, str] = {
     "matched": "light-green-10",
     "skipped": "grey-7",
     "validate": "purple-7",
+    # A validation operation's parent badge states the comparison verdict its
+    # parts carry, so the operator reads "match"/"mismatch" on the collapsed row
+    # exactly as on each part. Same hues as MATCH_COLORS so the two levels agree.
+    "match": "green-9",
+    "mismatch": "red-9",
 }
 
 
@@ -120,13 +125,13 @@ RUN_STATUS_COLORS: dict[str, str] = {
 OPENABLE_OPS: frozenset[str] = frozenset({"update", "delete", "update_and_delete", "move_files", MATCHED_OP, SKIPPED_OP})
 
 # Operations whose per-entity undo is NOT an in-place restore of one live entity, so
-# their rows never offer the Revert icon: a `delete` row's undo is a re-create (a
-# fresh sharedId, files and connection rows), and a `create_and_delete` merge's
-# target is only a ``dry-created-N`` placeholder in the review rows (Uwazi has
-# no such entity). A plain `create` IS undone from its row — the undo deletes the
-# entity the run minted — and an `update_and_delete` merge restores the target
-# and re-creates the sources it deleted, so both are absent here.
-RUN_LEVEL_ONLY_OPS: frozenset[str] = frozenset({"delete", "create_and_delete"})
+# their rows never offer the Revert icon: a `create_and_delete` merge's target is only
+# a ``dry-created-N`` placeholder in the review rows (Uwazi has no such entity). A
+# plain `create` IS undone from its row — the undo deletes the entity the run minted
+# — a plain `delete` IS undone from its row too (the undo re-creates the entity from
+# its backup with a fresh sharedId), and an `update_and_delete` merge restores the
+# target and re-creates the sources it deleted, so none of those three is here.
+RUN_LEVEL_ONLY_OPS: frozenset[str] = frozenset({"create_and_delete"})
 
 # ``_title`` is the review table's synthetic name for a title change — no
 # template property carries it, so it gets the same human word Uwazi uses.
@@ -184,6 +189,7 @@ def revert_entity_confirmation(
     tooltip: str = "",
     merge: bool = False,
     created: bool = False,
+    deleted: bool = False,
 ) -> tuple[str, str]:
     """``(title, message)`` for the per-row Revert dialog (pure).
 
@@ -201,6 +207,11 @@ def revert_entity_confirmation(
     ``created`` says the row's entity did not exist before the Run: there is no
     backup to restore, so the undo DELETES it. The dialog says that plainly —
     deleting an entity must never be described as a restore.
+
+    ``deleted`` says the Run DELETED the entity: there is no live row to update,
+    so the undo RE-CREATES it from the backup. That mints a NEW sharedId (Uwazi
+    cannot resurrect the old one) and re-uploads its files — the dialog must not
+    promise that the old id will come back.
     """
     if created:
         return (
@@ -210,6 +221,13 @@ def revert_entity_confirmation(
         )
     when = f" made {tooltip.removeprefix('entity backup creation ')}" if tooltip else ""
     restored = f"Restore {shared_id} to its backup{when}. ALL languages of this entity are restored (they share one backup)."
+    if deleted:
+        return (
+            "Revert delete",
+            f"Re-create {shared_id} from its backup{when}: this run deleted it, so undoing the delete writes the "
+            "backup back as a NEW entity with a fresh sharedId (its old id cannot be reused), and re-uploads the "
+            "files the backup captured. ALL languages restored.",
+        )
     if not merge:
         return "Revert entity", restored
     return (
@@ -755,12 +773,13 @@ def entity_row(item: EntityReviewRow, uwazi_url: str | None = None, backup_creat
     """
     status_label, status_color = run_status(item)
     # Per-entity revert is an IN-PLACE restore of the live row. It is offered for
-    # entities the run merely MODIFIED and for an `update_and_delete` merge,
-    # whose row owns the target's write AND the source deletes — its undo
-    # restores the target, re-creates the absorbed sources and removes the files
-    # it copied onto the target. Everything in RUN_LEVEL_ONLY_OPS is undone by the
-    # run-level Revert instead, and a standalone file copy still appends bytes
-    # the revert cannot trace back to a source this run deleted.
+    # entities the run merely MODIFIED, for a `delete` (whose undo re-creates the
+    # entity from its backup) and for an `update_and_delete` merge, whose row owns
+    # the target's write AND the source deletes — its undo restores the target,
+    # re-creates the absorbed sources and removes the files it copied onto the
+    # target. Everything in RUN_LEVEL_ONLY_OPS is undone by the run-level Revert
+    # instead, and a standalone file copy still appends bytes the revert cannot
+    # trace back to a source this run deleted.
     in_place_revertable = status_label in ("applied", "reverted") and not any(
         op in RUN_LEVEL_ONLY_OPS or op in FILE_OPS for op in item.ops
     )
@@ -815,6 +834,31 @@ def cost_card_value(spent: float, budget: float) -> str:
 def pending_suboperation_count(counts: dict[str, int]) -> int:
     """The header's Pending card: every suggestion still waiting to be written (pure)."""
     return int(counts.get(f"subs_{SuggestionStatus.PENDING.value}", 0))
+
+
+# --- performance line --------------------------------------------------------
+
+# The validation states that carry a measurement worth a row on the review
+# page. "none" (the run has no test set at all) has nothing to show: the row
+# asked the operator to go back to the wizard, which is not a result, and it
+# took the top of the page from the table they came for.
+_MEASURED_VALIDATION_STATES: frozenset[str] = frozenset({"fresh", "pending", "stale", "contaminated"})
+
+
+def performance_visible(summary: dict[str, Any]) -> bool:
+    """Whether the review page shows the performance line for this run (pure).
+
+    The line exists to show a SCORE — a measured share of a held-out set, or
+    the state of one that has not been scored yet. A run with no test set has
+    no score, no set and no property to name, so the line is omitted entirely
+    (the wizard's "Test set" step and the entity window's "Add to validation"
+    are where a set is configured). Hiding it is what the operator asked for:
+    an idle "Performance — / No test set / Add a test set in the wizard" strip
+    above every table reads as a broken feature, not as a missing option.
+    """
+    if summary.get("set") is None:
+        return False
+    return str(summary.get("state") or "none") in _MEASURED_VALIDATION_STATES
 
 
 # --- drift banner ------------------------------------------------------------
@@ -995,6 +1039,7 @@ __all__ = [
     "bulk_revert_label",
     "property_heading",
     "pending_suboperation_count",
+    "performance_visible",
     "expanded_keys_for",
     "expansion_mode",
     "prune_selection",

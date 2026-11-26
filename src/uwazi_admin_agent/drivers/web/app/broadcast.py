@@ -8,6 +8,8 @@ would create an import cycle). The behavior is unchanged.
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime
 from typing import Any
 
 from nicegui import app, context
@@ -46,6 +48,11 @@ def _summary_to_row(run: RunSummary, instance: str) -> dict[str, Any]:
         # in-flight claim has one; a finished run keeps a blank caption.
         "stage": _run_stage(instance, run.run_id) if status else "",
         "created": run.created_at.strftime("%Y-%m-%d %H:%M"),
+        # The numeric key the table sorts on (creation, newest first). The
+        # display column keeps the human timestamp; sorting the TEXT would
+        # order "2026-09-01 10:00" before "2026-10-01 09:00" wrongly only by
+        # luck, and would not survive a locale change.
+        "created_ts": _timestamp(run.created_at),
         "last_executed": run.last_executed_at.strftime("%Y-%m-%d %H:%M") if run.last_executed_at else "—",
         "modified": run.modified,
         "deleted": run.deleted,
@@ -56,6 +63,11 @@ def _summary_to_row(run: RunSummary, instance: str) -> dict[str, Any]:
     }
 
 
+def _timestamp(value: datetime) -> float:
+    """One creation timestamp as a sortable epoch (pure)."""
+    return value.timestamp()
+
+
 def _creating_to_row(name: str, stage: str = "") -> dict[str, Any]:
     """A placeholder row for a run whose generation is in flight."""
     return {
@@ -64,6 +76,8 @@ def _creating_to_row(name: str, stage: str = "") -> dict[str, Any]:
         "status": "creating",
         "stage": stage,
         "created": "—",
+        # A task being generated is the newest one there is.
+        "created_ts": time.time(),
         "last_executed": "—",
         "modified": 0,
         "deleted": 0,

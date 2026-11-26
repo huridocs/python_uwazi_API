@@ -389,7 +389,11 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       folding skipped entities into an `add_info` paragraph, so each entity
       keeps its link and its own row. `reason` MUST be one of the stable ids:
         - `no_document`         — no primary document is attached.
-        - `no_segmentation`     — the primary document has no usable text.
+        - `no_segmentation`     — the primary document has NO readable text at
+                                  all (`get_segmentation` returned None, or its
+                                  paragraphs carry no text). Never use it for a
+                                  filter that kept nothing or for a passage that
+                                  was too short: that is `no_match`.
         - `no_page_1`           — the source has no readable first page.
         - `no_match`            — the source was read but no matching value was found.
         - `no_code_in_page_1`   — legacy alias of `no_match` (kept for old scripts).
@@ -624,14 +628,33 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       Read an entity's PRIMARY document's page text via Uwazi's segmentation
       (the structured paragraphs Uwazi extracted from the document). Resolves
       the primary document for `language` and returns a dict:
-      `{"filename", "status", "pages", "paragraphs": [{"page_number", "text",
-      "left", "top", "width", "height", "type"}, ...]}`. `pages` is the highest
-      paragraph `page_number` (pages are 1-indexed, so it equals the number of
-      pages that carry text); `paragraphs` is the page-ordered text — search
-      `p["text"]` and read `p["page_number"]` to locate a value. Returns None
+      `{"filename", "status", "pages", "text", "paragraphs": [{"page_number",
+      "text", "left", "top", "width", "height", "type"}, ...]}`. `pages` is the
+      highest paragraph `page_number` (pages are 1-indexed, so it equals the
+      number of pages that carry text); `text` is EVERY paragraph's text joined
+      with newlines in reading order — for a task that reads the document (a
+      summary, a classification, a topic) use `seg["text"]` directly and do not
+      filter paragraphs at all; `paragraphs` is the page-ordered list to search
+      when you need a value's page (`p["page_number"]`). Returns None
       when the entity has no primary document or no ready segmentation (count
       it as missing and continue). In validation against dummies this returns
       None (dummies carry no documents); the fetch path is only exercised live.
+
+      `p["type"]` is Uwazi's segment LABEL, verbatim with its spaces and
+      capitalisation — one of: "Text", "Title", "Section header", "List item",
+      "Table", "Picture", "Caption", "Formula", "Footnote", "Page header",
+      "Page footer", "Other". These are the ONLY values; there is no
+      `section_header`/`list`/`paragraph` form on the wire. When you select or
+      exclude paragraph types, compare against THESE strings exactly
+      (`p["type"] in {"Text", "Title", "Section header", "List item"}`), and
+      never assume a document contains a given type: filter what is there and
+      keep reading rather than dropping every paragraph on a guessed label.
+
+      `None` covers BOTH "no primary document" and "no ready segmentation", so
+      tell them apart before recording a reason: `get_entity_files(sid)` with a
+      `kind == "document"` filter answers whether a document exists at all
+      (`no_document`), and only then is a missing segmentation
+      (`no_segmentation`) the right reason.
 
   get_url_text(shared_id, language=None)
       Fetch an entity's SOURCE PAGE URL and return the page body decoded as text
@@ -1360,8 +1383,17 @@ not hunt for it there. Same sample-derived extractor shape, different source:
 1. Author it with `author_html_extractor` (signature unchanged: it just receives
    text). Sample with `peek_segmentation_by_entity` when the tool's own HTML
    samples come back empty.
-2. Feed it `"\n".join(p["text"] for p in seg["paragraphs"])`, or the bulk
+2. Feed it `seg["text"]` — every paragraph joined in reading order — or the bulk
    `get_segmentation_parallel(shared_ids, language)`. `None` -> count missing.
+   `p["type"]` carries Uwazi's LABELS ("Text", "Section header", "List item",
+   "Page header", "Page footer", "Table", ...), never the enum ids
+   (`section_header`) nor a generic `paragraph`: a filter written against a
+   guessed label keeps NOTHING, and the entity is then wrongly reported as
+   `no_segmentation`. Prefer no type filter at all for a reading task (the text
+   of page headers/footers is harmless in a 4000-char excerpt), and when you do
+   filter, use the labels literally. Likewise a short/absent leading passage is
+   a `no_match` (source read, nothing to propose), NOT `no_segmentation`: that
+   reason is reserved for an entity with no readable document text at all.
 3. Use the bound helpers rather than hand-rolling: `dateparse.parse(text)` for a
    date (None = not found, never guess), and `textmatch.wratio(label, p["text"])`
    to pick the paragraph that states the field when the wording varies.
