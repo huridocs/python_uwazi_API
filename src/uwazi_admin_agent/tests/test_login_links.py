@@ -34,6 +34,48 @@ def test_instance_tokens_deduplicates_a_single_label_host() -> None:
     ]
 
 
+def test_instance_tokens_skips_a_www_prefix() -> None:
+    """`www.` is a web-fronting prefix, not the instance's name.
+
+    Deriving the label from `www.girlsrightsplatform.org` produced `www`, so the
+    natural link `?instance=girlsrightsplatform` was refused as "not a configured
+    instance" while the meaningless `?instance=www` worked.
+    """
+    assert instance_tokens("https://www.girlsrightsplatform.org") == [
+        "girlsrightsplatform",
+        "www.girlsrightsplatform.org",
+        "www",  # legacy links carried this; still accepted, never generated first
+        "https://www.girlsrightsplatform.org",
+    ]
+
+
+def test_match_instance_accepts_the_host_name_behind_www() -> None:
+    configured = ["http://localhost:3000", "https://www.girlsrightsplatform.org"]
+
+    assert match_instance("girlsrightsplatform", configured) == ("https://www.girlsrightsplatform.org", None)
+    # The netloc, the full url and the pre-fix `www` token all still resolve.
+    assert match_instance("www.girlsrightsplatform.org", configured) == ("https://www.girlsrightsplatform.org", None)
+    assert match_instance("www", configured) == ("https://www.girlsrightsplatform.org", None)
+    assert match_instance("https://www.girlsrightsplatform.org/", configured) == (
+        "https://www.girlsrightsplatform.org",
+        None,
+    )
+
+
+def test_instance_token_generates_the_name_behind_www() -> None:
+    configured = ["http://localhost:3000", "https://www.girlsrightsplatform.org"]
+
+    assert instance_token("https://www.girlsrightsplatform.org", configured) == "girlsrightsplatform"
+
+
+def test_a_bare_www_token_is_ambiguous_across_two_configures_hosts() -> None:
+    """The legacy `www` token must not silently pick one of two www hosts."""
+    configured = ["https://www.first.example", "https://www.second.example"]
+
+    assert match_instance("www", configured) == (None, AMBIGUOUS_INSTANCE_MESSAGE)
+    assert match_instance("first", configured) == ("https://www.first.example", None)
+
+
 def test_match_instance_accepts_the_short_form() -> None:
     assert match_instance("global-rep", CONFIGURED) == ("https://global-rep.uwazi.io", None)
 

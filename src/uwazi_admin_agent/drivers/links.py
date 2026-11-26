@@ -34,14 +34,29 @@ def _token(value: str) -> str:
     return value.strip().rstrip("/").lower()
 
 
+def _host_label(netloc: str) -> str:
+    """The first MEANINGFUL dot-label of a netloc (pure).
+
+    ``www.`` is a web-fronting prefix, never an instance's name: deriving the
+    label from ``www.girlsrightsplatform.org`` produced ``www``, so the natural
+    link ``?instance=girlsrightsplatform`` was refused as "not a configured
+    instance" while ``?instance=www`` silently worked.
+    """
+    labels = [part for part in netloc.split(".") if part]
+    while len(labels) > 1 and labels[0] == "www":
+        labels.pop(0)
+    return labels[0] if labels else ""
+
+
 def instance_tokens(url: str) -> list[str]:
     """The accepted short forms of ONE configured url, in preference order.
 
-    The first dot-label of the host (``global-rep``), then the lower-cased
-    netloc including any port (``global-rep.uwazi.io``, ``localhost:3000``),
-    then the normalized full url (``https://global-rep.uwazi.io``). A url
-    with no host contributes only its full-url token. Duplicates are dropped
-    while the order is preserved.
+    The first meaningful dot-label of the host, with a leading ``www.``
+    skipped (``girlsrightsplatform`` from ``www.girlsrightsplatform.org``,
+    ``global-rep`` from ``global-rep.uwazi.io``), then the lowered netloc
+    including any port (``www.girlsrightsplatform.org``, ``localhost:3000``),
+    then the normalized full url. A url with no host contributes only its
+    full-url token. Duplicates are dropped while order is preserved.
     """
     normalized = _token(url)
     if not normalized:
@@ -49,7 +64,15 @@ def instance_tokens(url: str) -> list[str]:
     netloc = urlsplit(normalized).netloc.lower()
     if not netloc:
         return [normalized]
-    tokens = [netloc.split(".")[0], netloc, normalized]
+    label = _host_label(netloc)
+    tokens = [label, netloc, normalized]
+    if label and label != netloc.split(".")[0] and netloc.split(".")[0] == "www":
+        # Backward compatibility: links generated before the www-aware tokens
+        # carried a bare ``www``. Keep it ACCEPTED (after the real name) so those
+        # links keep working, while the generated links now say the instance's
+        # own name. An ambiguous ``www`` across two configured hosts is still
+        # refused by :func:`match_instance`.
+        tokens.insert(2, "www")
     unique: list[str] = []
     for token in tokens:
         if token and token not in unique:

@@ -228,11 +228,23 @@ http://localhost:5055/?instance=global-rep&user=admin
 ```
 
 - The `instance` parameter is a **token**, matched EXACTLY against the
-  configured `UWAZI_URL` list: the host's first dot-label (`global-rep`), the
-  host with its port (`global-rep.uwazi.io`, `localhost:3000`), or the full
-  URL. Only a CONFIGURED url is ever used downstream, so a forged parameter
-  can never point the login at another host — a missing, unknown, or
+  configured `UWAZI_URL` list: the host's first dot-label with a leading `www.`
+  skipped (`global-rep`, `girlsrightsplatform`), the host with its port
+  (`global-rep.uwazi.io`, `www.girlsrightsplatform.org`, `localhost:3000`), or
+  the full URL. Only a CONFIGURED url is ever used downstream, so a forged
+  parameter can never point the login at another host — a missing, unknown, or
   ambiguous token renders a banner with **no login form at all**.
+
+  So with `UWAZI_URL=http://localhost:3000,https://www.girlsrightsplatform.org`:
+
+  ```
+  http://localhost:5055/?instance=localhost:3000            # local instance
+  http://localhost:5055/?instance=girlsrightsplatform       # www host, no "www"
+  ```
+
+  A link generated before the `www` fix carries `?instance=www`; it keeps
+  working, but it is ambiguous when two configured hosts both start with
+  `www.` — use the name from the link the server logs at startup.
 - The `user` parameter is optional. With it, the username field is not shown;
   without it, the admin types their username. A link whose username is stale
   is fixed by dropping `&user=…` from the URL.
