@@ -52,7 +52,12 @@ from .reads import (
     build_search_result_view,
     coerce_search_filters,
 )
-from .scope import _scoped_entity_reads, _scoped_read_wrapper, full_mode_usage_error
+from .scope import (
+    _scoped_entity_reads,
+    _scoped_read_wrapper,
+    full_mode_usage_error,
+    hidden_measured_property,
+)
 from .selector import build_validation_selector_namespace
 
 __all__ = [
@@ -93,5 +98,6 @@ __all__ = [
     "build_search_result_view",
     "coerce_search_filters",
     "full_mode_usage_error",
+    "hidden_measured_property",
     "run_script_sync",
 ]

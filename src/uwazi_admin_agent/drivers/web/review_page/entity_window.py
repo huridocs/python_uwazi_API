@@ -72,7 +72,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_entity_basis,
     get_entity_segmentation,
     get_entity_suggestions,
-    get_selection_rows,
+    get_suggestion_entity_languages,
     get_templates,
     property_labels_for,
     property_types_for,
@@ -1276,20 +1276,19 @@ def _entity_structural_card(detail: dict[str, Any]) -> None:
 def _navigation_pairs(state: dict[str, Any]) -> list[tuple[str, str | None]]:
     """The (sharedId, language) rows the window can walk, in the filter's order.
 
-    Navigation walks (sharedId, language) pairs, so it lands on the next row of
-    the table the operator is looking at — for a translation task that means the
-    sibling language of the same entity, not a different entity. The pairs come
-    from the store's selection projection (the filter is a suboperation filter,
-    so several parts of one group collapse to one pair).
+    Navigation walks the FILTERED TABLE, whatever operation a row carries: a
+    skipped/matched row and a validation row are entities the operator opened,
+    so Previous/Next must step through them exactly like an update. ``info``
+    rows are excluded automatically (their sharedId is synthetic). The pairs
+    come from the store's entity-language projection, so several parts of one
+    group collapse to one stop.
     """
-    pairs: list[tuple[str, str | None]] = []
-    for _id, shared_id, row_language, _op in get_selection_rows(
-        page_instance_url(), state["run_id"], _current_filter(state)
-    ):
-        pair = (shared_id, row_language)
-        if pair not in pairs:
-            pairs.append(pair)
-    return pairs
+    return get_suggestion_entity_languages(
+        page_instance_url(),
+        state["run_id"],
+        _current_filter(state),
+        include_display_only=True,
+    )
 
 
 def _navigate_entity(state: dict[str, Any], target: tuple[str, str | None]) -> None:

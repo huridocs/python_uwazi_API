@@ -54,6 +54,7 @@ from uwazi_admin_agent.ports.entity_repository_port import EntityRepositoryPort
 from uwazi_admin_agent.ports.file_repository_port import FileRepositoryPort
 from uwazi_admin_agent.ports.llm_runtime_port import LlmRuntimePort
 from uwazi_admin_agent.ports.segmentation_repository_port import SegmentationRepositoryPort
+from uwazi_admin_agent.ports.template_label_port import TemplateLabelPort
 from uwazi_admin_agent.ports.text_cache_port import TextCachePort
 from uwazi_admin_agent.ports.translation_port import TranslationPort
 from uwazi_admin_agent.ports.url_fetcher_port import UrlFetcherPort
@@ -78,6 +79,7 @@ class ValidationEvaluationUseCase:
         llm_runtime: LlmRuntimePort | None = None,
         llm_cache: TextCachePort | None = None,
         llm_budget: LlmBudget | None = None,
+        template_labels: TemplateLabelPort | None = None,
     ) -> None:
         self._entity_api = entity_api
         self._entity_repository = entity_repository
@@ -97,6 +99,10 @@ class ValidationEvaluationUseCase:
         self._llm_runtime = llm_runtime
         self._llm_cache = llm_cache
         self._llm_budget = llm_budget
+        # Resolves a raw entity's template ID to its display name. Without it
+        # hydration keeps the Mongo id, which is how a validation row read
+        # ``5bfbb1a0…`` in the Template column after a sync.
+        self._template_labels = template_labels
         #: The reviewable rows the last evaluation produced (None until one runs).
         self.last_rows: list[Suggestion] | None = None
 
@@ -141,7 +147,13 @@ class ValidationEvaluationUseCase:
         # captured when the set was frozen, never against the model's own output
         # (or today's edit). So the labels are applied AFTER hydration, last.
         if self._entity_repository is not None:
-            await asyncio.to_thread(hydrate_current_values, self._entity_repository, rows, self._default_language)
+            await asyncio.to_thread(
+                hydrate_current_values,
+                self._entity_repository,
+                rows,
+                self._default_language,
+                self._template_labels,
+            )
         self.last_rows = [_with_frozen_label(row, validation) for row in rows]
         predictions = predictions_from_records(held_records, validation.property_name)
         score = score_validation(

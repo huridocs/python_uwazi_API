@@ -68,9 +68,14 @@ DISPLAY_ONLY_OPS: frozenset[str] = frozenset({INFO_OP, MATCHED_OP, SKIPPED_OP})
 SKIP_REASON_LABELS: dict[str, str] = {
     "no_document": "No primary document is attached to this entity.",
     "no_segmentation": "The primary document has no usable text segmentation.",
-    "no_page_1": "The segmentation has no readable first page.",
-    "no_code_in_page_1": "No matching document code was found on the first page.",
-    "extraction_error": "An error occurred while extracting the document code.",
+    "no_page_1": "The source has no readable first page.",
+    # The generic "the source was read, no value matched" reason. The old id is
+    # kept because scripts authored before it existed still emit it, but its
+    # label must not claim the task extracts a document code: a task may read a
+    # markdown property or any other value instead.
+    "no_match": "No matching value was found in the source.",
+    "no_code_in_page_1": "No matching value was found in the source.",
+    "extraction_error": "An error occurred while extracting a value from the source.",
 }
 
 
@@ -273,8 +278,9 @@ class Suggestion(BaseModel):
         default=None,
         description=(
             "For a `skipped` row: the stable reason id (`no_document`, `no_segmentation`, "
-            "`no_page_1`, `no_code_in_page_1`, `extraction_error`). The UI maps it to a "
-            "descriptive sentence; the raw id stays available for filtering/support."
+            "`no_page_1`, `no_match`, `extraction_error`; legacy scripts may also emit "
+            "`no_code_in_page_1`). The UI maps it to a descriptive sentence; the raw id "
+            "stays available for filtering/support."
         ),
     )
     match: bool | None = Field(
@@ -482,6 +488,15 @@ class SuggestionFilter(BaseModel):
             "'mismatch' (differs), 'new' (no current value to compare). None = no filter. "
             "A three-way literal rather than a bool because 'new' is a distinct, "
             "operator-meaningful state, not the absence of a filter."
+        ),
+    )
+    matches: list[Literal["exact", "mismatch", "new"]] | None = Field(
+        default=None,
+        description=(
+            "Only VALIDATION rows whose frozen-label comparison is one of these verdicts. "
+            "The review table's Status filter exposes 'match' / 'mismatch' for the holdout "
+            "rows (their lifecycle status is not the question); this field carries that "
+            "choice. An explicit empty list matches NOTHING."
         ),
     )
     text: str | None = Field(default=None, description="Case-insensitive LIKE over title + sharedId.")

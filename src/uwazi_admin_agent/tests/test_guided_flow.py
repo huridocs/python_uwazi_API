@@ -10,11 +10,13 @@ from uwazi_admin_agent.domain.guided_task import (
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
+    INPUT_LANGUAGE_SPECIFIC_FALLBACK,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
     SOURCE_PDF,
     GuidedAnswers,
+    assemble_prompt,
 )
 
 
@@ -62,12 +64,20 @@ def test_conditional_follow_ups_appear_only_for_answers_that_need_them() -> None
     assert questions.index("scope_filter") == questions.index("scope") + 1
     assert questions.index("metadata_properties") == questions.index("sources") + 1
     assert questions.index("input_languages") == questions.index("input_language_mode") + 1
-    # The output-language questions are no longer offered on the fill flow:
-    # the prompt extracts in the source document's language.
+    # A multiselect target stores ONE shared value (no language row), so no
+    # entity-language question follows; that question exists for per-language
+    # text targets only (covered separately).
     assert "output_language_mode" not in questions
     assert "output_languages" not in questions
     assert questions.index("generation") == len(questions) - 2
     assert next_question_id("generation", answers) == "review"
+
+
+def test_primary_language_with_fallback_also_asks_which_language() -> None:
+    answers = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), input_language_mode=INPUT_LANGUAGE_SPECIFIC_FALLBACK)
+    questions = guided_question_ids(answers)
+    assert questions.index("input_languages") == questions.index("input_language_mode") + 1
+    assert question_error("input_languages", answers) is not None
 
 
 def test_create_flow_keeps_the_specific_output_languages_question() -> None:
@@ -84,11 +94,48 @@ def test_create_flow_keeps_the_specific_output_languages_question() -> None:
     assert "output_languages" not in guided_question_ids(all_mode)
 
 
-def test_guided_flow_never_asks_output_language_questions_for_fill_or_custom() -> None:
-    assert "output_language_mode" not in guided_question_ids(GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,)))
-    assert "output_language_mode" not in guided_question_ids(
-        GuidedAnswers(goal=GOAL_CUSTOM, sources=(SOURCE_PDF,), output_language_mode=OUTPUT_SPECIFIC)
+def test_fill_text_target_asks_which_entity_language_is_updated() -> None:
+    """A per-language text target is written into a language ROW, so the
+    operator must say which one — even when the document's language differs."""
+    extracting = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="text")
+    questions = guided_question_ids(extracting)
+    assert "output_language_mode" in questions
+    assert questions.index("output_language_mode") > questions.index("input_language_mode")
+    # A shared (non-per-language) property has no row to pick.
+    shared = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="multiselect")
+    assert "output_language_mode" not in guided_question_ids(shared)
+
+
+def test_fill_prompt_keeps_input_and_output_languages_independent() -> None:
+    prompt = assemble_prompt(
+        GuidedAnswers(
+            goal=GOAL_FILL,
+            sources=(SOURCE_PDF,),
+            target_property="judge",
+            target_property_type="text",
+            fill_rules="One name only.",
+            input_language_mode=INPUT_LANGUAGE_SPECIFIC_FALLBACK,
+            input_languages=("es",),
+            output_language_mode=OUTPUT_SPECIFIC,
+            output_languages=("en",),
+        ),
+        {"en": "English", "es": "Spanish"},
     )
+    assert "Prefer reading from: Spanish (es)." in prompt
+    assert "Write the suggestion only into the entity language row(s): English (en)." in prompt
+    assert "a Spanish document may update the English row" in prompt
+
+
+def test_guided_flow_asks_output_language_questions_for_per_language_fill_targets() -> None:
+    """Only a per-language text target needs the entity-language question; a
+    multiselect (shared value) target does not."""
+    text_target = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="text")
+    assert "output_language_mode" in guided_question_ids(text_target)
+    shared_target = GuidedAnswers(goal=GOAL_FILL, sources=(SOURCE_PDF,), target_property_type="multiselect")
+    assert "output_language_mode" not in guided_question_ids(shared_target)
+    # A custom task has no declared target: the wizard asks, so the operator can
+    # still say which entity row the task must update.
+    assert "output_language_mode" in guided_question_ids(GuidedAnswers(goal=GOAL_CUSTOM, sources=(SOURCE_PDF,)))
 
 
 def test_custom_task_skips_target_property_and_fill_or_classify_rules() -> None:

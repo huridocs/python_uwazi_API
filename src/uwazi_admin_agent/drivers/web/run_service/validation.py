@@ -165,6 +165,7 @@ async def evaluate_run(url: str, run_id: str, user: str, password: str) -> Valid
         llm_runtime=PydanticAiLlmRuntime(runtime.llm),
         llm_cache=runtime.file_cache,
         llm_budget=_run_budget(url, run_id),
+        template_labels=runtime.template_labels,
     )
     score = await use_case.evaluate(
         script,
@@ -318,6 +319,36 @@ async def read_validation_label(url: str, run_id: str, shared_id: str, user: str
     return value_in_language(metadata.get(validation.property_name), language)
 
 
+def validation_config_from_set(validation: ValidationSet | None) -> ValidationConfig | None:
+    """The wizard config that reproduces a run's test set for a DUPLICATE (pure).
+
+    A duplicated task keeps the source run's test-set settings: the measured
+    property, its type, the templates, the sampling mode and the custom filter
+    description. The sample is drawn again for the new run (fresh labels, same
+    rules) — copying the frozen labels would measure the new script against
+    values frozen for another run. The language is inferred from the frozen
+    labels, which is the only place the set records it.
+    """
+    if validation is None:
+        return None
+    language = "en"
+    for key in validation.labels:
+        label_language = split_label_key(key)[1]
+        if label_language:
+            language = label_language
+            break
+    return ValidationConfig(
+        mode=validation.mode,
+        property_name=validation.property_name,
+        property_type=validation.property_type,
+        template_names=list(validation.template_names),
+        sample_size=max(1, len(validation.shared_ids)),
+        selector_explanation=validation.selector_explanation,
+        language=language,
+        input_properties=list(validation.input_properties),
+    )
+
+
 def _validation_filter(shared_id: str) -> SuggestionFilter:
     return SuggestionFilter(shared_ids=[shared_id], is_validation=True, limit=10000)
 
@@ -333,6 +364,7 @@ __all__ = [
     "promote_validation_row",
     "read_validation_label",
     "remove_validation_row",
+    "validation_config_from_set",
     "validation_store",
     "validation_summary",
 ]

@@ -15,7 +15,13 @@ from uwazi_admin_agent.configuration import (
     WIZARD_DEFAULT_AI_ALLOWANCE,
 )
 from uwazi_admin_agent.domain.allowance_note import allowance_note_to_user_block
-from uwazi_admin_agent.domain.guided_task import GOAL_CUSTOM, GOAL_DESCRIPTIONS, GOAL_FILL, GOALS
+from uwazi_admin_agent.domain.guided_task import (
+    GOAL_CUSTOM,
+    GOAL_DESCRIPTIONS,
+    GOAL_FILL,
+    GOALS,
+    OUTPUT_SPECIFIC,
+)
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmPrice, with_default_backstops
 from uwazi_admin_agent.domain.prompt_validation import QuestionAnswer, build_final_prompt
 from uwazi_admin_agent.domain.validation_note import validation_note_to_user_block
@@ -83,11 +89,22 @@ def _sync_step_indicator(state: dict[str, Any], active: str | None) -> None:
         progress.value = index / len(path)
 
 
-def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_validated_prompt: str | None = None) -> None:
-    """Open the task-type-first wizard, or Generate directly for a duplicate."""
+def _new_task_wizard(
+    prefill_name: str = "",
+    prefill_prompt: str = "",
+    prefill_validated_prompt: str | None = None,
+    prefill_budget: LlmBudget | None = None,
+    prefill_validation: Any | None = None,
+) -> None:
+    """Open the task-creation wizard, or Generate directly for a duplicate."""
     base_prompt = (prefill_validated_prompt or prefill_prompt).strip() or prefill_prompt
     state: dict[str, Any] = {"name": prefill_name, "prompt": prefill_prompt, "final_prompt": base_prompt}
     state["_clarify_base"] = base_prompt
+    # A duplicate carries the SOURCE task's settings. The validation override is
+    # used until the operator edits the request (see ``_advance_with_prompt``);
+    # the budget is written into the caps controls below so the same
+    # ``_wizard_budget`` path serves both fresh and duplicated tasks.
+    state["_validation_config_override"] = prefill_validation
     if prefill_name or prefill_prompt:
         state["_prompt_base"] = base_prompt
         state["validated_prompt"] = base_prompt
@@ -116,6 +133,9 @@ def _new_task_wizard(prefill_name: str = "", prefill_prompt: str = "", prefill_v
             _wizard_step_validate(state, stepper, dialog)
             _wizard_step_generate(state, dialog, stepper)
             stepper.on_value_change(lambda event: _sync_step_indicator(state, str(event.value or "")))
+        if prefill_budget is not None:
+            _apply_budget_prefill(state, prefill_budget)
+        _sync_test_set_step(state)
         _sync_step_indicator(state, stepper.value)
         dialog.open()
         if prefill_name or prefill_prompt:
@@ -235,6 +255,9 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
         state["validated_prompt"] = None
         state["_prompt_base"] = prompt
         state["_clarify_base"] = prompt
+        # A duplicate's test-set recipe belongs to the SOURCE request. Once the
+        # operator edits the request, the copy must configure its own set.
+        state["_validation_config_override"] = None
     state["prompt"] = prompt
     state["final_prompt"] = state.get("validated_prompt") or prompt
     state["_validation_done"] = False
@@ -246,11 +269,31 @@ def _advance_with_prompt(state: dict[str, Any], prompt: str, stepper: Any) -> No
     # a custom rule, so those walk straight past the step. Rebuild the content
     # HERE (not only at build time) so it follows the goal just chosen.
     _render_test_set_step(state)
+    _sync_test_set_step(state)
     stepper.set_value("test_set" if _validation_goal(state) == GOAL_FILL else "caps")
 
 
-def _guided_prompt_ready(state: dict[str, Any], prompt: str) -> None:
-    """Accept the assembled prompt and continue to validation."""
+def _sync_test_set_step(state: dict[str, Any]) -> None:
+    """Show the test-set step only while the chosen flow can measure a property.
+
+    Entity-creation and custom tasks have no label to score against. Hiding the
+    step (not merely skipping it) keeps it out of the widget tree entirely, so
+    no navigation path can land the operator on a picker that cannot sample.
+    """
+    step = state.get("_test_set_step")
+    if step is not None and not step.is_deleted:
+        step.set_visibility(_validation_goal(state) == GOAL_FILL)
+
+
+def _guided_prompt_ready(state: dict[str, Any], prompt: str, answers: Any) -> None:
+    """Accept the assembled prompt and continue to validation.
+
+    The SUBMITTED answers are stored before advancing: the test-set step (and
+    every later decision) keys off their goal, so a stale draft must never make
+    a create flow look like a fill flow.
+    """
+    if answers is not None:
+        state["_guided_answers"] = answers
     state["_prompt_source"] = _PROMPT_SOURCE_GUIDED
     _advance_with_prompt(state, prompt, state["_stepper"])
 
@@ -280,7 +323,7 @@ def _wizard_step_guided(state: dict[str, Any], dialog: Any) -> None:
     build_guided_step(
         state,
         dialog,
-        on_submit=lambda prompt, _answers: _guided_prompt_ready(state, prompt),
+        on_submit=lambda prompt, answers: _guided_prompt_ready(state, prompt, answers),
         on_back=lambda: _guided_back_to_goal(state),
         on_free_text=lambda: _guided_switch_to_free_text(state),
     )
@@ -543,7 +586,8 @@ def _wizard_step_validation(state: dict[str, Any], stepper: Any, dialog: Any) ->
     ``_render_test_set_step``): the goal is chosen LATER in the wizard, so the
     build-time render cannot know whether a test set applies at all.
     """
-    with ui.step(name="test_set", title="Test set", icon="science"):
+    with ui.step(name="test_set", title="Test set", icon="science") as step:
+        state["_test_set_step"] = step
         container = ui.column().classes("w-full")
         state["_test_set_container"] = container
         _render_test_set_step(state)
@@ -755,6 +799,11 @@ def _validation_property_label(state: dict[str, Any], name: str) -> str:
 
 def _wizard_validation_config(state: dict[str, Any]):
     """The wizard's validation answer as a :class:`ValidationConfig` (or None)."""
+    override = state.get("_validation_config_override")
+    if override is not None:
+        # A duplicate carries the source run's test-set recipe; the picker was
+        # never shown for it, so the override is the only place it can live.
+        return override
     try:
         from uwazi_admin_agent.domain.validation import (
             VALIDATION_CUSTOM,
@@ -844,7 +893,15 @@ def _validation_property_type(state: dict[str, Any], name: str) -> str:
 
 
 def _wizard_default_language(answers: Any) -> str:
-    """The row locale the sample is read in: the task's first input language."""
+    """The entity ROW locale the sample is read in: the language being updated.
+
+    The test set freezes the value stored in the row the task writes to, so a
+    specific output language wins; the input language (what the document is
+    read in) only decides the row when the output follows the source.
+    """
+    output = list(getattr(answers, "output_languages", ()) or ())
+    if output and str(getattr(answers, "output_language_mode", "")) == OUTPUT_SPECIFIC:
+        return str(output[0])
     languages = list(getattr(answers, "input_languages", ()) or ())
     return str(languages[0]) if languages else "en"
 
@@ -1008,6 +1065,26 @@ def _script_caps_model() -> str:
         return MODEL
     except Exception:  # noqa: BLE001 — a missing/renamed constant must not break the wizard
         return "(model not configured)"
+
+
+def _apply_budget_prefill(state: dict[str, Any], budget: LlmBudget) -> None:
+    """Write a duplicate's approved allowance into the caps controls (pure-ish).
+
+    The wizard's caps step is skipped when a duplicate opens, so the widgets
+    must carry the SOURCE run's decision or ``_wizard_budget`` would fall back
+    to deny-by-default and the copy would silently lose its LLM allowance.
+    """
+    checkbox = state.get("_caps_use_llm")
+    cost_input = state.get("_caps_cost_input")
+    if checkbox is None or cost_input is None:
+        return
+    checkbox.value = budget.max_cost > 0 or budget.max_requests > 0
+    # A requests-only ceiling (legacy/custom budget) must keep a positive cost
+    # so the wizard's default-backstop rule does not collapse it to deny-all.
+    cost_input.value = float(
+        budget.max_cost if budget.max_cost > 0 else (PREDICTION_DEFAULT_MAX_COST if budget.max_requests > 0 else 0.0)
+    )
+    _sync_caps_fields(state)
 
 
 def _wizard_budget(state: dict[str, Any]) -> LlmBudget:

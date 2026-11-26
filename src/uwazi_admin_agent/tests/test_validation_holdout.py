@@ -187,7 +187,7 @@ def test_the_validation_filter_is_usable_by_the_store() -> None:
 
 def test_the_table_reads_a_validation_row_as_validate_and_never_runnable() -> None:
     payload = suboperation_row(_sub(is_validation=True), checked=False, in_place=True)
-    assert payload["status"] == "validate"
+    assert payload["status"] == "mismatch"
     assert payload["runnable"] is False
     assert payload["selectable"] is False
     assert "validation row" in payload["note"]
@@ -450,7 +450,7 @@ def test_a_held_out_entity_the_script_skipped_gets_a_measured_row() -> None:
     assert payload["has_checkable"] is False
     assert payload["has_runnable"] is False
     sub = payload["subs"][0]
-    assert sub["status"] == "validate"
+    assert sub["status"] == "mismatch"
     assert sub["label"] == "states"
     assert "Japan" in sub["current"]
 

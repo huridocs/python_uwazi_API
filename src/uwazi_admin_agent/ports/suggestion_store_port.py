@@ -206,8 +206,18 @@ class SuggestionStorePort(ABC):
         ...
 
     @abstractmethod
-    def entity_languages(self, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
-        """Every (sharedId, language) pair matching a filter, first-appearance order."""
+    def entity_languages(
+        self,
+        run_id: str,
+        f: SuggestionFilter,
+        *,
+        include_display_only: bool = False,
+    ) -> list[tuple[str, str | None]]:
+        """Every (sharedId, language) pair matching a filter, first-appearance order.
+
+        ``include_display_only`` adds ``matched``/``skipped`` rows for table
+        navigation; ``info`` rows name no entity and are always excluded.
+        """
         ...
 
     @abstractmethod

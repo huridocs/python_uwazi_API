@@ -110,6 +110,9 @@ _RUNNABLE_STATUSES: frozenset[str] = frozenset(
 
 
 _STATUS_LABELS: dict[str, str] = {status: status for status in STATUS_COLORS}
+# The Status filter also names the validation rows' comparison verdicts: their
+# lifecycle status is not the operator's question, the frozen-label match is.
+_STATUS_LABELS.update({"match": "match", "mismatch": "mismatch"})
 
 
 _RUN_STATUS_BADGE_COLORS: dict[str, str] = {
@@ -145,11 +148,27 @@ def _apply_checked(state: dict[str, Any], ids: list[int], checked: bool) -> None
         target.difference_update(ids)
 
 
-def _apply_drift_state(state: dict[str, Any], stored: Any, *, checking: bool = False) -> None:
-    """Paint one verdict (or the checking glyph) onto the banner elements."""
+def _apply_drift_state(
+    state: dict[str, Any],
+    stored: Any,
+    *,
+    checking: bool = False,
+    syncing: bool = False,
+) -> None:
+    """Paint one verdict (or the checking/syncing glyph) onto the banner elements."""
     label = state.get("_drift_label")
     icon = state.get("_drift_icon")
     if label is None or label.is_deleted:
+        return
+    if syncing:
+        label.text = drift_banner_text(status="unknown", detail=None, syncing=True)
+        label.classes(replace=drift_text_classes("blue"))
+        if icon is not None and not icon.is_deleted:
+            icon.name = "cloud_sync"
+            icon.classes("animate-spin text-body1")
+            icon.color = "blue"
+            icon.update()
+        _set_drift_sync_visibility(state, False)
         return
     if checking:
         label.text = drift_banner_text(status="unknown", detail=None, checking=True)
@@ -434,7 +453,7 @@ def _change_table(state: dict[str, Any]) -> None:
                   <thead>
                     <tr class="text-caption text-grey-7">
                       <th></th>
-                      <th class="text-left q-pa-xs">Suggestion</th>
+                      <th class="text-left q-pa-xs">Property</th>
                       <th class="text-left q-pa-xs">Language</th>
                       <th class="text-left q-pa-xs">Current value</th>
                       <th class="text-left q-pa-xs">Suggested value</th>
@@ -580,6 +599,22 @@ def _change_table(state: dict[str, Any]) -> None:
     _reload_table(state)
 
 
+def _operation_in_flight(state: dict[str, Any]) -> bool:
+    """Whether this run (or any Uwazi write on the instance) is in progress.
+
+    A Run/Revert is WRITING Uwazi, so a drift probe would read the half-applied
+    state and paint "Out of date" because of the operation itself. The same
+    holds for this run's sync (a ``refresh`` claim): the table is being re-read
+    and the banner already says so. Drift checks resume as soon as the claim
+    (and the write gate) is released.
+    """
+    instance = state.get("instance_url", "")
+    run_id = state.get("run_id", "")
+    if run_claim(instance, run_id) is not None:
+        return True
+    return snapshot(instance) is not None
+
+
 async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: Any = None) -> None:
     """Run the drift check in the background thread and repaint the banner.
 
@@ -588,6 +623,9 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
     slot stack, so every UI call it makes — the banner updates and the
     toasts — must re-enter the client explicitly via ``with client:``.
     """
+    if _operation_in_flight(state):
+        # Never probe during a write/sync: the drift would be our own doing.
+        return
     credentials = credentials_for_instance(state["instance_url"])
     if credentials is None:
         _apply_drift_state(
@@ -613,6 +651,10 @@ async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: A
     except Exception as exc:  # noqa: BLE001 — the banner reports; the page never crashes
         logger.exception("drift check failed")
         _set_drift_error(state, f"Drift check failed — {exc}")
+        return
+    if _operation_in_flight(state):
+        # A write/sync began while the probe ran: its verdict describes a
+        # half-applied state, so it must not repaint the banner.
         return
     _apply_drift_state(state, updated)
     if not notify or client is None:
@@ -874,12 +916,15 @@ def _drift_banner(state: dict[str, Any]) -> None:
     # open-page auto-check refresh it (a fresh page should not show a stale
     # 'valid' while Uwazi moved — the check replaces the text in place).
     stored = get_drift_state(page_instance_url(), state["run_id"])
-    _apply_drift_state(state, stored, checking=stored is None)
+    in_flight = _operation_in_flight(state)
+    _apply_drift_state(state, stored, checking=stored is None and not in_flight)
     # EVERY visit checks drift: Uwazi moves between visits, so a stored verdict
     # (even "up to date") describes the moment it was taken, not now. The check
     # runs in the background — the page renders the stored verdict meanwhile —
-    # and replaces it in place.
-    background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
+    # and replaces it in place. While a write/sync is in flight the check waits:
+    # its own operation would otherwise read as drift.
+    if not in_flight:
+        background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
 
 
 def _sync_now_clicked(state: dict[str, Any]) -> None:
@@ -1204,7 +1249,11 @@ def _checked_flags(state: dict[str, Any], kind: str) -> list[tuple[int, str, str
             elif kind == "revert":
                 selected.append(ref)
             continue
-        if sub.get(kind + "_selectable"):
+        if sub.get(kind + "_selectable") or (kind == "run" and sub.get("runnable")):
+            # A LOCKED part (a delete's whole-entity write) has no checkbox of
+            # its own, but the operation's tick selects it and its Run writes
+            # it. ``runnable`` is what makes those parts count for Run, exactly
+            # as ``_set_children_checked`` selected them.
             selected.append(ref)
     return selected
 
@@ -1385,7 +1434,8 @@ def _reload_table(state: dict[str, Any]) -> None:
                     int(sub["id"])
                     for payload in payloads
                     for sub in payload.get("subs") or []
-                    if isinstance(sub.get("id"), int) and sub.get("selectable")
+                    if isinstance(sub.get("id"), int)
+                    and (sub.get("selectable") or sub.get("runnable") or sub.get("revert_selectable"))
                 }
                 state["_checked"] = {sub_id for sub_id in (state.get("_checked") or ()) if sub_id in visible}
             _sync_selection(state)
@@ -1411,6 +1461,10 @@ def _reload_table(state: dict[str, Any]) -> None:
 def _schedule_drift_check(state: dict[str, Any]) -> None:
     """Start a drift check unless one just ran (the table-load hook)."""
     if state.get("_drift_label") is None:
+        return
+    if _operation_in_flight(state):
+        # A Run/Revert or a sync is writing/re-reading Uwazi: the probe would
+        # report our own work as drift and paint the banner red mid-pass.
         return
     now = time.monotonic()
     last = float(state.get("_drift_checked_at") or 0.0)
@@ -1702,8 +1756,6 @@ def _render_performance(state: dict[str, Any]) -> None:
             if score.detail():
                 ui.label(score.detail()).classes("text-caption text-grey-6")
         ui.badge(state_word).props(f"color={color}").classes("q-ml-sm")
-        if score is not None:
-            ui.label(score.caption(label)).classes("text-caption text-grey-6")
 
 
 def _validation_property_text(state: dict[str, Any], property_name: str) -> str:
@@ -2253,7 +2305,6 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
             ui.notify("Not logged in to Uwazi", type="negative")
         return
     item = state.get("_update_table_item")
-    label = state.get("_table_update_label")
     # Syncing only READS Uwazi, so it takes no write gate: another run's write
     # pass must neither block it nor be blocked by it. It still takes this
     # run's claim, so the same run cannot be synced and Run at once.
@@ -2263,21 +2314,30 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
         with client:
             if item is not None and not item.is_deleted:
                 item.disable()
-            if label is not None and not label.is_deleted:
-                label.text = "Syncing with Uwazi…"
+            # The BANNER reports the sync; the small "last synced" line keeps
+            # its previous value instead of flashing a second syncing message.
+            _apply_drift_state(state, None, syncing=True)
         result = await update_table_from_uwazi(
             state["instance_url"], state["run_id"], credentials.user, credentials.password
         )
         updated = get_drift_state(state["instance_url"], state["run_id"])
+        if getattr(client, "is_deleted", False):
+            # The page was closed while the sync ran. The sync itself landed;
+            # do not touch a deleted client (NiceGUI warns and the UI is gone).
+            return
         with client:
             _apply_drift_state(state, updated)
+            label = state.get("_table_update_label")
             if label is not None and not label.is_deleted:
                 label.text = table_update_label(get_table_update_time(state["instance_url"], state["run_id"]))
             ui.notify(result.message(), type="positive", multi_line=True)
             _refresh_all(state)
     except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
         logger.exception("sync with Uwazi failed")
+        if getattr(client, "is_deleted", False):
+            return
         with client:
+            _apply_drift_state(state, get_drift_state(state["instance_url"], state["run_id"]))
             ui.notify(
                 f"Sync with Uwazi failed: {exc}",
                 type="negative",
@@ -2285,6 +2345,6 @@ async def _update_table_now(state: dict[str, Any], client: Any) -> None:
             )
     finally:
         release_run(state["instance_url"], state["run_id"], "refresh")
-        if item is not None and not item.is_deleted:
+        if item is not None and not item.is_deleted and not getattr(client, "is_deleted", False):
             with client:
                 item.enable()

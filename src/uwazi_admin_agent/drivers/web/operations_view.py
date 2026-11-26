@@ -399,9 +399,14 @@ def suboperation_row(
     status_label = sub_status_label(sub.status)
     status_color = sub_status_color(sub.status)
     if sub.is_validation:
-        # Holdout evidence is neither work nor a result of a write: it gets its
-        # own word so a validation row never reads as pending work.
-        status_label, status_color = "validate", "purple-7"
+        # Holdout evidence is neither work nor a result of a write: its badge
+        # is the frozen-label comparison the score uses. "validate" already
+        # appears in the Operation column, so repeating it here hid the one
+        # fact the operator needs — whether the script's suggestion agrees
+        # with the held-out label.
+        matched = sub.match is True
+        status_label = "match" if matched else "mismatch"
+        status_color = MATCH_COLORS["exact" if matched else "mismatch"]
     elif sub.op == MATCHED_OP:
         status_label, status_color = "matched", "green-9"
     elif sub.op == SKIPPED_OP:
@@ -1123,8 +1128,10 @@ def operation_row(
         "has_runnable": any(sub.get("runnable") for sub in subs) and not rerun_blocked,
         # Whether ANY part is selectable at all (Run or Revert). The row
         # checkbox is enabled on this: an applied operation has nothing to run,
-        # but its write is exactly what the top Revert restores.
-        "has_selectable": any(sub.get("selectable") for sub in subs) and not rerun_blocked,
+        # but its write is exactly what the top Revert restores. A locked part
+        # (a delete's whole-entity write) has no checkbox of its own, yet the
+        # operation MUST be selectable so its Run can be triggered.
+        "has_selectable": any(sub.get("selectable") or sub.get("runnable") for sub in subs) and not rerun_blocked,
         "border_color": OP_BORDER_COLORS.get(item.ops[0] if item.ops else "", DEFAULT_BORDER_COLOR),
         "in_place": in_place,
         "revertable": in_place and item.applied > 0,

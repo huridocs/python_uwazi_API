@@ -10,12 +10,13 @@ from .guided_task import (
     GOAL_CREATE,
     GOAL_CUSTOM,
     GOAL_FILL,
-    INPUT_LANGUAGE_SPECIFIC,
     OUTPUT_SPECIFIC,
     SCOPE_FILTER,
     SOURCE_METADATA,
+    SPECIFIC_INPUT_LANGUAGE_MODES,
     GuidedAnswers,
     fill_is_classification,
+    needs_multilingual_output_section,
 )
 
 TEMPLATE_QUESTION = "templates"
@@ -47,6 +48,23 @@ CREATE_COUNT_QUESTION = "create_count"
 CREATE_INSTRUCTIONS_QUESTION = "create_instructions"
 
 
+def _append_language_questions(questions: list[str], answers: GuidedAnswers) -> None:
+    """The input-language questions, then the entity-language (output) ones.
+
+    The input language is what the DOCUMENT/metadata is read in. The output
+    language is which entity language ROW the suggestion is written into; they
+    are independent (a Spanish document may update the English entity), so the
+    output question is asked whenever the target stores text per language.
+    """
+    questions.append(INPUT_LANGUAGE_MODE_QUESTION)
+    if answers.input_language_mode in SPECIFIC_INPUT_LANGUAGE_MODES:
+        questions.append(INPUT_LANGUAGES_QUESTION)
+    if needs_multilingual_output_section(answers):
+        questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
+        if answers.output_language_mode == OUTPUT_SPECIFIC:
+            questions.append(OUTPUT_LANGUAGES_QUESTION)
+
+
 def _fill_questions(answers: GuidedAnswers) -> list[str]:
     questions = [TEMPLATE_QUESTION, TARGET_PROPERTY_QUESTION]
     if fill_is_classification(answers):
@@ -75,7 +93,7 @@ def _create_questions(answers: GuidedAnswers) -> list[str]:
         if answers.entity_scope == SCOPE_FILTER:
             questions.append(SCOPE_FILTER_QUESTION)
         questions.append(INPUT_LANGUAGE_MODE_QUESTION)
-        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+        if answers.input_language_mode in SPECIFIC_INPUT_LANGUAGE_MODES:
             questions.append(INPUT_LANGUAGES_QUESTION)
     elif answers.create_source == CREATE_SOURCE_UNRELATED:
         questions.extend((CREATE_COUNT_QUESTION, CREATE_INSTRUCTIONS_QUESTION, CREATE_TARGET_PROPERTIES_QUESTION))
@@ -99,9 +117,7 @@ def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
         questions.append(SOURCES_QUESTION)
         if SOURCE_METADATA in answers.sources:
             questions.append(METADATA_PROPERTIES_QUESTION)
-        questions.append(INPUT_LANGUAGE_MODE_QUESTION)
-        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
-            questions.append(INPUT_LANGUAGES_QUESTION)
+        _append_language_questions(questions, answers)
     elif answers.goal == GOAL_FILL:
         questions.append(SCOPE_QUESTION)
         if answers.entity_scope == SCOPE_FILTER:
@@ -109,14 +125,12 @@ def guided_question_ids(answers: GuidedAnswers) -> tuple[str, ...]:
         questions.append(SOURCES_QUESTION)
         if SOURCE_METADATA in answers.sources:
             questions.append(METADATA_PROPERTIES_QUESTION)
-        questions.append(INPUT_LANGUAGE_MODE_QUESTION)
-        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
-            questions.append(INPUT_LANGUAGES_QUESTION)
+        _append_language_questions(questions, answers)
 
-    # The output-language behavior is NOT offered as a question (see the guided
-    # form): the fill/custom flows extract in the source document's language,
-    # so their prompts stay in the answer's default source mode. The create
-    # flow keeps a specific-languages choice.
+    # The create flow asks its output languages inside ``_create_questions``;
+    # the fill/custom flows ask them via ``_append_language_questions`` because
+    # which entity row a suggestion lands in is a separate decision from which
+    # language the input is read in.
     if answers.goal == GOAL_CREATE:
         questions.append(OUTPUT_LANGUAGE_MODE_QUESTION)
         if answers.output_language_mode == OUTPUT_SPECIFIC:

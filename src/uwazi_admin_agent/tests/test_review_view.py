@@ -111,7 +111,7 @@ def test_suggestion_to_row_flattens_the_display_contract() -> None:
 def test_suggestion_to_row_carries_the_badge_colors() -> None:
     """Vue slots cannot reach ``window.*``, so colors must ride on the row."""
     row = suggestion_to_row(_suggestion(op="delete", property_name=None, match=None, status=SuggestionStatus.DISCARDED))
-    assert row["op_color"] == "brown-9"
+    assert row["op_color"] == "red"
     assert row["match_color"] == "grey-7"
     assert row["status_color"] == "pink-10"
 
@@ -256,13 +256,13 @@ def test_entity_row_uses_shared_id_when_there_is_no_title() -> None:
 def test_entity_row_dashes_an_unknown_template() -> None:
     row = entity_row(_entity_row(template_names=[], ops=["delete"]))
     assert row["template"] == "—"
-    assert row["op_colors"] == ["brown-9"]
+    assert row["op_colors"] == ["red"]
 
 
 def test_entity_row_mixed_ops_keep_their_colors_aligned() -> None:
     row = entity_row(_entity_row(ops=["update", "delete"]))
     assert row["ops"] == "update, delete"
-    assert row["op_colors"] == ["teal-10", "brown-9"]
+    assert row["op_colors"] == ["teal-10", "red"]
 
 
 def test_entity_row_match_column_is_gone() -> None:

@@ -334,6 +334,25 @@ def build_where(f: SuggestionFilter, run_id: str) -> tuple[str, list[Any]]:
         else:
             clause.append("match_state = ?")
             params.append(1 if f.match == "exact" else 0)
+    if f.matches is not None:
+        # The Status filter's "match"/"mismatch" options describe the HOLDOUT
+        # comparison, not the lifecycle status: they are scoped to validation
+        # rows so choosing one can never show regular work under a verdict word.
+        if not f.matches:
+            clause.append("1 = 0")
+        else:
+            terms: list[str] = []
+            if "exact" in f.matches:
+                terms.append("(is_validation = 1 AND match_state = 1)")
+            differing = [value for value in f.matches if value != "exact"]
+            if differing:
+                predicates: list[str] = []
+                if "mismatch" in differing:
+                    predicates.append("match_state = 0")
+                if "new" in differing:
+                    predicates.append("match_state IS NULL")
+                terms.append(f"(is_validation = 1 AND ({' OR '.join(predicates)}))")
+            clause.append(f"({' OR '.join(terms)})")
     if f.text:
         clause.append("(entity_title LIKE ? OR shared_id LIKE ?)")
         like = f"%{f.text}%"

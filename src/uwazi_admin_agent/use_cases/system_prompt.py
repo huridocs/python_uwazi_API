@@ -390,8 +390,9 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       keeps its link and its own row. `reason` MUST be one of the stable ids:
         - `no_document`         — no primary document is attached.
         - `no_segmentation`     — the primary document has no usable text.
-        - `no_page_1`           — the segmentation has no readable first page.
-        - `no_code_in_page_1`   — the page was read but no code matched.
+        - `no_page_1`           — the source has no readable first page.
+        - `no_match`            — the source was read but no matching value was found.
+        - `no_code_in_page_1`   — legacy alias of `no_match` (kept for old scripts).
         - `extraction_error`    — an exception occurred while extracting.
       `detail` is optional evidence (a short page-1 excerpt, the exception
       text). The review table maps the id to descriptive user-facing text.
@@ -1335,9 +1336,9 @@ one-document logic. Use this exact shape:
    paragraph. This is what gives the operator one visible, linked row per
    entity even when nothing changes. Use `no_document` when no primary document
    exists, `no_segmentation` when the document has no usable text, `no_page_1`
-   when page 1 is unreadable, `no_code_in_page_1` when the page was read but no
-   value matched, and `extraction_error` for a caught exception. Put a short
-   excerpt or exception message in `detail` so the reason is verifiable.
+   when page 1 is unreadable, `no_match` when the source was read but no value
+   matched, and `extraction_error` for a caught exception. Put a short excerpt
+   or exception message in `detail` so the reason is verifiable.
 
 SOURCE PAGE URL (when entities carry NO supporting file but DO carry a link):
 Some entities store their source as a `link` metadata property (e.g.

@@ -234,10 +234,11 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         """Record ONE entity the script could not process (no Uwazi write).
 
         ``reason`` is a stable id (``no_document``, ``no_segmentation``,
-        ``no_page_1``, ``no_code_in_page_1``, ``extraction_error``); the review
-        table maps it to a descriptive sentence. ``detail`` carries optional
-        evidence (for example the page text the extractor examined), rendered
-        beneath the reason. The row is excluded from every Run/selection path.
+        ``no_page_1``, ``no_match``, ``extraction_error``; legacy scripts may
+        also send ``no_code_in_page_1``); the review table maps it to a
+        descriptive sentence. ``detail`` carries optional evidence (for example
+        the page text the extractor examined), rendered beneath the reason. The
+        row is excluded from every Run/selection path.
         """
         _append_record(
             records,

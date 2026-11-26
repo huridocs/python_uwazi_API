@@ -283,7 +283,8 @@ def _display_operation(op: str, *, reason: str | None = None) -> OperationReview
 def test_skipped_reason_ids_map_to_descriptive_text() -> None:
     assert skip_reason_label("no_segmentation") == "The primary document has no usable text segmentation."
     assert skip_reason_label("no_document") == "No primary document is attached to this entity."
-    assert skip_reason_label("no_code_in_page_1") == "No matching document code was found on the first page."
+    assert skip_reason_label("no_code_in_page_1") == "No matching value was found in the source."
+    assert skip_reason_label("no_match") == "No matching value was found in the source."
     assert skip_reason_label(None).startswith("This entity was excluded")
 
 

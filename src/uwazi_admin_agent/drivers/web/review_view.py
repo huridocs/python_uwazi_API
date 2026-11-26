@@ -52,7 +52,7 @@ STATUS_COLORS: dict[str, str] = {
 OP_COLORS: dict[str, str] = {
     "update": "teal-10",
     "create": "cyan-10",
-    "delete": "brown-9",
+    "delete": "red",
     "publish": "light-green-9",
     "unpublish": "orange-10",
     "set_publish_status": "amber-10",
@@ -388,9 +388,10 @@ TITLE_CELL_CHARS: int = 97
 
 # How much of a row's recorded INPUT TEXT the review table prints. The cell
 # wraps, but an unbounded passage (a whole page) would push everything else off
-# the screen, so the payload carries a window instead. 1,000 characters is a
-# long paragraph: enough to judge the extraction without opening the document.
-CONTEXT_CELL_CHARS: int = 1_000
+# the screen, so the payload carries a window instead. 2,500 characters is a
+# substantial passage: enough to judge the extraction without opening the
+# document, while still bounding the row's height.
+CONTEXT_CELL_CHARS: int = 2_500
 
 # Column widths (CSS px) for the review table's fixed columns. The Target column
 # takes whatever is left and absorbs the shrink; naming the rest here is what
@@ -522,6 +523,16 @@ def suggestion_to_row(suggestion: Suggestion) -> dict[str, Any]:
     }
 
 
+# The Status filter also offers the validation rows' comparison verdicts. The
+# values are the table's badge words; the mapping says which store verdicts each
+# one selects. "mismatch" includes "new" because a validation row with no
+# proposal has no current verdict but is still NOT a match.
+VALIDATION_MATCH_FILTERS: dict[str, tuple[str, ...]] = {
+    "match": ("exact",),
+    "mismatch": ("mismatch", "new"),
+}
+
+
 def _selection(value: str | list[str] | tuple[str, ...] | None) -> list[str] | None:
     """Normalize a select value to a list (``None`` when nothing is selected)."""
     if not value:
@@ -634,9 +645,18 @@ def filter_from_controls(
     filtered set, so the order holds across pages.
     """
     statuses = _selection(status)
+    match_verdicts: list[str] = []
+    if statuses:
+        # The Status control carries both lifecycle statuses and the holdout
+        # verdicts ("match"/"mismatch"); the store takes the latter as its own
+        # validation-scoped filter, so it can never leak into regular rows.
+        for value in statuses:
+            match_verdicts.extend(VALIDATION_MATCH_FILTERS.get(value, ()))
+        statuses = [value for value in statuses if value not in VALIDATION_MATCH_FILTERS]
     ops = _selection(op)
     return SuggestionFilter(
         status=[SuggestionStatus(s) for s in statuses] if statuses else None,
+        matches=list(dict.fromkeys(match_verdicts)) or None,
         op=ops,
         property_name=property_name or None,
         text=(text or "").strip() or None,
@@ -812,13 +832,22 @@ DRIFT_STATUS_COLORS: dict[str, str] = {
 }
 
 
-def drift_banner_text(*, status: str, detail: str | None, checking: bool = False) -> str:
+def drift_banner_text(
+    *,
+    status: str,
+    detail: str | None,
+    checking: bool = False,
+    syncing: bool = False,
+) -> str:
     """The status line above the review table (pure).
 
+    ``syncing=True`` wins over everything (the table is being re-read);
     ``checking=True`` wins over any stored verdict (a check is running right
     now); otherwise the stored verdict speaks, with the check's detail after
     an em dash.
     """
+    if syncing:
+        return "Syncing with Uwazi…"
     if checking:
         return "Checking drift…" if not detail else f"Checking drift… (last check: {detail})"
     text = {

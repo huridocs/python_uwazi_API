@@ -18,10 +18,13 @@ from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa
 from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
+    current_pass,
     delete_run,
     export_tasks_csv,
     get_run,
     list_runs,
+    validation_config_from_set,
+    validation_summary,
 )
 from uwazi_admin_agent.drivers.web.session import (
     credentials_for_instance,
@@ -253,6 +256,13 @@ def _rowmenu_duplicate(run_id: str) -> None:
         # with (and the claim is what ``_start_generation`` would refuse).
         taken = [run.run_id for run in list_runs(instance)]
         taken.extend(claim.run_id for claim in operation_gate.run_claims(instance))
+        # A duplicate copies the task's SETTINGS, not just its prompt: the
+        # approved LLM allowance and the test-set recipe (measured property,
+        # sampling mode/filter) belong to the task, and dropping them silently
+        # made the copy a weaker task that spent the default allowance and had
+        # no performance score.
+        pass_row = current_pass(instance, run_id)
+        prefill_validation = validation_config_from_set(validation_summary(instance, run_id).get("set"))
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
         return
@@ -260,6 +270,8 @@ def _rowmenu_duplicate(run_id: str) -> None:
         prefill_name=free_copy_name(run_id, taken),
         prefill_prompt=detail.prompt,
         prefill_validated_prompt=detail.validated_prompt,
+        prefill_budget=pass_row.budget if pass_row is not None else None,
+        prefill_validation=prefill_validation,
     )
 
 

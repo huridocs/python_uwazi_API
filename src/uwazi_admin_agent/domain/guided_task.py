@@ -90,15 +90,32 @@ SOURCE_LABELS: dict[str, str] = {
 
 INPUT_LANGUAGE_MATCH = "match"
 INPUT_LANGUAGE_SPECIFIC = "specific"
+INPUT_LANGUAGE_SPECIFIC_FALLBACK = "specific_fallback"
 INPUT_LANGUAGE_ANY = "any"
-INPUT_LANGUAGE_MODES: tuple[str, ...] = (INPUT_LANGUAGE_MATCH, INPUT_LANGUAGE_SPECIFIC, INPUT_LANGUAGE_ANY)
+INPUT_LANGUAGE_MODES: tuple[str, ...] = (
+    INPUT_LANGUAGE_MATCH,
+    INPUT_LANGUAGE_SPECIFIC,
+    INPUT_LANGUAGE_SPECIFIC_FALLBACK,
+    INPUT_LANGUAGE_ANY,
+)
+
+# "specific" is the strict mode: read ONLY the chosen primary language(s) and
+# skip an entity whose content is missing in them. "specific_fallback" is the
+# same primary choice with a fallback to any other populated language.
+SPECIFIC_INPUT_LANGUAGE_MODES: frozenset[str] = frozenset({INPUT_LANGUAGE_SPECIFIC, INPUT_LANGUAGE_SPECIFIC_FALLBACK})
 
 INPUT_LANGUAGE_LABELS: dict[str, str] = {
     INPUT_LANGUAGE_MATCH: (
-        "Match each target language (read English sources for English suggestions, Spanish for Spanish, etc.)"
+        "Match each target language (read the English sources for English suggestions, the Spanish sources "
+        "for Spanish, etc.)"
     ),
-    INPUT_LANGUAGE_SPECIFIC: "Use a specific primary language",
-    INPUT_LANGUAGE_ANY: "Any available language (fall back automatically when missing)",
+    INPUT_LANGUAGE_SPECIFIC: "Use only a specific primary language (skip the entity when it is missing)",
+    INPUT_LANGUAGE_SPECIFIC_FALLBACK: (
+        "Use a specific primary language, and fall back to other languages when it is missing"
+    ),
+    INPUT_LANGUAGE_ANY: (
+        "Any available language (use whichever language has the content populated, falling back automatically)"
+    ),
 }
 
 FALLBACK_BLANK = "blank"
@@ -122,8 +139,8 @@ OUTPUT_LANGUAGE_MODES: tuple[str, ...] = (OUTPUT_ALL, OUTPUT_SPECIFIC, OUTPUT_SO
 # in the vocabulary so previously saved answers still validate and assemble.
 OUTPUT_LANGUAGE_LABELS: dict[str, str] = {
     OUTPUT_ALL: "Generate for all configured Uwazi languages (extract into each language)",
-    OUTPUT_SPECIFIC: "Generate only for specific language(s)",
-    OUTPUT_SOURCE: "Generate only in the language of the source document",
+    OUTPUT_SPECIFIC: ("Update only specific entity language(s), regardless of the input document's language"),
+    OUTPUT_SOURCE: "Update only the entity row in the language of the source document",
 }
 
 DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on document length and structure."
@@ -398,7 +415,7 @@ def validate_answers(answers: GuidedAnswers) -> list[str]:
             errors.append("List the metadata properties to read, or uncheck 'Entity metadata properties' as a source.")
         if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
             errors.append("Choose how the input language is selected.")
-        if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
+        if answers.input_language_mode in SPECIFIC_INPUT_LANGUAGE_MODES and not answers.input_languages:
             errors.append("Choose the primary input language(s), or switch to 'Match each target language'.")
 
         if answers.goal == GOAL_FILL:
@@ -467,7 +484,7 @@ def _validate_input_languages(answers: GuidedAnswers) -> list[str]:
     errors: list[str] = []
     if answers.input_language_mode not in INPUT_LANGUAGE_MODES:
         errors.append("Choose how the input language is selected.")
-    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC and not answers.input_languages:
+    if answers.input_language_mode in SPECIFIC_INPUT_LANGUAGE_MODES and not answers.input_languages:
         errors.append("Choose the primary input language(s), or switch to 'Match each target language'.")
     return errors
 
@@ -506,7 +523,7 @@ def _reads_metadata(answers: GuidedAnswers) -> bool:
     return SOURCE_METADATA in answers.sources
 
 
-def _needs_multilingual_output_section(answers: GuidedAnswers) -> bool:
+def needs_multilingual_output_section(answers: GuidedAnswers) -> bool:
     """Whether output-language rules apply to this task's target (pure)."""
     if answers.goal != GOAL_FILL:
         return True
@@ -517,14 +534,25 @@ def _needs_multilingual_output_section(answers: GuidedAnswers) -> bool:
 def _input_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> str:
     has_docs = _reads_documents(answers)
     has_meta = _reads_metadata(answers)
-    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC_FALLBACK:
         if has_docs and has_meta:
             fallback = "Fall back to another language when the document or metadata is missing in it."
         elif has_docs:
             fallback = "Fall back to another language when the document is missing in it."
         else:
             fallback = "Fall back to another language when the source property is empty in it."
-        return f"Always read from: {_language_text(answers.input_languages, labels)}. {fallback}"
+        return f"Prefer reading from: {_language_text(answers.input_languages, labels)}. {fallback}"
+    if answers.input_language_mode == INPUT_LANGUAGE_SPECIFIC:
+        if has_docs and has_meta:
+            missing = "the document or metadata is missing in it"
+        elif has_docs:
+            missing = "the document is missing in it"
+        else:
+            missing = "the source property is empty in it"
+        return (
+            f"Always read ONLY from: {_language_text(answers.input_languages, labels)}. "
+            f"Do not fall back: skip the entity when {missing}."
+        )
     if answers.input_language_mode == INPUT_LANGUAGE_ANY:
         if has_docs and has_meta:
             subject = "a document or metadata"
@@ -554,11 +582,29 @@ def _input_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> s
 
 def _output_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> str:
     if answers.output_language_mode == OUTPUT_SPECIFIC:
-        return f"Generate only for these languages: {_language_text(answers.output_languages, labels)}."
+        rows = _language_text(answers.output_languages, labels)
+        if answers.goal == GOAL_CREATE:
+            return f"Write the new entities' per-language text properties only into: {rows}."
+        return (
+            "Write the suggestion only into the entity language row(s): "
+            f"{rows}. "
+            "The input document's own language does not change this: a Spanish document may update the "
+            "English row."
+        )
     if answers.output_language_mode == OUTPUT_SOURCE:
         if _reads_documents(answers):
-            return "Generate only in the language of the source document."
-        return "Generate only in the source language."
+            if answers.goal == GOAL_CREATE:
+                return (
+                    "Write the new entities' per-language text properties into the row matching the source "
+                    "document's language."
+                )
+            return (
+                "Write the suggestion into the entity row in the language of the source document: "
+                "the language the document is written in, even when that is not the entity's language."
+            )
+        if answers.goal == GOAL_CREATE:
+            return "Write the new entities' per-language text properties into the source language's row."
+        return "Write the suggestion into the entity row in the source language."
     configured = _language_text(labels.keys(), labels)
     all_languages = "Generate for all configured Uwazi languages (extract into each language)."
     return f"{all_languages} Configured languages: {configured}." if configured else all_languages
@@ -831,7 +877,7 @@ def assemble_prompt(answers: GuidedAnswers, language_labels: Mapping[str, str] |
         "### Target Property & Logic",
         *_logic_lines(answers),
     ]
-    if _needs_multilingual_output_section(answers):
+    if needs_multilingual_output_section(answers):
         lines.extend(
             [
                 "",
@@ -872,6 +918,9 @@ __all__ = [
     "INPUT_LANGUAGE_MATCH",
     "INPUT_LANGUAGE_MODES",
     "INPUT_LANGUAGE_SPECIFIC",
+    "INPUT_LANGUAGE_SPECIFIC_FALLBACK",
+    "SPECIFIC_INPUT_LANGUAGE_MODES",
+    "needs_multilingual_output_section",
     "OUTPUT_ALL",
     "OUTPUT_LANGUAGE_LABELS",
     "OUTPUT_LANGUAGE_MODES",

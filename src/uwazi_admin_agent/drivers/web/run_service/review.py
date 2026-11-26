@@ -51,9 +51,23 @@ def current_pass(url: str, run_id: str) -> PredictionPass | None:
     return build_suggestion_store(url).get_pass(run_id)
 
 
-def get_suggestion_entity_languages(url: str, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
-    """Return every (sharedId, language) row matching a filter (the window's prev/next)."""
-    return build_suggestion_store(url).entity_languages(run_id, f)
+def get_suggestion_entity_languages(
+    url: str,
+    run_id: str,
+    f: SuggestionFilter,
+    *,
+    include_display_only: bool = False,
+) -> list[tuple[str, str | None]]:
+    """Return every (sharedId, language) row matching a filter (the window's prev/next).
+
+    ``include_display_only`` makes navigation walk the whole filtered table —
+    excluded/matched evidence rows included — instead of only the writable ones.
+    """
+    return build_suggestion_store(url).entity_languages(
+        run_id,
+        f,
+        include_display_only=include_display_only,
+    )
 
 
 def get_suggestion_counts(url: str, run_id: str) -> dict[str, int]:

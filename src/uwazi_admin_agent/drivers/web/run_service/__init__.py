@@ -107,6 +107,7 @@ from .validation import (
     read_validation_label,
     remove_validation_row,
     rescore_run,
+    validation_config_from_set,
     validation_store,
     validation_summary,
 )
@@ -201,6 +202,7 @@ __all__ = [
     "read_validation_label",
     "remove_validation_row",
     "rescore_run",
+    "validation_config_from_set",
     "validation_store",
     "validation_summary",
     "_task_use_case",

@@ -13,6 +13,7 @@ from uwazi_admin_agent.domain.guided_task import (
     GOAL_CUSTOM,
     GOAL_FILL,
     INPUT_LANGUAGE_SPECIFIC,
+    INPUT_LANGUAGE_SPECIFIC_FALLBACK,
     OUTPUT_SOURCE,
     OUTPUT_SPECIFIC,
     SCOPE_EMPTY,
@@ -152,10 +153,27 @@ def test_custom_task_requires_a_description() -> None:
 
 
 def test_specific_language_modes_require_selections() -> None:
-    input_issues = validate_answers(_classify_answers(input_language_mode=INPUT_LANGUAGE_SPECIFIC))
-    assert any("primary input language" in issue for issue in input_issues)
+    for mode in (INPUT_LANGUAGE_SPECIFIC, INPUT_LANGUAGE_SPECIFIC_FALLBACK):
+        input_issues = validate_answers(_classify_answers(input_language_mode=mode))
+        assert any("primary input language" in issue for issue in input_issues)
     output_issues = validate_answers(_classify_answers(output_language_mode=OUTPUT_SPECIFIC))
     assert any("output language" in issue for issue in output_issues)
+
+
+def test_strict_and_fallback_primary_languages_are_distinct_prompts() -> None:
+    strict = assemble_prompt(
+        _extract_answers(input_language_mode=INPUT_LANGUAGE_SPECIFIC, input_languages=("es",)),
+        {"es": "Spanish"},
+    )
+    assert "Always read ONLY from: Spanish (es)." in strict
+    assert "Do not fall back: skip the entity when the document is missing in it." in strict
+    fallback = assemble_prompt(
+        _extract_answers(input_language_mode=INPUT_LANGUAGE_SPECIFIC_FALLBACK, input_languages=("es",)),
+        {"es": "Spanish"},
+    )
+    assert "Prefer reading from: Spanish (es)." in fallback
+    assert "Fall back to another language when the document is missing in it." in fallback
+    assert "skip the entity" not in fallback
 
 
 def test_create_unrelated_requires_template_count_instructions_and_properties() -> None:
@@ -345,7 +363,7 @@ def test_assembled_prompt_names_output_languages_and_source_mode_for_text_proper
         _extract_answers(sources=(SOURCE_METADATA,), metadata_properties=("rec",), output_language_mode=OUTPUT_SOURCE),
         {},
     )
-    assert "Generate only in the source language." in source_meta
+    assert "Write the suggestion into the entity row in the source language." in source_meta
 
 
 def test_custom_task_prompt_embeds_the_description() -> None:

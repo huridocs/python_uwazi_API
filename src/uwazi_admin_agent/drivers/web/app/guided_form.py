@@ -92,10 +92,10 @@ _QUESTION_TITLES = {
     SCOPE_FILTER_QUESTION: "What filter or condition selects the entities?",
     SOURCES_QUESTION: "Which information should be used as input?",
     METADATA_PROPERTIES_QUESTION: "Which metadata properties should be read?",
-    INPUT_LANGUAGE_MODE_QUESTION: "Which input language should be read?",
-    INPUT_LANGUAGES_QUESTION: "Which primary input languages should be used?",
-    OUTPUT_LANGUAGE_MODE_QUESTION: "Which output languages should the new entities be written in?",
-    OUTPUT_LANGUAGES_QUESTION: "Which output languages should the new entities be written in?",
+    INPUT_LANGUAGE_MODE_QUESTION: "Which language should the input document or metadata be read in?",
+    INPUT_LANGUAGES_QUESTION: "Which primary input language(s) should be used?",
+    OUTPUT_LANGUAGE_MODE_QUESTION: "Which entity language should be updated?",
+    OUTPUT_LANGUAGES_QUESTION: "Which entity language(s) should be updated?",
     GENERATION_QUESTION: "How should the value be generated?",
     REVIEW_QUESTION: "Review the assembled prompt",
     CREATE_SOURCE_QUESTION: "What should the new entities be based on?",
@@ -453,7 +453,10 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
             placeholder="e.g. title, summary, description",
         )
     elif question == INPUT_LANGUAGE_MODE_QUESTION:
-        ui.label("Applies when an entity has multiple language versions.").classes("text-body2 text-grey-7 q-mb-md")
+        ui.label(
+            "This is the language of the DOCUMENT or metadata the task reads — independent of the entity "
+            "language it will update."
+        ).classes("text-body2 text-grey-7 q-mb-md")
         _radio(
             state,
             {mode: INPUT_LANGUAGE_LABELS[mode] for mode in INPUT_LANGUAGE_MODES},
@@ -463,18 +466,28 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
     elif question == INPUT_LANGUAGES_QUESTION:
         _languages(state, "input_languages", answers.input_languages, "Primary input language(s)")
     elif question == OUTPUT_LANGUAGE_MODE_QUESTION:
-        # The create flow's only output choice: which languages the new
-        # entities' per-language text properties are written in. The
-        # instance's machine-translation tool is NOT an option here (it is
-        # only available on some instances): a translation task is described
-        # as a CUSTOM task, where the prompt can call for it directly.
+        # Which entity language ROW receives the suggestion. Distinct from the
+        # input language above: a Spanish document may update the English row.
+        if answers.goal == GOAL_CREATE:
+            ui.label("Which entity language(s) the new entities' text properties are written in.").classes(
+                "text-body2 text-grey-7 q-mb-md"
+            )
+        else:
+            ui.label(
+                "The language row the suggestion is written into. This is NOT the language of the document: "
+                "a Spanish document can update the English entity."
+            ).classes("text-body2 text-grey-7 q-mb-md")
+        # The create flow's only output choice is which languages the new
+        # entities' per-language text properties are written in. The instance's
+        # machine-translation tool is NOT an option here (it is only available on
+        # some instances): a translation task is described as a CUSTOM task.
         _radio(
             state,
             {
                 OUTPUT_SPECIFIC: OUTPUT_LANGUAGE_LABELS[OUTPUT_SPECIFIC],
-                OUTPUT_SOURCE: "The language of the source entity",
+                OUTPUT_SOURCE: OUTPUT_LANGUAGE_LABELS[OUTPUT_SOURCE],
             },
-            OUTPUT_SPECIFIC if answers.output_language_mode != OUTPUT_SOURCE else OUTPUT_SOURCE,
+            OUTPUT_SPECIFIC if answers.output_language_mode == OUTPUT_SPECIFIC else OUTPUT_SOURCE,
             on_change=lambda: _next(state),
         )
     elif question == OUTPUT_LANGUAGES_QUESTION:

@@ -353,6 +353,28 @@ def _toggle_section(state: dict[str, Any], section: str) -> None:
     if label is not None and not label.is_deleted:
         label.text = section_toggle_label(section, visible)
         label.update()
+    if section == "search" and not visible:
+        # Hiding the search means the text narrowing is over: leaving it active
+        # would keep the table filtered by a control the operator can no longer
+        # see (and cannot clear without reopening the section).
+        _clear_search(state)
+
+
+def _clear_search(state: dict[str, Any]) -> None:
+    """Clear the free-text filter and its input, then refresh the table."""
+    if not (state.get("text") or ""):
+        return
+    state["text"] = ""
+    widget = state.get("_text_input")
+    if widget is not None and not widget.is_deleted:
+        state["_suppress_filter_events"] = True
+        try:
+            widget.value = ""
+        finally:
+            state["_suppress_filter_events"] = False
+    state["offset"] = 0
+    _reset_global_selection(state)
+    _refresh_all(state)
 
 
 def _update_table_clicked(state: dict[str, Any]) -> None:

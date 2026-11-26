@@ -8,6 +8,7 @@ from typing import Any
 
 from uwazi_admin_agent.domain.suggestion import (
     DISPLAY_ONLY_OPS,
+    INFO_OP,
     REVERT_RECREATES_OPS,
     EntityReviewRow,
     OperationReviewRow,
@@ -323,12 +324,35 @@ class ReadsMixin:
         plus one per single-value dropdown; no per-page Python loop.
         """
         base = f if f is not None else SuggestionFilter(limit=100000)
+        status_counts = self._count_by(run_id, base.without("status", "matches"), "status")
+        status_counts.update(self._count_validation_matches(run_id, base.without("status", "matches")))
         return {
             "op": self._count_by(run_id, base.without("op"), OP_VALUE_EXPR),
-            "status": self._count_by(run_id, base.without("status"), "status"),
+            "status": status_counts,
             "property": self._count_by(run_id, base.without("property_name"), "property_name", not_null=True),
             "language": self._count_by(run_id, base.without("languages"), "language", not_null=True),
         }
+
+    def _count_validation_matches(self, run_id: str, f: SuggestionFilter) -> dict[str, int]:
+        """``{"match": n, "mismatch": n}`` for the Status filter's verdict options (SQL).
+
+        A validation row's Status badge is its frozen-label verdict, not its
+        lifecycle state, so the Status dropdown offers ``match`` / ``mismatch``
+        beside the regular statuses. They count held-out rows only — the same
+        rows the badges describe — under every OTHER active filter.
+        """
+        where, params = build_where(f, run_id)
+        rows = self._query(
+            f"""
+            SELECT CASE WHEN match_state = 1 THEN 'match' ELSE 'mismatch' END AS value,
+                   COUNT(*) AS n
+              FROM suggestion
+             WHERE {where} AND is_validation = 1
+             GROUP BY CASE WHEN match_state = 1 THEN 'match' ELSE 'mismatch' END
+            """,
+            params,
+        )
+        return {str(row["value"]): int(row["n"]) for row in rows}
 
     def _count_by(
         self,
@@ -486,25 +510,41 @@ class ReadsMixin:
         )
         return [_row_to_suggestion(row) for row in rows]
 
-    def entity_languages(self, run_id: str, f: SuggestionFilter) -> list[tuple[str, str | None]]:
+    def entity_languages(
+        self,
+        run_id: str,
+        f: SuggestionFilter,
+        *,
+        include_display_only: bool = False,
+    ) -> list[tuple[str, str | None]]:
         """Every (sharedId, language) pair matching a filter, in first-appearance order.
 
         The entity window's Previous/Next walk THIS list, not the distinct
         sharedIds: the table's rows are per language, so a translation task's
         entity is one stop per language and navigation must land on the next
-        row, not the next entity. ``info`` rows are display-only and name no
-        entity, so they are excluded.
+        row, not the next entity. An ``info`` row names no entity, so it is
+        always excluded. ``include_display_only`` adds ``matched``/``skipped``
+        rows: the table shows them, so Previous/Next must step through them
+        like any other operation.
         """
         where, params = build_where(f, run_id)
+        if include_display_only:
+            # ``info`` is the only display-only op that cannot be opened: its
+            # shared_id is synthetic ("info-0"), not an entity.
+            display_clause = " AND op != ?"
+            display_params: list[Any] = [INFO_OP]
+        else:
+            display_clause = f" AND op NOT IN ({', '.join('?' for _ in DISPLAY_ONLY_OPS)})"
+            display_params = [*sorted(DISPLAY_ONLY_OPS)]
         rows = self._query(
             f"""
             SELECT shared_id, language, MIN(id) AS first_id
             FROM suggestion
-            WHERE {where} AND op NOT IN ({", ".join("?" for _ in DISPLAY_ONLY_OPS)})
+            WHERE {where}{display_clause}
             GROUP BY shared_id, language
             ORDER BY first_id
             """,
-            [*params, *sorted(DISPLAY_ONLY_OPS)],
+            [*params, *display_params],
         )
         return [(str(row["shared_id"]), row["language"]) for row in rows]
 
