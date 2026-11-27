@@ -34,9 +34,11 @@ def _noop_record_skipped(
     title: str = "",
     template_name: str | None = None,
     detail: str | None = None,
+    basis: list[str] | None = None,
+    context: str | list[str] | None = None,
 ) -> dict:
     """A record-free ``record_skipped`` for namespaces that build no table (see above)."""
-    del reason, title, template_name, detail
+    del reason, title, template_name, detail, basis, context
     return {"success": True, "shared_id": shared_id}
 
 
@@ -230,6 +232,8 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         title: str = "",
         template_name: str | None = None,
         detail: str | None = None,
+        basis: list[str] | None = None,
+        context: str | list[str] | None = None,
     ) -> dict:
         """Record ONE entity the script could not process (no Uwazi write).
 
@@ -239,6 +243,13 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
         descriptive sentence. ``detail`` carries optional evidence (for example
         the page text the extractor examined), rendered beneath the reason. The
         row is excluded from every Run/selection path.
+
+        ``basis`` and ``context`` carry the same provenance a change row carries:
+        the entity properties the value was to be read from, and the exact input
+        text the script read (or failed to read). A skip without them shows only
+        the failure sentence, so the operator cannot see the input that failed —
+        and the entity window, seeing no basis, tries to load a primary document
+        the task never used.
         """
         _append_record(
             records,
@@ -249,6 +260,8 @@ def _dry_run_write_helpers(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "template_name": template_name,
                 "reason": str(reason or ""),
                 "detail": None if detail is None else str(detail),
+                "basis": [str(name) for name in basis or []],
+                "context": _context_text(context),
             },
         )
         logger.info("dry-run record: skipped {} reason={}", shared_id, reason)

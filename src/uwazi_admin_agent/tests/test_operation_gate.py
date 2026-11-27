@@ -8,6 +8,7 @@ releases what it took, so runs never interfere. The display helpers are pure.
 from __future__ import annotations
 
 from uwazi_admin_agent.drivers.web.operation_gate import (
+    RUN_CLAIM_STATUS,
     GateState,
     RunClaim,
     active_text,
@@ -18,6 +19,7 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
     release_runs,
     run_claim,
     run_claim_text,
+    run_claim_title,
     run_claims,
     set_note,
     set_progress,
@@ -253,7 +255,7 @@ def test_progress_text_reads_the_fraction() -> None:
 
 def test_active_text_names_the_operation_and_its_units() -> None:
     run = GateState(instance=A, kind="run", run_id="migration-7", done=13, total=1230, started_at=None)  # type: ignore[arg-type]
-    assert active_text(run) == "Running — 13/1230 suboperations…"
+    assert active_text(run) == "Applying — 13/1230 suboperations…"
     revert = GateState(instance=A, kind="revert", run_id="migration-7", done=5, total=40, started_at=None)  # type: ignore[arg-type]
     assert active_text(revert) == "Reverting — 5/40 entity…"
     # A non-gated kind has no unit; it degrades to the verb alone.
@@ -273,7 +275,7 @@ def test_active_text_appends_the_holder_note() -> None:
         note="verifying the selection against Uwazi",
     )
     text = active_text(stated)
-    assert "Running" in text
+    assert "Applying" in text
     assert "verifying the selection against Uwazi" in text
     refused = GateState(
         instance=A,
@@ -306,6 +308,24 @@ def test_run_claim_text_names_the_verb_and_the_run() -> None:
     assert "generating" in text
     assert "Wait until it finishes" in text
     assert "This task is busy" in run_claim_text(None)
+
+
+def test_run_claim_title_explains_the_review_page_is_read_only() -> None:
+    """The review banner is an explanation, not the refusal sentence.
+
+    A regeneration claims the run outside the Uwazi-write gate; without a
+    visible read-only state the operator kept seeing an actionable table while
+    the planner rewrote it. Every claim kind the page can meet has words, and
+    the title never reads like a second action's refusal.
+    """
+    for kind in RUN_CLAIM_STATUS:
+        claim = RunClaim(instance=A, run_id="migration-7", kind=kind, started_at=None)  # type: ignore[arg-type]
+        title = run_claim_title(claim)
+        assert "read-only" in title
+        assert "This task is busy" not in title
+    regenerating = RunClaim(instance=A, run_id="migration-7", kind="regenerating", started_at=None)  # type: ignore[arg-type]
+    assert "Regenerating this task" in run_claim_title(regenerating)
+    assert run_claim_title(None) == ""
 
 
 # --- Run progress arithmetic (pure) ------------------------------------------

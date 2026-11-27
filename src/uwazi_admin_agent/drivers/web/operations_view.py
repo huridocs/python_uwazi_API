@@ -99,8 +99,8 @@ LOCKED_SUB_OPS: dict[str, str] = {
     "unpublish": "unpublishing is one action for the whole entity — select the operation",
     "set_publish_status": "the publish state is one action for the whole entity — select the operation",
     MOVE_OP: "adding files is one action — select the operation",
-    "update_and_delete": "a merge writes the target and deletes its sources in one Run — select the operation",
-    "create_and_delete": "a merge creates the target and deletes its sources in one Run — select the operation",
+    "update_and_delete": "a merge writes the target and deletes its sources in one Apply — select the operation",
+    "create_and_delete": "a merge creates the target and deletes its sources in one Apply — select the operation",
 }
 
 # Suboperation status labels. The store's lifecycle IS the operator's
@@ -129,7 +129,7 @@ _RUNNABLE_SUB_STATUSES: frozenset[str] = frozenset({"pending", "reverted"})
 
 
 def is_runnable_status(status_label: str) -> bool:
-    """Whether a suboperation in this display state can be written by a Run (pure)."""
+    """Whether a suboperation in this display state can be written by an Apply (pure)."""
     return status_label in _RUNNABLE_SUB_STATUSES
 
 
@@ -138,20 +138,20 @@ def non_runnable_note(status_label: str) -> str:
     return {
         "applied": "already applied — revert it first",
         "discarded": "discarded — restore it first",
-    }.get(status_label, "not independently runnable")
+    }.get(status_label, "not independently applicable")
 
 
 def rerun_blocked_reason(op: str) -> str:
-    """Why a reverted row of ``op`` cannot be run again (empty when it can) (pure).
+    """Why a reverted row of ``op`` cannot be applied again (empty when it can) (pure).
 
     A delete's undo is a re-create and a merge's undo re-creates the sources it
     absorbed, both with FRESH sharedIds. The recorded row still names the old
-    entities, so executing it again would write to an id that no longer exists
+    entities, so applying it again would write to an id that no longer exists
     (or, for a merge, copy from dead sources). Re-pointing the row automatically
     is not safe: the old→new mapping is per entity and the related row values
     would need the same remap. The row therefore stays visible and reverted, but
-    its Run is refused, with this text as the explanation. The undo itself IS
-    available from the row (a reverted delete/merge is not re-runnable, but the
+    its Apply is refused, with this text as the explanation. The undo itself IS
+    available from the row (a reverted delete/merge is not re-applicable, but the
     reverted state is what its Revert produced); a later Sync with Uwazi
     re-reads the operation from live state and resets it to PENDING (see
     :func:`uwazi_admin_agent.domain.review_refresh.reconciled_status`).
@@ -159,12 +159,12 @@ def rerun_blocked_reason(op: str) -> str:
     if op == "delete":
         return (
             "the revert re-created this entity with a new sharedId; this recorded delete still points "
-            "at the old id, so it cannot be run again"
+            "at the old id, so it cannot be applied again"
         )
     if op in MERGE_OPS:
         return (
             "the revert re-created the entities this merge absorbed with new sharedIds; this recorded "
-            "merge still points at the old ids, so it cannot be run again"
+            "merge still points at the old ids, so it cannot be applied again"
         )
     return ""
 
@@ -267,13 +267,17 @@ def _evidence_text(sub: Suggestion) -> str:
     """The input text the operator judges one suggestion against (pure).
 
     A regular row's ``context`` is the passage the script read. An EXCLUDED row
-    has no passage: its evidence is the recorded detail — the skip reason's
+    shows the recorded input text plus the recorded detail — the skip reason's
     supporting text (an exception message, the page examined), kept out of the
-    value columns so it can never be mistaken for a suggestion.
+    value columns so it can never be mistaken for a suggestion. The input text
+    comes first because it is what failed; a row recorded before skips could
+    carry it still has only the detail.
     """
     if sub.op == SKIPPED_OP:
         detail = "" if sub.proposed_value is None else str(sub.proposed_value).strip()
-        return detail[:CONTEXT_CELL_CHARS]
+        context = (sub.context or "").strip()
+        text = "\n\n".join(part for part in (context, detail) if part)
+        return text[:CONTEXT_CELL_CHARS]
     return (sub.context or "")[:CONTEXT_CELL_CHARS]
 
 
@@ -1202,7 +1206,7 @@ def operation_row(
         "modified": modified_label(item.modified_at),
         "rerun_blocked": rerun_blocked,
         "rerun_blocked_reason": rerun_reason,
-        "run_title": rerun_reason or "Run this operation: the ticked suboperations (all of them when none is ticked)",
+        "run_title": rerun_reason or "Apply this operation: the ticked suboperations (all of them when none is ticked)",
         "run_status": status,
         "run_status_color": RUN_STATUS_COLORS.get(status, "purple-7" if status == "validate" else "grey-7"),
         "status_hidden": status_repeats_operation(item.ops, status) or status == "validate",

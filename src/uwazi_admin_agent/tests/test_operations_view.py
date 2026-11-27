@@ -70,7 +70,7 @@ def test_lock_note_names_the_reason_only_for_whole_entity_ops() -> None:
     assert view.lock_note("update") == ""
     assert view.lock_note("create_relationships") == ""
     assert "one action" in view.lock_note("delete")
-    assert "one Run" in view.lock_note("update_and_delete")
+    assert "one Apply" in view.lock_note("update_and_delete")
     assert view.is_selectable("update")
     assert not view.is_selectable("delete")
 
@@ -470,6 +470,28 @@ def test_suboperation_row_carries_an_empty_context_when_there_is_none() -> None:
     row = view.suboperation_row(_sub(1), checked=False, in_place=False)
 
     assert row["context"] == ""
+
+
+def test_suboperation_row_shows_a_skip_input_text_before_its_detail() -> None:
+    """A skipped row's evidence is the text the script read, then the reason.
+
+    The input comes first because it is what failed; the detail explains why.
+    """
+    sub = _sub(1, op="skipped", proposed="no STATE entity matched")
+    sub = sub.model_copy(update={"context": "the property text"})
+
+    row = view.suboperation_row(sub, checked=False, in_place=False)
+
+    assert row["context"] == "the property text\n\nno STATE entity matched"
+
+
+def test_suboperation_row_shows_a_skip_detail_when_no_context_was_recorded() -> None:
+    """Older runs recorded no context; their rows keep today's detail-only text."""
+    sub = _sub(1, op="skipped", proposed="no STATE entity matched")
+
+    row = view.suboperation_row(sub, checked=False, in_place=False)
+
+    assert row["context"] == "no STATE entity matched"
 
 
 def test_sub_values_keep_current_whole_and_clip_the_one_line_proposal() -> None:

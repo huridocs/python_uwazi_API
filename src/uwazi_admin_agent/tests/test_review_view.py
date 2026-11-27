@@ -307,13 +307,13 @@ def test_the_uwazi_link_opens_the_row_in_its_own_language() -> None:
 def test_run_confirmation_names_the_languages_it_will_write() -> None:
     title, _message = run_confirmation(2, ["update"], ["es"])
 
-    assert title == "Run 2 suggestions (es)"
+    assert title == "Apply 2 suggestions (es)"
 
 
 def test_run_confirmation_without_languages_stays_plain() -> None:
     title, _message = run_confirmation(1, ["delete"])
 
-    assert title == "Run 1 suggestion"
+    assert title == "Apply 1 suggestion"
 
 
 # --- open in Uwazi ------------------------------------------------------------

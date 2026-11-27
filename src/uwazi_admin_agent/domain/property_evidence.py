@@ -13,12 +13,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from uwazi_admin_agent.domain.metadata_diff import format_metadata_value
+from uwazi_admin_agent.domain.metadata_diff import MAX_VALUE_CHARS, format_metadata_value
 
 # The synthetic name a script uses to point at the entity's title (see
 # ``uwazi_admin_agent.domain.suggestion.TITLE_PROPERTY``). Kept local so this
 # module stays a leaf with a single import.
 TITLE_PROPERTY: str = "_title"
+
+# How much of a basis property's value the review table shows as evidence. Five
+# times the one-line display cap: a ``rec``/``summary`` text property is often
+# a full paragraph, and clipping it at 200 characters showed a truncation
+# ellipsis in the middle of the very text the operator must judge.
+EVIDENCE_VALUE_CHARS: int = MAX_VALUE_CHARS * 5
 
 
 def basis_values(raw: dict[str, Any], names: list[str]) -> dict[str, Any]:
@@ -58,7 +64,7 @@ def basis_context_text(
     values = basis_values(raw, names)
     lines: list[str] = []
     for name in names:
-        text = format_metadata_value(values.get(name)).strip()
+        text = format_metadata_value(values.get(name), limit=EVIDENCE_VALUE_CHARS).strip()
         if not text or text == "—":
             continue
         heading = resolved.get(name) or ("Title" if name == TITLE_PROPERTY else name)
@@ -66,4 +72,4 @@ def basis_context_text(
     return "\n".join(lines)
 
 
-__all__ = ["TITLE_PROPERTY", "basis_context_text", "basis_values"]
+__all__ = ["EVIDENCE_VALUE_CHARS", "TITLE_PROPERTY", "basis_context_text", "basis_values"]

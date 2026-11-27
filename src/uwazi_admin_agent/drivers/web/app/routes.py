@@ -25,6 +25,7 @@ from uwazi_admin_agent.drivers.web.task_page import task_page
 
 _DUMMY_HTML = (
     "<!doctype html><html><head><meta charset='utf-8'><title>Uwazi Admin Agent</title>"
+    "<link rel='icon' href='/favicon.ico'>"
     "<style>"
     ":root{color-scheme:light}"
     "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"

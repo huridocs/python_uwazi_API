@@ -117,10 +117,10 @@ def test_bulk_discard_label_carries_the_selection_count() -> None:
     assert bulk_discard_label(3) == "Discard (3)"
 
 
-def test_discard_confirmation_says_the_suggestions_will_not_be_applied() -> None:
+def test_discard_confirmation_says_apply_will_not_write_the_suggestions() -> None:
     title, message = discard_confirmation(2)
     assert title == "Discard 2 suggestions"
-    assert "NOT be applied" in message
+    assert "NOT be written by Apply" in message
 
 
 # --- the store: marking an operation as discarded --------------------------------

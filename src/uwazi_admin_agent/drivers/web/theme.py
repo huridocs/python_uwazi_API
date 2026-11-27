@@ -195,6 +195,34 @@ body { overflow-x: hidden; }
 .uw-header .q-btn { color: var(--uw-ink-secondary); }
 .uw-header .q-btn:hover { background: var(--uw-warm); }
 
+/* The targeted Uwazi instance: the one thing that tells two open windows apart. */
+.header-instance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--uw-border-soft);
+  border-radius: var(--uw-radius-sm);
+  background: var(--uw-warm);
+  padding: 3px 8px;
+  min-width: 0;
+}
+.header-instance-icon { font-size: 15px; color: var(--uw-ink-tertiary); }
+.uw-header .header-instance .header-instance-url {
+  display: block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--uw-ink-secondary);
+  text-decoration: none;
+}
+.uw-header .header-instance .header-instance-url:hover {
+  color: var(--uw-ink);
+  text-decoration: underline;
+}
+
 .brand-mark {
   width: 28px;
   height: 28px;
@@ -599,8 +627,6 @@ body { overflow-x: hidden; }
   overflow-wrap: anywhere;
   border-left: 3px solid var(--uw-border-soft);
   padding-left: 8px;
-  max-height: 15em;
-  overflow-y: auto;
   user-select: text;
 }
 .context-row td { background: var(--uw-warm); padding-top: 4px; padding-bottom: 8px; }
@@ -713,6 +739,17 @@ FONT_LINKS = (
     '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">'
 )
 
+# The top-left wordmark is a white lowercase "u" on the Uwazi emphasis red.
+# NiceGUI serves this SVG string as the browser tab icon (and as /favicon.ico),
+# so the tab never falls back to the framework's default icon.
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="18" fill="#e8432a"/>'
+    '<path d="M21 18v14c0 7.7 4.8 13 11.5 13S44 39.7 44 32V18" fill="none" '
+    'stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>'
+    "</svg>"
+)
+
 
 def install_theme() -> None:
     """Apply the Uwazi palette and the shared stylesheet to the current page."""
@@ -729,4 +766,4 @@ def install_theme() -> None:
     ui.add_css(THEME_CSS)
 
 
-__all__ = ["FONT_LINKS", "THEME_CSS", "install_theme"]
+__all__ = ["FAVICON_SVG", "FONT_LINKS", "THEME_CSS", "install_theme"]

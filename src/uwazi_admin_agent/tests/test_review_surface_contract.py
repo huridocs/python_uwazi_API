@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from uwazi_admin_agent.domain.property_evidence import basis_context_text, basis_values
+from uwazi_admin_agent.domain.metadata_diff import MAX_VALUE_CHARS
+from uwazi_admin_agent.domain.property_evidence import EVIDENCE_VALUE_CHARS, basis_context_text, basis_values
 from uwazi_admin_agent.domain.suggestion import OperationReviewRow, Suggestion, SuggestionStatus
 from uwazi_admin_agent.drivers.web import operations_view as view
 
@@ -171,10 +172,32 @@ def test_basis_context_text_names_the_property_and_its_value() -> None:
     )
 
 
-def test_basis_context_text_is_empty_without_evidence() -> None:
-    assert basis_context_text(None, ["_title"]) == ""
-    assert basis_context_text({"title": "T"}, []) == ""
-    assert basis_context_text({"title": "T"}, ["absent"]) == ""
+def test_basis_context_text_shows_a_paragraph_without_the_one_line_ellipsis() -> None:
+    """A basis value is evidence, not a one-line cell.
+
+    The review table rendered ``rec``/``summary`` paragraphs cut at the 200-char
+    display cap, so the operator saw "…" in the middle of the text they were
+    judging. Evidence carries five times that window (still bounded, with an
+    ellipsis only beyond it).
+    """
+    paragraph = "Continue to implement national programmes, including newborns (Egypt). " * 4
+    raw = {"title": "T", "metadata": {"rec": [{"value": paragraph}]}}
+
+    text = basis_context_text(raw, ["rec"])
+
+    assert text == f"rec: {paragraph.strip()}"
+    assert "…" not in text
+    assert len(paragraph) > MAX_VALUE_CHARS
+
+
+def test_basis_context_text_still_bounds_a_pathological_value() -> None:
+    """Only the window grew: an enormous property cannot bloat every row."""
+    huge = "x" * (EVIDENCE_VALUE_CHARS + 250)
+    raw = {"title": "T", "metadata": {"rec": [{"value": huge}]}}
+
+    text = basis_context_text(raw, ["rec"])
+
+    assert text == "rec: " + "x" * EVIDENCE_VALUE_CHARS + "…"
 
 
 def test_every_real_operation_hue_is_distinct_from_every_workflow_status_hue() -> None:

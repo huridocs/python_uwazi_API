@@ -156,17 +156,17 @@ RUN_OP_PHRASES: dict[str, str] = {
 
 
 def run_confirmation(count: int, ops: list[str] | None = None, languages: list[str] | None = None) -> tuple[str, str]:
-    """``(title, message)`` for the Run dialog: a few words naming the change (pure).
+    """``(title, message)`` for the Apply dialog: a few words naming the change (pure).
 
-    The dialog's job is consent, not explanation — it says what Run will do to
+    The dialog's job is consent, not explanation — it says what Apply will do to
     Uwazi (``Delete 1 entity``) and nothing else. The ops come from the operator's
     own selection, so the wording is the change they just chose; unknown ops (or
-    a Run triggered without them) fall back to the neutral ``Write``. The
-    languages do the same for a translation task: "Run 2 rows (es)" says the
-    Run writes the Spanish text and leaves the other languages alone.
+    an apply triggered without them) fall back to the neutral ``Write``. The
+    languages do the same for a translation task: "Apply 2 rows (es)" says the
+    apply writes the Spanish text and leaves the other languages alone.
     """
     entities = "suggestion" if count == 1 else "suggestions"
-    title = f"Run {count} {entities}"
+    title = f"Apply {count} {entities}"
     if languages:
         title = f"{title} ({', '.join(languages)})"
     phrases = [RUN_OP_PHRASES[op] for op in ops or [] if op in RUN_OP_PHRASES]
@@ -239,12 +239,12 @@ def revert_entity_confirmation(
 
 
 def run_button_label(count: int) -> str:
-    """The Run button's text for a live selection of ``count`` rows (pure).
+    """The Apply button's text for a live selection of ``count`` rows (pure).
 
-    The button carries the selection count, so the operator sees what Run will
+    The button carries the selection count, so the operator sees what Apply will
     act on without opening the dialog.
     """
-    return f"Run ({count})"
+    return f"Apply ({count})"
 
 
 def bulk_revert_label(count: int) -> str:
@@ -269,14 +269,14 @@ def discard_confirmation(count: int) -> tuple[str, str]:
     """``(title, message)`` for the bulk Discard dialog (pure).
 
     The dialog is consent, not explanation: it says how many checked operations
-    will be marked as discarded and that a Run will not execute them. The reason
+    will be marked as discarded and that Apply will not write them. The reason
     itself is asked in the same dialog (it is stored with the rows), so the
-    operator can say WHY the end user does not want these executed.
+    operator can say WHY the end user does not want these applied.
     """
     noun = "suggestion" if count == 1 else "suggestions"
     return (
         f"Discard {count} {noun}",
-        f"Mark {count} checked {noun} as discarded. They will NOT be applied by a Run, and the reason is stored with them.",
+        f"Mark {count} checked {noun} as discarded. They will NOT be written by Apply, and the reason is stored with them.",
     )
 
 
@@ -331,7 +331,7 @@ def prune_selection(selected: list[Any], rows: list[dict[str, Any]]) -> list[dic
 
     Reloading the table replaces the rows without clearing the checkbox
     selection, so after a filter change or a page flip the hidden rows would
-    still be counted in ``Run (N)`` — and Run would act on entities the
+    still be counted in ``Apply (N)`` — and Apply would act on entities the
     operator can no longer see. Rows are matched on ``row_key`` (the table's
     entity+language identity, so a translation's two rows are two distinct
     selections) and the selection's own order is kept.
@@ -404,12 +404,11 @@ def full_value(value: Any, property_type: str | None = None) -> str:
 # the title itself keeps the whole budget.
 TITLE_CELL_CHARS: int = 97
 
-# How much of a row's recorded INPUT TEXT the review table prints. The cell
-# wraps and scrolls, but an unbounded passage (a whole page) would still push
-# everything else off the screen, so the payload carries a window instead. The
-# old 2,500-character window filled only a few lines in practice; 12,500 keeps
-# five times as much context available while still bounding the row.
-CONTEXT_CELL_CHARS: int = 12_500
+# How much of a row's recorded INPUT TEXT the review table prints. The expanded
+# vocabulary card shows the whole window without an inner scroll, so the payload
+# carries four times the previous window (12,500 -> 50,000) while still bounding
+# an entire page of text.
+CONTEXT_CELL_CHARS: int = 50_000
 
 # Column widths (CSS px) for the review table's fixed columns. The Target column
 # takes whatever is left and absorbs the shrink; naming the rest here is what

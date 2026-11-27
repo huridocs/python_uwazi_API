@@ -39,6 +39,7 @@ from uwazi_admin_agent.drivers.web.session import (
     session_is_active,
 )
 
+from .header import instance_badge
 from .theme import install_theme
 
 _STEP_COLORS: dict[str, str] = {
@@ -96,6 +97,7 @@ def _build_page(task_id: str) -> None:
                 ui.label(view.name).classes("breadcrumb-current")
                 ui.badge(view.status).props(f"color={_task_color(view.status)}").classes("q-ml-sm status-pill")
         with ui.row().classes("items-center gap-2 no-wrap"):
+            instance_badge(instance)
             ui.button("Revert task", icon="undo", on_click=lambda: _revert_task(state)).props("outline no-caps").classes(
                 "uw-btn-danger"
             )

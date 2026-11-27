@@ -615,6 +615,36 @@ result = len(entities)
     assert {row.shared_id: row.basis for row in rows} == {sid: ["_title"] for sid in ("s1", "s2", "s3")}
 
 
+def test_a_skip_recording_its_basis_persists_the_input_text_as_the_rows_context(
+    store: SqliteSuggestionStore,
+) -> None:
+    """Hydration turns a skipped row's recorded basis into the review-table context.
+
+    A metadata-source task that cannot match an entity records ``basis=[prop]``;
+    the row must then show that property's value, exactly like a change row, so
+    the operator sees the input without opening (or needing) a document.
+    """
+    script = """
+for d in query_entities_full(mode="by_template", template_name="Case"):
+    record_skipped(d["shared_id"], "no_match", title=d["title"],
+                   basis=["_title"], detail="no STATE entity matched")
+result = "skipped 3"
+"""
+    asyncio.run(_use_case(store).run(script, "skips", _budget()))
+
+    rows, total = store.query("skips", SuggestionFilter())
+
+    assert total == 3
+    assert {row.op for row in rows} == {"skipped"}
+    assert {row.shared_id: row.basis for row in rows} == {sid: ["_title"] for sid in ("s1", "s2", "s3")}
+    assert {row.shared_id: row.context for row in rows} == {
+        "s1": "Title: One",
+        "s2": "Title: Two",
+        "s3": "Title: Three",
+    }
+    assert {row.proposed_value for row in rows} == {"no STATE entity matched"}
+
+
 def test_hydration_turns_recorded_basis_into_the_rows_evidence_text() -> None:
     """A value inferred from the entity's own data gets that data as its context.
 

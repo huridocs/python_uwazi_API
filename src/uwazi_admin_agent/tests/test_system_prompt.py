@@ -466,6 +466,24 @@ def test_prompt_says_plain_info_rows_are_dropped_beside_changes() -> None:
     assert "`add_info(..., keep=True)` ONLY for a cross-entity summary" in SYSTEM_PROMPT
 
 
+def test_prompt_requires_the_failed_input_on_every_skip_record() -> None:
+    """A skip without provenance hides the text that failed.
+
+    The extended signature takes ``basis``/``context``; the metadata-source recipe
+    and the extraction steps must ask for one of them on the same call, otherwise
+    the row shows only the failure sentence and the entity window loads a document
+    the task never read.
+    """
+    assert (
+        "record_skipped(shared_id, reason, title='', template_name=None, detail=None, basis=None, context=None)"
+        in SYSTEM_PROMPT
+    )
+    assert "`basis=[<source property>, ...]`" in SYSTEM_PROMPT
+    assert "`context=<exact passage>`" in SYSTEM_PROMPT
+    assert "`record_skipped(..., basis=[prop])`" in SYSTEM_PROMPT
+    assert "`context=<the passage you read>`" in SYSTEM_PROMPT
+
+
 def test_prompt_multi_group_merge_batches_the_three_bulk_calls() -> None:
     """MULTI-GROUP MERGE must collect per-group work in the discovery loop and
     then apply the whole merge as ONE update_entities_parallel call, ONE

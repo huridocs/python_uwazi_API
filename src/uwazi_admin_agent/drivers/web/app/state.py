@@ -33,12 +33,7 @@ _STATUS_COLORS: dict[str, str] = {
 
 _ABORT: object = object()
 
-_CLAIM_STATUS: dict[str, str] = {
-    "creating": "creating",
-    "regenerating": "regenerating",
-    "run": "running",
-    "revert": "reverting",
-}
+_CLAIM_STATUS: dict[str, str] = operation_gate.RUN_CLAIM_STATUS
 
 _IN_FLIGHT_JS = "['creating', 'regenerating', 'running', 'reverting'].includes(props.row.status)"
 

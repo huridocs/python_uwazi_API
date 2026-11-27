@@ -67,7 +67,7 @@ class RunClaim:
 # The gated kinds, with the operator-facing words each one is shown as. Only
 # operations that WRITE Uwazi take this gate.
 KIND_VERBS: dict[str, str] = {
-    "run": "Running",
+    "run": "Applying",
     "revert": "Reverting",
 }
 
@@ -81,12 +81,34 @@ KIND_UNITS: dict[str, str] = {
 
 # Human-readable verbs for a per-run claim's refusal text.
 RUN_CLAIM_VERBS: dict[str, str] = {
-    "run": "running",
+    "run": "being applied",
     "revert": "reverting",
     "creating": "generating",
     "refresh": "syncing with Uwazi",
     "renaming": "being renamed",
     "deleting": "being deleted",
+}
+
+# The run status a claim paints on the review page's header badge. Only the
+# kinds a review page can be open for are mapped: a sync/rename/delete still
+# locks the page, but the stored run status is the honest reading there.
+RUN_CLAIM_STATUS: dict[str, str] = {
+    "creating": "creating",
+    "regenerating": "regenerating",
+    "run": "running",
+    "revert": "reverting",
+}
+
+# The review page's read-only banner names what the claim is doing, in the
+# operator's words (not the refusal sentence a second action gets).
+RUN_CLAIM_ACTIONS: dict[str, str] = {
+    "creating": "Generating this task",
+    "regenerating": "Regenerating this task",
+    "run": "Applying changes",
+    "revert": "Reverting changes",
+    "refresh": "Syncing with Uwazi",
+    "renaming": "Renaming this task",
+    "deleting": "Deleting this task",
 }
 
 
@@ -113,7 +135,7 @@ def busy_text(state: GateState | None) -> str:
     """The refusal toast's text when a second Uwazi write is attempted (pure)."""
     if state is None:
         return "Busy — another Uwazi operation is in progress. Wait until it finishes."
-    name = f" on run {state.run_id!r}" if state.run_id else ""
+    name = f" on task {state.run_id!r}" if state.run_id else ""
     return f"Busy — {active_text(state).lower().capitalize()}{name}. Wait until it finishes."
 
 
@@ -122,7 +144,20 @@ def run_claim_text(claim: RunClaim | None) -> str:
     if claim is None:
         return "This task is busy with another operation. Wait until it finishes."
     verb = RUN_CLAIM_VERBS.get(claim.kind, claim.kind)
-    return f"This task is busy — run {claim.run_id!r} is {verb}. Wait until it finishes."
+    return f"This task is busy — {claim.run_id!r} is {verb}. Wait until it finishes."
+
+
+def run_claim_title(claim: RunClaim | None) -> str:
+    """The review page's read-only banner headline for a claimed run (pure).
+
+    The banner is NOT a refusal: it explains why every mutating control on the
+    page is disabled and what is happening. ``claim.note`` carries the live
+    stage (``"LLM is writing the script…"``) and is rendered separately.
+    """
+    if claim is None:
+        return ""
+    action = RUN_CLAIM_ACTIONS.get(claim.kind, "Working on this task")
+    return f"{action} — the review table is read-only until it finishes."
 
 
 _LOCK = threading.Lock()
@@ -362,6 +397,8 @@ __all__ = [
     "GateState",
     "KIND_UNITS",
     "KIND_VERBS",
+    "RUN_CLAIM_ACTIONS",
+    "RUN_CLAIM_STATUS",
     "RUN_CLAIM_VERBS",
     "RunClaim",
     "active_text",
@@ -372,6 +409,7 @@ __all__ = [
     "release_runs",
     "run_claim",
     "run_claim_text",
+    "run_claim_title",
     "run_claims",
     "set_claim_note",
     "set_note",

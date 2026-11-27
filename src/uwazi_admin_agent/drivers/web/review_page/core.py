@@ -22,12 +22,14 @@ from uwazi_admin_agent.domain.suggestion import (
     SuggestionStatus,
 )
 from uwazi_admin_agent.drivers.web.operation_gate import (
+    RUN_CLAIM_STATUS,
     active_text,
     busy_text,
     release,
     release_run,
     run_claim,
     run_claim_text,
+    run_claim_title,
     snapshot,
     try_acquire,
     try_claim_run,
@@ -104,6 +106,10 @@ _STATUS_LABELS.update({"match": "match", "mismatch": "mismatch"})
 
 
 _RUN_STATUS_BADGE_COLORS: dict[str, str] = {
+    "creating": "blue-grey",
+    "regenerating": "cyan",
+    "running": "blue",
+    "reverting": "purple",
     "planned": "grey",
     "snapshotted": "orange",
     "executed": "green",
@@ -118,6 +124,8 @@ def _accept_values_clicked(state: dict[str, Any], args: Any) -> None:
     """Accept every predicted value of ONE multiselect suboperation back."""
     from .entity_window import _set_selection_by_id
 
+    if _refuse_when_claimed(state):
+        return
     _row, sub = _sub_of(state, args)
     if sub is None or sub.get("is_info") or sub.get("is_display_only") or not isinstance(sub.get("id"), int):
         return
@@ -328,6 +336,10 @@ def _change_table(state: dict[str, Any]) -> None:
     table.props["binary-state-sort"] = True
     # The card footer owns "Showing a-b of N" and the page controls.
     table.props["hide-pagination"] = True
+    # The page's own sticky bulk bar is the selection readout; Quasar's
+    # "N records selected" strip duplicated it and shifted the table when it
+    # appeared.
+    table.props["hide-selected-banner"] = True
     # The expansion state lives in the prop, so the page controls it. It starts
     # empty; ``Expand all`` (if used) writes the next page's keys here.
     table.props["expanded"] = []
@@ -345,7 +357,7 @@ def _change_table(state: dict[str, Any]) -> None:
                  (derived from the checked suboperation ids) and reports the
                  click through the table's own event. -->
             <q-checkbox v-if="!props.row.is_display_only && !props.row.is_info" :model-value="props.selected" dense
-                        :disable="!props.row.has_selectable"
+                        :disable="!props.row.has_selectable || props.row.read_only"
                         :title="props.row.rerun_blocked ? props.row.rerun_blocked_reason
                                 : (props.row.has_selectable ? '' : 'Nothing to run or revert on this operation')"
                         @update:model-value="v => $parent.$emit('toggle_row', props.row.row_key, v)" />
@@ -400,6 +412,7 @@ def _change_table(state: dict[str, Any]) -> None:
               <q-btn v-if="!props.row.is_display_only && props.row.run_status !== 'applied'
                            && props.row.run_status !== 'discarded' && !props.row.rerun_blocked"
                      class="row-actions" outline round dense size="sm" icon="block" color="negative"
+                     :disable="props.row.read_only"
                      @click.stop="$parent.$emit('discard_op', props.row)">
                 <q-tooltip>Reject these suggestions</q-tooltip>
               </q-btn>
@@ -412,11 +425,13 @@ def _change_table(state: dict[str, Any]) -> None:
                 <q-tooltip>Edit this entity</q-tooltip>
               </q-btn>
               <q-btn v-if="!props.row.is_display_only" outline no-caps dense color="grey-9" class="apply-btn"
-                     :disable="!props.row.has_runnable" @click.stop="$parent.$emit('run_op', props.row)">
+                     :disable="!props.row.has_runnable || props.row.read_only"
+                     @click.stop="$parent.$emit('run_op', props.row)">
                 Apply
                 <q-tooltip>{{ props.row.run_title }}</q-tooltip>
               </q-btn>
-              <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
+              <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8"
+                     :disable="props.row.read_only" @click.stop>
                 <q-tooltip>More actions</q-tooltip>
                 <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
                   <q-list dense style="min-width: 190px">
@@ -451,106 +466,97 @@ def _change_table(state: dict[str, Any]) -> None:
           </q-td>
         </q-tr>
 
-        <!-- One child row per suggested property, inside the SAME table and
-             with the SAME number of cells as the parent (the empty fillers
-             keep every column aligned). The source paragraph gets its own row
-             directly under the suggestion it explains. -->
-        <template v-for="c in props.row.children" :key="c.key">
-          <q-tr v-show="props.expand" class="child-row">
-            <q-td auto-width>
-              <q-checkbox v-if="c.selectable" dense :model-value="c.checked"
-                          @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, c.id, v)" />
-              <q-icon v-else-if="!c.is_info" name="lock" size="14px" color="grey-5">
-                <q-tooltip>{{ c.note || 'Not independently runnable' }}</q-tooltip>
-              </q-icon>
-            </q-td>
-            <q-td key="expand"></q-td>
-            <q-td key="title">
-              <div class="child-target truncate" :title="c.target_full">{{ c.target_text }}
-                <q-tooltip class="wide-tooltip">{{ c.target_full }}</q-tooltip>
-              </div>
-              <q-badge v-if="c.language" color="teal-9" class="lang-pill q-mt-xs">{{ c.language }}</q-badge>
-            </q-td>
-            <q-td key="template"></q-td>
-            <q-td key="recommendation">
-              <div class="rec-pair">
-                <div class="rec-line rec-current">
-                  <span class="rec-tag">Current</span>
-                  <span class="rec-value" :title="c.current_full">{{ c.current || '—' }}
-                    <q-tooltip v-if="c.current_full && c.current_full !== '—'" class="wide-tooltip">
-                      {{ c.current_full }}
-                    </q-tooltip>
-                  </span>
+        <!-- The expanded entity: ONE full-width panel holding a vertical list
+             of its suboperations. A subrow per table column made the values
+             drift into unrelated columns; the card list keeps each property's
+             current value, suggestion, status and source text together and
+             indents the whole block under the parent target. -->
+        <q-tr v-show="props.expand" class="child-row">
+          <q-td colspan="8" class="expanded-cell">
+            <div class="sub-list">
+              <div v-for="c in props.row.children" :key="c.key" class="sub-item"
+                   :class="{ 'sub-item-structural': c.structural, 'sub-item-info': c.is_info }">
+                <div class="sub-item-head">
+                  <q-checkbox v-if="c.selectable" dense class="sub-check" :model-value="c.checked"
+                              :disable="props.row.read_only"
+                              @update:model-value="v => { c.checked = v; $parent.$emit(
+                                'toggle_sub', props.row.row_key, c.id, v) }" />
+                  <q-icon v-else-if="!c.is_info" name="lock" size="14px" color="grey-5">
+                    <q-tooltip>{{ c.note || 'Not independently runnable' }}</q-tooltip>
+                  </q-icon>
+                  <span class="sub-item-title">{{ c.label || c.target_text || 'Suggestion' }}</span>
+                  <q-badge v-if="c.language" color="teal-9" class="lang-pill">{{ c.language }}</q-badge>
+                  <q-badge v-if="c.status" class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
+                  <div v-if="!c.structural && !c.is_info && !c.is_display_only" class="sub-item-actions">
+                    <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8"
+                           :disable="props.row.read_only" @click.stop>
+                      <q-tooltip>{{ c.label || 'Suggestion actions' }}</q-tooltip>
+                      <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
+                        <q-list dense style="min-width: 210px">
+                          <q-item v-if="c.runnable" clickable v-close-popup
+                                  @click="$parent.$emit('run_sub', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="play_arrow" /></q-item-section>
+                            <q-item-section>Apply this suggestion</q-item-section>
+                          </q-item>
+                          <q-item v-if="c.has_rejected" clickable v-close-popup
+                                  @click="$parent.$emit('accept_values', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="done_all" /></q-item-section>
+                            <q-item-section>Accept every value</q-item-section>
+                          </q-item>
+                          <q-item v-if="c.independent && c.status === 'discarded'" clickable v-close-popup
+                                  @click="$parent.$emit('restore_sub', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="restore" /></q-item-section>
+                            <q-item-section>Restore</q-item-section>
+                          </q-item>
+                          <q-item v-else-if="c.runnable" clickable v-close-popup
+                                  @click="$parent.$emit('discard_sub', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="block" /></q-item-section>
+                            <q-item-section>Reject</q-item-section>
+                          </q-item>
+                          <q-item v-if="c.revertable" clickable v-close-popup
+                                  @click="$parent.$emit('revert_sub', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="undo" /></q-item-section>
+                            <q-item-section>Revert this property</q-item-section>
+                          </q-item>
+                          <q-item v-if="!c.structural && !c.is_display_only" clickable v-close-popup
+                                  @click="$parent.$emit('edit_sub', props.row.row_key, c.id)">
+                            <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                            <q-item-section>Edit in entity window</q-item-section>
+                          </q-item>
+                        </q-list>
+                      </q-menu>
+                    </q-btn>
+                  </div>
                 </div>
-                <div class="rec-line rec-suggested">
-                  <span class="rec-tag">Suggestion</span>
-                  <span v-if="c.select_type && ((c.values && c.values.length) || c.extra_selection)" class="rec-values">
-                    <q-chip v-for="v in c.values" :key="v.label" dense
-                            :color="v.accepted ? 'green-2' : 'red-2'"
-                            :text-color="v.accepted ? 'green-10' : 'red-10'"
-                            :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
-                    <span v-if="c.extra_selection" class="rec-extra">{{ c.extra_selection }}</span>
-                  </span>
-                  <span v-else class="rec-value" :title="c.proposed_full">{{ c.proposed || '—' }}
-                    <q-tooltip v-if="c.recommendation_full" class="wide-tooltip">{{ c.recommendation_full }}
-                    </q-tooltip>
-                  </span>
+                <div v-if="c.caption" class="sub-item-caption">{{ c.caption }}</div>
+                <div class="sub-item-values">
+                  <div class="sub-value">
+                    <span class="sub-value-label">Current</span>
+                    <div class="sub-value-text sub-current" :title="c.current_full">{{ c.current || '—' }}</div>
+                  </div>
+                  <div class="sub-value">
+                    <span class="sub-value-label">Suggestion</span>
+                    <div v-if="c.select_type && ((c.values && c.values.length) || c.extra_selection)" class="sub-values">
+                      <q-chip v-for="v in c.values" :key="v.label" dense
+                              :color="v.accepted ? 'green-2' : 'red-2'"
+                              :text-color="v.accepted ? 'green-10' : 'red-10'"
+                              :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
+                      <span v-if="c.extra_selection" class="rec-extra">{{ c.extra_selection }}</span>
+                    </div>
+                    <div v-else class="sub-value-text sub-proposed" :title="c.proposed_full">
+                      {{ c.proposed_full || c.proposed || '—' }}
+                    </div>
+                  </div>
                 </div>
+                <div v-if="c.context" class="sub-item-context">
+                  <span class="sub-value-label">Context</span>
+                  <div class="subs-context">{{ c.context }}</div>
+                </div>
+                <div v-if="c.note && !c.selectable && !c.is_display_only" class="sub-item-note">{{ c.note }}</div>
               </div>
-            </q-td>
-            <q-td key="ops"></q-td>
-            <q-td key="run_status">
-              <q-badge class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
-            </q-td>
-            <q-td key="actions" class="text-no-wrap">
-              <div class="row items-center justify-end no-wrap actions-cell">
-                <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
-                  <q-tooltip>{{ c.label || 'Suggestion actions' }}</q-tooltip>
-                  <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
-                    <q-list dense style="min-width: 210px">
-                      <q-item v-if="c.runnable" clickable v-close-popup
-                              @click="$parent.$emit('run_sub', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="play_arrow" /></q-item-section>
-                        <q-item-section>Run this suggestion</q-item-section>
-                      </q-item>
-                      <q-item v-if="c.has_rejected" clickable v-close-popup
-                              @click="$parent.$emit('accept_values', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="done_all" /></q-item-section>
-                        <q-item-section>Accept every value</q-item-section>
-                      </q-item>
-                      <q-item v-if="c.independent && c.status === 'discarded'" clickable v-close-popup
-                              @click="$parent.$emit('restore_sub', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="restore" /></q-item-section>
-                        <q-item-section>Restore</q-item-section>
-                      </q-item>
-                      <q-item v-else-if="c.runnable" clickable v-close-popup
-                              @click="$parent.$emit('discard_sub', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="block" /></q-item-section>
-                        <q-item-section>Reject</q-item-section>
-                      </q-item>
-                      <q-item v-if="c.revertable" clickable v-close-popup
-                              @click="$parent.$emit('revert_sub', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="undo" /></q-item-section>
-                        <q-item-section>Revert this property</q-item-section>
-                      </q-item>
-                      <q-item v-if="!c.structural && !c.is_display_only" clickable v-close-popup
-                              @click="$parent.$emit('edit_sub', props.row.row_key, c.id)">
-                        <q-item-section avatar><q-icon name="edit" /></q-item-section>
-                        <q-item-section>Edit in entity window</q-item-section>
-                      </q-item>
-                    </q-list>
-                  </q-menu>
-                </q-btn>
-              </div>
-            </q-td>
-          </q-tr>
-          <q-tr v-if="c.context" v-show="props.expand" class="context-row">
-            <q-td></q-td>
-            <q-td colspan="7">
-              <div class="subs-context">{{ c.context }}</div>
-            </q-td>
-          </q-tr>
-        </template>
+            </div>
+          </q-td>
+        </q-tr>
         """,
     )
     table.on("run_op", lambda e: _run_op_clicked(state, _row_key_of(getattr(e, "args", None))))
@@ -599,6 +605,128 @@ def _operation_in_flight(state: dict[str, Any]) -> bool:
     if run_claim(instance, run_id) is not None:
         return True
     return snapshot(instance) is not None
+
+
+def _refuse_when_claimed(state: dict[str, Any], client: Any = None) -> bool:
+    """Refuse a local write while this run is claimed, naming the work (pure-ish).
+
+    The per-run claim is taken by generation, regeneration, sync, rename/delete
+    AND by Run/Revert themselves. A handler that writes the suggestion store
+    without taking the Uwazi-write gate (discard/restore/accept-values) would
+    otherwise mutate rows while the planner is rewriting them. The controls are
+    disabled while the claim is live; this guard is the server-side half, so a
+    stale page or a second client cannot slip a write in between polls.
+    """
+    claim = run_claim(state.get("instance_url", ""), state.get("run_id", ""))
+    if claim is None:
+        return False
+    message = run_claim_text(claim)
+    if client is not None:
+        with client:
+            ui.notify(message, type="warning", multi_line=True)
+    else:
+        ui.notify(message, type="warning", multi_line=True)
+    return True
+
+
+def _paint_claim_badge(state: dict[str, Any], claim: Any) -> None:
+    """Paint the live claim on the header badge (``regenerating`` and friends)."""
+    badge = state.get("_status_badge")
+    if badge is None or badge.is_deleted:
+        return
+    status = RUN_CLAIM_STATUS.get(claim.kind)
+    if status is None:
+        # A sync/rename/delete keeps the stored status: it is not a run state.
+        _refresh_run_badge(state)
+        return
+    badge.text = status
+    badge.props(f"color={_RUN_STATUS_BADGE_COLORS.get(status, 'grey-7')}")
+
+
+def _paint_table_read_only(state: dict[str, Any], read_only: bool) -> None:
+    """Propagate the claim to the row controls and repaint the table.
+
+    The Vue slots read ``props.row.read_only`` for the row and child checkboxes,
+    Apply/Reject buttons and the action menus; the class also disables Quasar's
+    header select-all checkbox, which is internal to QTable. Reading and
+    expanding stay available — only mutation is blocked.
+    """
+    table = state.get("_table")
+    if table is None or table.is_deleted:
+        return
+    rows: list[Any] = []
+    for row in table.rows or []:
+        if isinstance(row, dict):
+            row = dict(row)
+            row["read_only"] = read_only
+        rows.append(row)
+    table.rows = rows
+    if read_only:
+        table.classes(add="review-readonly")
+    else:
+        table.classes(remove="review-readonly")
+    # Replacing the rows invalidates QTable's selected list, so re-derive it
+    # from the checked ids (which also refreshes the bulk buttons' counts).
+    _sync_selection(state)
+
+
+def _render_run_claim(state: dict[str, Any], claim: Any) -> None:
+    """Show/hide the read-only banner and paint the live stage."""
+    banner = state.get("_run_banner")
+    if banner is None or banner.is_deleted:
+        return
+    banner.set_visibility(claim is not None)
+    if claim is None:
+        return
+    title = state.get("_run_banner_title")
+    if title is not None and not title.is_deleted:
+        title.text = run_claim_title(claim)
+    note = state.get("_run_banner_note")
+    if note is not None and not note.is_deleted:
+        note.text = claim.note.strip() or "The suggestions refresh automatically when it finishes."
+
+
+def _paint_run_claim(state: dict[str, Any], claim: Any) -> None:
+    """Apply one claim snapshot to the banner, the badge, the table and the bar."""
+    busy = claim is not None
+    was_busy = bool(state.get("_read_only"))
+    state["_read_only"] = busy
+    _render_run_claim(state, claim)
+    if busy != was_busy:
+        _paint_table_read_only(state, busy)
+        if state.get("_table") is None:
+            _refresh_selection_counts(state)
+    if busy:
+        _paint_claim_badge(state, claim)
+    elif was_busy:
+        _refresh_run_badge(state)
+    for key in ("_update_table_item", "_drift_sync_button"):
+        control = state.get(key)
+        if control is not None and not control.is_deleted:
+            control.set_enabled(not busy)
+
+
+def _poll_run_claim(state: dict[str, Any]) -> None:
+    """Keep the review page in step with the run's per-run claim.
+
+    A regeneration started from another window (or from the tasks page) does
+    not touch this page's UI. Polling the in-memory claim is what makes the
+    page show ``regenerating`` and disable every mutating control; on release
+    of a generation claim it reloads the table, because that is when the new
+    script and its suggestions are committed.
+    """
+    if not session_is_active(state["instance_url"]):
+        return
+    claim = run_claim(state["instance_url"], state["run_id"])
+    signature = (claim.kind, claim.note) if claim is not None else None
+    if signature == state.get("_run_claim_signature"):
+        return
+    previous = state.get("_run_claim_signature")
+    previous_kind = previous[0] if previous else None
+    state["_run_claim_signature"] = signature
+    _paint_run_claim(state, claim)
+    if claim is None and previous_kind in ("creating", "regenerating"):
+        _refresh_all(state)
 
 
 async def _check_drift_now(state: dict[str, Any], notify: bool = True, client: Any = None) -> None:
@@ -764,6 +892,8 @@ def _discard_from_state(state: dict[str, Any]) -> None:
     to be written are discarded — an applied row is undone by Revert, not
     refused.
     """
+    if _refuse_when_claimed(state):
+        return
     refs = _checked_flags(state, "run")
     ids = ids_of_refs(refs)
     if not ids:
@@ -782,7 +912,7 @@ def _discard_from_state(state: dict[str, Any]) -> None:
 
     noun = "suggestion" if len(ids) == 1 else "suggestions"
     _reason_dialog(
-        f"Mark {len(ids)} checked {noun} as discarded. They will NOT be applied by a Run, "
+        f"Mark {len(ids)} checked {noun} as discarded. They will NOT be written by Apply, "
         "and the reason is stored with them.",
         _submit,
         title=f"Discard {len(ids)} {noun}",
@@ -798,11 +928,13 @@ async def _discard_ids(
     client: Any,
 ) -> None:
     """Mark the given SUBOPERATIONS as discarded, then refresh the page."""
+    if _refuse_when_claimed(state, client):
+        return
     try:
         count = await asyncio.to_thread(discard_ids, state["instance_url"], state["run_id"], ids, reason)
         with client:
             ui.notify(
-                f"Discarded {count} suggestion(s) — a Run will not execute them",
+                f"Discarded {count} suggestion(s) — Apply will not write them",
                 type="positive",
                 multi_line=True,
             )
@@ -823,11 +955,13 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
     the list is showing: discarding an entity under a property filter refuses
     those property suggestions, not the ones the filter hid.
     """
+    if _refuse_when_claimed(state):
+        return
     row = _row_of_key(state, row_key)
     if row is None or row.get("is_display_only") or row.get("is_info"):
         return
     if row.get("rerun_blocked"):
-        ui.notify(f"This operation cannot be run again — {row.get('rerun_blocked_reason')}", type="warning")
+        ui.notify(f"This operation cannot be applied again — {row.get('rerun_blocked_reason')}", type="warning")
         return
     ids = ids_of_refs(_row_refs(row))
     if not ids:
@@ -838,7 +972,7 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
         background_tasks.create(_discard_ids(state, ids, reason, client), name=f"discard {row_key}")
 
     _reason_dialog(
-        "Mark this suggestion as discarded? A Run will not apply it. The reason is stored with it.",
+        "Mark this suggestion as discarded? Apply will not write it. The reason is stored with it.",
         _submit,
         title="Discard suggestions",
         confirm_label="Discard",
@@ -848,6 +982,8 @@ def _discard_op_clicked(state: dict[str, Any], row_key: str) -> None:
 
 def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Discard ONE suggestion (its id is the whole selection)."""
+    if _refuse_when_claimed(state):
+        return
     _row, sub = _sub_of(state, args)
     if sub is None or sub.get("is_info") or sub.get("is_display_only") or not isinstance(sub.get("id"), int):
         return
@@ -1071,6 +1207,12 @@ def _poll_progress(state: dict[str, Any]) -> None:
     """
     if not session_is_active(state["instance_url"]):
         return
+    # A claimed run (regeneration included) is rewriting the suggestion store.
+    # Re-reading it mid-write would paint a partial table — and would replace
+    # the read-only row payloads with actionable ones. The claim's release is
+    # what reloads the committed table.
+    if run_claim(state["instance_url"], state["run_id"]) is not None:
+        return
     pass_row = current_pass(state["instance_url"], state["run_id"])
     if pass_row is None or pass_row.status != PredictionAttemptStatus.RUNNING:
         return
@@ -1281,7 +1423,7 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     """Update the selection-driven buttons' texts from the checked SUBOPERATIONS.
 
     ONE selection, THREE meanings — each button counts the checked parts IT can
-    act on, so a selection of applied rows reads "Revert (N)" and "Run (0)":
+    act on, so a selection of applied rows reads "Revert (N)" and "Apply (0)":
 
     - Run/Discard act on the parts still to be written (pending/reverted), and
       an applied or discarded part must never inflate them;
@@ -1298,6 +1440,9 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     entities = len(entities_of_refs(revert_refs))
     selection = _checked_refs(state)
     selected_entities = len(entities_of_refs(selection))
+    # A claimed run (generation/regeneration/sync/Run/Revert) makes the page
+    # read-only: the counts stay visible, but no bulk action can be started.
+    busy = bool(state.get("_read_only"))
     selected_label = state.get("_selection_label")
     if selected_label is not None and not selected_label.is_deleted:
         selected_label.text = f"{selected_entities:,} selected"
@@ -1305,24 +1450,24 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     run_button = state.get("_run_button")
     if run_button is not None and not run_button.is_deleted:
         run_button.text = run_button_label(run_count)
-        run_button.set_enabled(run_count > 0)
+        run_button.set_enabled(run_count > 0 and not busy)
     revert_button = state.get("_bulk_revert_button")
     if revert_button is not None and not revert_button.is_deleted:
         # The target shows the verb alone; the count lives in the selected
         # label and in the Run button (the one action whose scope is the row
         # count the operator just selected).
         revert_button.text = "Revert"
-        revert_button.set_enabled(entities > 0)
+        revert_button.set_enabled(entities > 0 and not busy)
     discard_button = state.get("_bulk_discard_button")
     if discard_button is not None and not discard_button.is_deleted:
         discard_button.text = "Discard"
-        discard_button.set_enabled(run_count > 0)
+        discard_button.set_enabled(run_count > 0 and not busy)
     select_button = state.get("_select_all_button")
     if select_button is not None and not select_button.is_deleted:
         total = int(state.get("total") or 0)
         all_selected = bool(state.get("_select_all"))
         select_button.text = select_all_label(total, all_selected)
-        select_button.set_enabled(all_selected or total > 0)
+        select_button.set_enabled((all_selected or total > 0) and not busy)
 
 
 def _sync_table_sort(state: dict[str, Any]) -> None:
@@ -1522,8 +1667,13 @@ def _reload_table(state: dict[str, Any]) -> None:
             )
             for item in rows
         ]
+        read_only = bool(state.get("_read_only"))
         for item, payload in zip(rows, payloads, strict=True):
             _decorate_operation_payload(payload, item)
+            # Every repaint (a filter, a page flip, a post-action refresh)
+            # carries the CURRENT claim state: a payload rebuilt without it
+            # would re-enable Apply while regeneration still owns the run.
+            payload["read_only"] = read_only
         # The Revert icon names the backup it would restore, the way the
         # entity table's did: the date is already read for the confirm dialog.
         # A row the run CREATED has no backup: its undo deletes the entity, and
@@ -1643,10 +1793,12 @@ def _reset_global_selection(state: dict[str, Any]) -> None:
 
 async def _restore_ids(state: dict[str, Any], ids: list[int], client: Any) -> None:
     """Return the given SUBOPERATIONS' discarded rows to pending, then refresh."""
+    if _refuse_when_claimed(state, client):
+        return
     try:
         count = await asyncio.to_thread(restore_ids, state["instance_url"], state["run_id"], ids)
         with client:
-            ui.notify(f"Restored {count} suggestion(s) — they can be run again", type="positive")
+            ui.notify(f"Restored {count} suggestion(s) — they can be applied again", type="positive")
     except Exception as exc:  # noqa: BLE001 — the toast reports; the page never crashes
         logger.exception("restore failed")
         with client:
@@ -1659,6 +1811,8 @@ async def _restore_ids(state: dict[str, Any], ids: list[int], client: Any) -> No
 
 def _restore_op_clicked(state: dict[str, Any], row_key: str) -> None:
     """Undo the discard of ONE operation (its visible rows go back to pending)."""
+    if _refuse_when_claimed(state):
+        return
     row = _row_of_key(state, row_key)
     if row is None or row.get("is_display_only") or row.get("is_info"):
         return
@@ -1669,6 +1823,8 @@ def _restore_op_clicked(state: dict[str, Any], row_key: str) -> None:
 
 def _restore_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Undo ONE suboperation's discard."""
+    if _refuse_when_claimed(state):
+        return
     _row, sub = _sub_of(state, args)
     if sub is None or sub.get("is_info") or sub.get("is_display_only") or not isinstance(sub.get("id"), int):
         return
@@ -1684,6 +1840,8 @@ def _revert_from_state(state: dict[str, Any]) -> None:
     a revert (there is nothing to restore for it), and an applied part must not
     be dropped just because its siblings are still pending.
     """
+    if _refuse_when_claimed(state):
+        return
     entities = entities_of_refs(_checked_flags(state, "revert"))
     if not entities:
         ui.notify("Nothing selected to revert", type="warning")
@@ -1756,6 +1914,8 @@ def _revert_sub_clicked(state: dict[str, Any], args: Any) -> None:
     """Revert ONE property's write (the suboperation's own undo)."""
     from .entity_window import _revert_suboperation_clicked
 
+    if _refuse_when_claimed(state):
+        return
     _row, sub = _sub_of(state, args)
     if (
         sub is None
@@ -1989,7 +2149,7 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
         # operation — the only reading that makes the button useful.
         covered = subs
     if not covered:
-        ui.notify("This entity has nothing to run", type="warning")
+        ui.notify("This entity has nothing to apply", type="warning")
         return
     # A part that was already written (or refused) is not written again by the
     # operation's Run: "run this operation" means the work that remains, and a
@@ -2001,9 +2161,9 @@ def _run_op_clicked(state: dict[str, Any], row_key: str) -> None:
             "",
         )
         if blocked_reason:
-            ui.notify(f"This operation cannot be run again — {blocked_reason}", type="warning", multi_line=True)
+            ui.notify(f"This operation cannot be applied again — {blocked_reason}", type="warning", multi_line=True)
             return
-        ui.notify("Nothing left to run for this entity", type="warning")
+        ui.notify("Nothing left to apply for this entity", type="warning")
         return
     _set_children_checked(state, row, True)
     _sync_selection(state)
@@ -2030,6 +2190,8 @@ def _run_refs(
     modal on every press made the loop slower than the write it guards. The
     table's Run (a whole selection) keeps its confirmation.
     """
+    if _refuse_when_claimed(state):
+        return
     ids = ids_of_refs(refs)
     if not ids:
         ui.notify("Nothing selected", type="warning")
@@ -2127,7 +2289,7 @@ async def _run_rows(
                     )
                 else:
                     ui.notify(
-                        f"Applied — 'Revert' on run {state['run_id']!r} (or Revert task) undoes it",
+                        "Applied — 'Revert' on this task (or Revert task) undoes it",
                         type="positive",
                         multi_line=True,
                     )
@@ -2151,7 +2313,7 @@ async def _run_rows(
             logger.exception("run (heuristic apply) failed")
             with client:
                 ui.notify(
-                    f"Run failed: {exc}",
+                    f"Apply failed: {exc}",
                     type="negative",
                     multi_line=True,
                 )
@@ -2165,7 +2327,7 @@ async def _run_rows(
 
 
 def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
-    """The suboperation's Run button: write that one part."""
+    """The suboperation's Apply button: write that one part."""
     if not isinstance(args, list) or len(args) != 2:
         return
     row_key, sub_id = args
@@ -2181,10 +2343,10 @@ def _run_sub_clicked(state: dict[str, Any], args: Any) -> None:
     if not _runnable(sub):
         blocked_reason = str(sub.get("rerun_blocked_reason") or "")
         if blocked_reason:
-            ui.notify(f"This row cannot be run again — {blocked_reason}", type="warning", multi_line=True)
+            ui.notify(f"This row cannot be applied again — {blocked_reason}", type="warning", multi_line=True)
             return
         ui.notify(
-            f"This suboperation is already {sub.get('status')} — nothing to run"
+            f"This suboperation is already {sub.get('status')} — nothing to apply"
             + (" (Restore it first)" if sub.get("status") == "discarded" else ""),
             type="warning",
         )
@@ -2348,12 +2510,22 @@ def _sync_selection(state: dict[str, Any]) -> None:
         for sub in subs:
             if isinstance(sub, dict):
                 sub["checked"] = bool(sub.get("selectable")) and sub.get("id") in checked
+        # The expanded panel renders ``children``; keep it pointing at the same
+        # dicts the sync just updated. A stale copy here was why a checked part
+        # updated the counters but its checkbox stayed empty.
+        row["children"] = subs
         actionable_subs = [
             sub for sub in subs if isinstance(sub, dict) and (sub.get("runnable") or sub.get("revert_selectable"))
         ]
         if actionable_subs and all(sub.get("id") in checked for sub in actionable_subs):
             selected.append(row)
-    table.selected = selected
+    # Replacing the rows list (not just mutating the nested ``checked`` flags)
+    # is what makes the panel's checkboxes repaint: a table update that keeps
+    # the same list reference leaves the client looking at the old child state.
+    selected_keys = {row.get("row_key") for row in selected if isinstance(row, dict)}
+    rows = [dict(row) for row in table.rows or []]
+    table.rows = rows
+    table.selected = [row for row in rows if row.get("row_key") in selected_keys]
     table.update()
     _refresh_selection_counts(state)
 

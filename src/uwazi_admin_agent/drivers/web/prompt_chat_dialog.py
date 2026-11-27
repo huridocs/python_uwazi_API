@@ -110,12 +110,12 @@ from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
 # pass). The clarification turns are cheap and run on the configured defaults.
 _CHAT_OUT_TOKENS: int = 1024
 
-# The status badge on every prompt bubble. "Run" means the prompt is part of the
-# script's current prompt (it was applied); "Not run yet" means the operator
-# wrote it and has not pressed Run since.
+# The status badge on every prompt bubble. "Applied" means the prompt is part of
+# the script's current prompt (it was written); "Not applied yet" means the
+# operator wrote it and has not pressed Apply since.
 _PROMPT_STATUS_TEXT: dict[ChatPromptStatus, str] = {
-    ChatPromptStatus.APPLIED: "Run",
-    ChatPromptStatus.PENDING: "Not run yet",
+    ChatPromptStatus.APPLIED: "Applied",
+    ChatPromptStatus.PENDING: "Not applied yet",
 }
 _PROMPT_STATUS_COLOR: dict[ChatPromptStatus, str] = {
     ChatPromptStatus.APPLIED: "green",
@@ -289,7 +289,7 @@ def prompt_chat_dialog(
                 spinner = ui.spinner(size="sm", color="primary")
                 status_label = ui.label("").classes("text-caption text-grey-7")
                 run_button = ui.button(
-                    "Run modifications",
+                    "Apply modifications",
                     icon="play_arrow",
                     on_click=lambda: _run_clicked(state, on_table_changed, on_run_started),
                 ).props("unelevated no-caps color=primary")
@@ -331,7 +331,7 @@ def _add_prompt_bubble(
 
     One bubble per prompt (never one bubble holding the whole conversation), so
     the operator can point at the exact request they wrote. The badge says
-    whether that prompt is already part of the script ("Run") or is still
+    whether that prompt is already part of the script ("Applied") or is still
     waiting for the Run button ("Not run yet"). The returned handle lets a
     successful Run flip the badge in place.
     """
@@ -468,7 +468,7 @@ def _render_corrections_card(state: dict[str, Any]) -> None:
                 ui.label(f"Fixes to add to the prompt ({len(corrections)})").classes("text-subtitle2 text-weight-medium")
                 ui.label(
                     "Flag as many wrong suggestions as you need, then add them all to the "
-                    "prompt at once: one Run regenerates the script and fixes every one."
+                    "prompt at once: one Apply regenerates the script and fixes every one."
                 ).classes("text-caption text-grey-8 w-full")
                 for correction in corrections:
                     ui.label(correction_summary(correction)).classes("text-caption text-grey-8 w-full").style(
@@ -730,7 +730,7 @@ def _mark_prompts_run(state: dict[str, Any]) -> None:
     """Mark every prompt written in this session as folded into the Run.
 
     Called only after the regeneration SUCCEEDED: the requests are now part of
-    the script's prompt, so their bubbles say "Run" instead of "Not run yet".
+    the script's prompt, so their bubbles say "Applied" instead of "Not applied yet".
     A failed Run leaves them pending (the operator can try again).
     """
     state["history"] = mark_prompts_applied(state["history"])
@@ -783,7 +783,7 @@ async def _do_compact(state: dict[str, Any]) -> None:
     _replace_chat_with_compaction(state, compacted)
     _set_busy(state, False)
     with state.get("_client"):
-        ui.notify("Chat compacted — press Run modifications to apply it", type="positive", multi_line=True)
+        ui.notify("Chat compacted — press Apply modifications to apply it", type="positive", multi_line=True)
 
 
 def _replace_chat_with_compaction(state: dict[str, Any], compacted: str) -> None:
@@ -875,7 +875,7 @@ def _set_compact_enabled(state: dict[str, Any], enabled: bool) -> None:
 
 
 def _refresh_run_button(state: dict[str, Any]) -> None:
-    """Show the Run button only when the chat has changes and nothing is running."""
+    """Show the Apply button only when the chat has changes and nothing is running."""
     button = state.get("_run_button")
     if button is None or button.is_deleted:
         return
@@ -900,7 +900,7 @@ def _run_clicked(
     on_table_changed: Callable[[], None] | None,
     on_run_started: Callable[[], None] | None = None,
 ) -> None:
-    """The Run button: regenerate the script from the whole chat and reconcile."""
+    """The Apply button: regenerate the script from the whole chat and reconcile."""
     if state["busy"] or not state["dirty"]:
         return
     budget = build_budget(_regeneration_estimate(state["run_id"]))

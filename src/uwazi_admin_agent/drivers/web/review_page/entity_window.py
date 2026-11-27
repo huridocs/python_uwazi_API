@@ -97,6 +97,7 @@ from .core import (
     _clear_checked,
     _current_filter,
     _refresh_all,
+    _refuse_when_claimed,
     _run_refs,
     _suggestion_is_runnable,
 )
@@ -259,7 +260,7 @@ def _render_entity_details(
 
 
 def _refresh_entity_window(state: dict[str, Any]) -> None:
-    """Refresh the window's header + properties after a Run/Revert (in place)."""
+    """Refresh the window's header + properties after an Apply/Revert (in place)."""
     home = state.get("_entity_home")
     dialog = state.get("_entity_dialog")
     if not home or dialog is None or dialog.is_deleted:
@@ -536,7 +537,7 @@ def _entity_header(
     discarded: bool = False,
     suggestions: list[Suggestion] | None = None,
 ) -> None:
-    """The window's title row: Run this row, Revert this entity, or Close.
+    """The window's title row: Apply this row, Revert this entity, or Close.
 
     The buttons mirror the review table's operation actions. Run writes the
     rows that are still waiting (an applied/discarded part is not written
@@ -575,7 +576,7 @@ def _entity_header(
             if discarded:
                 ui.badge("discarded").props("color=negative").classes("q-mr-sm")
             run_button = ui.button(
-                "Run this row",
+                "Apply this row",
                 icon="play_arrow",
                 on_click=lambda: _run_refs(state, refs, confirm=False),
             ).props("flat no-caps color=primary")
@@ -761,7 +762,7 @@ def _relationship_summary(suggestion: Suggestion, titles: dict[str, str] | None 
     ]
     if unpredicted:
         _entity_value_label(
-            "Not predicted, will be removed by this Run: "
+            "Not predicted, will be removed when applied: "
             + ", ".join(render_relationship([shared_id], titles) for shared_id in unpredicted),
             "text-body2 text-orange-9",
         )
@@ -877,7 +878,7 @@ def _entity_suggestions(
     Each card carries the same per-property actions as the review table's
     suboperation row: Run (when the part can still be written on its own) and
     Revert (when that property has a completed in-place write to undo). The
-    header's "Run this row"/"Revert this entity" remain the coarse actions.
+    header's "Apply this row"/"Revert this entity" remain the coarse actions.
 
     ``focus_property`` highlights the property the window was opened from (a
     suboperation's Edit icon) without hiding the entity's other rows.
@@ -932,7 +933,7 @@ def _entity_suggestions(
                                 [s.op],
                                 confirm=False,
                             ),
-                        ).props("flat dense color=primary").tooltip("Run this property")
+                        ).props("flat dense color=primary").tooltip("Apply this property")
                     if sub_revertable(suggestion, in_place=sub_in_place):
                         ui.button(
                             icon="undo",
@@ -955,11 +956,17 @@ def _entity_suggestions(
                     f"Suggested value: {_render_value(suggestion.proposed_value, property_type, titles)}",
                     "text-body2 text-teal-9",
                 )
-            if suggestion.op == SKIPPED_OP and suggestion.proposed_value:
-                _entity_value_label(
-                    f"Evidence for this exclusion: {suggestion.proposed_value}",
-                    "text-body2 text-grey-7",
-                )
+            if suggestion.op == SKIPPED_OP:
+                if suggestion.context:
+                    _entity_value_label(
+                        f"Input text the script read: {suggestion.context}",
+                        "text-body2 text-grey-7",
+                    )
+                if suggestion.proposed_value:
+                    _entity_value_label(
+                        f"Evidence for this exclusion: {suggestion.proposed_value}",
+                        "text-body2 text-grey-7",
+                    )
             if suggestion.op in PROPERTY_OPS:
                 property_type = property_types.get(suggestion.property_name or "")
                 _entity_value_label(
@@ -987,7 +994,7 @@ def _entity_suggestions(
                     unpredicted = unpredicted_values(suggestion.current_value, selected)
                     if unpredicted:
                         _entity_value_label(
-                            f"Not predicted, will be removed by this Run: {', '.join(unpredicted)}",
+                            f"Not predicted, will be removed when applied: {', '.join(unpredicted)}",
                             "text-body2 text-orange-9",
                         )
                     _entity_value_label(
@@ -1031,7 +1038,7 @@ def _entity_suggestions(
                     unpredicted = unpredicted_values(suggestion.current_value, selected)
                     if unpredicted:
                         _entity_value_label(
-                            f"Not predicted, will be removed by this Run: {', '.join(unpredicted)}",
+                            f"Not predicted, will be removed when applied: {', '.join(unpredicted)}",
                             "text-body2 text-orange-9",
                         )
                     recommended = [option["label"] for option in options if option["recommended"]]
@@ -1326,6 +1333,8 @@ async def _revert_entity_clicked(state: dict[str, Any], shared_id: str) -> None:
     the task touched, not just the clicked suboperation's language. A merge row
     also re-creates the sources it absorbed, so the dialog says so.
     """
+    if _refuse_when_claimed(state):
+        return
     tooltip = state.get("_backup_dates", {}).get(shared_id)
     tooltip_text = tooltip.strftime("%Y-%m-%d %H:%M") if tooltip is not None else ""
 
@@ -1360,6 +1369,8 @@ def _revert_suboperation_clicked(
     this one puts a single property back, so the operator can keep the rest.
     Confirm first — it still writes to Uwazi.
     """
+    if _refuse_when_claimed(state):
+        return
 
     def _confirm() -> None:
         client = context.client
@@ -1521,6 +1532,8 @@ async def _set_selection_by_id(state: dict[str, Any], row_id: int, selected: lis
     is the operator's "nothing selected", which the service turns into the
     row's sentinel discard.
     """
+    if _refuse_when_claimed(state, client):
+        return
     try:
         await asyncio.to_thread(
             set_selected_values,

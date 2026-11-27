@@ -383,7 +383,7 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
       the Target column and its children shown when expanded. It carries no
       checkbox and no action buttons, and it is never applied.
 
-  record_skipped(shared_id, reason, title='', template_name=None, detail=None)
+  record_skipped(shared_id, reason, title='', template_name=None, detail=None, basis=None, context=None)
       Record ONE entity the script could not process. This is display-only:
       it changes NOTHING in Uwazi and is never runnable. Use it instead of
       folding skipped entities into an `add_info` paragraph, so each entity
@@ -400,6 +400,17 @@ Do NOT import them. Do NOT import anything else. They are injected for you:
         - `extraction_error`    — an exception occurred while extracting.
       `detail` is optional evidence (a short page-1 excerpt, the exception
       text). The review table maps the id to descriptive user-facing text.
+      A skip MUST also carry the provenance the value was to be read from, so
+      the operator can see the input that failed:
+        - `basis=[<source property>, ...]` when the value was to come from the
+          entity's OWN metadata. The entity window then shows those properties
+          instead of a document, and the review table uses their values as the
+          row's input text.
+        - `context=<exact passage>` when the value was to come from a document,
+          file or URL. `detail` stays the short failure/exception text.
+      A skip without either is a bug: it hides the input the operator needs to
+      judge the failure, and the window — seeing no basis — reports a missing
+      document for an entity whose task never read one.
       Call it once per skipped entity, inside the per-entity failure handling:
           try:
               seg = get_segmentation(sid)
@@ -1279,6 +1290,8 @@ entities from their own metadata properties or documents:
   rather than documents): read from `d["metadata"][prop]` (remember the READ
   array shape), pass `'basis': [prop, ...]` on each update dict (NOT
   `'context'`), and do NOT call `get_entity_files*` or `get_segmentation*`.
+  For each entity that cannot be processed, pass the same source property:
+  `record_skipped(..., basis=[prop])`.
 - Document-source extraction: when reading documents and the prompt gives no
   specific page or section guidance, determine the optimal extraction strategy
   from the document's length and structure (see DOCUMENT EXTRACTION below).
@@ -1361,7 +1374,10 @@ one-document logic. Use this exact shape:
    exists, `no_segmentation` when the document has no usable text, `no_page_1`
    when page 1 is unreadable, `no_match` when the source was read but no value
    matched, and `extraction_error` for a caught exception. Put a short excerpt
-   or exception message in `detail` so the reason is verifiable.
+   or exception message in `detail` so the reason is verifiable, and on that SAME
+   call pass `context=<the passage you read>` (document/file/URL source) or
+   `basis=[<source property>]` (metadata source) — without it the row shows the
+   failure sentence alone and the operator cannot see the input that failed.
 
 SOURCE PAGE URL (when entities carry NO supporting file but DO carry a link):
 Some entities store their source as a `link` metadata property (e.g.

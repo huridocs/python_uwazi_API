@@ -134,19 +134,20 @@ def _timestamp_to_date(value: float) -> str:
         return str(value)
 
 
-def format_metadata_value(value: Any) -> str:
+def format_metadata_value(value: Any, *, limit: int = MAX_VALUE_CHARS) -> str:
     """Render one metadata value (either shape) as a single display line.
 
     Handles the Uwazi raw shape (a list of ``{"value": ..., "label"?: ...}``
     dicts — the label is shown when present, since a thesaurus label is what the
     operator reads), other lists/tuples, booleans (lowercase), and scalars.
-    ``None`` renders as an em dash. Long output is truncated to
-    :data:`MAX_VALUE_CHARS` with a trailing ellipsis, matching the touch-set
-    table's formatting. Use :func:`render_metadata_value` where the FULL value
-    must be shown (the review entity window).
+    ``None`` renders as an em dash. Long output is truncated to ``limit`` (by
+    default :data:`MAX_VALUE_CHARS`) with a trailing ellipsis, matching the
+    touch-set table's formatting. Use :func:`render_metadata_value` where the
+    FULL value must be shown (the review entity window), or pass a larger
+    ``limit`` for a block that is read as evidence rather than a one-line cell.
     """
     text = render_metadata_value(value)
-    return text if len(text) <= MAX_VALUE_CHARS else text[:MAX_VALUE_CHARS] + "…"
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _render(value: Any) -> str:

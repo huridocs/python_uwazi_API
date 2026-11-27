@@ -23,7 +23,8 @@ from uwazi_admin_agent.drivers.web.session import (
     session_is_active,
 )
 
-from ..theme import install_theme
+from ..header import instance_badge
+from ..theme import FAVICON_SVG, install_theme
 from .broadcast import _refresh_rows_client
 from .login import _logout
 from .runs_table import _build_row_menu, _build_runs_table, _selection_toolbar
@@ -44,7 +45,7 @@ def _build_page() -> None:
             ui.element("div").classes("header-separator")
             ui.label("Tasks").classes("header-tab header-tab-active")
         with ui.row().classes("items-center gap-2 no-wrap"):
-            ui.link("Open Uwazi", page_instance_url(), new_tab=True).classes("header-tab")
+            instance_badge()
             with ui.button(icon="menu").props("flat round"):
                 with ui.menu():
                     ui.menu_item("Log out", _logout)
@@ -160,6 +161,7 @@ def main() -> None:
         port=port,
         reload=False,
         title="Uwazi Admin Agent",
+        favicon=FAVICON_SVG,
         storage_secret=storage_secret,
         show=login_paths[0] if login_paths else "/",
         show_welcome_message=False,

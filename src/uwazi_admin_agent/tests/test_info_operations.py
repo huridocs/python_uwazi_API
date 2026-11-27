@@ -305,6 +305,34 @@ def test_skip_record_becomes_a_per_entity_display_row() -> None:
     assert rows[0].proposed_value == "page 1"
 
 
+def test_a_skip_record_carries_the_same_provenance_a_change_row_carries() -> None:
+    """A failed metadata-source row must show the input that failed.
+
+    Without ``basis`` the entity window sees no source property and falls back to
+    loading a primary document the task never read; without ``context`` the review
+    table shows only the failure sentence.
+    """
+    records: list[dict] = []
+    record_skipped = _dry_run_write_helpers(records)["record_skipped"]
+
+    record_skipped(
+        "entity-a",
+        "no_match",
+        title="T",
+        template_name="DOCUMENT",
+        detail="no STATE entity matched",
+        basis=["source_text"],
+        context="Qatar (State of)",
+    )
+
+    assert records[0]["basis"] == ["source_text"]
+    assert records[0]["context"] == "Qatar (State of)"
+    assert records[0]["detail"] == "no STATE entity matched"
+    rows = records_to_suggestions("run1", records)
+    assert rows[0].basis == ["source_text"]
+    assert rows[0].context == "Qatar (State of)"
+
+
 def test_matched_operation_has_no_actions_but_has_link_and_values() -> None:
     payload = view.operation_row(_display_operation(MATCHED_OP), uwazi_url="https://example.test")
 

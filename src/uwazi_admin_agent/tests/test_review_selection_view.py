@@ -26,10 +26,10 @@ def _row(shared_id: str, language: str | None = None, title: str = "Case 1") -> 
 
 
 def test_run_button_label_counts_the_live_selection() -> None:
-    """The button's text is the checked-row count, so Run (0) is the empty state."""
-    assert run_button_label(0) == "Run (0)"
-    assert run_button_label(1) == "Run (1)"
-    assert run_button_label(37) == "Run (37)"
+    """The button's text is the checked-row count, so Apply (0) is the empty state."""
+    assert run_button_label(0) == "Apply (0)"
+    assert run_button_label(1) == "Apply (1)"
+    assert run_button_label(37) == "Apply (37)"
 
 
 def test_select_all_label_names_the_whole_filtered_result_set() -> None:

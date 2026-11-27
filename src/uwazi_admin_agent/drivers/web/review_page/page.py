@@ -7,6 +7,7 @@ from typing import Any
 
 from nicegui import background_tasks, context, ui
 
+from uwazi_admin_agent.drivers.web.header import instance_badge
 from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operation_gate import (
     set_progress,
@@ -44,6 +45,7 @@ from .core import (
     _performance_row,
     _poll_gate_toast,
     _poll_progress,
+    _poll_run_claim,
     _refresh_all,
     _refresh_expand_button,
     _refresh_selection_counts,
@@ -149,7 +151,7 @@ body { background:var(--uw-parchment); font-family:var(--uw-font-sans); color:va
 .rec-extra { font-size:12px; color:var(--uw-ink-secondary); }
 .subs-context { font-size:12px; line-height:1.45; color:var(--uw-ink-secondary); white-space:pre-wrap;
                 overflow-wrap:anywhere; border-left:3px solid var(--uw-border-soft); padding-left:8px;
-                max-height:15em; overflow-y:auto; user-select:text; }
+                user-select:text; }
 .context-row td { background:var(--uw-warm); padding-top:4px; padding-bottom:8px; }
 .op-pill { border-radius:6px; font-size:11px; font-weight:600; padding:2px 8px; }
 .status-pill { border-radius:999px; font-size:11px; font-weight:600; padding:3px 9px; line-height:1.3; }
@@ -167,6 +169,39 @@ tr:hover .row-actions { visibility:visible; }
 .child-row td { background:var(--uw-warm); border-bottom:1px solid var(--uw-border); padding-top:8px; padding-bottom:8px; }
 .child-row td:first-child { border-left:2px solid var(--uw-ink); }
 .child-target { padding-left:32px; font-size:13px; color:var(--uw-ink-secondary); }
+.child-row > td.expanded-cell { padding:0 !important; background:var(--uw-warm); }
+.sub-list { display:flex; flex-direction:column; gap:8px; padding:10px 16px 14px 112px; }
+.sub-item {
+  background:var(--uw-paper); border:1px solid var(--uw-border);
+  border-radius:var(--uw-radius); padding:12px 14px;
+}
+.sub-item-structural { border-style:dashed; }
+.sub-item-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.sub-item-title { font-size:13px; font-weight:600; color:var(--uw-ink); }
+.sub-item-caption { margin-top:2px; font-size:11px; color:var(--uw-ink-tertiary); }
+.sub-item-actions { margin-left:auto; }
+.sub-item-values { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+.sub-value {
+  display:grid; grid-template-columns:96px minmax(0,1fr);
+  gap:12px; align-items:start;
+}
+.sub-value-label {
+  display:block; margin:0; padding-top:1px; font-size:10px; font-weight:700;
+  letter-spacing:.06em; text-transform:uppercase; color:var(--uw-ink-tertiary);
+}
+.sub-value-text {
+  min-width:0; font-size:13px; line-height:1.45; color:var(--uw-ink-secondary);
+  white-space:pre-wrap; overflow-wrap:anywhere;
+}
+.sub-current { max-height:12em; overflow-y:auto; color:var(--uw-ink); }
+.sub-proposed { max-height:8em; overflow-y:auto; color:var(--uw-ink); }
+.sub-values { display:flex; flex-wrap:wrap; gap:4px; }
+.sub-item-context { margin-top:8px; }
+.sub-item-context .sub-value-label { display:block; margin-bottom:2px; }
+.sub-item-note { margin-top:6px; font-size:11px; color:var(--uw-ink-muted); }
+@media (max-width: 900px) {
+  .sub-list { padding-left:24px; }
+}
 .lang-pill { border-radius:4px; font-size:10px; padding:1px 6px; }
 .wide-tooltip { max-width:480px; white-space:pre-wrap; }
 .uw-card-footer { padding:10px 20px; border-top:1px solid var(--uw-border-soft); }
@@ -183,6 +218,19 @@ tr:hover .row-actions { visibility:visible; }
 .sync-dot-pulse { animation: syncpulse 1.1s ease-in-out infinite; }
 @keyframes syncpulse { 0%,100%{opacity:.35} 50%{opacity:1} }
 .sync-label { font-size:12px; color:var(--uw-ink-tertiary); }
+.uw-run-banner {
+  display:flex; align-items:flex-start; gap:12px; width:100%;
+  padding:12px 16px; border-radius:var(--uw-radius);
+  border:1px solid color-mix(in srgb, var(--uw-warning) 35%, var(--uw-border));
+  background:var(--uw-warning-light);
+}
+.uw-run-banner .q-spinner { margin-top:2px; }
+.uw-run-banner-title { font-size:13px; font-weight:700; color:var(--uw-ink); }
+.uw-run-banner-note { font-size:12px; color:var(--uw-ink-secondary); white-space:pre-wrap; overflow-wrap:anywhere; }
+/* The claim makes the table read-only: QTable's header select-all checkbox is
+   internal, so the class disables it here; row/child controls carry :disable. */
+.uw-table.review-readonly thead th:first-child .q-checkbox { pointer-events:none; opacity:.4; }
+.uw-table.review-readonly tbody .q-checkbox { pointer-events:none; opacity:.55; }
 .uw-bulk-bar { background:var(--uw-paper); border-top:1px solid var(--uw-border); padding:10px 24px;
                box-shadow:0 -2px 8px rgba(0,0,0,0.04); }
 .uw-selection-label { font-size:13px; font-weight:700; color:var(--uw-ink); }
@@ -284,6 +332,7 @@ def _build_page(run_id: str) -> None:
     with ui.column().classes("uw-review-shell w-full items-center"):
         with ui.element("div").classes("uw-page uw-review-page w-full"):
             _performance_row(state)
+            _run_state_banner(state)
             with ui.element("div").classes("uw-card uw-review-card w-full"):
                 with ui.row().classes("uw-card-header w-full items-center justify-between no-wrap"):
                     _summary_row(state)
@@ -311,11 +360,19 @@ def _build_page(run_id: str) -> None:
             type="info",
         )
 
+    # Paint the claim that was already live when the page opened (a
+    # regeneration started in another window, or a retry from the tasks page),
+    # then keep the page in step while it runs.
+    _poll_run_claim(state)
     ui.timer(3.0, lambda: _poll_progress(state))
     # The operation gate's fast poller: while a Run/Revert/refresh is held, this
     # keeps the live progress toast alive with the live fraction ("Running —
     # 13/1230 suboperations…"); idle, it does nothing.
     ui.timer(0.8, lambda: _poll_gate_toast(state))
+    # The per-run claim poller: generation/regeneration happen outside the write
+    # gate, so without this the review page kept showing a stale, actionable
+    # table while the planner was rewriting it.
+    ui.timer(1.5, lambda: _poll_run_claim(state))
 
 
 def _top_bar(state: dict[str, Any], run_id: str, detail: Any, instance: str) -> None:
@@ -331,16 +388,19 @@ def _top_bar(state: dict[str, Any], run_id: str, detail: Any, instance: str) -> 
             ui.label(run_id).classes("breadcrumb-current")
             state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm status-pill")
     with ui.row().classes("items-center gap-2 no-wrap"):
-        _header_menu(state, run_id, has_script=bool(detail.script), instance_url=instance)
+        instance_badge(instance)
+        _header_menu(state, run_id, has_script=bool(detail.script))
 
 
-def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False, instance_url: str = "") -> None:
+def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False) -> None:
     """The Settings menu: every occasional control, one click away.
 
     It holds the search toggle, the filters toggle, the run's prompt and
     script, the performance banner, and the way back to the tasks list. The
     controls that act on the table (expand/collapse, pagination) live in the
-    card where the table is.
+    card where the table is. The targeted instance is NOT here: it sits in the
+    top bar (:func:`instance_badge`), where two open windows can be told apart
+    without opening a menu.
     """
     with (
         ui.button(text="Settings", icon="settings")
@@ -359,7 +419,7 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 lambda: _toggle_section(state, "search"),
             )
             state["_performance_item"], state["_performance_menu_label"] = _menu_item(
-                "monitoring",
+                "speed",
                 "Show performance",
                 lambda: _toggle_performance(state),
             )
@@ -377,21 +437,18 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 "Show prompt",
                 lambda: prompt_chat_dialog(
                     run_id,
+                    # Stay on the review page: the run claim paints the
+                    # read-only banner (and disables every mutating control),
+                    # and this callback repaints the committed table when the
+                    # regeneration finishes. Navigating away hid that state
+                    # from the one page whose rows were being rewritten.
                     on_table_changed=lambda: _refresh_all(state),
-                    # A regeneration rewrites the table in place. Move to the
-                    # tasks window, where the run's row shows `regenerating`
-                    # until the new script and table are committed.
-                    on_run_started=lambda: ui.navigate.to(page_link("/app")),
                 ),
             )
             if has_script:
                 _menu_item("code", "Show script", lambda: script_dialog(run_id))
             ui.separator()
             _menu_item("arrow_back", "Back to tasks", lambda: ui.navigate.to(page_link("/app")))
-            if instance_url:
-                with ui.item():
-                    ui.icon("link").classes("q-mr-sm")
-                    ui.link(instance_url, instance_url, new_tab=True).classes("text-caption")
     button.on("click", menu.open)
 
 
@@ -597,6 +654,24 @@ def _reset_filters(state: dict[str, Any]) -> None:
         state["_suppress_filter_events"] = False
     _reset_global_selection(state)
     _refresh_all(state)
+
+
+def _run_state_banner(state: dict[str, Any]) -> None:
+    """The read-only banner shown while this run has a live claim.
+
+    Hidden by default so the page keeps its calm layout; the claim poller
+    paints the title and the live stage (generation narrates what the LLM is
+    doing) and makes it visible. It sits above the card, where it cannot be
+    confused with the table's own filtering chrome.
+    """
+    banner = ui.element("div").classes("uw-run-banner w-full")
+    state["_run_banner"] = banner
+    with banner:
+        state["_run_banner_spinner"] = ui.spinner(size="sm", color="primary")
+        with ui.column().classes("gap-0 grow"):
+            state["_run_banner_title"] = ui.label("").classes("uw-run-banner-title")
+            state["_run_banner_note"] = ui.label("").classes("uw-run-banner-note")
+    banner.set_visibility(False)
 
 
 def _action_bar(state: dict[str, Any]) -> None:
