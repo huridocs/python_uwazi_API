@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from uwazi_admin_agent.configuration import DUMMY_LANGUAGE
+from uwazi_admin_agent.domain.metadata_diff import render_property_value
 from uwazi_admin_agent.domain.relationship_values import (
     RELATIONSHIP_TYPE,
     SELECT_TYPE,
@@ -284,20 +285,21 @@ def _relationship_proposed(sub: Suggestion) -> str:
     return f"{text} ({kind})" if kind else text
 
 
-def sub_values(
+def _clip_display(text: str, limit: int = 120) -> str:
+    """Cut an already-rendered display value to one line (pure)."""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def sub_values_full(
     sub: Suggestion,
     types: dict[str, str] | None = None,
     titles: dict[str, str] | None = None,
 ) -> tuple[str, str]:
-    """One suboperation's ``(current, proposed)`` display pair (pure).
+    """One suboperation's ``(current, proposed)`` display pair, UNtruncated (pure).
 
-    The values are Uwazi's stored shapes rendered for a one-line cell — the
-    same rendering the entity window uses. A whole-entity op has no current
-    value to show (publishing/deleting is not a property), so it reads "—".
-    ``types`` maps property names to their template type so a date property
-    renders as a calendar date instead of its raw epoch timestamp; ``titles``
-    maps related-entity sharedIds to their display titles, so a relationship
-    value reads as the target entities' titles instead of bare ids.
+    The table cells clip the values with CSS, but a tooltip (and the collapsed
+    parent's one-line recommendation) must be able to show the whole value.
+    The render rules are the same ones :func:`sub_values` applies.
     """
     if sub.op == INFO_OP:
         return "—", "" if sub.proposed_value is None else str(sub.proposed_value)
@@ -314,17 +316,19 @@ def sub_values(
         if sub.is_validation:
             property_type = (types or {}).get(sub.property_name or "")
             if property_type == RELATIONSHIP_TYPE:
-                return truncate(render_relationship(sub.current_value, titles), 120), "—"
-            return truncate(sub.current_value, 120, property_type), "—"
+                return render_relationship(sub.current_value, titles), "—"
+            return render_property_value(sub.current_value, property_type), "—"
         return "—", "—"
     property_type = (types or {}).get(sub.property_name or "")
     if sub.op == MATCHED_OP:
         if property_type == RELATIONSHIP_TYPE:
             return (
-                truncate(render_relationship(sub.current_value, titles), 120),
-                truncate(render_relationship(sub.proposed_value, titles), 120),
+                render_relationship(sub.current_value, titles),
+                render_relationship(sub.proposed_value, titles),
             )
-        return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
+        return render_property_value(sub.current_value, property_type), render_property_value(
+            sub.proposed_value, property_type
+        )
     if sub.op == "create_relationships":
         return "—", _relationship_proposed(sub)
     if sub.op == "set_publish_status":
@@ -339,10 +343,31 @@ def sub_values(
         return "—", _move_files_summary(sub)
     if property_type == RELATIONSHIP_TYPE:
         return (
-            truncate(render_relationship(sub.current_value, titles), 120),
-            truncate(render_relationship(sub.proposed_value, titles), 120),
+            render_relationship(sub.current_value, titles),
+            render_relationship(sub.proposed_value, titles),
         )
-    return truncate(sub.current_value, 120, property_type), truncate(sub.proposed_value, 120, property_type)
+    return render_property_value(sub.current_value, property_type), render_property_value(
+        sub.proposed_value, property_type
+    )
+
+
+def sub_values(
+    sub: Suggestion,
+    types: dict[str, str] | None = None,
+    titles: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """One suboperation's ``(current, proposed)`` display pair (pure).
+
+    The values are Uwazi's stored shapes rendered for a one-line cell — the
+    same rendering the entity window uses. A whole-entity op has no current
+    value to show (publishing/deleting is not a property), so it reads "—".
+    ``types`` maps property names to their template type so a date property
+    renders as a calendar date instead of its raw epoch timestamp; ``titles``
+    maps related-entity sharedIds to their display titles, so a relationship
+    value reads as the target entities' titles instead of bare ids.
+    """
+    current, proposed = sub_values_full(sub, types, titles)
+    return _clip_display(current), _clip_display(proposed)
 
 
 def _move_files_summary(sub: Suggestion) -> str:
@@ -418,6 +443,7 @@ def suboperation_row(
     elif sub.op == SKIPPED_OP:
         status_label, status_color = "excluded", "grey-7"
     current, proposed = sub_values(sub, types, titles)
+    current_full, proposed_full = sub_values_full(sub, types, titles)
     match = sub_match(sub)
     blocked = rerun_blocked(sub.op, status_label)
     # A validation row is NEVER runnable and NEVER selectable: its Run would write
@@ -503,6 +529,8 @@ def suboperation_row(
         "lang": sub.language,
         "current": current,
         "proposed": proposed,
+        "current_full": current_full,
+        "proposed_full": proposed_full,
         "match": match,
         "match_color": MATCH_COLORS.get(match, "grey-4"),
         "status": status_label,
@@ -877,6 +905,34 @@ def validated_cell(subs: Iterable[dict[str, Any]]) -> tuple[str, str]:
     if checked:
         return f"{checked}/{total}", "orange"
     return f"{checked}/{total}", "grey-6"
+
+
+def recommendation_text(subs: Iterable[dict[str, Any]]) -> str:
+    """The collapsed row's one-line RECOMMENDATION, derived from its parts (pure).
+
+    The parent row has no proposed value of its own: the suggestion belongs to
+    the property child rows. The most substantial proposed value is what the
+    operator wants to read on the collapsed entity (a title is short, the
+    extracted text is what needs judging), so the longest non-structural value
+    wins. Property rows are named by their label when nothing was proposed
+    (a delete/publish row), so the cell still says what the operation does.
+    """
+    candidates: list[str] = []
+    fallback = ""
+    for sub in subs:
+        if not isinstance(sub, dict):
+            continue
+        label = str(sub.get("label") or "").strip()
+        if not fallback and label:
+            fallback = label
+        if sub.get("structural"):
+            continue
+        text = str(sub.get("proposed_full") or sub.get("proposed") or "").strip()
+        if text and text != "—":
+            candidates.append(text)
+    if not candidates:
+        return fallback
+    return max(candidates, key=len)
 
 
 def _operation_words(item: OperationReviewRow) -> str:
@@ -1292,6 +1348,7 @@ __all__ = [
     "operation_status_breakdown",
     "ops_of_refs",
     "pairs_of_refs",
+    "recommendation_text",
     "rerun_blocked",
     "rerun_blocked_reason",
     "selected_subs",

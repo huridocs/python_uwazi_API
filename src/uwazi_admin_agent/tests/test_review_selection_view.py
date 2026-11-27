@@ -35,9 +35,9 @@ def test_run_button_label_counts_the_live_selection() -> None:
 def test_select_all_label_names_the_whole_filtered_result_set() -> None:
     """The header checkbox already selects the page; the button selects every
     filtered result, and says how many there are."""
-    assert select_all_label(0, False) == "Select all results"
-    assert select_all_label(1, False) == "Select all 1 result"
-    assert select_all_label(2500, False) == "Select all 2,500 results"
+    assert select_all_label(0, False) == "Select all entities"
+    assert select_all_label(1, False) == "Select all 1 entity"
+    assert select_all_label(2500, False) == "Select all 2,500 entities"
     assert select_all_label(2500, True) == "Clear selection"
 
 

@@ -470,3 +470,35 @@ def test_suboperation_row_carries_an_empty_context_when_there_is_none() -> None:
     row = view.suboperation_row(_sub(1), checked=False, in_place=False)
 
     assert row["context"] == ""
+
+
+def test_sub_values_full_keeps_the_whole_proposed_value_and_the_cell_clips_it() -> None:
+    """The table cell clips; the tooltip/parent recommendation needs the full text."""
+    long_text = "x" * 300
+    sub = _sub(1, proposed=long_text)
+
+    _current_full, proposed_full = view.sub_values_full(sub)
+    _current, proposed = view.sub_values(sub)
+
+    assert proposed_full == long_text
+    assert len(proposed) == 121
+    assert proposed.endswith("…")
+
+
+def test_recommendation_text_prefers_the_most_substantial_proposed_value() -> None:
+    """The collapsed row shows the content worth judging, not the short title."""
+    subs = [
+        {"label": "Title", "proposed": "124.76", "proposed_full": "124.76"},
+        {
+            "label": "Rec",
+            "proposed": "Ensure an open and safe civic space…",
+            "proposed_full": "Ensure an open and safe civic space by guaranteeing freedom of speech.",
+        },
+    ]
+
+    assert view.recommendation_text(subs) == "Ensure an open and safe civic space by guaranteeing freedom of speech."
+
+
+def test_recommendation_text_falls_back_to_the_first_label_without_a_proposal() -> None:
+    assert view.recommendation_text([{"label": "Delete", "proposed": "—"}]) == "Delete"
+    assert view.recommendation_text([{"label": "Copied file", "proposed": "a.pdf", "structural": True}]) == "Copied file"

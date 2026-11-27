@@ -304,8 +304,8 @@ def select_all_label(total: int, all_selected: bool) -> str:
     if all_selected:
         return "Clear selection"
     if not total:
-        return "Select all results"
-    noun = "result" if total == 1 else "results"
+        return "Select all entities"
+    noun = "entity" if total == 1 else "entities"
     return f"Select all {total:,} {noun}"
 
 
@@ -603,13 +603,13 @@ def property_filter_options(
 ) -> dict[str, str]:
     """The Property dropdown's options: present properties, each with its count (pure).
 
-    The first option is the unfiltered ``"any property"`` (no count — it is the
+    The first option is the unfiltered ``"Any property"`` (no count — it is the
     absence of a constraint). The others come from ``counts``, which is the
     faceted count under the rest of the filter, so a property whose every row
     the other filters removed is not offered. The SELECTED property is kept even
     at zero, so the control still shows what is applied.
     """
-    options: dict[str, str] = {"": "any property"}
+    options: dict[str, str] = {"": "Any property"}
     for name, count in counts.items():
         if count <= 0 and name != selected:
             continue
@@ -624,7 +624,7 @@ def language_filter_options(
     selected: str,
 ) -> dict[str, str]:
     """The Language dropdown's options, counted like the Property one (pure)."""
-    options: dict[str, str] = {"": "any language"}
+    options: dict[str, str] = {"": "Any language"}
     for language, count in counts.items():
         if count <= 0 and language != selected:
             continue

@@ -73,7 +73,7 @@ def test_a_selected_option_stays_listed_at_zero_so_the_filter_is_never_cleared()
 
 def test_the_property_dropdown_keeps_any_property_and_counts_the_rest() -> None:
     options = property_filter_options({"rec": "Rec"}, {"rec": 4, "other": 0}, "")
-    assert options == {"": "any property", "rec": "Rec (4)"}
+    assert options == {"": "Any property", "rec": "Rec (4)"}
 
 
 def test_a_selected_property_that_lost_every_row_is_kept_at_zero() -> None:
@@ -82,8 +82,8 @@ def test_a_selected_property_that_lost_every_row_is_kept_at_zero() -> None:
 
 
 def test_the_language_dropdown_uses_the_same_rules() -> None:
-    assert language_filter_options({"es": 2}, "") == {"": "any language", "es": "es (2)"}
-    assert language_filter_options({"es": 0}, "") == {"": "any language"}
+    assert language_filter_options({"es": 2}, "") == {"": "Any language", "es": "es (2)"}
+    assert language_filter_options({"es": 0}, "") == {"": "Any language"}
 
 
 # --- create-row display -----------------------------------------------------

@@ -14,8 +14,6 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
 from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.review_view import (
     OP_LABELS,
-    bulk_discard_label,
-    bulk_revert_label,
     filter_from_controls,
     filter_options,
     language_filter_options,
@@ -46,6 +44,7 @@ from .core import (
     _poll_gate_toast,
     _poll_progress,
     _refresh_all,
+    _refresh_selection_counts,
     _reset_global_selection,
     _revert_from_state,
     _run_from_state,
@@ -55,6 +54,123 @@ from .core import (
     _update_table_now,
 )
 from .entity_window import _merged_labels, _merged_types, _template_labels, _template_types
+
+_REVIEW_CSS = """
+body { background:#F5F3EF; font-family:'Noto Sans', Inter, sans-serif; color:#111827; overflow-x:hidden; }
+.nicegui-content { padding: 0; }
+.uw-header { background:#fff !important; color:#111827 !important; box-shadow:none !important;
+             border-bottom:1px solid #E5E7EB; }
+.uw-header .q-link { color:#1C64F2; }
+.uw-page { max-width:1360px; margin:0 auto; padding:20px 24px 120px; display:flex;
+           flex-direction:column; gap:16px; }
+.uw-card { background:#fff; border:1px solid #E5E7EB; border-radius:8px; box-shadow:none; overflow:hidden; }
+.uw-card-header { padding:16px 20px; border-bottom:1px solid #F3F4F6; }
+.uw-card-title { font-size:22px; line-height:1.2; font-weight:700; color:#111827; }
+.uw-summary { font-size:13px; color:#6B7280; }
+.uw-info-banner { background:#FEF6E4; border:1px solid #FDE7BB; border-radius:8px;
+                  padding:12px 16px; display:flex; align-items:center; }
+.uw-banner-icon { color:#B45309; font-size:20px; }
+.uw-banner-title { font-weight:700; font-size:13px; color:#111827; }
+.uw-banner-text { font-size:13px; color:#374151; }
+.uw-banner-value { color:#111827; }
+.uw-banner-close { color:#6B7280; }
+.uw-search-row { padding:12px 20px 0; }
+.uw-filter-row { padding:14px 20px; border-bottom:1px solid #F3F4F6; }
+.filter-box { border:1px solid #D1D5DB; border-radius:8px; background:#fff; padding:6px 10px 5px 10px;
+              min-height:52px; display:flex; flex-direction:column; justify-content:center;
+              position:relative; }
+.filter-placeholder { position:absolute; left:10px; top:29px; font-size:13px; color:#111827;
+                      pointer-events:none; }
+.filter-caption { font-size:10px; line-height:1.2; font-weight:700; letter-spacing:.06em;
+                  text-transform:uppercase; color:#6B7280; }
+.filter-select .q-field__control { min-height:26px; height:26px; padding:0; }
+.filter-select .q-field__native, .filter-select .q-field__input { padding:0; min-height:24px;
+                                                                  color:#111827; font-size:13px; }
+.filter-select .q-field__append { height:24px; }
+.filter-select .q-field__bottom { display:none; }
+.filter-select .q-chip { font-size:11px; }
+.filter-select .q-field__control:before, .filter-select .q-field__control:after { display:none; }
+.density-toggle { border:1px solid #E5E7EB; border-radius:8px; overflow:hidden; }
+.density-toggle .q-btn { border-radius:0; padding:3px 12px; font-size:12px; color:#6B7280; }
+.density-toggle .q-btn + .q-btn { border-left:1px solid #E5E7EB; }
+.density-btn-active { background:#F3F4F6 !important; color:#111827 !important; }
+.reset-link { color:#6B7280 !important; font-size:13px; }
+.filter-badge { position:absolute; top:-7px; right:-7px; font-size:10px; min-height:18px; padding:0 5px; }
+.filter-button-wrap { position:relative; display:inline-block; }
+.uw-table .q-table__middle { max-height:70vh; overflow-y:auto; overflow-x:hidden; }
+.uw-table .q-table { table-layout:fixed; width:100%; }
+.uw-table thead tr th { position:sticky; top:0; z-index:3; background:#fff; text-transform:uppercase;
+                        font-size:11px; font-weight:700; color:#111827; padding:10px 12px;
+                        border-bottom:1px solid #E5E7EB; }
+.uw-table tbody td { padding:10px 12px; border-bottom:1px solid #F3F4F6; vertical-align:middle;
+                     overflow:hidden; }
+.uw-table thead tr th:first-child, .uw-table tbody td:first-child {
+  width:52px; min-width:52px; max-width:52px; padding-left:12px; padding-right:4px; }
+.uw-table thead tr th:first-child .q-checkbox, .uw-table tbody td:first-child .q-checkbox { margin:0; }
+.uw-table.review-no-selectable thead th:first-child { visibility:hidden; }
+/* Fixed layout reads the column widths from the HEADER row: Quasar puts the
+   per-column ``style`` only on the body cells, so the widths are declared here
+   (one rule per column, in the same order as the columns list). */
+.uw-table thead tr th:nth-child(2) { width:36px; }
+.uw-table thead tr th:nth-child(3) { width:190px; }
+.uw-table thead tr th:nth-child(4) { width:120px; }
+.uw-table thead tr th:nth-child(5) { width:auto; }
+.uw-table thead tr th:nth-child(6) { width:132px; }
+.uw-table thead tr th:nth-child(7) { width:176px; }
+.uw-table thead tr th:nth-child(8) { width:226px; }
+.uw-table tbody tr:hover { background:#FAFAFA; }
+.uw-table tbody tr.child-row:hover { background:#F7F3EC; }
+.uw-table .q-table__sort-icon { font-size:14px; opacity:.7; }
+.uw-table .q-checkbox { margin:0; }
+.entity-link { color:#1C64F2; font-weight:500; text-decoration:none; cursor:pointer; }
+.entity-link:hover { text-decoration:underline; }
+.truncate { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rec-cell { color:#374151; font-size:13px; }
+.op-pill { border-radius:6px; font-size:11px; font-weight:600; padding:2px 8px; }
+.status-pill { border-radius:999px; font-size:11px; font-weight:600; padding:3px 9px; line-height:1.3; }
+.status-pending { background:#FEF3C7; color:#92400E; }
+.status-applied { background:#DCFCE7; color:#166534; }
+.status-discarded { background:#F3F4F6; color:#4B5563; }
+.status-negative { background:#FEE2E2; color:#991B1B; }
+.status-neutral { background:#F3F4F6; color:#4B5563; }
+.status-progress { width:120px; }
+.actions-cell { gap:6px; }
+.apply-btn { border-radius:6px; font-weight:600; font-size:12px; padding:3px 12px; }
+.row-actions { visibility:hidden; }
+tr:hover .row-actions { visibility:visible; }
+.child-row { background:#FAF8F5; }
+.child-row td { background:#FAF8F5; border-bottom:1px solid #F0ECE6; padding-top:8px; padding-bottom:8px; }
+.child-row td:first-child { border-left:2px solid #111827; }
+.child-target { padding-left:16px; font-size:13px; color:#374151; }
+.lang-pill { border-radius:4px; font-size:10px; padding:1px 6px; }
+.wide-tooltip { max-width:480px; white-space:pre-wrap; }
+.uw-card-footer { padding:10px 20px; border-top:1px solid #F3F4F6; }
+.uw-page-label { font-size:12px; color:#6B7280; }
+.uw-card-footer .page-btn { min-width:30px; border-radius:6px; color:#6B7280 !important; font-size:13px; }
+.uw-card-footer .page-btn-active, .uw-card-footer .page-btn-active * {
+  background:#111827 !important; color:#fff !important; }
+.sync-dot { width:8px; height:8px; border-radius:999px; display:inline-block;
+            background:#9CA3AF; flex:0 0 auto; }
+.sync-dot-pulse { animation: syncpulse 1.1s ease-in-out infinite; }
+@keyframes syncpulse { 0%,100%{opacity:.35} 50%{opacity:1} }
+.sync-label { font-size:12px; color:#6B7280; }
+.sync-button { font-size:11px; }
+.uw-bulk-bar { background:#fff; border-top:1px solid #E5E7EB; padding:10px 24px;
+               box-shadow:0 -2px 8px rgba(0,0,0,0.04); }
+.uw-selection-label { font-size:13px; font-weight:700; color:#111827; }
+.uw-run-button { background:#111827 !important; color:#fff !important; }
+.uw-select-all { color:#1C64F2 !important; font-size:13px; }
+.uw-discard-button { color:#DC2626 !important; border-color:#FCA5A5 !important; }
+.uw-bulk-sticky { z-index:1000; }
+.brand-mark { width:28px; height:28px; border-radius:6px; background:#E8323C; color:#fff;
+              display:flex; align-items:center; justify-content:center; font-weight:800; font-size:16px; }
+.brand-name { font-size:16px; font-weight:700; color:#111827; }
+.breadcrumb-link { color:#1C64F2; font-size:13px; }
+.breadcrumb-chevron { color:#9CA3AF; font-size:16px; }
+.breadcrumb-current { color:#111827; font-size:13px; font-weight:500; }
+.lang-select { width:130px; }
+.settings-btn { color:#111827 !important; }
+"""
 
 
 def review_page(run_id: str, instance_url: str) -> None:
@@ -67,7 +183,20 @@ def review_page(run_id: str, instance_url: str) -> None:
     if not session_is_active(instance_url):
         ui.navigate.to(page_link("/", instance_url))
         return
-    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    ui.colors(
+        primary="#111827",
+        secondary="#6B7280",
+        positive="#16A34A",
+        negative="#DC2626",
+        warning="#F59E0B",
+        info="#1C64F2",
+    )
+    ui.add_head_html(
+        '<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">'
+    )
+    ui.add_css(_REVIEW_CSS)
     _build_page(run_id)
 
 
@@ -85,39 +214,6 @@ def _build_page(run_id: str) -> None:
             ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat")
         return
 
-    # The expansion's styling: Quasar's ``q-table--no-wrap`` turns every
-    # descendant ``td`` into nowrap, so the suboperation cells need the wrap
-    # restored explicitly; and the panel reads as one card with a colored LEFT
-    # border in the operation's color, which is what tells the groups apart once
-    # everything is expanded.
-    ui.add_head_html(
-        """
-        <style>
-        .subs-expand {{ white-space: normal; }}
-        .subs-table {{ width: 100%; border-collapse: collapse; table-layout: fixed; white-space: normal; }}
-        .subs-table th {{ border-bottom: 1px solid rgba(0,0,0,0.12); }}
-        .subs-table td {{ border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: top; white-space: normal; }}
-        .subs-table td > div {{ overflow-wrap: anywhere; }}
-        .subs-card {{
-            border: 1px solid rgba(0,0,0,0.12);
-            border-left: 4px solid var(--subs-border-color, #607d8b);
-            border-radius: 4px;
-            background: rgba(0,0,0,0.02);
-            padding: 4px 8px 8px 8px;
-        }}
-        body.body--dark .subs-card {{ background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.15); }}
-        .subs-table td.subs-actions {{ white-space: nowrap; width: 132px; }}
-        .subs-table td.subs-actions .q-btn {{ margin: 0; }}
-        .subs-context {{ border-left: 3px solid rgba(0,0,0,0.12); padding-left: 8px; }}
-        body.body--dark .subs-context {{ border-left-color: rgba(255,255,255,0.15); }}
-        .review-no-selectable thead th:first-child {{ visibility: hidden; }}
-        /* The Target cell is a LINK: the browser must show the hand cursor,
-           not the I-beam a selectable label draws. */
-        .review-title-link, .review-title-link * {{ cursor: pointer !important; }}
-        </style>
-        """
-    )
-
     state: dict[str, Any] = {
         "run_id": run_id,
         # The instance this page is bound to, captured once: background tasks
@@ -133,114 +229,67 @@ def _build_page(run_id: str) -> None:
         "property": "",
         "language": "",
         "text": "",
-        # The collapsible sections' initial state: the FILTERS are ON when the
-        # page opens (narrowing the table is the first thing an operator does),
-        # the stats and the free-text search stay behind the menu. The menu
-        # items and the containers read these flags, so each label states the
-        # next click.
+        # The filter row is visible when the page opens; the free-text search
+        # stays behind the settings menu (the dropdowns are the normal way to
+        # narrow a run, a text scan is an occasional tool).
         "_filters_visible": True,
-        "_stats_visible": False,
         "_search_visible": False,
         # The table's sort lives in the COLUMN HEADERS. 'recorded' keeps the
-        # script's order until a header is clicked; a new column starts
-        # Modified newest-first / others A→Z, and clicking it again reverses.
-        # The store orders the WHOLE filtered set, not just this page.
+        # script's order until a header is clicked; a new column starts A->Z
+        # (Target/Template/Operation) or newest-first for a date, and clicking
+        # it again reverses. The store orders the WHOLE filtered set, not just
+        # this page.
         "sort_by": "recorded",
         "sort_desc": False,
         "loading": False,
-        # Set while the page control is rewritten programmatically: assigning a
-        # widget value fires its own change handler, and that must not reload
-        # the table in a loop.
-        "_suppress_page_events": False,
         # The SUBOPERATION selection: the suggestion rows the operator ticked,
         # held as row ids because that is the only identity finer than an
         # (entity, language) pair — "run this one property of this one
         # language". The parent operation's tick is DERIVED from its parts, so
         # the two levels cannot disagree.
         "_checked": set(),
-        # Whole-result selection (the button, not the page header checkbox):
-        # every SUBOPERATION matching the current filter, across every page.
-        # The ids are resolved from the store once, and ``_global_refs`` keeps
-        # their identity so Run/Discard/Revert do not need the page payload.
+        # Whole-result selection (the footer link): every suboperation matching
+        # the current filter, across every page.
         "_select_all": False,
         "_global_refs": {},
-        # Whole-result mode marks which checked ids came from the APPLIED side
-        # of the projection (they feed Revert only, never Run/Discard).
         "_global_applied_ids": set(),
         # Which operations are expanded (the table's ``expanded`` prop is the
-        # source of truth, which is what makes "Expand all" possible), and the
-        # page-wide MODE ("all"/"none"/"mixed") that a page flip carries over:
-        # Expand all then Next must land expanded, Collapse all then Next
-        # collapsed.
+        # source of truth).
         "_expanded": set(),
-        "_expand_mode": "none",
-        # Set while a filter control is reset programmatically: assigning a
-        # control's value fires its own change handler, and the reset must not
-        # re-enter the filter logic.
+        # Compact rows vs comfortable rows: the target's density toggle.
+        "_compact": False,
+        # Set while a filter control is reset programmatically.
         "_suppress_filter_events": False,
     }
 
-    with ui.header().classes("items-center justify-between"):
-        with ui.row().classes("items-center"):
-            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
-            ui.label(f"Review — {detail.run_id}").classes("text-h6 q-ml-sm")
-            state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
-        with ui.row().classes("items-center"):
-            # The controlled instance this run writes to — the same header link
-            # the runs table carries, so the operator always knows which instance
-            # the rows they are about to write belong to.
-            instance_url = page_instance_url()
-            if instance_url:
-                ui.icon("link", color="secondary").classes("q-mr-xs")
-                ui.link(instance_url, instance_url, new_tab=True).classes("text-white")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
+    with ui.header().classes("uw-header items-center justify-between"):
+        _top_bar(state, run_id, detail, instance)
 
     with ui.column().classes("w-full items-center"):
-        with ui.card().classes("w-full max-w-7xl"):
-            # Row 1: the performance line (ALWAYS visible — "does this task
-            # work?" is the question the page opens with) and, at the far
-            # right, the hamburger menu that reveals the occasional controls.
-            # The score used to live inside the collapsible stats section as a
-            # card of its own, which buried the one number the operator came
-            # for and made the top of the page a stack of unrelated boxes.
-            with ui.row().classes("w-full items-center justify-between gap-2 no-wrap"):
-                _performance_row(state)
-                _header_menu(state, run_id, has_script=bool(detail.script))
-            # The three collapsible sections: the counters (stats), the
-            # free-text search and the filters. The FILTERS are visible when
-            # the page opens — they narrow the table, which is the operator's
-            # first job — while the counters and the search start hidden. The
-            # menu toggles each independently: the search sits OUTSIDE the
-            # filters section so showing it works even when the filters are
-            # collapsed.
-            with ui.column().classes("w-full q-mb-sm") as search_section:
-                state["_search_section"] = search_section
-                _search_bar(state)
-            with ui.column().classes("w-full") as filters_section:
-                state["_filters_section"] = filters_section
-                _filter_bar(state)
-            with ui.column().classes("w-full") as stats_section:
-                state["_stats_section"] = stats_section
-                _summary_row(state)
-            # Row 2: the selection-driven actions on the LEFT (they act on the
-            # rows the operator ticks, so they sit with the table, on the side
-            # the reading starts from) and the view controls on the RIGHT.
+        with ui.element("div").classes("uw-page w-full"):
+            _performance_row(state)
+            with ui.element("div").classes("uw-card w-full"):
+                with ui.row().classes("uw-card-header w-full items-center justify-between no-wrap"):
+                    _summary_row(state)
+                    with ui.row().classes("items-center gap-4 no-wrap"):
+                        _drift_banner(state)
+                        _filters_button(state)
+                with ui.column().classes("uw-search-row w-full") as search_section:
+                    state["_search_section"] = search_section
+                    _search_bar(state)
+                with ui.column().classes("w-full") as filters_section:
+                    state["_filters_section"] = filters_section
+                    _filter_bar(state)
+                # The table and its in-card footer.
+                _change_table(state)
+            # The selection-driven bulk bar: hidden until something is checked.
             _action_bar(state)
-            # The drift verdict sits BELOW the action bar, just above the
-            # table: it is the state of the data the table shows, so it reads
-            # as a banner over the table, not as one more control above it.
-            # It is NOT hidden: a stale table is a safety warning, not a
-            # statistic.
-            _drift_banner(state)
-            # Entering the page ALWAYS re-checks drift (see ``_drift_banner``):
-            # the stored verdict describes when it was taken, not now.
-            _change_table(state)
-            # Apply the initial visibility the menu labels already advertise:
-            # the filters ON, the counters and the search off. Entering the page
-            # ALWAYS resets to this.
-            state["_stats_section"].set_visibility(state["_stats_visible"])
+            # Apply the initial visibility the controls advertise: filters ON,
+            # search off. Entering the page ALWAYS resets to this.
             state["_filters_section"].set_visibility(state["_filters_visible"])
             state["_search_section"].set_visibility(state["_search_visible"])
+            _refresh_filter_badge(state)
+            _refresh_selection_counts(state)
 
     if current_pass(page_instance_url(), run_id) is None:
         ui.notify(
@@ -255,49 +304,50 @@ def _build_page(run_id: str) -> None:
     ui.timer(0.8, lambda: _poll_gate_toast(state))
 
 
-def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False) -> None:
-    """The page's hamburger menu: every control that is read on demand.
+def _top_bar(state: dict[str, Any], run_id: str, detail: Any, instance: str) -> None:
+    """The white top bar: service wordmark and breadcrumb, then settings."""
+    with ui.row().classes("items-center gap-6 no-wrap"):
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            with ui.element("div").classes("brand-mark"):
+                ui.label("u")
+            ui.label("Uwazi Suggestions").classes("brand-name")
+        with ui.row().classes("items-center gap-1 no-wrap"):
+            ui.link("Tasks", page_link("/app")).classes("breadcrumb-link")
+            ui.icon("chevron_right").classes("breadcrumb-chevron")
+            ui.label(run_id).classes("breadcrumb-current")
+            state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
+    with ui.row().classes("items-center gap-2 no-wrap"):
+        # The interface language is English today; the control is present so
+        # the header keeps its shape when translations are added.
+        ui.select(["English"], value="English").props("outlined dense options-dense hide-bottom-space").classes(
+            "lang-select"
+        ).tooltip("Interface language")
+        _header_menu(state, run_id, has_script=bool(detail.script), instance_url=instance)
 
-    One menu in the card's top right holds the controls the operator reaches
-    for occasionally — the three collapsible sections (stats, filters and the
-    free-text search), the drift check, the table refresh, and the run's prompt
-    and script. The page itself is the table; the filters open WITH the page,
-    and the rest is one click away.
 
-    The section items state what the click WILL do ("Show filters" /
-    "Hide filters"), so the label is the item's own contract — the filters
-    item opens reading "Hide filters" because the section starts visible, and
-    the search item opens reading "Show search" because the search starts
-    hidden.
+def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False, instance_url: str = "") -> None:
+    """The Settings menu: every occasional control, one click away.
+
+    It holds the search toggle, the drift/sync actions, the run's prompt and
+    script, and the way back to the tasks list. The controls that act on the
+    table (filters, density, pagination) live in the card where the table is.
     """
-    # The menu is nested INSIDE the button: Quasar anchors a menu to its
-    # parent element, so a sibling menu would hang off the whole toolbar row
-    # instead of the button that opens it. ``q-ml-auto`` keeps it pinned to the
-    # row's far right even when the performance line beside it is hidden (the
-    # row's ``justify-between`` would otherwise anchor the lone button left).
-    with ui.button(icon="menu", on_click=lambda: menu.open()).props("flat dense color=secondary").classes("q-ml-auto"):
+    with ui.button(text="Settings", icon="settings").props("outline no-caps color=grey-9").classes("settings-btn") as button:
         with ui.menu() as menu:
-            state["_filters_item"], state["_filters_label"] = _menu_item(
-                "filter_alt",
-                section_toggle_label("filters", bool(state.get("_filters_visible", True))),
-                lambda: _toggle_section(state, "filters"),
-            )
-            state["_stats_item"], state["_stats_label"] = _menu_item(
-                "insights",
-                section_toggle_label("stats", bool(state.get("_stats_visible", False))),
-                lambda: _toggle_section(state, "stats"),
-            )
-            # The free-text search starts hidden: the dropdowns are the usual
-            # way to narrow a run, while a text scan is an occasional tool the
-            # operator reaches for from this menu.
             state["_search_item"], state["_search_label"] = _menu_item(
                 "search",
                 section_toggle_label("search", bool(state.get("_search_visible", False))),
                 lambda: _toggle_section(state, "search"),
             )
-            ui.separator()
             _menu_item(
-                "sync", "Check drift", lambda: background_tasks.create(_check_drift_now(state, client=context.client))
+                "unfold_more",
+                "Expand / collapse all",
+                lambda: _toggle_expand_all(state),
+            )
+            _menu_item(
+                "sync",
+                "Check drift",
+                lambda: background_tasks.create(_check_drift_now(state, client=context.client)),
             )
             state["_update_table_item"], state["_update_table_menu_label"] = _menu_item(
                 "cloud_sync", "Sync with Uwazi", lambda: _update_table_clicked(state)
@@ -316,9 +366,14 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 ),
             )
             if has_script:
-                # The script item exists only for a run that HAS one — the same
-                # rule the tasks table's row menu follows.
                 _menu_item("code", "Show script", lambda: script_dialog(run_id))
+            ui.separator()
+            _menu_item("arrow_back", "Back to tasks", lambda: ui.navigate.to(page_link("/app")))
+            if instance_url:
+                with ui.item():
+                    ui.icon("link").classes("q-mr-sm")
+                    ui.link(instance_url, instance_url, new_tab=True).classes("text-caption")
+    button.on("click", menu.open)
 
 
 def _menu_item(icon: str, text: str, on_click: Any) -> tuple[Any, Any]:
@@ -366,6 +421,7 @@ def _clear_search(state: dict[str, Any]) -> None:
             state["_suppress_filter_events"] = False
     state["offset"] = 0
     _reset_global_selection(state)
+    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
@@ -378,12 +434,7 @@ def _update_table_clicked(state: dict[str, Any]) -> None:
 
 
 def _search_bar(state: dict[str, Any]) -> None:
-    """The free-text search, hidden until the hamburger menu reveals it.
-
-    It lives in its OWN section, not inside the filter bar: the dropdowns are
-    the normal way to narrow a run, while a text scan is an occasional tool, so
-    it opens on demand and can be shown even while the filters are collapsed.
-    """
+    """The free-text search, hidden until the settings menu reveals it."""
     state["_text_input"] = (
         ui.input(
             "Search title / sharedId",
@@ -395,105 +446,155 @@ def _search_bar(state: dict[str, Any]) -> None:
     )
 
 
-def _filter_bar(state: dict[str, Any]) -> None:
-    """The filters: one labelled strip of selects plus the Reset button.
+def _filters_button(state: dict[str, Any]) -> None:
+    """The card header's Filters button and its active-filter count badge."""
+    with ui.element("div").classes("filter-button-wrap"):
+        state["_filters_button"] = ui.button(
+            "Filters", icon="filter_alt", on_click=lambda: _toggle_section(state, "filters")
+        ).props("outline no-caps color=grey-9")
+        state["_filter_badge"] = ui.badge("0").props("color=primary").classes("filter-badge")
 
-    The row is aligned LEFT and starts with a small "Filters" caption, so the
-    controls read as one cohesive block instead of four unrelated dropdowns
-    floating at the table's right edge. Each select keeps the same height and a
-    minimum width, and Reset sits LAST with a vertical rule in front of it: it
-    undoes the whole row, so it reads as the row's own exit.
-    """
-    with (
-        ui.row()
-        .classes("w-full items-center gap-2 no-wrap q-py-xs")
-        .style("border-top: 1px solid rgba(0,0,0,0.08); padding-top: 4px;")
-    ):
-        ui.icon("filter_alt", color="grey-7").classes("text-body2")
-        ui.label("Filters").classes("text-caption text-grey-7 q-mr-sm")
-        # The Property filter comes FIRST: it decides WHAT the table shows
-        # (every property the task writes is an option, and picking one
-        # narrows the table to the suboperations writing that property).
-        # Options carry NO score: the run's ONE performance number lives in
-        # the validation card, so the two cannot compete or disagree.
-        labels_by_template = _template_labels(state["run_id"])
-        state["_template_labels"] = labels_by_template
-        state["_labels"] = _merged_labels(labels_by_template)
-        # Types ride along with labels so date values render as calendar
-        # dates in the table and in the entity window.
-        types_by_template = _template_types(state["run_id"])
-        state["_template_types"] = types_by_template
-        state["_types"] = _merged_types(types_by_template)
-        # Every dropdown is counted against the OTHER active filters (see
-        # ``_refresh_filter_counts``): the labels say how many rows each
-        # choice would leave, and a choice that matches nothing under them is
-        # not offered at all.
-        counts = get_filter_counts(
-            page_instance_url(),
-            state["run_id"],
-            filter_from_controls(
-                property_name=state["property"],
-                language=state["language"],
-                limit=100000,
-            ),
+
+def _active_filter_count(state: dict[str, Any]) -> int:
+    """How many filter dimensions are narrowing the table right now (pure)."""
+    return sum(
+        (
+            1 if state.get("property") else 0,
+            1 if state.get("language") else 0,
+            1 if state.get("op") else 0,
+            1 if state.get("status") else 0,
+            1 if (state.get("text") or "").strip() else 0,
         )
-        state["_property_select"] = (
-            ui.select(
-                property_filter_options(state["_labels"], counts.get("property", {}), state["property"]),
-                value=state["property"],
-                label="Property",
-                on_change=lambda e: _set_filter(state, "property", e.value or ""),
+    )
+
+
+def _refresh_filter_badge(state: dict[str, Any]) -> None:
+    """Paint the Filters button's active count (hidden at zero)."""
+    badge = state.get("_filter_badge")
+    if badge is None or badge.is_deleted:
+        return
+    count = _active_filter_count(state)
+    badge.text = str(count)
+    badge.set_visibility(count > 0)
+
+
+def _filter_bar(state: dict[str, Any]) -> None:
+    """The filter row: four labelled selects, Reset and the density toggle."""
+    labels_by_template = _template_labels(state["run_id"])
+    state["_template_labels"] = labels_by_template
+    state["_labels"] = _merged_labels(labels_by_template)
+    types_by_template = _template_types(state["run_id"])
+    state["_template_types"] = types_by_template
+    state["_types"] = _merged_types(types_by_template)
+    counts = get_filter_counts(
+        page_instance_url(),
+        state["run_id"],
+        filter_from_controls(
+            property_name=state["property"],
+            language=state["language"],
+            limit=100000,
+        ),
+    )
+    property_options = property_filter_options(state["_labels"], counts.get("property", {}), state["property"])
+    property_options[""] = "Any property"
+    language_options = language_filter_options(counts.get("language", {}), state["language"])
+    language_options[""] = "Any language"
+
+    with ui.row().classes("uw-filter-row w-full items-stretch gap-3 wrap"):
+        with ui.element("div").classes("filter-box").style("width:248px"):
+            ui.label("Property").classes("filter-caption")
+            state["_property_select"] = (
+                ui.select(
+                    property_options,
+                    value=state["property"],
+                    on_change=lambda e: _set_filter(state, "property", e.value or ""),
+                )
+                .props("borderless dense hide-bottom-space options-dense")
+                .classes("filter-select w-full")
             )
-            .props("dense outlined")
-            .classes("min-w-[240px]")
-        )
-        # The Language filter names the language a SUBOPERATION is written
-        # in: the operation row is one entity whatever languages it writes,
-        # so the language has to be selectable below the row. It sits right
-        # after Property: both narrow WHAT the table shows.
-        state["_language_select"] = (
-            ui.select(
-                language_filter_options(counts.get("language", {}), state["language"]),
-                value=state["language"],
-                label="Language",
-                on_change=lambda e: _set_filter(state, "language", e.value or ""),
+        with ui.element("div").classes("filter-box").style("width:180px"):
+            ui.label("Language").classes("filter-caption")
+            state["_language_select"] = (
+                ui.select(
+                    language_options,
+                    value=state["language"],
+                    on_change=lambda e: _set_filter(state, "language", e.value or ""),
+                )
+                .props("borderless dense hide-bottom-space options-dense")
+                .classes("filter-select w-full")
             )
-            .props("dense outlined")
-            .classes("min-w-[150px]")
-        )
         # Operation and Status are MULTI-selects: an operator often wants to
-        # see two statuses (or two operations) at once. No "any" option — an empty
-        # selection is the unfiltered state, and the Reset button clears it.
-        # Their options list only the values the run actually has under the
-        # other filters, each with its row count (see _refresh_filter_counts
-        # for the live refresh).
-        state["_op_select"] = (
-            ui.select(
-                filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
-                multiple=True,
-                value=state["op"],
-                label="Operation",
-                on_change=lambda e: _set_filter(state, "op", e.value or []),
+        # see two statuses (or two operations) at once. An empty selection is
+        # the unfiltered state; the placeholder says so.
+        with ui.element("div").classes("filter-box").style("width:220px"):
+            ui.label("Operation").classes("filter-caption")
+            state["_op_select"] = (
+                ui.select(
+                    filter_options(OP_LABELS, counts.get("op", {}), state["op"]),
+                    multiple=True,
+                    value=state["op"],
+                    on_change=lambda e: _set_filter(state, "op", e.value or []),
+                )
+                .props("borderless dense hide-bottom-space options-dense use-chips clearable")
+                .classes("filter-select w-full")
             )
-            .props("dense outlined use-chips clearable")
-            .classes("min-w-[190px]")
-        )
-        state["_status_select"] = (
-            ui.select(
-                filter_options(_STATUS_LABELS, counts.get("status", {}), state["status"]),
-                multiple=True,
-                value=state["status"],
-                label="Status",
-                on_change=lambda e: _set_filter(state, "status", e.value or []),
+            op_placeholder = ui.label("Any operation").classes("filter-placeholder")
+            op_placeholder.bind_visibility_from(state["_op_select"], "value", backward=lambda v: not v)
+        with ui.element("div").classes("filter-box").style("width:180px"):
+            ui.label("Status").classes("filter-caption")
+            state["_status_select"] = (
+                ui.select(
+                    filter_options(_STATUS_LABELS, counts.get("status", {}), state["status"]),
+                    multiple=True,
+                    value=state["status"],
+                    on_change=lambda e: _set_filter(state, "status", e.value or []),
+                )
+                .props("borderless dense hide-bottom-space options-dense use-chips clearable")
+                .classes("filter-select w-full")
             )
-            .props("dense outlined use-chips clearable")
-            .classes("min-w-[140px]")
+            status_placeholder = ui.label("Any status").classes("filter-placeholder")
+            status_placeholder.bind_visibility_from(state["_status_select"], "value", backward=lambda v: not v)
+        with ui.row().classes("items-center gap-3 no-wrap ml-auto"):
+            ui.button("Reset", on_click=lambda: _reset_filters(state)).props("flat dense no-caps").classes("reset-link")
+            _density_toggle(state)
+
+
+def _density_toggle(state: dict[str, Any]) -> None:
+    """The Compact / Comfortable segmented control."""
+    with ui.row().classes("density-toggle items-center no-wrap"):
+        state["_compact_button"] = (
+            ui.button("Compact", on_click=lambda: _set_density(state, True)).props("flat dense no-caps")
         )
-        # The clear button is the LAST item of the row: it undoes the whole
-        # row, so it reads as the row's own exit, behind a rule that sets it
-        # apart from the controls it clears.
-        ui.separator().props("vertical").classes("q-mx-sm").style("height: 24px")
-        ui.button("Reset", icon="restart_alt", on_click=lambda: _reset_filters(state)).props("flat dense")
+        state["_comfortable_button"] = (
+            ui.button("Comfortable", on_click=lambda: _set_density(state, False)).props("flat dense no-caps")
+        )
+    _refresh_density_buttons(state)
+
+
+def _set_density(state: dict[str, Any], compact: bool) -> None:
+    """Switch the table between compact and comfortable rows."""
+    state["_compact"] = compact
+    table = state.get("_table")
+    if table is not None and not table.is_deleted:
+        if compact:
+            table.props("dense")
+        else:
+            table.props(remove="dense")
+        table.update()
+    _refresh_density_buttons(state)
+
+
+def _refresh_density_buttons(state: dict[str, Any]) -> None:
+    """Paint the segmented control's selected half."""
+    compact = bool(state.get("_compact"))
+    for key, active in (("_compact_button", compact), ("_comfortable_button", not compact)):
+        button = state.get(key)
+        if button is None or button.is_deleted:
+            continue
+        if active:
+            button.classes(add="density-btn-active")
+        else:
+            button.classes(remove="density-btn-active")
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
@@ -504,18 +605,12 @@ def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
     state[key] = value
     state["offset"] = 0
     _reset_global_selection(state)
+    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
 def _reset_filters(state: dict[str, Any]) -> None:
-    """Clear EVERY filter: the state, and the control that shows it.
-
-    The clear button has to empty the row it sits in, so each control is
-    reset to its own "any" value — the single-value dropdowns to "", the
-    multi-selects to an empty list, and the search to "". The change events
-    those assignments fire are suppressed, so the reset does not re-enter the
-    filter logic (and does not refresh the table once per control).
-    """
+    """Clear EVERY filter: the state, and the control that shows it."""
     state.update(
         {
             "status": [],
@@ -544,51 +639,46 @@ def _reset_filters(state: dict[str, Any]) -> None:
     finally:
         state["_suppress_filter_events"] = False
     _reset_global_selection(state)
+    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
 def _action_bar(state: dict[str, Any]) -> None:
-    """The table's control row: the selection actions, then the view controls.
+    """The sticky bulk-action bar, visible only while rows are selected.
 
-    ONE row with two visually distinct groups, separated by a vertical rule: on
-    the left the actions that act on the checked rows (Run / Revert / Discard,
-    each carrying its count), on the right the controls that change what the
-    table SHOWS (Select all results / Expand all). They used to be nine flat
-    buttons strung across the full width with nothing but a spacer between
-    them, which made "Run" and "Expand all" read as peers.
+    It replaces the old always-visible RUN (0) / REVERT (0) / DISCARD (0)
+    toolbar: an action with nothing selected is noise, and the counts belong
+    to the selection the operator just made.
     """
-    with ui.row().classes("w-full items-center gap-2 no-wrap q-mb-sm"):
-        with ui.row().classes("items-center gap-2 no-wrap"):
-            state["_run_button"] = ui.button(
-                run_button_label(0),
-                icon="play_arrow",
-                on_click=lambda: _run_from_state(state),
-            ).props("dense color=primary")
-            state["_bulk_revert_button"] = ui.button(
-                bulk_revert_label(0),
-                icon="undo",
-                on_click=lambda: _revert_from_state(state),
-            ).props("dense flat color=indigo")
+    sticky = ui.page_sticky(position="bottom", y_offset=0, expand=True).classes("uw-bulk-sticky")
+    state["_bulk_bar"] = sticky
+    with sticky:
+        with ui.row().classes("uw-bulk-bar w-full items-center gap-3 no-wrap"):
+            state["_selection_label"] = ui.label("0 selected").classes("uw-selection-label")
+            state["_run_button"] = (
+                ui.button(run_button_label(0), icon="play_arrow", on_click=lambda: _run_from_state(state))
+                .props("unelevated no-caps color=primary")
+                .classes("uw-run-button")
+            )
+            state["_bulk_revert_button"] = (
+                ui.button("Revert", on_click=lambda: _revert_from_state(state))
+                .props("outline no-caps color=grey-9")
+            )
             # The bulk Discard: marking the checked operations as "will not be
             # executed" one by one is not workable on a table of thousands, so
             # the selection carries it too.
-            state["_bulk_discard_button"] = ui.button(
-                bulk_discard_label(0),
-                icon="block",
-                on_click=lambda: _discard_from_state(state),
-            ).props("dense flat color=negative")
-        ui.separator().props("vertical").classes("q-mx-sm").style("height: 24px")
-        with ui.row().classes("items-center gap-2 no-wrap"):
-            state["_select_all_button"] = ui.button(
-                select_all_label(0, False),
-                icon="select_all",
-                on_click=lambda: _toggle_select_all(state),
-            ).props("dense flat")
-            # The expand toggle changes what the table SHOWS, not what the
-            # operator has selected, so it sits beside Select all rather than
-            # among the actions.
-            state["_expand_button"] = ui.button(
-                "Expand all",
-                icon="unfold_more",
-                on_click=lambda: _toggle_expand_all(state),
-            ).props("dense flat")
+            state["_bulk_discard_button"] = (
+                ui.button("Discard", on_click=lambda: _discard_from_state(state))
+                .props("outline no-caps color=negative")
+                .classes("uw-discard-button")
+            )
+            state["_select_all_button"] = (
+                ui.button(select_all_label(0, False), on_click=lambda: _toggle_select_all(state))
+                .props("flat no-caps")
+                .classes("uw-select-all")
+            )
+    sticky.set_visibility(False)
+    _refresh_selection_counts(state)
+
+
+__all__ = ["review_page"]

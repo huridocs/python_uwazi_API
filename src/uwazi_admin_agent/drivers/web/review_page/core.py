@@ -33,38 +33,26 @@ from uwazi_admin_agent.drivers.web.operation_gate import (
     try_claim_run,
 )
 from uwazi_admin_agent.drivers.web.operations_view import (
-    EXPAND_COLUMN,
-    STATUS_WITH_COUNT_COLUMN,
     entities_of_refs,
     ids_of_refs,
     languages_of_refs,
     operation_row,
     ops_of_refs,
     pairs_of_refs,
+    recommendation_text,
     rerun_blocked,
     sub_refs,
 )
 from uwazi_admin_agent.drivers.web.review_view import (
-    ACTIONS_COLUMN,
-    DRIFT_STATUS_COLORS,
-    MODIFIED_COLUMN,
     OP_LABELS,
-    OPS_COLUMN,
     STATUS_COLORS,
-    TEMPLATE_COLUMN,
-    TITLE_COLUMN,
-    bulk_discard_label,
-    bulk_revert_label,
-    cost_card_value,
     drift_banner_text,
     drift_banner_time,
-    drift_text_classes,
     expanded_keys_for,
     expansion_mode,
     filter_from_controls,
     filter_options,
     language_filter_options,
-    pending_suboperation_count,
     performance_visible,
     property_filter_options,
     review_sort_pagination,
@@ -85,7 +73,6 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_operation_rows,
     get_run,
     get_selection_rows,
-    get_suggestion_counts,
     get_table_update_time,
     preflight_selection,
     refresh_baseline_after_run,
@@ -149,6 +136,34 @@ def _apply_checked(state: dict[str, Any], ids: list[int], checked: bool) -> None
         target.difference_update(ids)
 
 
+_DRIFT_LABELS: dict[str, str] = {
+    "valid": "Up to date",
+    "drifted": "Out of date",
+    "error": "Check failed",
+    "unknown": "Not checked yet",
+    "checking": "Checking…",
+    "syncing": "Syncing with Uwazi…",
+}
+
+_DRIFT_DOT_COLORS: dict[str, str] = {
+    "valid": "#16A34A",
+    "drifted": "#DC2626",
+    "error": "#DC2626",
+    "unknown": "#9CA3AF",
+    "checking": "#F59E0B",
+    "syncing": "#1C64F2",
+}
+
+_DRIFT_TEXT_COLORS: dict[str, str] = {
+    "valid": "#6B7280",
+    "drifted": "#DC2626",
+    "error": "#DC2626",
+    "unknown": "#6B7280",
+    "checking": "#6B7280",
+    "syncing": "#6B7280",
+}
+
+
 def _apply_drift_state(
     state: dict[str, Any],
     stored: Any,
@@ -156,68 +171,50 @@ def _apply_drift_state(
     checking: bool = False,
     syncing: bool = False,
 ) -> None:
-    """Paint one verdict (or the checking/syncing glyph) onto the banner elements."""
+    """Paint one compact sync verdict onto the card header.
+
+    The old red/grey banner strip above the table is now the right-hand
+    "● Up to date · checked 13:40" readout. The DOT carries the verdict color
+    (green = current, red = drifted/failed, grey = never checked); the text
+    stays secondary grey so it does not compete with the table. The full
+    sentence (and any drift detail) moves into the hover tooltip.
+    """
     label = state.get("_drift_label")
-    icon = state.get("_drift_icon")
+    dot = state.get("_drift_icon")
     if label is None or label.is_deleted:
         return
     if syncing:
-        label.text = drift_banner_text(status="unknown", detail=None, syncing=True)
-        label.classes(replace=drift_text_classes("blue"))
-        if icon is not None and not icon.is_deleted:
-            icon.name = "cloud_sync"
-            icon.classes("animate-spin text-body1")
-            icon.color = "blue"
-            icon.update()
-        _set_drift_sync_visibility(state, False)
-        return
-    if checking:
-        label.text = drift_banner_text(status="unknown", detail=None, checking=True)
-        label.classes(replace=drift_text_classes("grey-7"))
-        if icon is not None and not icon.is_deleted:
-            icon.name = "sync"
-            icon.classes("animate-spin text-body1")
-            icon.color = "blue"
-            icon.update()
-        _set_drift_sync_visibility(state, False)
-        return
-    if stored is None:
-        label.text = drift_banner_text(status="unknown", detail=None)
-        label.classes(replace=drift_text_classes("grey-7"))
-        _set_drift_sync_visibility(state, False)
-        return
-    label.text = drift_banner_text(
-        status=stored.status.value,
-        detail=stored.detail,
-    ) + drift_banner_time(stored.checked_at)
-    color = DRIFT_STATUS_COLORS.get(stored.status.value, "grey-7")
-    icon_name = {
-        "unknown": "help_outline",
-        "valid": "check_circle",
-        "drifted": "warning",
-        "error": "error",
-    }.get(stored.status.value, "help_outline")
-    # The TEXT takes the verdict color: "Out of date" in red is the whole
-    # point of the banner. ``replace=`` drops the resting grey so the verdict
-    # color wins.
-    label.classes(replace=drift_text_classes(color))
-    if icon is not None and not icon.is_deleted:
-        icon.name = icon_name
-        # ``classes(...)`` ADDS by default: without removing the checking
-        # stage's ``animate-spin`` here, the verdict icon would keep spinning
-        # forever. A fresh class list also drops stale text-color entries so
-        # the new verdict's color wins.
-        icon.classes(replace="text-body1")
-        icon.classes(f"text-{color}")
-        icon.update()
-    # Drift is the one verdict with an action attached: the table is out of
-    # date, so the banner offers the sync that fixes it, right where the
-    # warning is read.
-    _set_drift_sync_visibility(state, stored.status is DriftStatus.DRIFTED)
+        key = "syncing"
+        self_text = _DRIFT_LABELS[key]
+        full_text = drift_banner_text(status="unknown", detail=None, syncing=True)
+    elif checking:
+        key = "checking"
+        self_text = _DRIFT_LABELS[key]
+        full_text = drift_banner_text(status="unknown", detail=None, checking=True)
+    elif stored is None:
+        key = "unknown"
+        self_text = _DRIFT_LABELS[key]
+        full_text = drift_banner_text(status="unknown", detail=None)
+    else:
+        key = str(stored.status.value)
+        self_text = _DRIFT_LABELS.get(key, "Not checked yet") + drift_banner_time(stored.checked_at)
+        full_text = drift_banner_text(status=key, detail=stored.detail)
+    label.text = self_text
+    label.style(replace=f"color: {_DRIFT_TEXT_COLORS.get(key, '#6B7280')};")
+    if dot is not None and not dot.is_deleted:
+        dot.classes(replace="sync-dot" + (" sync-dot-pulse" if key in ("checking", "syncing") else ""))
+        dot.style(f"background: {_DRIFT_DOT_COLORS.get(key, '#9CA3AF')};")
+    tooltip = state.get("_drift_tooltip")
+    if tooltip is not None and not tooltip.is_deleted:
+        tooltip.text = full_text
+        tooltip.update()
+    # Drift is the only verdict with an action attached: the table is out of
+    # date, so the header offers the sync that fixes it.
+    _set_drift_sync_visibility(state, stored is not None and stored.status is DriftStatus.DRIFTED and not syncing)
 
 
 def _set_drift_sync_visibility(state: dict[str, Any], visible: bool) -> None:
-    """Show/hide the banner's Sync button (the drifted state's remedy)."""
+    """Show/hide the header's Sync button (the drifted state's remedy)."""
     button = state.get("_drift_sync_button")
     if button is None or button.is_deleted:
         return
@@ -260,83 +257,81 @@ def _card(label: str, value: str, color: str = "primary", caption: str = "") -> 
 
 
 def _change_table(state: dict[str, Any]) -> None:
-    """The OPERATIONS table: one row per affected entity, each with suboperations.
+    """The SUGGESTIONS table: one parent row per entity, expanded property rows.
 
-    The row is the entity (every language it writes), and expanding it shows the
-    SUBOPERATIONS it is made of: one per property value per language, one per
-    link for a relationship batch. That is what makes a translation task one row
-    with two language parts instead of two peer rows, and what lets Run/Discard/
-    Revert address a single property.
+    The parent row is the entity; the child rows are its suggested property
+    values. Both levels render in the SAME table body so they share the column
+    grid (a nested table inevitably drifts out of alignment). Quasar owns the
+    expansion state (``props.expand``, keyed by ``row_key``) and the page owns
+    the checked SUBOPERATION ids (the parent tick is derived from them), so a
+    rows refresh never loses either.
 
-    The body slot renders both levels so ``props.expand`` (Quasar's expansion,
-    keyed by ``row_key`` so it survives a rows refresh) can show the panel, and
-    ``props.selected`` keeps the header checkbox, the row checkbox and the Run
-    count in step. Colors and labels arrive on the row (computed in Python): a
-    Vue slot cannot reach ``window.*``.
+    All colors, labels and derived readings arrive on the payload from Python:
+    a Vue slot cannot reach ``window.*`` helpers.
     """
     from .entity_window import _revert_entity_clicked
 
-    # The five data headers are sortable: a click orders the WHOLE filtered set
-    # in SQL (see ``sort_from_header_click``), not just the visible page. The
-    # expand and Actions columns are not data, so they never sort.
+    # The expand column holds the chevron; the checkbox is added by QTable's
+    # selection support (the body slot draws it as the first cell). Fixed
+    # widths keep a long recommendation from widening the table; the
+    # Recommendation column takes the remaining width and clips with CSS.
     columns = [
-        {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": EXPAND_COLUMN},
-        {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": True, "style": TITLE_COLUMN},
+        {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": "width: 36px"},
+        {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": True, "style": "width: 190px"},
         {
             "name": "template",
             "label": "Template",
             "field": "template",
             "align": "left",
             "sortable": True,
-            "style": TEMPLATE_COLUMN,
+            "style": "width: 120px",
         },
-        {"name": "ops", "label": "Operation", "field": "ops", "align": "left", "sortable": True, "style": OPS_COLUMN},
+        {
+            "name": "recommendation",
+            "label": "Recommendation",
+            "field": "recommendation",
+            "align": "left",
+            "sortable": False,
+            "style": "width: auto",
+        },
+        {"name": "ops", "label": "Operation", "field": "ops", "align": "left", "sortable": True, "style": "width: 132px"},
         {
             "name": "run_status",
             "label": "Status",
             "field": "run_status",
             "align": "left",
             "sortable": True,
-            "style": STATUS_WITH_COUNT_COLUMN,
-        },
-        {
-            "name": "modified",
-            "label": "Modified",
-            "field": "modified",
-            "align": "left",
-            "sortable": True,
-            "style": MODIFIED_COLUMN,
+            "style": "width: 176px",
         },
         {
             "name": "actions",
             "label": "Actions",
             "field": "actions",
-            "align": "center",
+            "align": "right",
             "sortable": False,
-            "style": ACTIONS_COLUMN,
+            "style": "width: 226px",
         },
     ]
     table = ui.table(
         rows=[],
         columns=columns,
-        # The operation's key is the ENTITY: one row however many languages and
-        # properties its suboperations write.
         row_key="row_key",
         selection="multiple",
         pagination=review_sort_pagination(state.get("sort_by") or "recorded", bool(state.get("sort_desc"))),
         on_select=lambda e: _on_table_select(state, e),
-    ).classes("w-full")
-    # Two clicks must mean ascending then descending, never a third "unsorted"
+    ).classes("w-full uw-table")
+    table.props("flat")
+    if state.get("_compact"):
+        table.props("dense")
+    # Two clicks mean ascending then descending, never a third "unsorted"
     # state: Quasar's default cycle includes one, ``binary-state-sort`` removes
     # it. With ``rowsNumber`` (see review_sort_pagination) QTable is in server
     # mode: it draws the arrow but never re-sorts the page we hand it locally.
     table.props["binary-state-sort"] = True
-    # The page has its own "Showing X–Y of Z" readout and page buttons, so the
-    # QTable footer would be a second, redundant pagination control.
+    # The card footer owns "Showing a-b of N" and the page controls.
     table.props["hide-pagination"] = True
-    # The table's expansion state lives in the ``expanded`` prop, so the server
-    # owns it: that is what lets the page expand (and collapse) every operation
-    # at once. It starts empty.
+    # The expansion state lives in the prop, so the page controls it. It starts
+    # empty; ``Expand all`` (if used) writes the next page's keys here.
     table.props["expanded"] = []
     # In server mode Quasar reports a header click with a ``request`` carrying
     # the new sortBy/descending (it does NOT emit ``update:sort``). Only the
@@ -348,205 +343,187 @@ def _change_table(state: dict[str, Any]) -> None:
         """
         <q-tr :props="props">
           <q-td auto-width>
-            <!-- The row checkbox is SERVER-OWNED, exactly like the suboperation
-                 ones: it reads ``props.selected`` (derived from the checked
-                 suboperation ids) and reports the click through the table's own
-                 event. ``v-model=props.selected`` used to write Quasar's
-                 selection directly, which raced the Python-side re-derivation
-                 of the same state — on a table whose rows shared a key (the
-                 create placeholders all read ``dry-created-0``) the write-back
-                 overwrote the tick, so the box snapped back and could not be
-                 checked. -->
-            <q-checkbox v-if="!props.row.is_display_only" :model-value="props.selected" dense
+            <!-- The row checkbox is SERVER-OWNED: it reads props.selected
+                 (derived from the checked suboperation ids) and reports the
+                 click through the table's own event. -->
+            <q-checkbox v-if="!props.row.is_display_only && !props.row.is_info" :model-value="props.selected" dense
                         :disable="!props.row.has_selectable"
                         :title="props.row.rerun_blocked ? props.row.rerun_blocked_reason
                                 : (props.row.has_selectable ? '' : 'Nothing to run or revert on this operation')"
                         @update:model-value="v => $parent.$emit('toggle_row', props.row.row_key, v)" />
           </q-td>
           <q-td key="expand" :props="props" class="text-center">
-            <q-btn v-if="!props.row.is_info || props.row.has_subs" dense flat size="sm"
+            <q-btn v-if="props.row.has_subs" dense flat round size="sm"
+                   class="expand-btn"
                    @click.stop="props.expand = !props.expand"
-                   :icon="props.expand ? 'expand_less' : 'chevron_right'"
-                   :title="props.expand ? 'Collapse the suboperations' : 'Show the suboperations'" />
+                   :icon="props.expand ? 'expand_more' : 'chevron_right'">
+              <q-tooltip>{{ props.expand ? 'Collapse suggestions' : 'Show suggestions' }}</q-tooltip>
+            </q-btn>
           </q-td>
           <q-td key="title" :props="props">
-            <div v-if="props.row.is_info" class="text-body2"
-                 style="white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;">{{ props.row.title_full }}</div>
-            <div v-else style="min-width: 0;">
-              <!-- The title IS the link: clicking it opens the entity in Uwazi.
-                   A row with nothing to open (a create that has not run yet)
-                   falls back to the plain title, which opens the detail window.
-                   ``user-select: none`` on purpose: selectable text makes the
-                   browser draw its I-beam, hiding the pointer that says "this
-                   opens the entity". -->
+            <div v-if="props.row.is_info" class="truncate text-body2" style="user-select: text;"
+                 :title="props.row.title_full">{{ props.row.title_full }}
+              <q-tooltip class="wide-tooltip">{{ props.row.title_full }}</q-tooltip>
+            </div>
+            <div v-else class="truncate">
               <a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener"
-                 class="text-primary review-title-link" style="display: block; overflow: hidden;
-                       text-overflow: ellipsis; white-space: nowrap; cursor: pointer; user-select: none;"
-                 :title="props.row.title_full + ' — open in Uwazi'" draggable="false">{{ props.row.title }}</a>
-              <span v-else class="text-primary review-title-link" style="display: block; overflow: hidden;
-                    text-overflow: ellipsis; white-space: nowrap; cursor: pointer;"
-                    :title="props.row.title_full"
-                    @click="$event => { const sel = $event.target.ownerDocument.getSelection();
-                      if (sel && !sel.isCollapsed && sel.rangeCount &&
-                      ($event.target.contains(sel.getRangeAt(0).startContainer) ||
-                      $event.target.contains(sel.getRangeAt(0).endContainer))) return;
-                      $parent.$emit('open_entity', props.row); }">{{ props.row.title }}</span>
+                 class="entity-link" draggable="false">{{ props.row.title }}</a>
+              <span v-else class="entity-link" @click="$parent.$emit('open_entity', props.row)">{{ props.row.title }}</span>
+              <q-tooltip class="wide-tooltip">{{ props.row.title_full }}</q-tooltip>
             </div>
           </q-td>
-          <q-td key="template" :props="props">{{ props.row.template || '—' }}</q-td>
+          <q-td key="template" :props="props">
+            <div class="truncate">{{ props.row.template || '—' }}</div>
+          </q-td>
+          <q-td key="recommendation" :props="props">
+            <div class="truncate rec-cell">{{ props.row.recommendation || '—' }}
+              <q-tooltip v-if="props.row.recommendation_full"
+                         class="wide-tooltip">{{ props.row.recommendation_full }}</q-tooltip>
+            </div>
+          </q-td>
           <q-td key="ops" :props="props">
-            <q-badge v-for="(op, i) in props.row.ops.split(', ')" :key="op"
-                     :color="props.row.op_colors[i]" class="q-mr-xs">{{ op }}</q-badge>
+            <div class="row items-center no-wrap q-gutter-xs">
+              <q-badge v-for="op in props.row.ops_list" :key="op" outline color="grey-8" class="op-pill">{{ op }}</q-badge>
+            </div>
           </q-td>
-          <q-td key="run_status" :props="props" class="text-no-wrap">
-            <q-badge v-if="!props.row.status_hidden" :color="props.row.run_status_color" class="q-mr-xs">
-              {{ props.row.run_status }}</q-badge>
-            <span v-if="props.row.has_validated" :class="'text-' + props.row.validated_color"
-                  class="text-caption text-bold">{{ props.row.validated }}</span>
-            <div v-if="props.row.status_breakdown" class="text-caption text-grey-6">
-              {{ props.row.status_breakdown }}</div>
-            <q-icon v-if="props.row.rerun_blocked" name="sync_disabled" size="16px" color="orange-9"
-                    class="q-ml-xs" :title="props.row.rerun_blocked_reason" />
-          </q-td>
-          <q-td key="modified" :props="props" class="text-no-wrap">{{ props.row.modified }}</q-td>
-          <q-td key="actions" :props="props" class="text-no-wrap">
-            <!-- A display-only row (excluded / matched) is still an ENTITY:
-                 opening its detail window is how the operator sees the document
-                 behind the verdict. -->
-            <q-btn v-if="props.row.is_display_only && !props.row.is_info" dense flat icon="edit" color="teal"
-                   title="Open the entity window (its document and this row's evidence)"
-                   @click.stop="$parent.$emit('open_entity', props.row)" />
-            <template v-if="!props.row.is_display_only">
-              <q-btn dense flat icon="play_arrow" color="primary"
-                     :disable="!props.row.has_runnable"
-                     :title="props.row.run_title"
-                     @click.stop="$parent.$emit('run_op', props.row)" />
-              <q-btn v-if="props.row.revertable" dense flat icon="undo" color="indigo"
-                     :title="props.row.revert_tooltip || 'Revert this entity to its backup (all its languages)'"
-                     @click.stop="$parent.$emit('revert_op', props.row)" />
-              <q-btn v-if="props.row.run_status === 'discarded'" dense flat icon="restore" color="orange"
-                     title="Undo the discard — these suboperations go back to the review queue"
-                     @click.stop="$parent.$emit('restore_op', props.row)" />
-              <q-btn v-else-if="props.row.run_status !== 'applied' && !props.row.rerun_blocked"
-                     dense flat icon="block" color="negative"
-                     title="Mark this operation's visible suboperations as discarded — a Run will not execute them"
-                     @click.stop="$parent.$emit('discard_op', props.row)" />
-              <q-btn dense flat icon="edit" color="teal"
-                     title="Open the entity window (all its rows, every language)"
-                     @click.stop="$parent.$emit('open_entity', props.row)" />
+          <q-td key="run_status" :props="props">
+            <template v-if="props.row.status_text">
+              <div class="row items-center no-wrap">
+                <q-badge class="status-pill" :class="'status-' + props.row.status_kind">{{ props.row.status_text }}</q-badge>
+              </div>
+              <q-linear-progress v-if="props.row.show_progress" :value="props.row.progress" size="3px" rounded
+                                 track-color="grey-3" :color="props.row.progress_color" class="status-progress q-mt-xs" />
             </template>
           </q-td>
-        </q-tr>
-        <tr v-show="props.expand">
-          <td colspan="100%" class="q-pa-sm subs-expand">
-            <div class="subs-card" :style="{ '--subs-border-color': props.row.border_color }">
-              <div style="width: 0; min-width: 100%; overflow-x: auto;">
-                <table class="subs-table">
-                  <colgroup>
-                    <col style="width: 40px;" />
-                    <col style="width: 22%;" />
-                    <col style="width: 76px;" />
-                    <col style="width: 19%;" />
-                    <col style="width: 26%;" />
-                    <col style="width: 104px;" />
-                    <col style="width: 132px;" />
-                  </colgroup>
-                  <thead>
-                    <tr class="text-caption text-grey-7">
-                      <th></th>
-                      <th class="text-left q-pa-xs">Property</th>
-                      <th class="text-left q-pa-xs">Language</th>
-                      <th class="text-left q-pa-xs">Current value</th>
-                      <th class="text-left q-pa-xs">Suggested value</th>
-                      <th class="text-left q-pa-xs">Status</th>
-                      <th class="text-left q-pa-xs">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template v-for="sub in props.row.subs">
-                      <tr v-if="sub.is_info" :key="'info-' + sub.id">
-                        <td></td>
-                        <td class="q-pa-xs" colspan="6">
-                          <div class="text-body2"
-                               style="white-space: pre-wrap; overflow-wrap: anywhere;
-                                      user-select: text;">{{ sub.label }}</div>
-                        </td>
-                      </tr>
-                      <template v-else>
-                        <tr :key="sub.key">
-                          <td class="text-center">
-                            <q-checkbox v-if="sub.selectable" dense :model-value="sub.checked"
-                                        @update:model-value="v => $parent.$emit(
-                                            'toggle_sub', props.row.row_key, sub.id, v)" />
-                            <q-icon v-else name="lock" size="16px" color="grey-5"
-                                    :title="sub.note || 'not independently runnable'" />
-                          </td>
-                          <td class="q-pa-xs">
-                            <div class="text-body2">{{ sub.label }}</div>
-                            <div v-if="sub.caption" class="text-caption text-grey-6">{{ sub.caption }}</div>
-                          </td>
-                          <td class="q-pa-xs">
-                            <q-badge v-if="sub.language" color="teal-9">{{ sub.language }}</q-badge>
-                            <span v-else class="text-grey-6">—</span>
-                          </td>
-                          <td class="q-pa-xs"><div class="text-body2 text-grey-7">{{ sub.current }}</div></td>
-                          <td class="q-pa-xs">
-                            <template v-if="sub.select_type">
-                              <div class="row items-center q-gutter-xs">
-                                <q-chip v-for="(v, i) in sub.values" :key="v.label + '-' + i" dense
-                                        :color="v.accepted ? 'green-2' : 'red-2'"
-                                        :text-color="v.accepted ? 'green-10' : 'red-10'"
-                                        :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
-                                <q-chip v-if="sub.extra_selection" dense color="blue-2" text-color="blue-10"
-                                        icon="add">
-                                  {{ sub.extra_selection }}</q-chip>
-                              </div>
-                            </template>
-                            <div v-else class="text-body2">{{ sub.proposed }}</div>
-                          </td>
-                          <td class="q-pa-xs">
-                            <q-badge :color="sub.status_color">{{ sub.status }}</q-badge>
-                          </td>
-                          <td class="q-pa-xs subs-actions">
-                            <q-btn v-if="sub.selectable" dense flat icon="play_arrow" color="primary"
-                                   title="Run this suboperation (only this property)"
-                                   @click.stop="$parent.$emit('run_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-if="sub.has_rejected" dense flat icon="done_all" color="positive"
-                                   title="Accept every predicted value again"
-                                   @click.stop="$parent.$emit('accept_values', props.row.row_key, sub.id)" />
-                            <q-btn v-if="sub.independent && sub.status === 'discarded'"
-                                   dense flat icon="restore" color="orange"
-                                   title="Undo the discard — this suboperation goes back to the review queue"
-                                   @click.stop="$parent.$emit('restore_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-else-if="sub.selectable" dense flat icon="block" color="negative"
-                                   title="Discard this suboperation — a Run will not execute it"
-                                   @click.stop="$parent.$emit('discard_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-if="sub.revertable" dense flat icon="undo" color="indigo"
-                                   title="Revert this one property to its backup value"
-                                   @click.stop="$parent.$emit('revert_sub', props.row.row_key, sub.id)" />
-                            <q-btn v-if="!sub.structural && !sub.is_display_only" dense flat icon="edit" color="teal"
-                                   title="Open the entity window at this language"
-                                   @click.stop="$parent.$emit('edit_sub', props.row.row_key, sub.id)" />
-                          </td>
-                        </tr>
-                        <tr v-if="sub.context" :key="sub.key + '-context'">
-                          <td></td>
-                          <td class="q-pa-xs" colspan="6">
-                            <div class="subs-context">
-                              <div class="text-caption text-grey-6">Input text the suggestion was read from</div>
-                              <div class="text-body2 text-grey-7"
-                                   style="white-space: pre-wrap; overflow-wrap: anywhere;
-                                          user-select: text;">{{ sub.context }}</div>
-                            </div>
-                          </td>
-                        </tr>
-                      </template>
-                  </tbody>
-                </table>
-              </div>
+          <q-td key="actions" :props="props" class="text-no-wrap">
+            <div v-if="!props.row.is_info" class="row items-center justify-end no-wrap actions-cell">
+              <q-btn v-if="!props.row.is_display_only && props.row.run_status !== 'applied'
+                           && props.row.run_status !== 'discarded' && !props.row.rerun_blocked"
+                     class="row-actions" outline round dense size="sm" icon="block" color="negative"
+                     @click.stop="$parent.$emit('discard_op', props.row)">
+                <q-tooltip>Reject these suggestions</q-tooltip>
+              </q-btn>
+              <q-btn v-if="props.row.is_display_only" dense flat round size="sm" icon="edit" color="teal"
+                     @click.stop="$parent.$emit('open_entity', props.row)">
+                <q-tooltip>Open the entity window</q-tooltip>
+              </q-btn>
+              <q-btn v-else class="row-actions" outline round dense size="sm" icon="edit" color="grey-8"
+                     @click.stop="$parent.$emit('open_entity', props.row)">
+                <q-tooltip>Edit this entity</q-tooltip>
+              </q-btn>
+              <q-btn v-if="!props.row.is_display_only" outline no-caps dense color="grey-9" class="apply-btn"
+                     :disable="!props.row.has_runnable" @click.stop="$parent.$emit('run_op', props.row)">
+                Apply
+                <q-tooltip>{{ props.row.run_title }}</q-tooltip>
+              </q-btn>
+              <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
+                <q-tooltip>More actions</q-tooltip>
+                <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
+                  <q-list dense style="min-width: 190px">
+                    <q-item clickable v-close-popup @click="$parent.$emit('open_entity', props.row)">
+                      <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                      <q-item-section>Edit</q-item-section>
+                    </q-item>
+                    <q-item v-if="props.row.revertable" clickable v-close-popup
+                            @click="$parent.$emit('revert_op', props.row)">
+                      <q-item-section avatar><q-icon name="undo" /></q-item-section>
+                      <q-item-section>Revert</q-item-section>
+                    </q-item>
+                    <q-item v-if="props.row.run_status === 'discarded'" clickable v-close-popup
+                            @click="$parent.$emit('restore_op', props.row)">
+                      <q-item-section avatar><q-icon name="restore" /></q-item-section>
+                      <q-item-section>Restore</q-item-section>
+                    </q-item>
+                    <q-item v-else-if="!props.row.is_display_only && props.row.run_status !== 'applied'
+                                       && !props.row.rerun_blocked"
+                            clickable v-close-popup @click="$parent.$emit('discard_op', props.row)">
+                      <q-item-section avatar><q-icon name="block" /></q-item-section>
+                      <q-item-section>Reject</q-item-section>
+                    </q-item>
+                    <q-item v-if="props.row.url" clickable tag="a" :href="props.row.url" target="_blank">
+                      <q-item-section avatar><q-icon name="open_in_new" /></q-item-section>
+                      <q-item-section>Open in Uwazi</q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-menu>
+              </q-btn>
             </div>
-          </td>
-        </tr>
+          </q-td>
+        </q-tr>
+
+        <!-- One child row per suggested property, inside the SAME table and
+             with the SAME number of cells as the parent (the empty fillers
+             keep every column aligned). -->
+        <q-tr v-for="c in props.row.children" :key="c.key" v-show="props.expand" class="child-row">
+          <q-td auto-width>
+            <q-checkbox v-if="c.selectable" dense :model-value="c.checked"
+                        @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, c.id, v)" />
+            <q-icon v-else-if="!c.is_info" name="lock" size="14px" color="grey-5">
+              <q-tooltip>{{ c.note || 'Not independently runnable' }}</q-tooltip>
+            </q-icon>
+          </q-td>
+          <q-td key="expand"></q-td>
+          <q-td key="title">
+            <div class="child-target truncate" :title="c.target_full">{{ c.target_text }}
+              <q-tooltip class="wide-tooltip">{{ c.target_full }}</q-tooltip>
+            </div>
+            <q-badge v-if="c.language" color="teal-9" class="lang-pill q-mt-xs">{{ c.language }}</q-badge>
+          </q-td>
+          <q-td key="template"></q-td>
+          <q-td key="recommendation">
+            <div v-if="c.recommendation" class="truncate rec-cell">{{ c.recommendation }}
+              <q-tooltip class="wide-tooltip">{{ c.recommendation_full }}</q-tooltip>
+            </div>
+            <span v-else class="text-grey-5">—</span>
+          </q-td>
+          <q-td key="ops">
+            <q-badge v-if="c.op" outline color="grey-7" class="op-pill">{{ c.op }}</q-badge>
+          </q-td>
+          <q-td key="run_status">
+            <q-badge class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
+          </q-td>
+          <q-td key="actions" class="text-no-wrap">
+            <div class="row items-center justify-end no-wrap actions-cell">
+              <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
+                <q-tooltip>{{ c.label || 'Suggestion actions' }}</q-tooltip>
+                <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
+                  <q-list dense style="min-width: 210px">
+                    <q-item v-if="c.runnable" clickable v-close-popup
+                            @click="$parent.$emit('run_sub', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="play_arrow" /></q-item-section>
+                      <q-item-section>Run this suggestion</q-item-section>
+                    </q-item>
+                    <q-item v-if="c.has_rejected" clickable v-close-popup
+                            @click="$parent.$emit('accept_values', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="done_all" /></q-item-section>
+                      <q-item-section>Accept every value</q-item-section>
+                    </q-item>
+                    <q-item v-if="c.independent && c.status === 'discarded'" clickable v-close-popup
+                            @click="$parent.$emit('restore_sub', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="restore" /></q-item-section>
+                      <q-item-section>Restore</q-item-section>
+                    </q-item>
+                    <q-item v-else-if="c.runnable" clickable v-close-popup
+                            @click="$parent.$emit('discard_sub', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="block" /></q-item-section>
+                      <q-item-section>Reject</q-item-section>
+                    </q-item>
+                    <q-item v-if="c.revertable" clickable v-close-popup
+                            @click="$parent.$emit('revert_sub', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="undo" /></q-item-section>
+                      <q-item-section>Revert this property</q-item-section>
+                    </q-item>
+                    <q-item v-if="!c.structural && !c.is_display_only" clickable v-close-popup
+                            @click="$parent.$emit('edit_sub', props.row.row_key, c.id)">
+                      <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                      <q-item-section>Edit in entity window</q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-menu>
+              </q-btn>
+            </div>
+          </q-td>
+        </q-tr>
         """,
     )
     table.on("run_op", lambda e: _run_op_clicked(state, _row_key_of(getattr(e, "args", None))))
@@ -566,37 +543,18 @@ def _change_table(state: dict[str, Any]) -> None:
     # what the cascade to the suboperations needs (``on_select`` only carries
     # the selection itself).
     table.on("selection", lambda e: _selection_changed(state, e), ["added", "rows", "keys"])
-    # A chevron changed the expansion: mirror it in the prop so "Expand all"
-    # knows what is already open.
+    # A chevron changed the expansion: mirror it in the prop so the page's
+    # expansion state stays the source of truth.
     table.on("update:expanded", lambda e: _expanded_changed(state, e))
     state["_table"] = table
 
-    with ui.row().classes("w-full items-center justify-between"):
-        state["_page_label"] = ui.label("").classes("text-body2 text-grey-7")
-        with ui.row().classes("items-center gap-1"):
-            # First / previous / page readout / next / last. A run can have
-            # dozens of pages, so the two ends are one click away instead of a
-            # long run of chevrons.
-            ui.button(icon="first_page", on_click=lambda: _page_to(state, 1)).props("flat dense").tooltip("First page")
-            ui.button(icon="chevron_left", on_click=lambda: _page(state, -1)).props("flat dense")
-            state["_page_number"] = ui.label("").classes("text-body2 q-mx-sm")
-            ui.button(icon="chevron_right", on_click=lambda: _page(state, 1)).props("flat dense")
-            ui.button(icon="last_page", on_click=lambda: _page_to(state, None)).props("flat dense").tooltip("Last page")
-            # A typed page number: the fastest way to jump into the middle of a
-            # 50-page table without stepping through every page.
-            ui.label("Go to").classes("text-body2 text-grey-7 q-ml-sm")
-            state["_page_input"] = (
-                ui.number(
-                    value=1,
-                    min=1,
-                    max=1,
-                    precision=0,
-                    on_change=lambda e: _page_from_input(state, e.value),
-                )
-                .props("dense outlined")
-                .classes("w-24")
-                .tooltip("Type a page number and press Enter")
-            )
+    # The card footer: the result window on the left, the page controls on the
+    # right. It lives INSIDE the card, under the table (the old pagination row
+    # floated below it as a second, unrelated card).
+    with ui.row().classes("uw-card-footer w-full items-center justify-between no-wrap"):
+        state["_page_label"] = ui.label("").classes("uw-page-label")
+        with ui.row().classes("items-center gap-1 no-wrap") as pager:
+            state["_page_buttons"] = pager
     _reload_table(state)
 
 
@@ -875,55 +833,31 @@ def _discard_sub_clicked(state: dict[str, Any], args: Any) -> None:
 
 
 def _drift_banner(state: dict[str, Any]) -> None:
-    """The drift line: what the last drift check concluded.
+    """The card header's sync readout: "● Up to date · checked 13:40".
 
-    It sits BELOW the action bar, just above the list — the state of the data
-    the list shows. Renders the STORED verdict (or "not checked yet") and
-    ALWAYS starts a fresh check: entering the page is the moment the operator
-    needs to know whether the list still matches Uwazi.
-
-    ONE row, inside a bordered strip: icon, verdict, last-sync time and — when
-    the verdict is "drifted" — the sync action at the END of the same line. The
-    drifted state used to stack the button under the verdict as a flat grey
-    button, which read as a caption rather than as the way out of the warning.
+    It renders the STORED verdict immediately and ALWAYS starts a fresh check:
+    entering the page is the moment the operator needs to know whether the
+    list still matches Uwazi. The drifted state grows a small Sync button at
+    the end of the same line — the verdict's remedy next to the warning.
     """
-    with (
-        ui.row()
-        .classes("w-full items-center gap-2 q-mb-sm review-strip")
-        .style("border: 1px solid rgba(0,0,0,0.12); border-radius: 4px; padding: 4px 8px;")
-    ):
-        state["_drift_icon"] = ui.icon("sync", color="grey-6").classes("text-body1")
-        state["_drift_label"] = ui.label(drift_banner_text(status="unknown", detail=None)).classes(
-            drift_text_classes("grey-7")
-        )
-        # The verdict color is painted on the TEXT as well as the icon (see
-        # ``_apply_drift_state``): "Out of date" must be impossible to miss,
-        # and grey body text on a light table reads as ordinary prose.
-        state["_table_update_label"] = ui.label(
-            table_update_label(get_table_update_time(page_instance_url(), state["run_id"]))
-        ).classes("text-caption text-grey-6")
-        # The drifted verdict's remedy sits at the END of the same row, so the
-        # banner reads left-to-right: what the check found, then the action that
-        # fixes it. It is a real OUTLINED button (not flat): the drifted state is
-        # the one moment this control appears, and it has to look pressable.
+    with ui.row().classes("items-center gap-2 no-wrap sync-status"):
+        state["_drift_icon"] = ui.element("span").classes("sync-dot")
+        state["_drift_label"] = ui.label(_DRIFT_LABELS["unknown"]).classes("sync-label")
+        with state["_drift_label"]:
+            state["_drift_tooltip"] = ui.tooltip("")
         state["_drift_sync_button"] = ui.button(
-            "Sync with Uwazi",
-            icon="cloud_sync",
+            "Sync",
+            icon="sync",
             on_click=lambda: _sync_now_clicked(state),
-        ).props("dense outline color=primary")
+        ).props("outline dense no-caps color=primary").classes("sync-button")
         state["_drift_sync_button"].set_visibility(False)
 
-    # The verdict's text is stored per run: apply it immediately, then let the
-    # open-page auto-check refresh it (a fresh page should not show a stale
-    # 'valid' while Uwazi moved — the check replaces the text in place).
     stored = get_drift_state(page_instance_url(), state["run_id"])
     in_flight = _operation_in_flight(state)
     _apply_drift_state(state, stored, checking=stored is None and not in_flight)
     # EVERY visit checks drift: Uwazi moves between visits, so a stored verdict
     # (even "up to date") describes the moment it was taken, not now. The check
-    # runs in the background — the page renders the stored verdict meanwhile —
-    # and replaces it in place. While a write/sync is in flight the check waits:
-    # its own operation would otherwise read as drift.
+    # runs in the background — the page renders the stored verdict meanwhile.
     if not in_flight:
         background_tasks.create(_check_drift_now(state, notify=False, client=context.client))
 
@@ -1193,23 +1127,36 @@ def _refresh_filter_counts(state: dict[str, Any]) -> None:
         language_widget.set_options(language_filter_options(counts.get("language", {}), state["language"]))
 
 
+def _page_window(current: int, pages: int) -> list[int]:
+    """The page numbers the footer shows around the current page (pure).
+
+    Five slots, kept inside the result set: the target's compact "‹ 1 2 3 ›"
+    pager, generalized to long runs without a run of hundreds of buttons.
+    """
+    if pages <= 5:
+        return list(range(1, pages + 1))
+    start = max(1, min(current - 2, pages - 4))
+    return list(range(start, start + 5))
+
+
 def _refresh_page_controls(state: dict[str, Any]) -> None:
-    """Write the current page into the readout and the typed page input."""
+    """Rebuild the footer's page buttons around the current page."""
+    holder = state.get("_page_buttons")
+    if holder is None or holder.is_deleted:
+        return
     pages = _page_count(state)
     page = state["offset"] // REVIEW_PAGE_SIZE + 1
-    label = state.get("_page_number")
-    if label is not None and not label.is_deleted:
-        label.text = f"page {page} / {pages}"
-    page_input = state.get("_page_input")
-    if page_input is None or page_input.is_deleted:
-        return
-    state["_suppress_page_events"] = True
-    try:
-        page_input.min = 1
-        page_input.max = pages
-        page_input.value = page
-    finally:
-        state["_suppress_page_events"] = False
+    holder.clear()
+    with holder:
+        previous = ui.button(icon="chevron_left", on_click=lambda: _page(state, -1)).props("flat dense round")
+        previous.set_enabled(page > 1)
+        for number in _page_window(page, pages):
+            button = ui.button(str(number), on_click=lambda n=number: _page_to(state, n)).props("flat dense no-caps")
+            button.classes("page-btn")
+            if number == page:
+                button.classes(add="page-btn-active")
+        following = ui.button(icon="chevron_right", on_click=lambda: _page(state, 1)).props("flat dense round")
+        following.set_enabled(page < pages)
 
 
 def _refresh_run_badge(state: dict[str, Any]) -> None:
@@ -1296,17 +1243,31 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     revert_refs = _checked_flags(state, "revert")
     run_count = len(run_refs)
     entities = len(entities_of_refs(revert_refs))
+    selection = _checked_refs(state)
+    selected_entities = len(entities_of_refs(selection))
+    selected_label = state.get("_selection_label")
+    if selected_label is not None and not selected_label.is_deleted:
+        selected_label.text = f"{selected_entities:,} selected"
+    # The bar is a sticky affordance, not a permanent toolbar: it exists only
+    # while there is something to act on. A partial child selection counts too
+    # (the Run applies those parts), which ``table.selected`` alone would miss.
+    bulk_bar = state.get("_bulk_bar")
+    if bulk_bar is not None and not bulk_bar.is_deleted:
+        bulk_bar.set_visibility(bool(selection))
     run_button = state.get("_run_button")
     if run_button is not None and not run_button.is_deleted:
         run_button.text = run_button_label(run_count)
         run_button.set_enabled(run_count > 0)
     revert_button = state.get("_bulk_revert_button")
     if revert_button is not None and not revert_button.is_deleted:
-        revert_button.text = bulk_revert_label(entities)
+        # The target shows the verb alone; the count lives in the selected
+        # label and in the Run button (the one action whose scope is the row
+        # count the operator just selected).
+        revert_button.text = "Revert"
         revert_button.set_enabled(entities > 0)
     discard_button = state.get("_bulk_discard_button")
     if discard_button is not None and not discard_button.is_deleted:
-        discard_button.text = bulk_discard_label(run_count)
+        discard_button.text = "Discard"
         discard_button.set_enabled(run_count > 0)
     select_button = state.get("_select_all_button")
     if select_button is not None and not select_button.is_deleted:
@@ -1367,6 +1328,103 @@ def _table_sort_requested(state: dict[str, Any], event: Any) -> None:
     _reload_table(state)
 
 
+def _clip_text(text: str, limit: int) -> str:
+    """Cut a display string to one line, with the ellipsis the cells use (pure)."""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+_SUB_STATUS_KINDS: dict[str, str] = {
+    "applied": "applied",
+    "pending": "pending",
+    "reverted": "pending",
+    "discarded": "discarded",
+    "match": "applied",
+    "matched": "applied",
+    "mismatch": "negative",
+    "excluded": "neutral",
+    "skipped": "neutral",
+    "info": "neutral",
+    "n/a": "neutral",
+}
+
+
+def _decorate_operation_payload(payload: dict[str, Any], item: Any) -> None:
+    """Add the presentation fields the suggestions table's slots read (pure).
+
+    The payload from :func:`operation_row` already carries every domain fact;
+    this adds only what is specific to the new table: the collapsed row's
+    RECOMMENDATION (derived from its property parts), the "X of Y applied"
+    reading with its progress, and one presentation contract per child row.
+    Keeping it here means the Vue slot stays a plain property read.
+    """
+    subs = [sub for sub in (payload.get("subs") or []) if isinstance(sub, dict)]
+    total = int(getattr(item, "proposal_count", 0) or 0)
+    applied = int(getattr(item, "applied", 0) or 0)
+    discarded = int(getattr(item, "discarded", 0) or 0)
+    payload["applied_count"] = applied
+    payload["total_count"] = total
+    payload["discarded_count"] = discarded
+    payload["all_discarded"] = bool(total and discarded >= total)
+    payload["progress"] = (applied / total) if total else 0.0
+    payload["progress_color"] = "positive" if total and applied >= total else "warning"
+    recommendation = recommendation_text(subs)
+    payload["recommendation_full"] = recommendation
+    payload["recommendation"] = _clip_text(recommendation, 160)
+    payload["ops_list"] = [op for op in str(payload.get("ops") or "").split(", ") if op]
+    # The slot renders the parent and then one sibling `<q-tr>` per entry, so
+    # both levels share the table's column grid.
+    payload["children"] = subs
+
+    seen_keys: set[str] = set()
+    for index, sub in enumerate(subs):
+        # Give every child a unique Vue key: an info/structural row may share
+        # its suggestion id with a sibling (or have none), and duplicate keys
+        # would make Vue reuse the wrong row.
+        key = str(sub.get("key") or f"sub-{index}")
+        if key in seen_keys:
+            key = f"{key}-{index}"
+        seen_keys.add(key)
+        sub["key"] = key
+        label = str(sub.get("label") or "").strip()
+        proposed = str(sub.get("proposed") or "").strip()
+        proposed_full = str(sub.get("proposed_full") or proposed).strip()
+        if label and proposed and proposed != "—":
+            sub["target_text"] = f"{label} → {proposed}"
+        else:
+            sub["target_text"] = label or proposed or "—"
+        sub["target_full"] = (
+            f"{label} → {proposed_full}" if label and proposed_full and proposed_full != "—" else (label or proposed_full)
+        )
+        sub["recommendation"] = "" if proposed == "—" else _clip_text(proposed_full, 160)
+        sub["recommendation_full"] = "" if proposed_full == "—" else proposed_full
+        sub["status_kind"] = _SUB_STATUS_KINDS.get(str(sub.get("status") or ""), "neutral")
+        sub["language"] = str(sub.get("language") or "")
+
+    is_info = bool(payload.get("is_info"))
+    is_display_only = bool(payload.get("is_display_only"))
+    run_status = str(payload.get("run_status") or "pending")
+    if is_info:
+        payload["status_text"] = ""
+        payload["status_kind"] = "neutral"
+        payload["show_progress"] = False
+    elif is_display_only:
+        payload["status_text"] = run_status
+        payload["status_kind"] = _SUB_STATUS_KINDS.get(run_status, "neutral")
+        payload["show_progress"] = False
+    elif payload["all_discarded"]:
+        payload["status_text"] = "Discarded"
+        payload["status_kind"] = "discarded"
+        payload["show_progress"] = False
+    elif total:
+        payload["status_text"] = f"{applied} of {total} applied"
+        payload["status_kind"] = "applied" if applied >= total else "pending"
+        payload["show_progress"] = True
+    else:
+        payload["status_text"] = run_status
+        payload["status_kind"] = "neutral"
+        payload["show_progress"] = False
+
+
 def _reload_table(state: dict[str, Any]) -> None:
     """Load one page of OPERATIONS with their suboperations and update the table.
 
@@ -1416,6 +1474,8 @@ def _reload_table(state: dict[str, Any]) -> None:
             )
             for item in rows
         ]
+        for item, payload in zip(rows, payloads, strict=True):
+            _decorate_operation_payload(payload, item)
         # The Revert icon names the backup it would restore, the way the
         # entity table's did: the date is already read for the confirm dialog.
         # A row the run CREATED has no backup: its undo deletes the entity, and
@@ -1462,10 +1522,13 @@ def _reload_table(state: dict[str, Any]) -> None:
         if label is not None and not label.is_deleted:
             first = state["offset"] + 1 if total else 0
             last = min(state["offset"] + REVIEW_PAGE_SIZE, total)
-            label.text = f"Showing {first:,}–{last:,} of {total:,} operations"
+            label.text = f"Showing {first:,}–{last:,} of {total:,}"
         _refresh_page_controls(state)
         _sync_table_sort(state)
         _refresh_expand_button(state)
+        # The summary reads "N suggestions · M entities" over the FILTERED set,
+        # so it is repainted with the same totals the table just received.
+        _render_summary(state)
     finally:
         state["loading"] = False
         # Every table load re-checks drift: the table is a snapshot of Uwazi, so
@@ -1497,51 +1560,31 @@ def _schedule_drift_check(state: dict[str, Any]) -> None:
 
 
 def _render_summary(state: dict[str, Any]) -> None:
-    holder = state.get("_summary")
+    """Paint the card's summary over the CURRENT filter (pure-ish).
+
+    "N suggestions · M entities" has to describe the filtered list, not the
+    run's absolute totals: the entity count is the table's own total, and the
+    suggestion count is the same op facet the Operation filter uses (summed
+    over the selected operations, or over all of them). Counting through one
+    existing faceted query avoids loading every row just for a number.
+    """
     # The performance line lives OUTSIDE this holder (always visible, at the top
-    # of the page) but it is refreshed here so the score and the counters are
+    # of the page) but it is refreshed here so the score and the summary are
     # never painted from different moments.
     _render_performance(state)
-    if holder is None or holder.is_deleted:
+    label = state.get("_summary_label")
+    if label is None or label.is_deleted:
         return
-    counts = get_suggestion_counts(page_instance_url(), state["run_id"])
-    pass_row = current_pass(page_instance_url(), state["run_id"])
-    holder.clear()
-    with holder:
-        # ONE card for the operations and their suboperations: the Operations
-        # card counts the PARTS (the list's real content — one suggestion per
-        # property/language/link), and the
-        # entities behind them ride underneath, so the operator reads the
-        # table's two levels without a second card.
-        _card(
-            "Suggestions",
-            f"{counts.get('subs_total', 0):,}",
-            caption=(
-                f"{counts.get('operations_total', 0):,} entities to run"
-                f" · {counts.get('result_entities', 0):,} result entities"
-            ),
-        )
-        _card("Pending", f"{pending_suboperation_count(counts):,}", "grey")
-        _card("Matched", f"{counts.get('display_matched', 0):,}", "green")
-        _card("Excluded", f"{counts.get('display_skipped', 0):,}", "grey-7")
-        _card("Discarded", f"{counts.get('subs_discarded', 0):,}", "red")
-        # Applied reads as a fraction so the operator sees how much of the task
-        # is written without counting rows: applied suboperations / all of them.
-        _card("Applied", f"{counts.get('subs_applied', 0):,} / {counts.get('subs_total', 0):,}", "blue")
-        _card("Reverted", f"{counts.get('subs_reverted', 0):,}", "indigo")
-        if pass_row is not None:
-            # The LLM cost card: the spend against the cap, as money. It sits
-            # at the FAR RIGHT of the row,
-            # apart from the counters: the cost is not a count of the table's
-            # content, it is the pass's own money, and it gets its own space.
-            _card(
-                "LLM cost",
-                cost_card_value(
-                    pass_row.budget.call_cost(pass_row.spent.input_tokens, pass_row.spent.output_tokens),
-                    pass_row.budget.max_cost,
-                ),
-                "teal",
-            )
+    try:
+        counts = get_filter_counts(page_instance_url(), state["run_id"], _current_filter(state, limit=100000))
+    except Exception:  # noqa: BLE001 — a summary failure must not break the table
+        logger.exception("could not count the filtered suggestions")
+        counts = {}
+    op_counts = counts.get("op", {})
+    selected_ops = [str(op) for op in (state.get("op") or [])]
+    suggestions = sum(op_counts.get(op, 0) for op in selected_ops) if selected_ops else sum(op_counts.values())
+    entities = int(state.get("total") or 0)
+    label.text = f"{suggestions:,} suggestions · {entities:,} entities"
 
 
 def _reset_global_selection(state: dict[str, Any]) -> None:
@@ -1719,47 +1762,62 @@ def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tu
 
 
 def _performance_row(state: dict[str, Any]) -> None:
-    """The performance line: ONE percentage, on ONE property, against the holdout.
+    """The dismissible performance banner above the card.
 
-    A ROW, not a card: the number the operator opens the page with is a single
-    figure with its state word, and boxing it as one more card in a strip of
-    cards made it compete with the counters (and buried it inside a collapsible
-    section). It sits at the top of the page, next to the menu.
-
-    A run with NO test set shows no line at all (see ``performance_visible``):
-    there is no property to name and no number to report, and an idle "Add a
-    test set" strip above the table reads as a broken feature.
-
-    The state is stated in words (``Unseen``, ``Used for fixes``, ``Stale``,
-    ``Not scored yet``): a number without that word reads as a promise it does
-    not make. It is NOT shown in the property filter (the filter answers a
-    different question: how a suggestion compares with Uwazi's current value).
+    A run with no test set has no score, so the banner says how to measure it
+    ("Add a test set in the wizard") and can be dismissed. A scored run shows
+    the same figure the old always-on line carried, in the same strip, so the
+    page's top stays one calm sentence instead of a stack of counter cards.
     """
-    holder = ui.row().classes("items-center gap-2 no-wrap")
-    state["_performance_holder"] = holder
+    banner = ui.element("div").classes("uw-info-banner w-full")
+    state["_performance_banner"] = banner
+    with banner:
+        with ui.row().classes("w-full items-center justify-between no-wrap"):
+            holder = ui.row().classes("items-center gap-2 no-wrap grow")
+            state["_performance_holder"] = holder
+            ui.button(icon="close", on_click=lambda: _dismiss_performance(state)).props(
+                "flat dense round color=grey-8"
+            ).classes("uw-banner-close").tooltip("Dismiss")
     _render_performance(state)
 
 
+def _dismiss_performance(state: dict[str, Any]) -> None:
+    """Hide the performance banner for the rest of this page session."""
+    state["_performance_dismissed"] = True
+    banner = state.get("_performance_banner")
+    if banner is not None and not banner.is_deleted:
+        banner.set_visibility(False)
+
+
 def _render_performance(state: dict[str, Any]) -> None:
-    """Paint the performance line (called on load and after every refresh)."""
+    """Paint the performance banner (called on load and after every refresh)."""
+    if state.get("_performance_dismissed"):
+        return
     holder = state.get("_performance_holder")
-    if holder is None or holder.is_deleted:
+    banner = state.get("_performance_banner")
+    if holder is None or holder.is_deleted or banner is None or banner.is_deleted:
         return
     try:
         summary = validation_summary(state["instance_url"], state["run_id"])
     except Exception as exc:  # noqa: BLE001 — the line degrades, the page never breaks
-        logger.warning("validation card failed: {}", exc)
+        logger.warning("validation banner failed: {}", exc)
+        banner.set_visibility(False)
         return
-    # A run with no test set has no performance to report: hide the whole line
-    # instead of painting an idle "No test set" strip above the table.
-    if not performance_visible(summary):
-        holder.clear()
-        holder.set_visibility(False)
-        return
-    holder.set_visibility(True)
+    banner.set_visibility(True)
     holder.clear()
     with holder:
-        validation = summary["set"]
+        ui.icon("info").classes("uw-banner-icon")
+        validation = summary.get("set")
+        if validation is None:
+            with ui.row().classes("items-baseline gap-1 no-wrap"):
+                ui.label("Performance —").classes("uw-banner-title")
+                ui.label("No test set. Add a test set in the wizard to measure this task.").classes("uw-banner-text")
+            return
+        if not performance_visible(summary):
+            with ui.row().classes("items-baseline gap-1 no-wrap"):
+                ui.label("Performance —").classes("uw-banner-title")
+                ui.label("The test set is recorded but has not been scored yet.").classes("uw-banner-text")
+            return
         score = summary.get("score")
         state_word = {
             "fresh": "Unseen test set",
@@ -1769,12 +1827,13 @@ def _render_performance(state: dict[str, Any]) -> None:
         }.get(summary["state"], summary["state"])
         color = "teal" if summary["state"] == "fresh" else "orange"
         label = _validation_property_text(state, validation.property_name)
-        ui.icon("speed", color="primary").classes("text-body2")
-        ui.label(f"Performance · {label}").classes("text-body2 text-grey-7")
+        with ui.row().classes("items-baseline gap-1 no-wrap"):
+            ui.label("Performance —").classes("uw-banner-title")
+            ui.label(f"{label} ·").classes("uw-banner-text")
         if score is None:
-            ui.label("—").classes("text-h6 text-bold text-grey-6")
+            ui.label("—").classes("text-subtitle2 text-bold text-grey-6")
         else:
-            ui.label(score.value_text()).classes("text-h6 text-bold text-primary")
+            ui.label(score.value_text()).classes("text-subtitle1 text-bold uw-banner-value")
             if score.detail():
                 ui.label(score.detail()).classes("text-caption text-grey-6")
         ui.badge(state_word).props(f"color={color}").classes("q-ml-sm")
@@ -2114,16 +2173,24 @@ def _set_children_checked(state: dict[str, Any], row: dict[str, Any], checked: b
 
 
 def _set_drift_error(state: dict[str, Any], text: str) -> None:
-    """Write a failed-check message onto the banner, in red (pure-ish).
+    """Write a failed-check verdict onto the header readout (pure-ish).
 
-    The check failed, so the banner must not keep the resting grey: a red
-    line says "the state below may be stale".
+    The check failed, so the dot goes red and the full failure is available in
+    the tooltip; the text stays the two-word verdict the header has room for.
     """
     label = state.get("_drift_label")
     if label is None or label.is_deleted:
         return
-    label.text = text
-    label.classes(replace=drift_text_classes(DRIFT_STATUS_COLORS["error"]))
+    label.text = "Check failed"
+    label.style(replace="color: #DC2626;")
+    dot = state.get("_drift_icon")
+    if dot is not None and not dot.is_deleted:
+        dot.classes(replace="sync-dot")
+        dot.style("background: #DC2626;")
+    tooltip = state.get("_drift_tooltip")
+    if tooltip is not None and not tooltip.is_deleted:
+        tooltip.text = text
+        tooltip.update()
     # A failed check proves nothing about the table's currency, so the sync
     # action stays hidden until a check actually reports drift.
     _set_drift_sync_visibility(state, False)
@@ -2159,20 +2226,16 @@ def _suggestion_is_runnable(suggestion: Suggestion) -> bool:
 
 
 def _summary_row(state: dict[str, Any]) -> None:
-    """The counters strip: how the table's suggestions split across statuses.
+    """The card header's title and the filtered suggestion/entity summary.
 
-    The performance number is NOT here: it has its own always-visible line at the
-    top of the page (see :func:`_performance_row`), because it is one figure
-    with its own state word, not another counter. Both are repainted by
-    :func:`_render_summary`, so the two can never show figures from different
-    moments.
-
-    The row WRAPS: eight counters (plus the money card, which is pushed to the
-    right) do not fit on a narrow window, and a nowrap row simply clipped the
-    last card at the card's edge.
+    The old strip of eight counter cards is gone: the target design keeps one
+    reading ("456 suggestions · 228 entities") beside the title, and the
+    per-status detail is reachable through the Status filter. The figure is
+    repainted by :func:`_render_summary` after every table load.
     """
-    holder = ui.row().classes("w-full items-center gap-3 q-mb-sm wrap")
-    state["_summary"] = holder
+    with ui.row().classes("items-baseline gap-3 no-wrap"):
+        ui.label("Suggestions").classes("uw-card-title")
+        state["_summary_label"] = ui.label("").classes("uw-summary")
     _render_summary(state)
 
 
