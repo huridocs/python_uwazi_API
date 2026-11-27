@@ -44,10 +44,12 @@ from .core import (
     _poll_gate_toast,
     _poll_progress,
     _refresh_all,
+    _refresh_expand_button,
     _refresh_selection_counts,
     _reset_global_selection,
     _revert_from_state,
     _run_from_state,
+    _show_performance,
     _summary_row,
     _toggle_expand_all,
     _toggle_select_all,
@@ -83,20 +85,18 @@ body { background:#F5F3EF; font-family:'Noto Sans', Inter, sans-serif; color:#11
                       pointer-events:none; }
 .filter-caption { font-size:10px; line-height:1.2; font-weight:700; letter-spacing:.06em;
                   text-transform:uppercase; color:#6B7280; }
-.filter-select .q-field__control { min-height:26px; height:26px; padding:0; }
+.filter-select .q-field__control { min-height:26px; height:auto; padding:0; }
 .filter-select .q-field__native, .filter-select .q-field__input { padding:0; min-height:24px;
-                                                                  color:#111827; font-size:13px; }
-.filter-select .q-field__append { height:24px; }
+                                                                  color:#111827; font-size:13px;
+                                                                  flex-wrap:wrap; align-content:center;
+                                                                  row-gap:2px; max-height:72px;
+                                                                  overflow-y:auto; }
+.filter-select .q-field__append { height:auto; }
 .filter-select .q-field__bottom { display:none; }
-.filter-select .q-chip { font-size:11px; }
+.filter-select .q-chip { font-size:11px; max-width:100%; }
+.filter-select .q-chip .q-chip__content { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .filter-select .q-field__control:before, .filter-select .q-field__control:after { display:none; }
-.density-toggle { border:1px solid #E5E7EB; border-radius:8px; overflow:hidden; }
-.density-toggle .q-btn { border-radius:0; padding:3px 12px; font-size:12px; color:#6B7280; }
-.density-toggle .q-btn + .q-btn { border-left:1px solid #E5E7EB; }
-.density-btn-active { background:#F3F4F6 !important; color:#111827 !important; }
 .reset-link { color:#6B7280 !important; font-size:13px; }
-.filter-badge { position:absolute; top:-7px; right:-7px; font-size:10px; min-height:18px; padding:0 5px; }
-.filter-button-wrap { position:relative; display:inline-block; }
 .uw-table .q-table__middle { max-height:70vh; overflow-y:auto; overflow-x:hidden; }
 .uw-table .q-table { table-layout:fixed; width:100%; }
 .uw-table thead tr th { position:sticky; top:0; z-index:3; background:#fff; text-transform:uppercase;
@@ -126,6 +126,19 @@ body { background:#F5F3EF; font-family:'Noto Sans', Inter, sans-serif; color:#11
 .entity-link:hover { text-decoration:underline; }
 .truncate { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .rec-cell { color:#374151; font-size:13px; }
+.rec-pair { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.rec-line { display:flex; align-items:baseline; gap:6px; min-width:0; }
+.rec-tag { flex:0 0 auto; width:74px; font-size:10px; font-weight:700; letter-spacing:.04em;
+           text-transform:uppercase; color:#6B7280; }
+.rec-value { font-size:13px; color:#111827; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rec-current .rec-value { color:#6B7280; }
+.rec-values { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+.rec-values .q-chip { height:auto; min-height:20px; padding:1px 8px; font-size:11px; }
+.rec-extra { font-size:12px; color:#374151; }
+.subs-context { font-size:12px; line-height:1.45; color:#4B5563; white-space:pre-wrap;
+                overflow-wrap:anywhere; border-left:3px solid #D1D5DB; padding-left:8px;
+                max-height:9em; overflow-y:auto; user-select:text; }
+.context-row td { background:#FAF8F5; padding-top:4px; padding-bottom:8px; }
 .op-pill { border-radius:6px; font-size:11px; font-weight:600; padding:2px 8px; }
 .status-pill { border-radius:999px; font-size:11px; font-weight:600; padding:3px 9px; line-height:1.3; }
 .status-pending { background:#FEF3C7; color:#92400E; }
@@ -149,12 +162,15 @@ tr:hover .row-actions { visibility:visible; }
 .uw-card-footer .page-btn { min-width:30px; border-radius:6px; color:#6B7280 !important; font-size:13px; }
 .uw-card-footer .page-btn-active, .uw-card-footer .page-btn-active * {
   background:#111827 !important; color:#fff !important; }
+.page-input { width:64px; }
+.page-input .q-field__control { height:30px; min-height:30px; }
+.sync-button { font-size:12px; font-weight:600; padding:4px 14px; }
+.sync-button .q-icon { font-size:18px; }
 .sync-dot { width:8px; height:8px; border-radius:999px; display:inline-block;
             background:#9CA3AF; flex:0 0 auto; }
 .sync-dot-pulse { animation: syncpulse 1.1s ease-in-out infinite; }
 @keyframes syncpulse { 0%,100%{opacity:.35} 50%{opacity:1} }
 .sync-label { font-size:12px; color:#6B7280; }
-.sync-button { font-size:11px; }
 .uw-bulk-bar { background:#fff; border-top:1px solid #E5E7EB; padding:10px 24px;
                box-shadow:0 -2px 8px rgba(0,0,0,0.04); }
 .uw-selection-label { font-size:13px; font-weight:700; color:#111827; }
@@ -168,7 +184,6 @@ tr:hover .row-actions { visibility:visible; }
 .breadcrumb-link { color:#1C64F2; font-size:13px; }
 .breadcrumb-chevron { color:#9CA3AF; font-size:16px; }
 .breadcrumb-current { color:#111827; font-size:13px; font-weight:500; }
-.lang-select { width:130px; }
 .settings-btn { color:#111827 !important; }
 """
 
@@ -256,8 +271,6 @@ def _build_page(run_id: str) -> None:
         # Which operations are expanded (the table's ``expanded`` prop is the
         # source of truth).
         "_expanded": set(),
-        # Compact rows vs comfortable rows: the target's density toggle.
-        "_compact": False,
         # Set while a filter control is reset programmatically.
         "_suppress_filter_events": False,
     }
@@ -273,7 +286,6 @@ def _build_page(run_id: str) -> None:
                     _summary_row(state)
                     with ui.row().classes("items-center gap-4 no-wrap"):
                         _drift_banner(state)
-                        _filters_button(state)
                 with ui.column().classes("uw-search-row w-full") as search_section:
                     state["_search_section"] = search_section
                     _search_bar(state)
@@ -288,7 +300,6 @@ def _build_page(run_id: str) -> None:
             # search off. Entering the page ALWAYS resets to this.
             state["_filters_section"].set_visibility(state["_filters_visible"])
             state["_search_section"].set_visibility(state["_search_visible"])
-            _refresh_filter_badge(state)
             _refresh_selection_counts(state)
 
     if current_pass(page_instance_url(), run_id) is None:
@@ -310,39 +321,40 @@ def _top_bar(state: dict[str, Any], run_id: str, detail: Any, instance: str) -> 
         with ui.row().classes("items-center gap-2 no-wrap"):
             with ui.element("div").classes("brand-mark"):
                 ui.label("u")
-            ui.label("Uwazi Suggestions").classes("brand-name")
+            ui.label("Uwazi Admin Agent").classes("brand-name")
         with ui.row().classes("items-center gap-1 no-wrap"):
             ui.link("Tasks", page_link("/app")).classes("breadcrumb-link")
             ui.icon("chevron_right").classes("breadcrumb-chevron")
             ui.label(run_id).classes("breadcrumb-current")
             state["_status_badge"] = ui.badge(detail.status.value).props("color=grey-7").classes("q-ml-sm")
     with ui.row().classes("items-center gap-2 no-wrap"):
-        # The interface language is English today; the control is present so
-        # the header keeps its shape when translations are added.
-        ui.select(["English"], value="English").props("outlined dense options-dense hide-bottom-space").classes(
-            "lang-select"
-        ).tooltip("Interface language")
         _header_menu(state, run_id, has_script=bool(detail.script), instance_url=instance)
 
 
 def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False, instance_url: str = "") -> None:
     """The Settings menu: every occasional control, one click away.
 
-    It holds the search toggle, the drift/sync actions, the run's prompt and
-    script, and the way back to the tasks list. The controls that act on the
-    table (filters, density, pagination) live in the card where the table is.
+    It holds the search toggle, the filters toggle, the run's prompt and
+    script, the performance banner, and the way back to the tasks list. The
+    controls that act on the table (expand/collapse, pagination) live in the
+    card where the table is.
     """
     with ui.button(text="Settings", icon="settings").props("outline no-caps color=grey-9").classes("settings-btn") as button:
         with ui.menu() as menu:
+            state["_filters_item"], state["_filters_label"] = _menu_item(
+                "filter_alt",
+                section_toggle_label("filters", bool(state.get("_filters_visible", False))),
+                lambda: _toggle_section(state, "filters"),
+            )
             state["_search_item"], state["_search_label"] = _menu_item(
                 "search",
                 section_toggle_label("search", bool(state.get("_search_visible", False))),
                 lambda: _toggle_section(state, "search"),
             )
             _menu_item(
-                "unfold_more",
-                "Expand / collapse all",
-                lambda: _toggle_expand_all(state),
+                "monitoring",
+                "Show performance",
+                lambda: _show_performance(state),
             )
             _menu_item(
                 "sync",
@@ -421,7 +433,6 @@ def _clear_search(state: dict[str, Any]) -> None:
             state["_suppress_filter_events"] = False
     state["offset"] = 0
     _reset_global_selection(state)
-    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
@@ -446,40 +457,8 @@ def _search_bar(state: dict[str, Any]) -> None:
     )
 
 
-def _filters_button(state: dict[str, Any]) -> None:
-    """The card header's Filters button and its active-filter count badge."""
-    with ui.element("div").classes("filter-button-wrap"):
-        state["_filters_button"] = ui.button(
-            "Filters", icon="filter_alt", on_click=lambda: _toggle_section(state, "filters")
-        ).props("outline no-caps color=grey-9")
-        state["_filter_badge"] = ui.badge("0").props("color=primary").classes("filter-badge")
-
-
-def _active_filter_count(state: dict[str, Any]) -> int:
-    """How many filter dimensions are narrowing the table right now (pure)."""
-    return sum(
-        (
-            1 if state.get("property") else 0,
-            1 if state.get("language") else 0,
-            1 if state.get("op") else 0,
-            1 if state.get("status") else 0,
-            1 if (state.get("text") or "").strip() else 0,
-        )
-    )
-
-
-def _refresh_filter_badge(state: dict[str, Any]) -> None:
-    """Paint the Filters button's active count (hidden at zero)."""
-    badge = state.get("_filter_badge")
-    if badge is None or badge.is_deleted:
-        return
-    count = _active_filter_count(state)
-    badge.text = str(count)
-    badge.set_visibility(count > 0)
-
-
 def _filter_bar(state: dict[str, Any]) -> None:
-    """The filter row: four labelled selects, Reset and the density toggle."""
+    """The filter row: four labelled selects, Reset and Expand/Collapse all."""
     labels_by_template = _template_labels(state["run_id"])
     state["_template_labels"] = labels_by_template
     state["_labels"] = _merged_labels(labels_by_template)
@@ -526,7 +505,7 @@ def _filter_bar(state: dict[str, Any]) -> None:
         # Operation and Status are MULTI-selects: an operator often wants to
         # see two statuses (or two operations) at once. An empty selection is
         # the unfiltered state; the placeholder says so.
-        with ui.element("div").classes("filter-box").style("width:220px"):
+        with ui.element("div").classes("filter-box").style("width:300px"):
             ui.label("Operation").classes("filter-caption")
             state["_op_select"] = (
                 ui.select(
@@ -540,7 +519,7 @@ def _filter_bar(state: dict[str, Any]) -> None:
             )
             op_placeholder = ui.label("Any operation").classes("filter-placeholder")
             op_placeholder.bind_visibility_from(state["_op_select"], "value", backward=lambda v: not v)
-        with ui.element("div").classes("filter-box").style("width:180px"):
+        with ui.element("div").classes("filter-box").style("width:220px"):
             ui.label("Status").classes("filter-caption")
             state["_status_select"] = (
                 ui.select(
@@ -556,45 +535,17 @@ def _filter_bar(state: dict[str, Any]) -> None:
             status_placeholder.bind_visibility_from(state["_status_select"], "value", backward=lambda v: not v)
         with ui.row().classes("items-center gap-3 no-wrap ml-auto"):
             ui.button("Reset", on_click=lambda: _reset_filters(state)).props("flat dense no-caps").classes("reset-link")
-            _density_toggle(state)
+            _expand_all_button(state)
 
 
-def _density_toggle(state: dict[str, Any]) -> None:
-    """The Compact / Comfortable segmented control."""
-    with ui.row().classes("density-toggle items-center no-wrap"):
-        state["_compact_button"] = (
-            ui.button("Compact", on_click=lambda: _set_density(state, True)).props("flat dense no-caps")
-        )
-        state["_comfortable_button"] = (
-            ui.button("Comfortable", on_click=lambda: _set_density(state, False)).props("flat dense no-caps")
-        )
-    _refresh_density_buttons(state)
-
-
-def _set_density(state: dict[str, Any], compact: bool) -> None:
-    """Switch the table between compact and comfortable rows."""
-    state["_compact"] = compact
-    table = state.get("_table")
-    if table is not None and not table.is_deleted:
-        if compact:
-            table.props("dense")
-        else:
-            table.props(remove="dense")
-        table.update()
-    _refresh_density_buttons(state)
-
-
-def _refresh_density_buttons(state: dict[str, Any]) -> None:
-    """Paint the segmented control's selected half."""
-    compact = bool(state.get("_compact"))
-    for key, active in (("_compact_button", compact), ("_comfortable_button", not compact)):
-        button = state.get(key)
-        if button is None or button.is_deleted:
-            continue
-        if active:
-            button.classes(add="density-btn-active")
-        else:
-            button.classes(remove="density-btn-active")
+def _expand_all_button(state: dict[str, Any]) -> None:
+    """Expand or collapse every row, in the exact spot the density toggle held."""
+    state["_expand_button"] = (
+        ui.button("Expand all", icon="unfold_more", on_click=lambda: _toggle_expand_all(state))
+        .props("outline dense no-caps color=grey-9")
+        .classes("expand-all-btn")
+    )
+    _refresh_expand_button(state)
 
 
 def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
@@ -605,7 +556,6 @@ def _set_filter(state: dict[str, Any], key: str, value: Any) -> None:
     state[key] = value
     state["offset"] = 0
     _reset_global_selection(state)
-    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
@@ -639,16 +589,15 @@ def _reset_filters(state: dict[str, Any]) -> None:
     finally:
         state["_suppress_filter_events"] = False
     _reset_global_selection(state)
-    _refresh_filter_badge(state)
     _refresh_all(state)
 
 
 def _action_bar(state: dict[str, Any]) -> None:
-    """The sticky bulk-action bar, visible only while rows are selected.
+    """The always-visible sticky bulk-action bar.
 
-    It replaces the old always-visible RUN (0) / REVERT (0) / DISCARD (0)
-    toolbar: an action with nothing selected is noise, and the counts belong
-    to the selection the operator just made.
+    The buttons act on the checked rows; with nothing checked they stay
+    disabled so the bar never changes the table's height while filtering or
+    paging. The counts describe the selection the operator just made.
     """
     sticky = ui.page_sticky(position="bottom", y_offset=0, expand=True).classes("uw-bulk-sticky")
     state["_bulk_bar"] = sticky
@@ -660,9 +609,8 @@ def _action_bar(state: dict[str, Any]) -> None:
                 .props("unelevated no-caps color=primary")
                 .classes("uw-run-button")
             )
-            state["_bulk_revert_button"] = (
-                ui.button("Revert", on_click=lambda: _revert_from_state(state))
-                .props("outline no-caps color=grey-9")
+            state["_bulk_revert_button"] = ui.button("Revert", on_click=lambda: _revert_from_state(state)).props(
+                "outline no-caps color=grey-9"
             )
             # The bulk Discard: marking the checked operations as "will not be
             # executed" one by one is not workable on a table of thousands, so
@@ -677,7 +625,6 @@ def _action_bar(state: dict[str, Any]) -> None:
                 .props("flat no-caps")
                 .classes("uw-select-all")
             )
-    sticky.set_visibility(False)
     _refresh_selection_counts(state)
 
 

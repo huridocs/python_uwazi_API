@@ -48,6 +48,47 @@ def scope_read_result(result: Any, scope: set[str]) -> Any:
     return result
 
 
+def include_held_entities(result: Any, held_entities: list[dict[str, Any]]) -> Any:
+    """Put the frozen sample FIRST in a target-template read, keeping the rest (pure).
+
+    A target-template read is not narrowed: a relationship script looks its values
+    up in a catalog that may live in the SAME template, and a narrowed read makes
+    that lookup empty (every held-out row then records ``skipped``). The sample is
+    PREPENDED and deduplicated by ``shared_id`` instead, so a script that slices the
+    discovery list (``dicts[:5]``) still processes the scored entities first, while
+    every id/title the script needs for a lookup stays readable.
+    """
+    if isinstance(result, str) or not held_entities:
+        return result
+    held: list[dict[str, Any]] = []
+    held_ids: list[str] = []
+    for entity in held_entities:
+        if not isinstance(entity, dict):
+            continue
+        shared_id = str(entity.get("shared_id") or "")
+        if not shared_id or shared_id in held_ids:
+            continue
+        held.append(entity)
+        held_ids.append(shared_id)
+    if not held:
+        return result
+    included = set(held_ids)
+    if isinstance(result, list):
+        return held + [
+            item for item in result if not (isinstance(item, dict) and str(item.get("shared_id") or "") in included)
+        ]
+    if isinstance(result, SimpleNamespace):
+        examples = held + [
+            example
+            for example in (result.examples or [])
+            if isinstance(example, dict) and str(example.get("shared_id") or "") not in included
+        ]
+        summary = result.summary
+        ids = held_ids + [shared_id for shared_id in summary.shared_ids if shared_id not in included]
+        return NamedNamespace(summary=summary.model_copy(update={"shared_ids": ids}), examples=examples[:3])
+    return result
+
+
 def _scoped_read_wrapper(base: Any, scope: set[str]) -> Any:
     """Wrap a bound read helper so its result keeps only the in-scope ids."""
 
@@ -231,20 +272,31 @@ def validation_evaluation_reads(
     target_templates: set[str],
     measured_property: str | None,
 ) -> None:
-    """Scope a dry-run namespace to the entities the score measures (in place).
+    """Make the frozen sample FIRST in every target-template read (in place).
 
-    The evaluation pass is the planning pass over the SAME script, restricted to
-    the frozen sample. Without this the script discovered the whole instance
-    (hundreds of entities), so it spent its LLM budget before reaching the
-    held-out ones and could SLICE THEM AWAY entirely (``dicts[:5]``) — the score
-    then measured nothing while the table showed no validation rows.
+    The evaluation pass is the planning pass over the SAME script, so it must not
+    hide a read the production pass performs. Narrowing is abandoned here: the
+    read API cannot tell "discovery of the entities to process" from "lookup of
+    the values to propose", so ANY narrowed dimension starves one of them. That
+    defect recurred three times — a blanket allow-list emptied a reference
+    catalog (every held-out row recorded ``skipped``), the template-aware
+    replacement still narrowed ``by_ids`` and a target template used as the
+    catalog (self-referential relationship), and it narrowed everything when the
+    set named no target template.
 
-    The restriction is TEMPLATE-AWARE, which is the part the old allow-list got
-    wrong: a query against one of the run's own target templates yields only the
-    held-out entities, while a query against any OTHER template (a thesaurus-like
-    reference catalog the task looks values up in) passes through untouched. An
-    empty ``target_templates`` means the set was sampled across every template,
-    so every template is a target.
+    The contract now:
+
+    - a TARGET-template read keeps the WHOLE result, with the frozen sample
+      PREPENDED (see :func:`include_held_entities`), so the script's own slice
+      (``dicts[:5]``) starts at the scored entities while a catalog living in the
+      same template stays complete enough to look values up in;
+    - ``by_ids`` is never narrowed (an explicit-id lookup is not discovery);
+    - a non-target template read passes through untouched;
+    - the script's ``limit`` is passed through unchanged — prepending means the
+      sample can no longer be sliced away by a small limit.
+
+    An empty ``target_templates`` means the set was sampled across every
+    template, so every template is a target.
 
     ``measured_property`` is the one filter that is dropped (see
     :func:`evaluation_filters`): it encodes "only the empty ones", and none of
@@ -259,6 +311,19 @@ def validation_evaluation_reads(
     def _is_target_template(template_name: str | None) -> bool:
         return targets is None or (template_name or "") in targets
 
+    def _sample_entities(template_name: str | None, language: str) -> list[dict[str, Any]]:
+        """The frozen sample's own dicts, fetched by id (empty when unreadable)."""
+        fetched = base_query(mode="by_ids", language=language, limit=len(held_ids), shared_ids=sorted(held_ids))
+        if not isinstance(fetched, list):
+            return []
+        if not template_name:
+            return [entity for entity in fetched if isinstance(entity, dict)]
+        return [
+            entity
+            for entity in fetched
+            if isinstance(entity, dict) and str(entity.get("template_name") or "") in ("", template_name)
+        ]
+
     def query_entities(
         mode: str,
         language: str = "en",
@@ -270,10 +335,7 @@ def validation_evaluation_reads(
         shared_ids: list[str] | None = None,
     ) -> Any:
         if mode == "by_ids":
-            wanted = [shared_id for shared_id in (shared_ids or []) if shared_id in held_ids]
-            if not wanted:
-                return []
-            return base_query(mode=mode, language=language, limit=limit, shared_ids=wanted)
+            return base_query(mode=mode, language=language, limit=limit, shared_ids=shared_ids)
         if not _is_target_template(template_name):
             return base_query(
                 mode,
@@ -284,19 +346,18 @@ def validation_evaluation_reads(
                 filters=filters,
                 published=published,
             )
-        # A target-template scan must be wide enough to CONTAIN the sample: the
-        # held-out ids are scattered through the template, so the script's own
-        # (possibly small) limit is widened before the scope narrows it again.
         result = base_query(
             mode,
             language=language,
-            limit=max(int(limit or 0), len(held_ids)),
+            limit=limit,
             search_term=search_term,
             template_name=template_name,
             filters=evaluation_filters(filters, measured_property),
             published=published,
         )
-        return scope_read_result(result, held_ids)
+        if isinstance(result, str):
+            return result
+        return include_held_entities(result, _sample_entities(template_name, language))
 
     def query_entities_full(
         mode: str,
@@ -322,13 +383,15 @@ def validation_evaluation_reads(
         result = base_full(
             mode,
             language=language,
-            limit=max(int(limit or 0), len(held_ids)),
+            limit=limit,
             search_term=search_term,
             template_name=template_name,
             filters=evaluation_filters(filters, measured_property),
             published=published,
         )
-        return scope_read_result(result, held_ids)
+        if isinstance(result, str):
+            return result
+        return include_held_entities(result, _sample_entities(template_name, language))
 
     namespace["query_entities"] = query_entities
     namespace["query_entities_full"] = query_entities_full

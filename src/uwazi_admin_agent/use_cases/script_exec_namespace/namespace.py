@@ -265,12 +265,14 @@ def build_dry_run_namespace(
       perfectly while learning nothing, which is exactly how a validation
       sample ended up carrying a value the document never mentioned.
     - ``evaluation_scope``: the frozen sample's sharedIds, for the SCORING pass
-      (see :func:`validation_evaluation_reads`). A query against one of the run's
-      own target templates yields only those entities — the script cannot spend
-      its budget on the rest of the instance or slice the sample away — while a
-      query against any OTHER template (a reference catalog) passes through
-      untouched. ``evaluation_templates`` names those target templates; empty
-      means "every template is a target".
+      (see :func:`validation_evaluation_reads`). The frozen sample is prepended
+      to every target-template result and NOTHING is hidden: the rest of the
+      result stays readable, so a catalog living in the same template still
+      resolves, while a script that slices the discovery list processes the
+      scored entities first. ``by_ids`` and non-target templates pass through
+      untouched — an explicit-id lookup is not discovery, and a reference
+      catalog must stay complete. ``evaluation_templates`` names those target
+      templates; empty means "every template is a target".
     """
     controller = throttle if throttle is not None else ThrottleController()
     executor = ParallelExecutor(controller)
@@ -321,8 +323,9 @@ def build_dry_run_namespace(
     if target_shared_id is not None:
         _scoped_entity_reads(namespace, {target_shared_id})
     if evaluation_scope:
-        # The SCORING pass: only the frozen sample is discoverable, per target
-        # template (see ``validation_evaluation_reads``).
+        # The SCORING pass: the frozen sample is put FIRST in each target-
+        # template read and nothing is hidden (see
+        # ``validation_evaluation_reads``).
         validation_evaluation_reads(
             namespace,
             set(evaluation_scope),

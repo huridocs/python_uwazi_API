@@ -346,9 +346,7 @@ def sub_values_full(
             render_relationship(sub.current_value, titles),
             render_relationship(sub.proposed_value, titles),
         )
-    return render_property_value(sub.current_value, property_type), render_property_value(
-        sub.proposed_value, property_type
-    )
+    return render_property_value(sub.current_value, property_type), render_property_value(sub.proposed_value, property_type)
 
 
 def sub_values(

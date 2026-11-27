@@ -1,14 +1,16 @@
 """Isolated tests for the validation pass's read scoping (per AGENTS.md).
 
-The scoring pass is the planning pass over the SAME script, restricted to the
-frozen sample. Two reported failures are pinned here:
+The scoring pass is the planning pass over the SAME script, with the frozen
+sample prepended to a target-template read. Two reported failures are pinned
+here:
 
 * a task scoped to "only entities where the target property is empty" filtered
   the measured property server-side, so every held-out entity (which carries
   the measured value by construction) was filtered out and the pass recorded
   nothing — the "the test set is broken / the rows never appear" report;
-* with no restriction at all, the script discovered the whole instance, spent
-  its budget there and could slice the sample away.
+* a target-template read narrowed to the sample emptied a relationship catalog
+  that lives in the same template, so every row recorded ``skipped``; and with
+  no ordering at all a script could slice the sample away.
 
 Real objects: a tiny in-memory search surface and the real bound namespace.
 """
@@ -70,6 +72,10 @@ class _SearchApi:
         self.seen_limits.append(limit)
         return _result(selected)
 
+    async def get_entities_by_shared_ids(self, shared_ids, language, limit=10000):
+        by_id = {entity.shared_id: entity for entity in self.entities}
+        return [by_id[shared_id] for shared_id in shared_ids if shared_id in by_id][:limit]
+
 
 def _in_namespace(api: _SearchApi, held: set[str], templates: set[str], property_name: str, call: Any) -> Any:
     """Run ``call`` against a real dry-run namespace with the evaluation scope applied."""
@@ -98,11 +104,11 @@ def test_the_empty_scope_filter_is_dropped_for_the_scoring_pass() -> None:
     assert evaluation_filters(other, "states") == other
 
 
-def test_a_target_template_read_yields_only_the_held_out_entities() -> None:
+def test_a_target_template_read_returns_the_sample_first_and_keeps_the_rest() -> None:
     api = _SearchApi(
         [
-            AgentEntity(shared_id="kept", title="Kept", template_name="Recommendation"),
             AgentEntity(shared_id="other", title="Other", template_name="Recommendation"),
+            AgentEntity(shared_id="kept", title="Kept", template_name="Recommendation"),
         ]
     )
 
@@ -119,7 +125,10 @@ def test_a_target_template_read_yields_only_the_held_out_entities() -> None:
         ),
     )
 
-    assert found.summary.shared_ids == ["kept"]
+    # The sample is FIRST (a script that slices starts at the scored entity) and
+    # the rest of the page stays readable: a narrowed read emptied a catalog that
+    # lives in the same template.
+    assert found.summary.shared_ids == ["kept", "other"]
     # The measured-property filter was dropped: it selects exactly the entities the
     # score cannot use, so keeping it made the pass record nothing at all.
     assert api.seen_filters == [[]]
@@ -150,26 +159,45 @@ def test_a_reference_catalog_read_is_not_narrowed_to_the_sample() -> None:
     assert api.seen_limits == [50]
 
 
-def test_an_explicit_id_read_keeps_only_the_scored_entities() -> None:
+def test_an_explicit_id_read_is_not_narrowed() -> None:
+    """An explicit-id lookup is not discovery: a relationship script must fetch any id."""
     api = _SearchApi(
         [
-            AgentEntity(shared_id="kept", title="Kept", template_name="Recommendation"),
             AgentEntity(shared_id="other", title="Other", template_name="Recommendation"),
+            AgentEntity(shared_id="kept", title="Kept", template_name="Recommendation"),
         ]
     )
 
-    class _ByIdApi(_SearchApi):
-        async def get_entities_by_shared_ids(self, shared_ids, language, limit=10000):
-            return [entity for entity in self.entities if entity.shared_id in set(shared_ids)]
-
-    by_id_api = _ByIdApi(api.entities)
-
     found = _in_namespace(
-        by_id_api,
+        api,
         {"kept"},
         {"Recommendation"},
         "states",
         lambda namespace: namespace["query_entities"](mode="by_ids", shared_ids=["kept", "other"]),
     )
 
-    assert [entity["shared_id"] for entity in found] == ["kept"]
+    assert [entity["shared_id"] for entity in found] == ["kept", "other"]
+
+
+def test_a_catalog_in_a_target_template_is_complete() -> None:
+    """The reported shape: a relationship resolves values from the SAME template.
+
+    Narrowing this read emptied the catalog, so every held-out row recorded
+    ``skipped`` and the validation table showed no suggested value.
+    """
+    api = _SearchApi(
+        [
+            AgentEntity(shared_id="other", title="Other", template_name="Recommendation"),
+            AgentEntity(shared_id="kept", title="Kept", template_name="Recommendation"),
+        ]
+    )
+
+    found = _in_namespace(
+        api,
+        {"kept"},
+        {"Recommendation"},
+        "states",
+        lambda namespace: namespace["query_entities_full"]("by_template", template_name="Recommendation"),
+    )
+
+    assert [entity["shared_id"] for entity in found] == ["kept", "other"]

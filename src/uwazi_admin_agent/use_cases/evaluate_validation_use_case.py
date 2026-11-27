@@ -2,8 +2,8 @@
 
 The evaluation is a SEPARATE planning pass over the holdout entities only:
 
-- reads are real and the namespace is scoped to the held-out ids, so the script
-  can only see the entities it is scored on;
+- reads are real and target-template reads put the held-out entities FIRST
+  without hiding the rest, so the script discovers exactly what production does;
 - writes are recorded and discarded — nothing is applied, nothing is persisted
   as reviewable work;
 - the labels are the values frozen with the set, never the live ones (a Run, a
@@ -39,7 +39,7 @@ from uwazi_admin_agent.configuration import (
 )
 from uwazi_admin_agent.domain.extraction_eval import is_blank
 from uwazi_admin_agent.domain.llm_budget import LlmBudget, LlmLedger, LlmPrice
-from uwazi_admin_agent.domain.suggestion import MOVE_OP, SKIPPED_OP, Suggestion
+from uwazi_admin_agent.domain.suggestion import MOVE_OP, SKIPPED_OP, Suggestion, skip_reason_label
 from uwazi_admin_agent.domain.suggestion_scoring import records_to_suggestions
 from uwazi_admin_agent.domain.validation import (
     ValidationScore,
@@ -117,7 +117,7 @@ class ValidationEvaluationUseCase:
         if self._entity_api is None:
             raise RuntimeError("validation evaluation needs the entity API to run the script")
         started = time.monotonic()
-        records = await asyncio.to_thread(self._run_script, script, validation)
+        records, stop_note = await asyncio.to_thread(self._run_script, script, validation)
         held = set(validation.shared_ids)
         held_records = [record for record in records if _addresses(record, held)]
         # A `skipped` record IS the script failing to propose a value for a
@@ -139,7 +139,7 @@ class ValidationEvaluationUseCase:
             # suggest the score judged them.
             if row.property_name == validation.property_name
         ]
-        rows.extend(_missing_rows(rows, validation, _skip_evidence(held_records)))
+        rows.extend(_missing_rows(rows, validation, _skip_evidence(held_records), stop_note))
         # Hydration fills the display identity (title, template) from Uwazi, the
         # same way the planning pass does — without it a validation row reads as
         # a bare sharedId. It also writes the LIVE current value, which the
@@ -173,18 +173,18 @@ class ValidationEvaluationUseCase:
         )
         return score
 
-    def _run_script(self, script: str, validation: ValidationSet) -> list[dict[str, Any]]:
+    def _run_script(self, script: str, validation: ValidationSet) -> tuple[list[dict[str, Any]], str | None]:
         """Execute the script against the instance exactly as the planning pass does.
 
-        The scored entities are what the pass must cover, so the namespace is
-        scoped to them — see ``validation_evaluation_reads``. Restricting the
-        whole instance (the old allow-list) broke the ordinary
-        classify-by-relationship shape: a script that resolves a name against a
-        catalog template (``STATE``, a thesaurus-like set) got an empty catalog
-        and recorded ``skipped`` for every held-out entity, so its score was 0
-        for a script that works. Restricting NOTHING broke the opposite way: the
-        script discovered the whole instance, spent its budget there and could
-        slice the sample away entirely.
+        The scored entities must be what the pass COVERS first, but nothing the
+        production pass reads may be hidden from it: a target-template read keeps
+        the whole result with the frozen sample prepended (see
+        ``validation_evaluation_reads``), so the script's own slice starts at the
+        held-out entities and a catalog living in the same template stays
+        readable. ``by_ids`` and non-target templates are never narrowed, and
+        only a filter on the measured property is dropped. The sample is
+        therefore first in the script's own selection and the budget is spent on
+        it first — without the narrowing that starved a relationship catalog.
 
         The LLM helpers are bound exactly as in the planning pass (a fresh
         ledger over the run's approved budget) whenever the runtime is wired: a
@@ -193,14 +193,19 @@ class ValidationEvaluationUseCase:
         every row as ``skipped`` and scored 0 for a working script. A caller
         that wires no approved budget gets a DENY-ALL ceiling, so an
         LLM-driven script stops on its first call instead of spending
-        unbudgeted money; either way the halt is reported and the rows recorded
-        before it still count.
+        unbudgeted money; either way the halt is REPORTED as the note the
+        unreached placeholder rows carry, and the rows recorded before it still
+        count.
 
         The measured property's STORED value is hidden from the discovery reads
         (see ``hidden_measured_property``): the proposal must not be able to
         restate the very value the score compares it against, which is what
         turned one validation sample into evidence for a value the document
         never mentioned.
+
+        Returns ``(records, note)``: ``note`` explains a halted pass to every
+        held-out entity the script never reached, so a crashed or budget-stopped
+        run cannot leave rows with no evidence at all.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -231,9 +236,13 @@ class ValidationEvaluationUseCase:
             loop.close()
         if error is not None:
             logger.warning("validation pass script error: {}", error)
-        if ledger.exceeded:
+            note = f"The validation pass stopped with an error: {error}"
+        elif ledger.exceeded:
             logger.warning("validation pass stopped at the script's LLM budget; the rows recorded before it count")
-        return records
+            note = "The validation pass stopped at the run's AI budget before reaching this entity."
+        else:
+            note = None
+        return records, note
 
 
 def _deny_all_budget() -> LlmBudget:
@@ -285,6 +294,10 @@ def _skip_evidence(records: list[dict[str, Any]]) -> dict[str, str]:
         shared_id = str(record.get("shared_id") or "")
         detail = record.get("detail")
         text = "" if detail is None else str(detail).strip()
+        # A `record_skipped(sid, "no_match")` carries no detail of its own; the
+        # stable reason still says WHY in the row instead of leaving it blank.
+        if shared_id and not text:
+            text = skip_reason_label(str(record.get("reason") or "")).strip()
         if shared_id and text:
             evidence[shared_id] = text
     return evidence
@@ -294,6 +307,7 @@ def _missing_rows(
     rows: list[Suggestion],
     validation: ValidationSet,
     evidence: dict[str, str] | None = None,
+    fallback_evidence: str | None = None,
 ) -> list[Suggestion]:
     """One row per frozen label the script produced NO measured value for (pure).
 
@@ -306,6 +320,10 @@ def _missing_rows(
     The check is per MEASURED label, not per entity: a script that proposed
     another property for a held-out entity still proposed nothing for the one
     being scored, and that missing prediction needs its own row.
+
+    ``fallback_evidence`` is the pass-level reason (the script crashed or stopped
+    at its LLM budget): a row whose entity has no recorded skip of its own still
+    says why nothing was proposed instead of showing a blank evidence cell.
     """
     evidence = evidence or {}
     per_language = validation.is_per_language()
@@ -328,7 +346,7 @@ def _missing_rows(
             property_name=validation.property_name,
             language=language if per_language else None,
             proposed_value=None,
-            context=evidence.get(shared_id),
+            context=evidence.get(shared_id) or fallback_evidence,
         )
         placeholder.append(_with_frozen_label(row, validation))
     return placeholder

@@ -455,6 +455,49 @@ def test_a_held_out_entity_the_script_skipped_gets_a_measured_row() -> None:
     assert "Japan" in sub["current"]
 
 
+def test_a_skip_without_detail_still_reports_its_reason() -> None:
+    """``record_skipped(sid, "no_match")`` carries no detail; the row must still explain."""
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _missing_rows, _skip_evidence
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="states",
+        property_type="relationship",
+        shared_ids=["a"],
+        labels={"a|en": [{"shared_id": "id-1", "title": "Japan"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+    evidence = _skip_evidence([{"op": "skipped", "shared_id": "a", "reason": "no_match", "detail": None}])
+
+    rows = _missing_rows([], validation, evidence)
+
+    assert rows[0].context == "No matching value was found in the source."
+
+
+def test_a_stopped_pass_explains_every_unreached_sample_entity() -> None:
+    """A crashed or budget-stopped pass must not leave placeholder rows with no evidence."""
+    from datetime import datetime
+
+    from uwazi_admin_agent.domain.validation import ValidationSet
+    from uwazi_admin_agent.use_cases.evaluate_validation_use_case import _missing_rows
+
+    validation = ValidationSet(
+        run_id="r",
+        property_name="states",
+        property_type="relationship",
+        shared_ids=["a"],
+        labels={"a|en": [{"shared_id": "id-1", "title": "Japan"}]},
+        created_at=datetime(2026, 1, 1),
+    )
+
+    rows = _missing_rows([], validation, {}, "The validation pass stopped with an error: TypeError: boom")
+
+    assert rows[0].context == "The validation pass stopped with an error: TypeError: boom"
+
+
 def test_a_skipped_holdout_record_is_rendered_as_the_measured_row() -> None:
     """The recorded `skipped` op is a missing prediction, not an "excluded" outcome."""
     from uwazi_admin_agent.domain.suggestion import OperationReviewRow, Suggestion

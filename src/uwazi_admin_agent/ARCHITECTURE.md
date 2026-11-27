@@ -46,16 +46,17 @@ side must never read, used to score the script honestly.
   running it and keeping only the rows that address a held-out entity; writes
   are recorded, never applied. The namespace is scoped by
   `scope.validation_evaluation_reads`: a query against one of the run's own
-  TARGET templates yields only the frozen sample, while a query against any
-  OTHER template (the thesaurus-like catalog a classify-by-relationship script
-  resolves names against) passes through untouched. Both extremes are wrong: an
-  entity-wide allow-list starved that catalog (every held-out entity recorded
-  `skipped`, a working script scored 0), and no restriction at all let the script
-  discover the whole instance, spend its budget there and slice the sample away.
-  A filter on the MEASURED property is dropped for the pass
-  (`scope.evaluation_filters`): "only the entities where it is empty" selects
-  exactly the entities the score cannot use, since every held-out entity carries
-  a frozen label. The script's own `llm_complete`/`llm_map` calls are bound
+  TARGET templates returns the WHOLE result with the frozen sample prepended
+  (`scope.include_held_entities`), `by_ids` and any OTHER template (the
+  thesaurus-like catalog a classify-by-relationship script resolves names
+  against) pass through untouched, and only a filter on the MEASURED property is
+  dropped. A narrowed read cannot tell discovery from lookup, so it starved the
+  relationship catalog three times: the sample is ordered first instead of
+  hidden, the rest stays readable, and a small slice still starts at the scored
+  entities. The filter drop is `scope.evaluation_filters`: "only the entities
+  where it is empty" selects exactly the entities the score cannot use, since
+  every held-out entity carries a frozen label. The script's own
+  `llm_complete`/`llm_map` calls are bound
   exactly as the planning pass binds them: under the run's approved budget and a
   fresh ledger (a caller that wires none gets a deny-all ceiling). Evaluating
   with them unbound made every LLM-driven row `skipped` and scored a working

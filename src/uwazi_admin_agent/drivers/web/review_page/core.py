@@ -273,8 +273,8 @@ def _change_table(state: dict[str, Any]) -> None:
 
     # The expand column holds the chevron; the checkbox is added by QTable's
     # selection support (the body slot draws it as the first cell). Fixed
-    # widths keep a long recommendation from widening the table; the
-    # Recommendation column takes the remaining width and clips with CSS.
+    # widths keep a long suggestion from widening the table; the
+    # Suggestion column takes the remaining width and clips with CSS.
     columns = [
         {"name": "expand", "label": "", "field": "expand", "align": "center", "sortable": False, "style": "width: 36px"},
         {"name": "title", "label": "Target", "field": "title", "align": "left", "sortable": True, "style": "width: 190px"},
@@ -288,7 +288,7 @@ def _change_table(state: dict[str, Any]) -> None:
         },
         {
             "name": "recommendation",
-            "label": "Recommendation",
+            "label": "Suggestion",
             "field": "recommendation",
             "align": "left",
             "sortable": False,
@@ -321,8 +321,6 @@ def _change_table(state: dict[str, Any]) -> None:
         on_select=lambda e: _on_table_select(state, e),
     ).classes("w-full uw-table")
     table.props("flat")
-    if state.get("_compact"):
-        table.props("dense")
     # Two clicks mean ascending then descending, never a third "unsorted"
     # state: Quasar's default cycle includes one, ``binary-state-sort`` removes
     # it. With ``rowsNumber`` (see review_sort_pagination) QTable is in server
@@ -453,77 +451,106 @@ def _change_table(state: dict[str, Any]) -> None:
 
         <!-- One child row per suggested property, inside the SAME table and
              with the SAME number of cells as the parent (the empty fillers
-             keep every column aligned). -->
-        <q-tr v-for="c in props.row.children" :key="c.key" v-show="props.expand" class="child-row">
-          <q-td auto-width>
-            <q-checkbox v-if="c.selectable" dense :model-value="c.checked"
-                        @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, c.id, v)" />
-            <q-icon v-else-if="!c.is_info" name="lock" size="14px" color="grey-5">
-              <q-tooltip>{{ c.note || 'Not independently runnable' }}</q-tooltip>
-            </q-icon>
-          </q-td>
-          <q-td key="expand"></q-td>
-          <q-td key="title">
-            <div class="child-target truncate" :title="c.target_full">{{ c.target_text }}
-              <q-tooltip class="wide-tooltip">{{ c.target_full }}</q-tooltip>
-            </div>
-            <q-badge v-if="c.language" color="teal-9" class="lang-pill q-mt-xs">{{ c.language }}</q-badge>
-          </q-td>
-          <q-td key="template"></q-td>
-          <q-td key="recommendation">
-            <div v-if="c.recommendation" class="truncate rec-cell">{{ c.recommendation }}
-              <q-tooltip class="wide-tooltip">{{ c.recommendation_full }}</q-tooltip>
-            </div>
-            <span v-else class="text-grey-5">—</span>
-          </q-td>
-          <q-td key="ops">
-            <q-badge v-if="c.op" outline color="grey-7" class="op-pill">{{ c.op }}</q-badge>
-          </q-td>
-          <q-td key="run_status">
-            <q-badge class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
-          </q-td>
-          <q-td key="actions" class="text-no-wrap">
-            <div class="row items-center justify-end no-wrap actions-cell">
-              <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
-                <q-tooltip>{{ c.label || 'Suggestion actions' }}</q-tooltip>
-                <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
-                  <q-list dense style="min-width: 210px">
-                    <q-item v-if="c.runnable" clickable v-close-popup
-                            @click="$parent.$emit('run_sub', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="play_arrow" /></q-item-section>
-                      <q-item-section>Run this suggestion</q-item-section>
-                    </q-item>
-                    <q-item v-if="c.has_rejected" clickable v-close-popup
-                            @click="$parent.$emit('accept_values', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="done_all" /></q-item-section>
-                      <q-item-section>Accept every value</q-item-section>
-                    </q-item>
-                    <q-item v-if="c.independent && c.status === 'discarded'" clickable v-close-popup
-                            @click="$parent.$emit('restore_sub', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="restore" /></q-item-section>
-                      <q-item-section>Restore</q-item-section>
-                    </q-item>
-                    <q-item v-else-if="c.runnable" clickable v-close-popup
-                            @click="$parent.$emit('discard_sub', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="block" /></q-item-section>
-                      <q-item-section>Reject</q-item-section>
-                    </q-item>
-                    <q-item v-if="c.revertable" clickable v-close-popup
-                            @click="$parent.$emit('revert_sub', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="undo" /></q-item-section>
-                      <q-item-section>Revert this property</q-item-section>
-                    </q-item>
-                    <q-item v-if="!c.structural && !c.is_display_only" clickable v-close-popup
-                            @click="$parent.$emit('edit_sub', props.row.row_key, c.id)">
-                      <q-item-section avatar><q-icon name="edit" /></q-item-section>
-                      <q-item-section>Edit in entity window</q-item-section>
-                    </q-item>
-                  </q-list>
-                </q-menu>
-              </q-btn>
-            </div>
-          </q-td>
-        </q-tr>
+             keep every column aligned). The source paragraph gets its own row
+             directly under the suggestion it explains. -->
+        <template v-for="c in props.row.children" :key="c.key">
+          <q-tr v-show="props.expand" class="child-row">
+            <q-td auto-width>
+              <q-checkbox v-if="c.selectable" dense :model-value="c.checked"
+                          @update:model-value="v => $parent.$emit('toggle_sub', props.row.row_key, c.id, v)" />
+              <q-icon v-else-if="!c.is_info" name="lock" size="14px" color="grey-5">
+                <q-tooltip>{{ c.note || 'Not independently runnable' }}</q-tooltip>
+              </q-icon>
+            </q-td>
+            <q-td key="expand"></q-td>
+            <q-td key="title">
+              <div class="child-target truncate" :title="c.target_full">{{ c.target_text }}
+                <q-tooltip class="wide-tooltip">{{ c.target_full }}</q-tooltip>
+              </div>
+              <q-badge v-if="c.language" color="teal-9" class="lang-pill q-mt-xs">{{ c.language }}</q-badge>
+            </q-td>
+            <q-td key="template"></q-td>
+            <q-td key="recommendation">
+              <div class="rec-pair">
+                <div class="rec-line rec-current">
+                  <span class="rec-tag">Current</span>
+                  <span class="rec-value" :title="c.current_full">{{ c.current || '—' }}
+                    <q-tooltip v-if="c.current_full && c.current_full !== '—'" class="wide-tooltip">
+                      {{ c.current_full }}
+                    </q-tooltip>
+                  </span>
+                </div>
+                <div class="rec-line rec-suggested">
+                  <span class="rec-tag">Suggestion</span>
+                  <span v-if="c.select_type && ((c.values && c.values.length) || c.extra_selection)" class="rec-values">
+                    <q-chip v-for="v in c.values" :key="v.label" dense
+                            :color="v.accepted ? 'green-2' : 'red-2'"
+                            :text-color="v.accepted ? 'green-10' : 'red-10'"
+                            :icon="v.accepted ? 'check' : 'close'">{{ v.label }}</q-chip>
+                    <span v-if="c.extra_selection" class="rec-extra">{{ c.extra_selection }}</span>
+                  </span>
+                  <span v-else class="rec-value" :title="c.proposed_full">{{ c.proposed || '—' }}
+                    <q-tooltip v-if="c.recommendation_full" class="wide-tooltip">{{ c.recommendation_full }}
+                    </q-tooltip>
+                  </span>
+                </div>
+              </div>
+            </q-td>
+            <q-td key="ops">
+              <q-badge v-if="c.op" outline color="grey-7" class="op-pill">{{ c.op }}</q-badge>
+            </q-td>
+            <q-td key="run_status">
+              <q-badge class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
+            </q-td>
+            <q-td key="actions" class="text-no-wrap">
+              <div class="row items-center justify-end no-wrap actions-cell">
+                <q-btn dense flat round size="sm" icon="more_horiz" color="grey-8" @click.stop>
+                  <q-tooltip>{{ c.label || 'Suggestion actions' }}</q-tooltip>
+                  <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
+                    <q-list dense style="min-width: 210px">
+                      <q-item v-if="c.runnable" clickable v-close-popup
+                              @click="$parent.$emit('run_sub', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="play_arrow" /></q-item-section>
+                        <q-item-section>Run this suggestion</q-item-section>
+                      </q-item>
+                      <q-item v-if="c.has_rejected" clickable v-close-popup
+                              @click="$parent.$emit('accept_values', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="done_all" /></q-item-section>
+                        <q-item-section>Accept every value</q-item-section>
+                      </q-item>
+                      <q-item v-if="c.independent && c.status === 'discarded'" clickable v-close-popup
+                              @click="$parent.$emit('restore_sub', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="restore" /></q-item-section>
+                        <q-item-section>Restore</q-item-section>
+                      </q-item>
+                      <q-item v-else-if="c.runnable" clickable v-close-popup
+                              @click="$parent.$emit('discard_sub', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="block" /></q-item-section>
+                        <q-item-section>Reject</q-item-section>
+                      </q-item>
+                      <q-item v-if="c.revertable" clickable v-close-popup
+                              @click="$parent.$emit('revert_sub', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="undo" /></q-item-section>
+                        <q-item-section>Revert this property</q-item-section>
+                      </q-item>
+                      <q-item v-if="!c.structural && !c.is_display_only" clickable v-close-popup
+                              @click="$parent.$emit('edit_sub', props.row.row_key, c.id)">
+                        <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                        <q-item-section>Edit in entity window</q-item-section>
+                      </q-item>
+                    </q-list>
+                  </q-menu>
+                </q-btn>
+              </div>
+            </q-td>
+          </q-tr>
+          <q-tr v-if="c.context" v-show="props.expand" class="context-row">
+            <q-td></q-td>
+            <q-td colspan="7">
+              <div class="subs-context">{{ c.context }}</div>
+            </q-td>
+          </q-tr>
+        </template>
         """,
     )
     table.on("run_op", lambda e: _run_op_clicked(state, _row_key_of(getattr(e, "args", None))))
@@ -845,11 +872,15 @@ def _drift_banner(state: dict[str, Any]) -> None:
         state["_drift_label"] = ui.label(_DRIFT_LABELS["unknown"]).classes("sync-label")
         with state["_drift_label"]:
             state["_drift_tooltip"] = ui.tooltip("")
-        state["_drift_sync_button"] = ui.button(
-            "Sync",
-            icon="sync",
-            on_click=lambda: _sync_now_clicked(state),
-        ).props("outline dense no-caps color=primary").classes("sync-button")
+        state["_drift_sync_button"] = (
+            ui.button(
+                "Sync with Uwazi",
+                icon="sync",
+                on_click=lambda: _sync_now_clicked(state),
+            )
+            .props("unelevated no-caps color=primary size=md")
+            .classes("sync-button")
+        )
         state["_drift_sync_button"].set_visibility(False)
 
     stored = get_drift_state(page_instance_url(), state["run_id"])
@@ -1140,7 +1171,12 @@ def _page_window(current: int, pages: int) -> list[int]:
 
 
 def _refresh_page_controls(state: dict[str, Any]) -> None:
-    """Rebuild the footer's page buttons around the current page."""
+    """Rebuild the footer's page buttons around the current page.
+
+    The pager offers the first and last page directly plus a typed page
+    number, so a run of thousands of pages never forces a walk through the
+    five visible buttons.
+    """
     holder = state.get("_page_buttons")
     if holder is None or holder.is_deleted:
         return
@@ -1148,6 +1184,8 @@ def _refresh_page_controls(state: dict[str, Any]) -> None:
     page = state["offset"] // REVIEW_PAGE_SIZE + 1
     holder.clear()
     with holder:
+        first = ui.button(icon="first_page", on_click=lambda: _page_to(state, 1)).props("flat dense round")
+        first.set_enabled(page > 1)
         previous = ui.button(icon="chevron_left", on_click=lambda: _page(state, -1)).props("flat dense round")
         previous.set_enabled(page > 1)
         for number in _page_window(page, pages):
@@ -1157,6 +1195,21 @@ def _refresh_page_controls(state: dict[str, Any]) -> None:
                 button.classes(add="page-btn-active")
         following = ui.button(icon="chevron_right", on_click=lambda: _page(state, 1)).props("flat dense round")
         following.set_enabled(page < pages)
+        last = ui.button(icon="last_page", on_click=lambda: _page_to(state, None)).props("flat dense round")
+        last.set_enabled(page < pages)
+        ui.label("Go to").classes("uw-page-label")
+        page_input = (
+            ui.number(value=page, min=1, max=pages, step=1)
+            .props("dense outlined hide-bottom-space")
+            .classes("page-input")
+            .tooltip(f"Page number (1–{pages})")
+        )
+        page_input.on("keydown.enter", lambda _e: _page_from_input(state, page_input.value))
+        state["_page_input"] = page_input
+        ui.button(icon="arrow_forward", on_click=lambda: _page_from_input(state, page_input.value)).props(
+            "flat dense round"
+        ).tooltip("Go to this page")
+        ui.label(f"/ {pages}").classes("uw-page-label")
 
 
 def _refresh_run_badge(state: dict[str, Any]) -> None:
@@ -1248,12 +1301,7 @@ def _refresh_selection_counts(state: dict[str, Any]) -> None:
     selected_label = state.get("_selection_label")
     if selected_label is not None and not selected_label.is_deleted:
         selected_label.text = f"{selected_entities:,} selected"
-    # The bar is a sticky affordance, not a permanent toolbar: it exists only
-    # while there is something to act on. A partial child selection counts too
-    # (the Run applies those parts), which ``table.selected`` alone would miss.
-    bulk_bar = state.get("_bulk_bar")
-    if bulk_bar is not None and not bulk_bar.is_deleted:
-        bulk_bar.set_visibility(bool(selection))
+    # The bar is always present; only its buttons depend on what is checked.
     run_button = state.get("_run_button")
     if run_button is not None and not run_button.is_deleted:
         run_button.text = run_button_label(run_count)
@@ -1764,10 +1812,12 @@ def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tu
 def _performance_row(state: dict[str, Any]) -> None:
     """The dismissible performance banner above the card.
 
-    A run with no test set has no score, so the banner says how to measure it
-    ("Add a test set in the wizard") and can be dismissed. A scored run shows
-    the same figure the old always-on line carried, in the same strip, so the
-    page's top stays one calm sentence instead of a stack of counter cards.
+    A run with no test set starts with the banner HIDDEN: there is no score to
+    show, and the empty strip took the top of the page from the table. The
+    Settings menu's "Show performance" brings it back (dismissing it hides it
+    again). A scored run shows the same figure the old always-on line carried,
+    in the same strip, so the page's top stays one calm sentence instead of a
+    stack of counter cards.
     """
     banner = ui.element("div").classes("uw-info-banner w-full")
     state["_performance_banner"] = banner
@@ -1781,9 +1831,17 @@ def _performance_row(state: dict[str, Any]) -> None:
     _render_performance(state)
 
 
+def _show_performance(state: dict[str, Any]) -> None:
+    """Bring a dismissed (or test-set-less) performance banner back."""
+    state["_performance_dismissed"] = False
+    state["_performance_forced"] = True
+    _render_performance(state)
+
+
 def _dismiss_performance(state: dict[str, Any]) -> None:
-    """Hide the performance banner for the rest of this page session."""
+    """Hide the performance banner until the Settings menu shows it again."""
     state["_performance_dismissed"] = True
+    state["_performance_forced"] = False
     banner = state.get("_performance_banner")
     if banner is not None and not banner.is_deleted:
         banner.set_visibility(False)
@@ -1791,11 +1849,12 @@ def _dismiss_performance(state: dict[str, Any]) -> None:
 
 def _render_performance(state: dict[str, Any]) -> None:
     """Paint the performance banner (called on load and after every refresh)."""
-    if state.get("_performance_dismissed"):
-        return
     holder = state.get("_performance_holder")
     banner = state.get("_performance_banner")
     if holder is None or holder.is_deleted or banner is None or banner.is_deleted:
+        return
+    if state.get("_performance_dismissed"):
+        banner.set_visibility(False)
         return
     try:
         summary = validation_summary(state["instance_url"], state["run_id"])
@@ -1803,11 +1862,16 @@ def _render_performance(state: dict[str, Any]) -> None:
         logger.warning("validation banner failed: {}", exc)
         banner.set_visibility(False)
         return
+    validation = summary.get("set")
+    if validation is None and not state.get("_performance_forced"):
+        # No test set means no measurement: the table keeps the top of the page
+        # until the operator asks for the banner from the Settings menu.
+        banner.set_visibility(False)
+        return
     banner.set_visibility(True)
     holder.clear()
     with holder:
         ui.icon("info").classes("uw-banner-icon")
-        validation = summary.get("set")
         if validation is None:
             with ui.row().classes("items-baseline gap-1 no-wrap"):
                 ui.label("Performance —").classes("uw-banner-title")
@@ -2234,7 +2298,7 @@ def _summary_row(state: dict[str, Any]) -> None:
     repainted by :func:`_render_summary` after every table load.
     """
     with ui.row().classes("items-baseline gap-3 no-wrap"):
-        ui.label("Suggestions").classes("uw-card-title")
+        ui.label("Review").classes("uw-card-title")
         state["_summary_label"] = ui.label("").classes("uw-summary")
     _render_summary(state)
 
