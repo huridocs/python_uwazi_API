@@ -99,8 +99,9 @@ class UwaziApiAdapter(
         template_mapper: Optional[TemplateMapperAdapter] = None,
         entity_mapper: Optional[EntityMapper] = None,
         page_mapper: Optional[PageMapper] = None,
+        use_cached_session: bool = True,
     ):
-        self.client = UwaziClient(user=user, password=password, url=url, token=token)
+        self.client = UwaziClient(user=user, password=password, url=url, token=token, use_cached_session=use_cached_session)
         self._thesauri_repo = self.client.thesauris
         self._template_repo = self.client.templates
         self._entity_repo = self.client.entities

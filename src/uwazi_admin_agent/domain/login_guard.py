@@ -12,7 +12,8 @@ known username. The tradeoff is that a blocked account stays blocked for
 everyone until the service restarts — that is the intended, explicit cost of
 this simple design.
 
-Only REFUSED credentials count (:class:`~uwazi_api.domain.exceptions.CredentialsRejectedError`):
+Only REFUSED credentials count — :class:`~uwazi_api.domain.exceptions.CredentialsRejectedError`
+and a rejected 2FA code (:class:`~uwazi_api.domain.exceptions.TwoFactorTokenInvalidError`):
 an unreachable instance, a wrong URL or a 5xx is an operational failure and must
 never lock an admin out.
 

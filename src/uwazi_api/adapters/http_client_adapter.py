@@ -3,17 +3,31 @@ from typing import Optional
 
 import requests
 from requests.cookies import merge_cookies
+from requests.utils import cookiejar_from_dict
 
+from uwazi_api.adapters.login_session_cache import cached_login_session, remember_login_session
 from uwazi_api.adapters.request_retry import requests_login_session, requests_retry_session
 from uwazi_api.domain.credentials import require_credentials
-from uwazi_api.domain.exceptions import AuthenticationError, CredentialsRejectedError
+from uwazi_api.domain.exceptions import (
+    AuthenticationError,
+    CredentialsRejectedError,
+    TwoFactorRequiredError,
+    TwoFactorTokenInvalidError,
+)
 from uwazi_api.instance_urls import first_instance_url
 from uwazi_api.iso_639_choices import iso_639_choices
 from uwazi_api.ports.http_port import HttpClientPort
 
 
 class HttpClientAdapter(HttpClientPort):
-    def __init__(self, url: str, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None):
+    def __init__(
+        self,
+        url: str,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        token: Optional[str] = None,
+        use_cached_session: bool = True,
+    ):
         if not url:
             raise ValueError("URL is required and cannot be None or empty")
         # ``UWAZI_URL`` may hold a comma-separated list of instances. This
@@ -54,7 +68,22 @@ class HttpClientAdapter(HttpClientPort):
             "Content-Type": "application/json",
         }
         self.graylog = logging.getLogger("graylog")
-        self.connect_sid = self._get_connect_sid() if user and password else None
+        self.use_cached_session = use_cached_session
+        self.connect_sid = self._resolve_connect_sid() if user and password else None
+
+    def _resolve_connect_sid(self) -> str:
+        if self.use_cached_session:
+            cached = cached_login_session(self.url, self.user, self.password)
+            if cached:
+                # Same wire effect as the jar merge in _get_connect_sid: a
+                # domainless hostOnly cookie is sent to this adapter's URL
+                # (see tests/test_login_cookie_carryover.py for the domain trap).
+                self.request_adapter.cookies.update(cookiejar_from_dict({"connect.sid": cached}))
+                self.graylog.info(f"Reusing the cached Uwazi session for {self.url}")
+                return cached
+        sid = self._get_connect_sid()
+        remember_login_session(self.url, self.user, self.password, sid)
+        return sid
 
     def post_multipart(
         self,
@@ -137,6 +166,14 @@ class HttpClientAdapter(HttpClientPort):
                     # password or account. The web login gate counts only this
                     # case towards its failed-login lockout.
                     raise CredentialsRejectedError(response.status_code)
+                # ``/api/login`` produces a 400 only for ``TwoFactorTokenInvalid``
+                # (a malformed body is a 422), so the status alone identifies the
+                # two 2FA answers: 409 = a code is required, 400 = the code was
+                # wrong or expired.
+                if response.status_code == 409:
+                    raise TwoFactorRequiredError()
+                if response.status_code == 400:
+                    raise TwoFactorTokenInvalidError()
                 raise AuthenticationError(f"Login failed: {response.status_code}")
             cookie = response.cookies.get("connect.sid")
             if not cookie:

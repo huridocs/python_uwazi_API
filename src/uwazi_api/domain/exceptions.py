@@ -66,6 +66,22 @@ class CredentialsRejectedError(AuthenticationError):
         self.status_code = status_code
 
 
+class TwoFactorRequiredError(AuthenticationError):
+    """The instance accepted the password but requires a 2FA code (HTTP 409)."""
+
+    def __init__(self) -> None:
+        super().__init__("Uwazi requires a two-factor authentication code")
+        self.status_code = 409
+
+
+class TwoFactorTokenInvalidError(AuthenticationError):
+    """The instance rejected the supplied 2FA code (HTTP 400)."""
+
+    def __init__(self) -> None:
+        super().__init__("Uwazi rejected the two-factor authentication code")
+        self.status_code = 400
+
+
 class PageNotFoundError(DomainError):
     pass
 

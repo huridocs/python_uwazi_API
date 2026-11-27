@@ -28,8 +28,9 @@ class UwaziClient:
         password: Optional[str] = None,
         url: Optional[str] = None,
         token: Optional[str] = None,
+        use_cached_session: bool = True,
     ):
-        self.http = HttpClientAdapter(url, user, password, token=token)
+        self.http = HttpClientAdapter(url, user, password, token=token, use_cached_session=use_cached_session)
 
         # Drivers / Repositories
         self._template_repo = TemplateRepository(self.http)

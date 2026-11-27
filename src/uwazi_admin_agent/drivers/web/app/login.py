@@ -18,7 +18,11 @@ from uwazi_admin_agent.drivers.web.session import (
 )
 from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_api.domain.credentials import MISSING_CREDENTIALS_MESSAGE, has_credentials
-from uwazi_api.domain.exceptions import CredentialsRejectedError
+from uwazi_api.domain.exceptions import (
+    CredentialsRejectedError,
+    TwoFactorRequiredError,
+    TwoFactorTokenInvalidError,
+)
 
 from ..theme import install_theme
 
@@ -43,10 +47,18 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
     """Full-page login gate: validates the Uwazi account before the app loads.
 
     Nothing of the admin app renders until the credentials pass a real
-    ``/api/login`` against the SELECTED Uwazi instance. Successful logins are
-    remembered in MEMORY for this session together with the chosen instance
-    (only a random, non-secret token is persisted), and the user is sent to
-    ``/app``; failures show an inline error and keep the login page up.
+    ``/api/login`` against the SELECTED Uwazi instance. When the instance
+    answers ``409`` (an account with 2FA enabled), the form asks for the
+    6-digit authenticator code and re-posts the same credentials plus that
+    code; ``400`` means the code was wrong or expired and keeps the code step
+    up. Each web login performs a REAL ``/api/login`` with
+    ``use_cached_session=False``, so the cookie cache warm from an earlier
+    login can never stand in for the second factor.
+
+    Successful logins are remembered in MEMORY for this session together with
+    the chosen instance (only a random, non-secret token is persisted), and the
+    user is sent to ``/app``; failures show an inline error and keep the login
+    page up.
 
     The instance comes from the URL's PATH PREFIX, never from a picker or a
     query parameter: the route registered this page for one configured
@@ -108,39 +120,75 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
                 .props("outlined dense")
                 .classes("w-full q-mt-sm")
             )
+            # Hidden until the instance answers 409: the code is asked for only
+            # when the password was accepted and the account uses 2FA.
+            token_input = (
+                ui.input("Verification code").props("outlined dense inputmode=numeric maxlength=6").classes("w-full q-mt-sm")
+            )
+            token_input.set_visibility(False)
 
-            def _submit() -> None:
-                # Never fall back to a default account: an empty submit must not
-                # authenticate as ``admin`` on an instance that still has default
-                # credentials. Both fields are required.
-                typed_user = (user_input.value or "").strip() if user_input is not None else ""
-                account = (user or typed_user).strip()
-                password = (password_input.value or "") if password_input is not None else ""
-                if not has_credentials(account, password):
-                    error_label.set_text(MISSING_CREDENTIALS_MESSAGE)
-                    return
-                # A locked account is refused WITHOUT contacting the instance:
-                # the block must stop the login attempts, not merely hide them.
+            # The two-step state lives in this closure only: never persisted,
+            # never logged, and gone as soon as the page is left.
+            pending: dict[str, str] = {}
+
+            def _reset_pending() -> None:
+                pending.clear()
+                token_input.value = ""
+                token_input.set_visibility(False)
+                back_button.set_visibility(False)
+                submit_button.set_text("Log in")
+                if user_input is not None:
+                    user_input.set_enabled(True)
+                password_input.set_enabled(True)
+                error_label.set_text("")
+
+            def _record_failure(account: str, *, invalid_code: bool) -> None:
+                failures = GUARD.record_failure(instance_url, account)
+                logger.warning(
+                    "Admin web login failed user={} instance={} failures={} invalid_code={}",
+                    account,
+                    instance_url,
+                    failures,
+                    invalid_code,
+                )
                 if GUARD.is_blocked(instance_url, account):
                     error_label.set_text(blocked_message(account))
-                    return
+                elif invalid_code:
+                    error_label.set_text(f"Invalid or expired verification code. {failures} failed attempts.")
+                else:
+                    error_label.set_text(f"Login failed. {failures} failed attempts.")
+
+            def _attempt(account: str, password: str, token: str | None) -> None:
                 try:
-                    UwaziApiAdapter(user=account, password=password, url=instance_url)
-                except CredentialsRejectedError:
-                    # The instance refused the credentials: count it. An
-                    # unreachable instance is NOT counted (it would lock every
-                    # admin out during an outage).
-                    failures = GUARD.record_failure(instance_url, account)
-                    logger.warning(
-                        "Admin web login failed user={} instance={} failures={}",
-                        account,
-                        instance_url,
-                        failures,
+                    UwaziApiAdapter(
+                        user=account,
+                        password=password,
+                        url=instance_url,
+                        token=token,
+                        use_cached_session=False,  # the gate ALWAYS proves the second factor
                     )
-                    if GUARD.is_blocked(instance_url, account):
-                        error_label.set_text(blocked_message(account))
-                    else:
-                        error_label.set_text(f"Login failed. {failures} failed attempts.")
+                except TwoFactorRequiredError:
+                    pending["user"], pending["password"] = account, password
+                    if user_input is not None:
+                        user_input.set_enabled(False)
+                    password_input.set_enabled(False)
+                    token_input.set_visibility(True)
+                    back_button.set_visibility(True)
+                    submit_button.set_text("Verify")
+                    error_label.set_text("Enter the 6-digit code from your authenticator app.")
+                    token_input.run_method("focus")
+                    return
+                except TwoFactorTokenInvalidError:
+                    _record_failure(account, invalid_code=True)
+                    token_input.value = ""
+                    return
+                except CredentialsRejectedError:
+                    if pending:
+                        # A 401 on the code step means the account locked or the
+                        # password changed: Uwazi's own login form returns to the
+                        # password step here too.
+                        _reset_pending()
+                    _record_failure(account, invalid_code=False)
                     return
                 except Exception as exc:  # noqa: BLE001 — surface every validation failure
                     error_label.set_text(f"Login failed: {exc}")
@@ -156,10 +204,48 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
                 # login page instead of the dummy page.
                 ui.navigate.to(page_link("/app", instance_url))
 
-            password_input.on("keydown.enter", _submit)
-            ui.button("Log in", icon="login", on_click=_submit).props("unelevated no-caps color=primary").classes(
-                "w-full q-mt-lg"
+            def _submit() -> None:
+                if pending:
+                    # Second step: the password already passed, only the code
+                    # travels this time (and is never stored anywhere).
+                    account, password = pending["user"], pending["password"]
+                    if GUARD.is_blocked(instance_url, account):
+                        error_label.set_text(blocked_message(account))
+                        return
+                    token = "".join(ch for ch in (token_input.value or "") if ch.isdigit())[:6]
+                    if len(token) != 6:
+                        error_label.set_text("Enter the 6-digit code from your authenticator app.")
+                        return
+                    _attempt(account, password, token)
+                    return
+
+                # Never fall back to a default account: an empty submit must not
+                # authenticate as ``admin`` on an instance that still has default
+                # credentials. Both fields are required.
+                typed_user = (user_input.value or "").strip() if user_input is not None else ""
+                account = (user or typed_user).strip()
+                password = (password_input.value or "") if password_input is not None else ""
+                if not has_credentials(account, password):
+                    error_label.set_text(MISSING_CREDENTIALS_MESSAGE)
+                    return
+                # A locked account is refused WITHOUT contacting the instance:
+                # the block must stop the login attempts, not merely hide them.
+                if GUARD.is_blocked(instance_url, account):
+                    error_label.set_text(blocked_message(account))
+                    return
+                _attempt(account, password, None)
+
+            submit_button = (
+                ui.button("Log in", icon="login", on_click=_submit)
+                .props("unelevated no-caps color=primary")
+                .classes("w-full q-mt-lg")
             )
+            back_button = (
+                ui.button("Use a different account", on_click=_reset_pending).props("flat no-caps").classes("w-full")
+            )
+            back_button.set_visibility(False)
+            password_input.on("keydown.enter", _submit)
+            token_input.on("keydown.enter", _submit)
 
 
 def _logout() -> None:
