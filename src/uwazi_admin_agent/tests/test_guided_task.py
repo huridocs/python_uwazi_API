@@ -363,7 +363,7 @@ def test_assembled_prompt_names_output_languages_and_source_mode_for_text_proper
         _extract_answers(sources=(SOURCE_METADATA,), metadata_properties=("rec",), output_language_mode=OUTPUT_SOURCE),
         {},
     )
-    assert "Write the suggestion into the entity row in the source language." in source_meta
+    assert "Write the suggestion into the entity's fields in the source language." in source_meta
 
 
 def test_custom_task_prompt_embeds_the_description() -> None:

@@ -466,16 +466,16 @@ def _render_question_control(state: dict[str, Any], question: str, answers: Guid
     elif question == INPUT_LANGUAGES_QUESTION:
         _languages(state, "input_languages", answers.input_languages, "Primary input language(s)")
     elif question == OUTPUT_LANGUAGE_MODE_QUESTION:
-        # Which entity language ROW receives the suggestion. Distinct from the
-        # input language above: a Spanish document may update the English row.
+        # Which entity language RECEIVES the suggestion. Distinct from the input
+        # language above: a Spanish document may update the English language.
         if answers.goal == GOAL_CREATE:
             ui.label("Which entity language(s) the new entities' text properties are written in.").classes(
                 "text-body2 text-grey-7 q-mb-md"
             )
         else:
             ui.label(
-                "The language row the suggestion is written into. This is NOT the language of the document: "
-                "a Spanish document can update the English entity."
+                "The entity language the suggestion is written into. This is NOT the language of the document: "
+                "a Spanish document can update an entity's English fields."
             ).classes("text-body2 text-grey-7 q-mb-md")
         # The create flow's only output choice is which languages the new
         # entities' per-language text properties are written in. The instance's

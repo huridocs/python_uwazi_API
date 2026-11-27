@@ -1,32 +1,33 @@
-"""Login-page URL helpers: instance token + username preselected.
+"""Login-page and in-app URL helpers: one path prefix per Uwazi instance.
 
-An operator hands each instance's admins a link like
+The admin web serves each configured ``UWAZI_URL`` under its own path prefix:
 
-    http://localhost:5055/?instance=global-rep&user=admin
+    http://localhost:5055/upr-info          # https://www.upr-info.org
+    http://localhost:5055/girlsrightsplatform
+    http://localhost:5055/localhost         # http://localhost:3000
 
-which opens the login page with that instance and that username already
-filled in, so the only thing left to type is the Uwazi password.
-
-The ``instance`` parameter is a **token**, never a URL to dial: it is matched
-against the configured ``UWAZI_URL`` list only (see :func:`match_instance`),
-and the value used downstream is always the CONFIGURED url string. An
-unmatched token never reaches the API adapter — otherwise the login page
-would be an SSRF and an admin-password exfiltration primitive.
+The path prefix is a TOKEN, never a URL to dial: it is matched against the
+configured ``UWAZI_URL`` list only (see :func:`match_instance`), and the value
+used downstream is always the CONFIGURED url string. A path that names no
+configured instance (or names several) is answered with the dummy page, so a
+forged path can never point the login at another host.
 
 Pure module: no I/O, no environment reads, no network.
 """
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlencode, urlsplit
 
 from uwazi_admin_agent.domain.instance import same_instance
 
 MISSING_INSTANCE_MESSAGE = "Open the link that was shared with you to reach the right Uwazi instance."
-UNMATCHED_INSTANCE_MESSAGE = "This link does not name a configured Uwazi instance. Check the URL you were given."
-AMBIGUOUS_INSTANCE_MESSAGE = (
-    "This link matches more than one configured Uwazi instance. Ask for a link that names exactly one."
-)
+
+# One path segment carries letters, digits, dots, dashes, underscores and
+# colons (the port separator); a slash, a query or a bracket would not survive
+# as ONE segment.
+_PATH_SEGMENT = re.compile(r"^[a-z0-9._:-]+$")
 
 
 def _token(value: str) -> str:
@@ -34,45 +35,65 @@ def _token(value: str) -> str:
     return value.strip().rstrip("/").lower()
 
 
-def _host_label(netloc: str) -> str:
-    """The first MEANINGFUL dot-label of a netloc (pure).
+def _host_label(host: str) -> str:
+    """The first MEANINGFUL dot-label of a host (pure).
 
     ``www.`` is a web-fronting prefix, never an instance's name: deriving the
     label from ``www.girlsrightsplatform.org`` produced ``www``, so the natural
-    link ``?instance=girlsrightsplatform`` was refused as "not a configured
-    instance" while ``?instance=www`` silently worked.
+    route ``/girlsrightsplatform`` was refused while ``/www`` silently worked.
     """
-    labels = [part for part in netloc.split(".") if part]
+    labels = [part for part in host.split(".") if part]
     while len(labels) > 1 and labels[0] == "www":
         labels.pop(0)
     return labels[0] if labels else ""
 
 
-def instance_tokens(url: str) -> list[str]:
-    """The accepted short forms of ONE configured url, in preference order.
+def _split(url: str) -> tuple[str, str, int | None, str]:
+    """``(scheme, host, port, netloc)`` of a configured value (pure).
 
-    The first meaningful dot-label of the host, with a leading ``www.``
-    skipped (``girlsrightsplatform`` from ``www.girlsrightsplatform.org``,
-    ``global-rep`` from ``global-rep.uwazi.io``), then the lowered netloc
-    including any port (``www.girlsrightsplatform.org``, ``localhost:3000``),
-    then the normalized full url. A url with no host contributes only its
-    full-url token. Duplicates are dropped while order is preserved.
+    A configured value without a scheme (``upr-info.org``, ``localhost:3000``)
+    is parsed with a leading ``//`` so it is read as a host, not as a path.
+    """
+    parts = urlsplit(url)
+    if not parts.netloc:
+        parts = urlsplit("//" + url)
+    try:
+        port = parts.port
+    except ValueError:  # an invalid port is no port
+        port = None
+    return parts.scheme, (parts.hostname or ""), port, parts.netloc.lower()
+
+
+def instance_tokens(url: str) -> list[str]:
+    """The accepted spellings of ONE configured url, in preference order.
+
+    The host's first meaningful dot-label (``www.`` skipped: ``upr-info``), the
+    host (``upr-info.org``), the host with its port (``localhost:3000``), the
+    netloc as configured (``www.upr-info.org``), the legacy bare ``www`` (links
+    generated before the www-aware rules carried it), a scheme-qualified form
+    (``https:upr-info.org``, the last resort when two configured values share a
+    host) and the normalized full url. Duplicates are dropped while order is
+    preserved. A url with no host contributes only its full-url token.
     """
     normalized = _token(url)
     if not normalized:
         return []
-    netloc = urlsplit(normalized).netloc.lower()
+    scheme, host, port, netloc = _split(normalized)
     if not netloc:
         return [normalized]
-    label = _host_label(netloc)
-    tokens = [label, netloc, normalized]
-    if label and label != netloc.split(".")[0] and netloc.split(".")[0] == "www":
-        # Backward compatibility: links generated before the www-aware tokens
-        # carried a bare ``www``. Keep it ACCEPTED (after the real name) so those
-        # links keep working, while the generated links now say the instance's
-        # own name. An ambiguous ``www`` across two configured hosts is still
-        # refused by :func:`match_instance`.
-        tokens.insert(2, "www")
+    bare_host = host.removeprefix("www.")
+    tokens = [
+        _host_label(host),
+        bare_host,
+        host,
+        f"{host}:{port}" if port is not None else host,
+        netloc,
+    ]
+    if netloc.startswith("www."):
+        tokens.append("www")
+    if scheme:
+        tokens.append(f"{scheme}:{netloc}")
+    tokens.append(normalized)
     unique: list[str] = []
     for token in tokens:
         if token and token not in unique:
@@ -80,159 +101,91 @@ def instance_tokens(url: str) -> list[str]:
     return unique
 
 
-def match_instance(token: str, configured: list[str]) -> tuple[str | None, str | None]:
-    """Resolve an ``instance`` token against the configured urls.
+def match_instance(token: str, configured: list[str]) -> str | None:
+    """Resolve a path token to ONE configured url (None when it names none/several).
 
-    Returns ``(configured_url, None)`` on an exact match, ``(None, message)``
-    when the token names no configured instance (or names more than one), and
-    ``(None, None)`` when there is no token at all.
-
-    Matching is EXACT against the tokens of :func:`instance_tokens`, so a
-    token never silently picks an unintended instance. A full url with a
-    trailing slash or a differently-cased host is accepted as well.
+    Matching is EXACT against :func:`instance_tokens` (plus the normalized full
+    url), so a token never silently picks an unintended instance, and an
+    ambiguous token is refused rather than resolved.
     """
     normalized = _token(token)
     if not normalized:
-        return None, None
-    candidates: list[str] = []
-    for url in configured:
-        if normalized in instance_tokens(url) or same_instance(token, url):
-            candidates.append(url)
+        return None
+    candidates = [url for url in configured if normalized in instance_tokens(url) or same_instance(token, url)]
     unique = list(dict.fromkeys(candidates))
-    if not unique:
-        return None, UNMATCHED_INSTANCE_MESSAGE
-    if len(unique) > 1:
-        return None, AMBIGUOUS_INSTANCE_MESSAGE
-    return unique[0], None
+    return unique[0] if len(unique) == 1 else None
+
+
+def path_tokens(url: str, configured: list[str]) -> list[str]:
+    """The path prefixes that resolve to EXACTLY ``url``, in preference order.
+
+    Only single-segment spellings that :func:`match_instance` resolves to this
+    instance alone: a form another configured instance also answers to would be
+    an ambiguous route. The first entry is the instance's canonical path.
+    """
+    return [
+        token
+        for token in instance_tokens(url)
+        if _PATH_SEGMENT.match(token) and same_instance(match_instance(token, configured) or "", url)
+    ]
 
 
 def instance_token(url: str, configured: list[str]) -> str:
-    """The token a generated link carries for ``url``.
+    """The canonical path token of ``url`` ("" when it has no usable one)."""
+    forms = path_tokens(url, configured)
+    return forms[0] if forms else ""
 
-    The shortest form of :func:`instance_tokens` that resolves back to THIS
-    instance alone; the normalized full url when even that is ambiguous
-    (e.g. two configured hosts share their first dot-label).
+
+def login_link(base_url: str, token: str, user: str) -> str:
+    """The login URL of ONE instance token (and, optionally, one username).
+
+    ``base_url`` is the app's origin (``https://admin.example.org``) or empty
+    for the relative form (``/upr-info``). An empty ``user`` is dropped, so the
+    recipient types their own username.
     """
-    for token in instance_tokens(url):
-        matched, error = match_instance(token, configured)
-        if error is None and matched is not None and same_instance(matched, url):
-            return token
-    return _token(url)
+    path = f"/{token}" if token else "/"
+    query = f"?{urlencode({'user': user})}" if user else ""
+    return f"{base_url.rstrip('/')}{path}{query}"
 
 
-def login_link(base_url: str, instance: str, user: str) -> str:
-    """The login link for one instance (and, optionally, one username).
+def startup_login_links(base_url: str, configured: list[str], user: str = "") -> list[str]:
+    """One login URL per configured instance, in configured order.
 
-    Empty values are dropped, so an empty ``user`` yields a link that asks
-    the recipient for their username. An empty ``base_url`` yields the
-    relative form ``/?instance=…``.
+    With no instance picker the only way to reach an instance is its own URL,
+    so the console must print every one. Instances without a usable path token
+    are skipped (they get no route).
     """
-    query = urlencode({key: value for key, value in (("instance", instance), ("user", user)) if value})
-    prefix = f"{base_url.rstrip('/')}/" if base_url else "/"
-    return f"{prefix}?{query}"
-
-
-def startup_login_link(base_url: str, configured: list[str], user: str = "") -> str:
-    """The console's login link for the FIRST configured instance.
-
-    The ``instance`` parameter is mandatory on the login page: a bare ``/``
-    renders only the "open the shared link" guidance, so the URL the server
-    announces at startup must already carry it. The first configured url
-    supplies the token and ``user`` (``UWAZI_USER``, the deployment's shared
-    admin account) prefills the username. With nothing configured the bare
-    base url is returned and ``user`` is dropped — it would decorate a
-    dead-end link that renders the "no instance configured" banner.
-    """
-    if not configured:
-        return f"{base_url.rstrip('/')}/" if base_url else "/"
-    return login_link(base_url, instance_token(configured[0], configured), user)
+    links: list[str] = []
+    for url in configured:
+        token = instance_token(url, configured)
+        if token:
+            links.append(login_link(base_url, token, user))
+    return links
 
 
 def page_link(path: str, instance: str, configured: list[str]) -> str:
-    """An in-app page URL that carries the instance token in its query string.
+    """An in-app URL under ``instance``'s path prefix.
 
-    ``/app``, ``/review/<id>`` and ``/task/<id>`` keep the same ``instance``
-    token the login URL used, so a reload is self-describing: with the
-    in-memory credentials gone, the page can send the operator back to the
-    LOGIN page of the same instance instead of the bare ``/`` guidance. The
-    account is NOT carried: the login page offers the username field again.
-    An empty instance yields ``path`` unchanged.
+    ``/app`` becomes ``/upr-info/app`` and ``/`` becomes ``/upr-info`` (the
+    instance's login page). Keeping the prefix in every URL is what makes a
+    reload land on the same instance instead of the dummy page, even after a
+    restart dropped the in-memory credentials. An empty/unknown instance and
+    the path ""/"/" degrade to the unprefixed form.
     """
     token = instance_token(instance, configured) if instance else ""
     if not token:
         return path or "/"
-    separator = "&" if "?" in path else "?"
-    return f"{path}{separator}{urlencode({'instance': token})}"
-
-
-def resolve_page_target(
-    path: str,
-    instance_param: str,
-    user_param: str,
-    session_instance: str,
-    configured: list[str],
-) -> tuple[str, str | None]:
-    """Resolve an in-app page's URL to ``(instance to serve, redirect url or None)``.
-
-    The page's URL and the session must agree on ONE instance:
-
-    - no session: the page cannot serve, so redirect to the login gate and keep
-      the URL's target — the gate shows that instance (or its own banner when
-      the token is unknown/ambiguous) instead of the bare-path guidance;
-    - a session but no token in the URL: re-enter the SAME page with the token,
-      so the next reload can find its way back to this instance's login page;
-    - a token naming ANOTHER instance: this session's credentials belong to a
-      different host, so redirect to the login gate for the token's instance.
-    """
-    param = (instance_param or "").strip()
-    user = (user_param or "").strip()
-    if not session_instance:
-        return "", login_link("", param, user) if param else "/"
-    if not param:
-        return session_instance, page_link(path, session_instance, configured)
-    matched, error = match_instance(param, configured)
-    if error is not None or matched is None:
-        return "", login_link("", param, user)
-    if not same_instance(matched, session_instance):
-        return "", login_link("", param, user)
-    return session_instance, None
-
-
-def resolve_login_target(
-    instance_param: str,
-    user_param: str,
-    configured: list[str],
-) -> tuple[str, str, str | None]:
-    """Resolve the login page's query parameters to (instance, user, error).
-
-    The instance is ALWAYS a configured url string or empty — never the raw
-    parameter — so an unmatched token can never reach the API adapter. The
-    ``instance`` parameter is MANDATORY: an empty one is reported as an error
-    instead of falling back to the first configured instance, so a bare ``/``
-    shows guidance rather than a login form. The error is None when the target
-    is usable.
-    """
-    user = (user_param or "").strip()
-    if not configured:
-        return "", user, None
-    if not (instance_param or "").strip():
-        return "", user, MISSING_INSTANCE_MESSAGE
-    matched, error = match_instance(instance_param, configured)
-    if error is not None or matched is None:
-        return "", user, error
-    return matched, user, None
+    suffix = "" if path in ("", "/") else (path if path.startswith("/") else f"/{path}")
+    return f"/{token}{suffix}"
 
 
 __all__ = [
-    "AMBIGUOUS_INSTANCE_MESSAGE",
     "MISSING_INSTANCE_MESSAGE",
-    "UNMATCHED_INSTANCE_MESSAGE",
     "instance_token",
     "instance_tokens",
     "login_link",
     "match_instance",
     "page_link",
-    "resolve_login_target",
-    "resolve_page_target",
-    "startup_login_link",
+    "path_tokens",
+    "startup_login_links",
 ]

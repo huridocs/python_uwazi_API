@@ -855,7 +855,7 @@ def _render_validation_fields(state: dict[str, Any]) -> None:
 
 
 def _validation_property_label(state: dict[str, Any], name: str) -> str:
-    """``Label (name) — type`` for one property, from the wizard's schema (pure-ish)."""
+    """``Label — type`` for one property, from the wizard's schema (pure-ish)."""
     schema = state.get("_guided_schema")
     try:
         for template in getattr(schema, "templates", ()) or ():

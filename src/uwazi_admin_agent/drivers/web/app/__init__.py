@@ -36,8 +36,9 @@ from .dialogs import (
     _segmentation_dialog,
     _start_confirmed_task,
 )
-from .login import _login_page, _logout
-from .page import _app, _build_page, _index, _register_static_and_routes, main
+from .login import _guidance_page, _login_page, _logout
+from .page import _build_page, _register_static_and_routes, app_page, main
+from .routes import register_routes
 from .runs_table import (
     _build_row_menu,
     _build_runs_table,
@@ -98,6 +99,12 @@ from .wizard import (
     _wizard_step_validate,
     _wizard_validate_back,
 )
+
+# The page routes are bound to the configured instances here, once, after every
+# page builder has been imported (the handlers close over the imported
+# functions). Any address that names no configured instance answers the dummy
+# 404 page.
+register_routes()
 
 __all__ = [
     "_run_in_flight",
@@ -183,8 +190,9 @@ __all__ = [
     "_confirm_generation",
     "_do_generate",
     "_build_page",
-    "_index",
-    "_app",
+    "_guidance_page",
+    "app_page",
     "main",
     "_register_static_and_routes",
+    "register_routes",
 ]

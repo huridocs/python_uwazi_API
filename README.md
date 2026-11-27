@@ -102,12 +102,17 @@ OLLAMA_API_KEY=<api-key>
 UWAZI_URL=http://localhost:3000,https://uwazi.example.org
 ```
 
-- The login screen has **no instance picker**: the `instance` parameter is
-  **mandatory** and comes from the URL.
-  Opening the app bare (`http://localhost:5055/`) shows guidance to use the
-  full link instead of a login form. A link's instance is matched against the
-  configured list and the CONFIGURED url is what is used, so a parameter can
-  never point the login at another host.
+- The admin web serves **one URL prefix per configured instance**:
+  `http://localhost:5055/localhost` for `http://localhost:3000`,
+  `http://localhost:5055/upr-info` for `https://www.upr-info.org`, … There is
+  **no instance picker** and no instance list anywhere. A path is a TOKEN
+  matched against the configured list (host name, host, host with port, the
+  netloc as configured, and the full URL) and the CONFIGURED url is what is
+  used, so a path can never point the login at another host. A path that names
+  no configured instance — or several — answers with a minimal dummy page,
+  which never discloses which instances exist.
+  Opening a bare `http://localhost:5055/` shows guidance to use the full link
+  instead of a login form.
 - The login screen **shows where the credentials are going**: a compact card
   above the form prints the instance's full url, and the account named by the
   link's `user` parameter, so the operator can verify the target before typing
@@ -117,12 +122,12 @@ UWAZI_URL=http://localhost:3000,https://uwazi.example.org
   sense on their own instance. To switch, log out and open the link of the
   other instance.
 - **The instance stays in every in-app URL.** After login the app navigates to
-  `/app?instance=<token>` (and the review/task pages carry the same token), so
+  `/localhost/app` (and the review/task pages live under the same prefix), so
   a reload — including one after a restart dropped the in-memory credentials —
-  returns to the **login page of that same instance** instead of the bare
-  `http://localhost:5055/` guidance. A page whose URL names a different
-  instance than the session's is sent to that instance's login page rather
-  than serving the wrong instance's data.
+  returns to the **login page of that same instance** instead of the dummy
+  page. A page whose prefix names a different instance than the session's is
+  sent to that instance's login page rather than serving the wrong instance's
+  data.
 - **Isolation is enforced, not just intended.** Toasts and table refreshes
   reach only clients whose session is still logged in to that same instance;
   a page whose session logged out (in any tab) stops reading that instance's
@@ -186,9 +191,9 @@ cp1252 consoles (use `setx PYTHONUTF8 1` to make it permanent).
 
 ### Run it
 
-Open `http://localhost:5055/?instance=<instance>` (the `instance` parameter is
-mandatory; a bare `http://localhost:5055/` only shows guidance) and log in with
-your Uwazi credentials. The server
+Open `http://localhost:5055/<instance>` — one prefix per configured instance; the
+server logs every one at startup, and a bare `http://localhost:5055/` only shows
+guidance — and log in with your Uwazi credentials. The server
 binds `0.0.0.0`, so other LAN hosts can reach it if port 5055 is opened on the
 host firewall. Run data (prompts, runs, audit logs) lives under
 `src/uwazi_admin_agent/data/`.
@@ -220,39 +225,42 @@ and the property filler are covered.
 
 ### Login links
 
-The login page takes the Uwazi instance — and, optionally, the account — from
-its URL, so a link can open the right instance with the username prefilled:
+Each configured instance has its own URL path — and, optionally, a preselected
+account — so a link can open the right instance with the username prefilled:
 
 ```
-http://localhost:5055/?instance=global-rep&user=admin
+http://localhost:5055/upr-info?user=admin
 ```
 
-- The `instance` parameter is a **token**, matched EXACTLY against the
-  configured `UWAZI_URL` list: the host's first dot-label with a leading `www.`
-  skipped (`global-rep`, `girlsrightsplatform`), the host with its port
-  (`global-rep.uwazi.io`, `www.girlsrightsplatform.org`, `localhost:3000`), or
-  the full URL. Only a CONFIGURED url is ever used downstream, so a forged
-  parameter can never point the login at another host — a missing, unknown, or
-  ambiguous token renders a banner with **no login form at all**.
+- The path is a **token**, matched EXACTLY against the configured `UWAZI_URL`
+  list: the host's first dot-label with a leading `www.` skipped (`upr-info`,
+  `girlsrightsplatform`), the host (`upr-info.org`,
+  `girlsrightsplatform.org`), the host with its port (`localhost:3000`), the
+  netloc as configured (`www.upr-info.org`) or the full URL. Only a CONFIGURED
+  url is ever used downstream, so a forged path can never point the login at
+  another host — an unknown path, a path naming several instances, and any
+  other address answer with a minimal dummy page and **no login form**.
 
   So with `UWAZI_URL=http://localhost:3000,https://www.girlsrightsplatform.org`:
 
   ```
-  http://localhost:5055/?instance=localhost:3000            # local instance
-  http://localhost:5055/?instance=girlsrightsplatform       # www host, no "www"
+  http://localhost:5055/localhost              # local instance
+  http://localhost:5055/girlsrightsplatform     # www host, no "www"
+  http://localhost:5055/localhost:3000          # the same, spelled with the port
   ```
 
-  A link generated before the `www` fix carries `?instance=www`; it keeps
-  working, but it is ambiguous when two configured hosts both start with
-  `www.` — use the name from the link the server logs at startup.
-- The `user` parameter is optional. With it, the username field is not shown;
-  without it, the admin types their username. A link whose username is stale
-  is fixed by dropping `&user=…` from the URL.
+  The canonical link of every instance is printed at startup (`open … to log
+  in`); the other accepted spellings work too. Old `?instance=…` links are
+  dead: that URL is the bare path plus a query, which renders the guidance
+  page.
+- The `user` query parameter is optional. With it, the username field is not
+  shown; without it, the admin types their username. A link whose username is
+  stale is fixed by dropping `?user=…` from the URL.
 - **The link carries no credential.** The password is always typed by the
   admin and validated against Uwazi with a real `POST /api/login`.
 - Links are written by hand or shared by any channel: this app no longer
-  generates or prints them (there is no invite-links dialog and no `links`
-  CLI step) — the login URL is the whole contract above.
+  generates or prints them per recipient (there is no invite-links dialog and
+  no `links` CLI step) — the URL above is the whole contract.
 
 ### Reviewing: selection scan → run → revert
 

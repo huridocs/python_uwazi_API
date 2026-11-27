@@ -15,10 +15,9 @@ from typing import Any
 
 from loguru import logger
 from nicegui import background_tasks, context, ui
-from starlette.requests import Request
 
 from uwazi_admin_agent.domain.task import StepView, TaskView
-from uwazi_admin_agent.drivers.web.instances import page_link, page_target
+from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operation_gate import (
     busy_text,
     release,
@@ -51,25 +50,15 @@ _STEP_COLORS: dict[str, str] = {
 }
 
 
-@ui.page("/task/{task_id}")
-def task_page(task_id: str, request: Request) -> None:
+def task_page(task_id: str, instance_url: str) -> None:
     """Render the task page (login required).
 
-    The URL keeps the ``instance`` token, so a reload lands on the login page
-    of the instance this task belongs to (see
-    :func:`uwazi_admin_agent.drivers.links.resolve_page_target`) instead of the
-    bare-path guidance.
+    ``instance_url`` is the configured instance the path prefix named; a
+    session logged in to another instance (or none) is sent to that instance's
+    login page.
     """
-    instance, redirect = page_target(
-        f"/task/{task_id}",
-        request.query_params.get("instance", ""),
-        request.query_params.get("user", ""),
-    )
-    if redirect is not None:
-        ui.navigate.to(redirect)
-        return
-    if not instance:  # defensive: a served page always resolved one
-        ui.navigate.to("/")
+    if not session_is_active(instance_url):
+        ui.navigate.to(page_link("/", instance_url))
         return
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
     _build_page(task_id)

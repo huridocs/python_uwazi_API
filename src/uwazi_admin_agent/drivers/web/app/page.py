@@ -9,15 +9,10 @@ import secrets
 from fastapi import Response
 from loguru import logger
 from nicegui import app, context, ui
-from starlette.requests import Request
 
-# Import for its side effect: the ``@ui.page("/review/{run_id}")`` route registers
-# on import, so the runs table's Review action can navigate to it.
-from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
-from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
+from uwazi_admin_agent.drivers.links import startup_login_links
 from uwazi_admin_agent.drivers.web.host_guard import assert_safe_bind
-from uwazi_admin_agent.drivers.links import startup_login_link
-from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS, page_target
+from uwazi_admin_agent.drivers.web.instances import INSTANCE_URLS, page_link
 from uwazi_admin_agent.drivers.web.run_service import (
     fetch_entity_document_bytes,
 )
@@ -25,10 +20,11 @@ from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
     credentials_for_instance,
     page_instance_url,
+    session_is_active,
 )
 
 from .broadcast import _refresh_rows_client
-from .login import _login_page, _logout
+from .login import _logout
 from .runs_table import _build_row_menu, _build_runs_table, _selection_toolbar
 from .state import _STATIC_DIR
 
@@ -121,41 +117,15 @@ def _build_page() -> None:
     )
 
 
-@ui.page("/")
-def _index(request: Request) -> None:
-    """Login gate: nothing renders until the Uwazi credentials validate.
+def app_page(instance_url: str) -> None:
+    """Main admin app for ONE configured instance (login required).
 
-    The query parameters come from the login URL: the MANDATORY ``instance``
-    selects the Uwazi instance (matched against the configured list) and
-    ``user`` preselects the account. A bare ``/`` shows guidance to open the
-    full link instead of a login form.
+    The instance comes from the URL's path prefix, so a reload names its target:
+    with the in-memory credentials gone (server restart, expired session) the
+    operator lands on that instance's login page, never on the dummy page.
     """
-    _login_page(
-        request.query_params.get("instance", ""),
-        request.query_params.get("user", ""),
-    )
-
-
-@ui.page("/app")
-def _app(request: Request) -> None:
-    """Main admin app: only reachable with a validated session login.
-
-    The ``instance`` token must be present in the URL, and it must name the
-    instance this session is logged in to. A reload keeps working because the
-    URL still names its target: when the in-memory credentials are gone (server
-    restart, expired session) the operator lands on the LOGIN page of the same
-    instance instead of the bare-path guidance.
-    """
-    instance, redirect = page_target(
-        "/app",
-        request.query_params.get("instance", ""),
-        request.query_params.get("user", ""),
-    )
-    if redirect is not None:
-        ui.navigate.to(redirect)
-        return
-    if not instance:  # defensive: a served page always resolved one
-        ui.navigate.to("/")
+    if not session_is_active(instance_url):
+        ui.navigate.to(page_link("/", instance_url))
         return
     _build_page()
 
@@ -168,12 +138,12 @@ def main() -> None:
     stable ``ADMIN_WEB_STORAGE_SECRET``; :func:`assert_safe_bind` refuses the
     cleartext/wrong-secret combinations before the server starts.
 
-    Ready time announces the login link of the FIRST configured instance
-    (``?instance=<token>``), the link that actually opens the login page: the
-    ``instance`` parameter is mandatory, so a bare base url is a dead end.
-    NiceGUI's own welcome line (named ``show_welcome_message``) is replaced by
-    it and the auto-opened browser lands on the login page instead of the
-    bare path too.
+    Ready time announces the login link of EVERY configured instance
+    (``/<token>``), the links that actually open a login page: the path prefix
+    is what selects the instance, so a bare base url is a dead end. NiceGUI's
+    own welcome line (named ``show_welcome_message``) is replaced by them and
+    the auto-opened browser lands on the first instance's login page instead of
+    the bare path too.
 
     The websocket is bound to the browser session (:mod:`socket_guard`), so a
     socket that carries no session cookie cannot drive another browser's
@@ -184,29 +154,31 @@ def main() -> None:
     port = int(os.environ.get("ADMIN_WEB_PORT", "5055"))
     host = os.environ.get("ADMIN_WEB_HOST", "127.0.0.1")
     public_url = os.environ.get("ADMIN_WEB_PUBLIC_URL", "")
-    storage_secret = os.environ.get("ADMIN_WEB_STORAGE_SECRET")
+    storage_secret = _storage_secret()
     assert_safe_bind(host, public_url, storage_secret)
     user = os.environ.get("UWAZI_USER", "").strip()
-    # The absolute link goes to the terminal (the operator of a remote
-    # deployment cannot use a loopback address); the relative one is the path
-    # the local browser is opened at.
-    login_url = startup_login_link(public_url.rstrip("/") or f"http://{_display_host(host)}:{port}", INSTANCE_URLS, user)
-    login_path = startup_login_link("", INSTANCE_URLS, user)
+    # The absolute links go to the terminal (the operator of a remote
+    # deployment cannot use a loopback address); the relative ones are the
+    # paths the local browser is opened at.
+    base_url = public_url.rstrip("/") or f"http://{_display_host(host)}:{port}"
+    login_urls = startup_login_links(base_url, INSTANCE_URLS, user)
+    login_paths = startup_login_links("", INSTANCE_URLS, user)
 
-    def _announce_login_url() -> None:
-        if INSTANCE_URLS:
-            logger.info("Admin-agent web: open {} to log in", login_url)
+    def _announce_login_urls() -> None:
+        if login_urls:
+            for login_url in login_urls:
+                logger.info("Admin-agent web: open {} to log in", login_url)
         else:
             logger.warning("Admin-agent web: UWAZI_URL is empty — no instance to log in to")
 
-    app.on_startup(_announce_login_url)
+    app.on_startup(_announce_login_urls)
     ui.run(
         host=host,
         port=port,
         reload=False,
         title="Uwazi Admin Agent",
-        storage_secret=_storage_secret(),
-        show=login_path,
+        storage_secret=storage_secret,
+        show=login_paths[0] if login_paths else "/",
         show_welcome_message=False,
     )
 

@@ -1,7 +1,7 @@
 """Review page: operations table, suboperations, entity window (split modules).
 
-The public surface is unchanged; importing the package registers the
-``@ui.page("/review/{run_id}")`` route via ``.page``.
+The public surface is unchanged; ``routes`` registers the ``/review/{run_id}``
+pages per configured instance.
 """
 
 from __future__ import annotations

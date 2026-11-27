@@ -122,8 +122,8 @@ def test_fill_prompt_keeps_input_and_output_languages_independent() -> None:
         {"en": "English", "es": "Spanish"},
     )
     assert "Prefer reading from: Spanish (es)." in prompt
-    assert "Write the suggestion only into the entity language row(s): English (en)." in prompt
-    assert "a Spanish document may update the English row" in prompt
+    assert "Write the suggestion only into the entity's language(s): English (en)." in prompt
+    assert "may update the entity's English fields" in prompt
 
 
 def test_guided_flow_asks_output_language_questions_for_per_language_fill_targets() -> None:

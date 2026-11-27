@@ -6,9 +6,8 @@ from functools import partial
 from typing import Any
 
 from nicegui import background_tasks, context, ui
-from starlette.requests import Request
 
-from uwazi_admin_agent.drivers.web.instances import page_link, page_target
+from uwazi_admin_agent.drivers.web.instances import page_link
 from uwazi_admin_agent.drivers.web.operation_gate import (
     set_progress,
 )
@@ -33,6 +32,7 @@ from uwazi_admin_agent.drivers.web.run_service import (
 from uwazi_admin_agent.drivers.web.session import (
     bind_client_instance,
     page_instance_url,
+    session_is_active,
 )
 from uwazi_admin_agent.drivers.web.task_dialogs import script_dialog
 
@@ -57,25 +57,15 @@ from .core import (
 from .entity_window import _merged_labels, _merged_types, _template_labels, _template_types
 
 
-@ui.page("/review/{run_id}")
-def review_page(run_id: str, request: Request) -> None:
+def review_page(run_id: str, instance_url: str) -> None:
     """Render the review page for one run (login required).
 
-    The URL keeps the ``instance`` token, so a reload lands on the login page
-    of the instance this run belongs to (see
-    :func:`uwazi_admin_agent.drivers.links.resolve_page_target`) instead of the
-    bare-path guidance.
+    ``instance_url`` is the configured instance the path prefix named; a
+    session logged in to another instance (or none) is sent to that instance's
+    login page.
     """
-    instance, redirect = page_target(
-        f"/review/{run_id}",
-        request.query_params.get("instance", ""),
-        request.query_params.get("user", ""),
-    )
-    if redirect is not None:
-        ui.navigate.to(redirect)
-        return
-    if not instance:  # defensive: a served page always resolved one
-        ui.navigate.to("/")
+    if not session_is_active(instance_url):
+        ui.navigate.to(page_link("/", instance_url))
         return
     ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
     _build_page(run_id)

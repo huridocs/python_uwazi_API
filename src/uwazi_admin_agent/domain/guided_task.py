@@ -140,7 +140,7 @@ OUTPUT_LANGUAGE_MODES: tuple[str, ...] = (OUTPUT_ALL, OUTPUT_SPECIFIC, OUTPUT_SO
 OUTPUT_LANGUAGE_LABELS: dict[str, str] = {
     OUTPUT_ALL: "Generate for all configured Uwazi languages (extract into each language)",
     OUTPUT_SPECIFIC: ("Update only specific entity language(s), regardless of the input document's language"),
-    OUTPUT_SOURCE: "Update only the entity row in the language of the source document",
+    OUTPUT_SOURCE: "Update only the entity language that matches the source document's language",
 }
 
 DEFAULT_DOCUMENT_GUIDANCE = "Determine the optimal extraction strategy based on document length and structure."
@@ -198,11 +198,17 @@ class WizardProperty:
 
     @property
     def display(self) -> str:
-        """The option text: ``Label (name) — type`` (name alone when it IS the label)."""
+        """The option text: ``Label — type``, never the internal property name.
+
+        The name is the Uwazi API's internal identifier: someone creating a
+        property in Uwazi only ever sees its label, so printing
+        ``Label (internal_name)`` offers a string they cannot recognise or
+        reproduce. The name stays the option's VALUE, so nothing downstream
+        changes. A property without a label falls back to its name (an empty
+        option would be unusable).
+        """
         label = (self.label or self.name).strip()
-        name = self.name.strip()
-        rendered = f"{label} ({name})" if label != name else name
-        return f"{rendered} — {self.type}" if self.type else rendered
+        return f"{label} — {self.type}" if self.type else label
 
 
 @dataclass(frozen=True)
@@ -582,29 +588,26 @@ def _input_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> s
 
 def _output_language_text(answers: GuidedAnswers, labels: Mapping[str, str]) -> str:
     if answers.output_language_mode == OUTPUT_SPECIFIC:
-        rows = _language_text(answers.output_languages, labels)
+        languages = _language_text(answers.output_languages, labels)
         if answers.goal == GOAL_CREATE:
-            return f"Write the new entities' per-language text properties only into: {rows}."
+            return f"Write the new entities' per-language text properties only into: {languages}."
         return (
-            "Write the suggestion only into the entity language row(s): "
-            f"{rows}. "
+            "Write the suggestion only into the entity's language(s): "
+            f"{languages}. "
             "The input document's own language does not change this: a Spanish document may update the "
-            "English row."
+            "entity's English fields."
         )
     if answers.output_language_mode == OUTPUT_SOURCE:
         if _reads_documents(answers):
             if answers.goal == GOAL_CREATE:
-                return (
-                    "Write the new entities' per-language text properties into the row matching the source "
-                    "document's language."
-                )
+                return "Write the new entities' per-language text properties in the source document's language."
             return (
-                "Write the suggestion into the entity row in the language of the source document: "
+                "Write the suggestion into the entity's fields in the language of the source document: "
                 "the language the document is written in, even when that is not the entity's language."
             )
         if answers.goal == GOAL_CREATE:
-            return "Write the new entities' per-language text properties into the source language's row."
-        return "Write the suggestion into the entity row in the source language."
+            return "Write the new entities' per-language text properties in the source language."
+        return "Write the suggestion into the entity's fields in the source language."
     configured = _language_text(labels.keys(), labels)
     all_languages = "Generate for all configured Uwazi languages (extract into each language)."
     return f"{all_languages} Configured languages: {configured}." if configured else all_languages
