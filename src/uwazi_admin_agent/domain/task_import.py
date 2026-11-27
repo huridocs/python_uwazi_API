@@ -101,9 +101,8 @@ def assign_names(
     """Pair each task with a run name that does not collide (pure).
 
     ``taken`` is the instance's existing run ids (plus any in-flight claims). A
-    colliding id becomes ``"<id> copy"``/``"<id> copy 2"`` — the same rule the
-    Duplicate action uses — and the batch itself is checked too, so one file
-    cannot produce two runs with the same folder.
+    colliding id becomes ``"<id> copy"``/``"<id> copy 2"`` and the batch itself
+    is checked too, so one file cannot produce two runs with the same folder.
     """
     used = {str(name).strip() for name in taken if str(name).strip()}
     planned: list[tuple[str, ImportedTask]] = []

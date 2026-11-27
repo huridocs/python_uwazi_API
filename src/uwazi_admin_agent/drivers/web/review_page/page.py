@@ -50,9 +50,9 @@ from .core import (
     _reset_global_selection,
     _revert_from_state,
     _run_from_state,
-    _show_performance,
     _summary_row,
     _toggle_expand_all,
+    _toggle_performance,
     _toggle_select_all,
     _update_table_now,
 )
@@ -78,11 +78,9 @@ body { background:var(--uw-parchment); font-family:var(--uw-font-sans); color:va
   border:1px solid color-mix(in srgb, var(--uw-warning) 35%, var(--uw-border));
   border-radius:8px; padding:12px 16px; display:flex; align-items:center;
 }
-.uw-banner-icon { color:#B45309; font-size:20px; }
 .uw-banner-title { font-weight:700; font-size:13px; color:var(--uw-ink); }
 .uw-banner-text { font-size:13px; color:var(--uw-ink-secondary); }
 .uw-banner-value { color:var(--uw-ink); }
-.uw-banner-close { color:var(--uw-ink-tertiary); }
 .uw-search-row { padding:12px 20px 0; }
 .uw-filter-row { padding:14px 20px; border-bottom:1px solid var(--uw-border-soft); }
 .filter-box {
@@ -140,13 +138,18 @@ body { background:var(--uw-parchment); font-family:var(--uw-font-sans); color:va
 .rec-tag { flex:0 0 auto; width:74px; font-size:10px; font-weight:700; letter-spacing:.04em;
            text-transform:uppercase; color:var(--uw-ink-tertiary); }
 .rec-value { font-size:13px; color:var(--uw-ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.rec-current .rec-value { color:var(--uw-ink-tertiary); }
+.rec-current .rec-line { align-items:flex-start; }
+.rec-current .rec-value {
+  color:var(--uw-ink-tertiary);
+  white-space:pre-wrap; overflow-wrap:anywhere; text-overflow:clip;
+  max-height:12em; overflow-y:auto; overflow-x:hidden;
+}
 .rec-values { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
 .rec-values .q-chip { height:auto; min-height:20px; padding:1px 8px; font-size:11px; }
 .rec-extra { font-size:12px; color:var(--uw-ink-secondary); }
 .subs-context { font-size:12px; line-height:1.45; color:var(--uw-ink-secondary); white-space:pre-wrap;
                 overflow-wrap:anywhere; border-left:3px solid var(--uw-border-soft); padding-left:8px;
-                max-height:9em; overflow-y:auto; user-select:text; }
+                max-height:15em; overflow-y:auto; user-select:text; }
 .context-row td { background:var(--uw-warm); padding-top:4px; padding-bottom:8px; }
 .op-pill { border-radius:6px; font-size:11px; font-weight:600; padding:2px 8px; }
 .status-pill { border-radius:999px; font-size:11px; font-weight:600; padding:3px 9px; line-height:1.3; }
@@ -163,7 +166,7 @@ tr:hover .row-actions { visibility:visible; }
 .child-row { background:var(--uw-warm); }
 .child-row td { background:var(--uw-warm); border-bottom:1px solid var(--uw-border); padding-top:8px; padding-bottom:8px; }
 .child-row td:first-child { border-left:2px solid var(--uw-ink); }
-.child-target { padding-left:16px; font-size:13px; color:var(--uw-ink-secondary); }
+.child-target { padding-left:32px; font-size:13px; color:var(--uw-ink-secondary); }
 .lang-pill { border-radius:4px; font-size:10px; padding:1px 6px; }
 .wide-tooltip { max-width:480px; white-space:pre-wrap; }
 .uw-card-footer { padding:10px 20px; border-top:1px solid var(--uw-border-soft); }
@@ -278,10 +281,10 @@ def _build_page(run_id: str) -> None:
     with ui.header().classes("uw-header items-center justify-between"):
         _top_bar(state, run_id, detail, instance)
 
-    with ui.column().classes("w-full items-center"):
-        with ui.element("div").classes("uw-page w-full"):
+    with ui.column().classes("uw-review-shell w-full items-center"):
+        with ui.element("div").classes("uw-page uw-review-page w-full"):
             _performance_row(state)
-            with ui.element("div").classes("uw-card w-full"):
+            with ui.element("div").classes("uw-card uw-review-card w-full"):
                 with ui.row().classes("uw-card-header w-full items-center justify-between no-wrap"):
                     _summary_row(state)
                     with ui.row().classes("items-center gap-4 no-wrap"):
@@ -355,10 +358,10 @@ def _header_menu(state: dict[str, Any], run_id: str, *, has_script: bool = False
                 section_toggle_label("search", bool(state.get("_search_visible", False))),
                 lambda: _toggle_section(state, "search"),
             )
-            _menu_item(
+            state["_performance_item"], state["_performance_menu_label"] = _menu_item(
                 "monitoring",
                 "Show performance",
-                lambda: _show_performance(state),
+                lambda: _toggle_performance(state),
             )
             _menu_item(
                 "sync",
@@ -399,7 +402,7 @@ def _menu_item(icon: str, text: str, on_click: Any) -> tuple[Any, Any]:
     runs, and the label's text is what the section items rewrite when the
     section they toggle changes state.
     """
-    with ui.item(on_click=on_click) as item:
+    with ui.menu_item(on_click=on_click) as item:
         ui.icon(icon).classes("q-mr-sm")
         label = ui.label(text)
     return item, label

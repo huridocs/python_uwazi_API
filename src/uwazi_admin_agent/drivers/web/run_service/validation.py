@@ -319,18 +319,18 @@ async def read_validation_label(url: str, run_id: str, shared_id: str, user: str
 
 
 def validation_config_from_set(validation: ValidationSet | None) -> ValidationConfig | None:
-    """The wizard config that reproduces a run's test set for a DUPLICATE (pure).
+    """The wizard config that reproduces a run's test set on a retry (pure).
 
-    A duplicated task keeps the source run's test-set settings: the measured
-    property, its type, the templates, the sampling mode and the custom filter
-    description. The sample is drawn again for the new run (fresh labels, same
-    rules) — copying the frozen labels would measure the new script against
-    values frozen for another run. The language is inferred from the frozen
-    labels, which is the only place the set records it.
+    A retried task keeps the run's test-set settings: the measured property, its
+    type, the templates, the sampling mode and the custom filter description. The
+    sample is drawn again for the new attempt (fresh labels, same rules) —
+    copying the frozen labels would measure the new script against values frozen
+    for another attempt. The language is inferred from the frozen labels, which
+    is the only place the set records it.
 
     The CUSTOM selector snippet travels too: re-authoring it would ask the LLM a
-    second time (and could answer differently), so the duplicate freezes the
-    same entities its source chose.
+    second time (and could answer differently), so the retry freezes the same
+    entities its source chose.
     """
     if validation is None:
         return None
@@ -370,10 +370,10 @@ def validation_config_from_dict(data: Any) -> ValidationConfig | None:
     """The config a manifest stored, or ``None`` when there is none (pure).
 
     A malformed dict (a legacy hand-written manifest, a renamed field) reads as
-    "no recipe" instead of failing the duplicate: the operator gets a task
-    without a test set, not a stack trace. A dict with no recognized field is
-    exactly that case — pydantic would fill every field with its default and
-    hand back a "none" recipe nobody chose.
+    "no recipe" instead of failing the retry: the operator gets a task without a
+    test set, not a stack trace. A dict with no recognized field is exactly that
+    case — pydantic would fill every field with its default and hand back a
+    "none" recipe nobody chose.
     """
     if not isinstance(data, dict) or not data:
         return None
@@ -393,7 +393,7 @@ def run_validation_config(url: str, run_id: str) -> ValidationConfig | None:
     The FROZEN SET wins when there is one: it is the truth about what the run
     measured (the operator may have edited the set since creation). Otherwise the
     recipe recorded on the manifest at creation is used — which is exactly the
-    case a duplicate needs, because a run whose set could not be built still knows
+    case a retry needs, because a run whose set could not be built still knows
     what the operator asked for.
     """
     store = validation_store(url, run_id)

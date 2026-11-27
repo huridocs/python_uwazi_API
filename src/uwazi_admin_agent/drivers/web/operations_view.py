@@ -356,16 +356,18 @@ def sub_values(
 ) -> tuple[str, str]:
     """One suboperation's ``(current, proposed)`` display pair (pure).
 
-    The values are Uwazi's stored shapes rendered for a one-line cell — the
-    same rendering the entity window uses. A whole-entity op has no current
-    value to show (publishing/deleting is not a property), so it reads "—".
-    ``types`` maps property names to their template type so a date property
-    renders as a calendar date instead of its raw epoch timestamp; ``titles``
-    maps related-entity sharedIds to their display titles, so a relationship
-    value reads as the target entities' titles instead of bare ids.
+    The current value travels in full (up to the table's context window) so its
+    cell can grow vertically and scroll for extreme values; the proposed value
+    stays one line in the cell and is available in full through
+    ``proposed_full``. Entirely whole-entity ops have no current value to show
+    (publishing/deleting is not a property), so they read "—". ``types`` maps
+    property names to their template type so a date property renders as a
+    calendar date instead of its raw epoch timestamp; ``titles`` maps
+    related-entity sharedIds to their display titles, so a relationship value
+    reads as the target entities' titles instead of bare ids.
     """
     current, proposed = sub_values_full(sub, types, titles)
-    return _clip_display(current), _clip_display(proposed)
+    return current[:CONTEXT_CELL_CHARS], _clip_display(proposed)
 
 
 def _move_files_summary(sub: Suggestion) -> str:

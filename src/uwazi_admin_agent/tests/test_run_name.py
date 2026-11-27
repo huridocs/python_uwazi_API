@@ -47,8 +47,7 @@ def test_copy_name_is_the_plain_suffix_when_free() -> None:
 
 
 def test_copy_name_numbers_past_every_taken_copy() -> None:
-    # Duplicating the same run twice must NOT target the first copy's folder:
-    # the prefilled wizard opens on Generate, skipping the name check.
+    # A colliding imported task must NOT target the first copy's folder.
     taken = ["merge-2026", "merge-2026 copy"]
     assert free_copy_name("merge-2026", taken) == "merge-2026 copy 2"
 

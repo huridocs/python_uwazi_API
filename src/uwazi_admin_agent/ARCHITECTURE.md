@@ -102,18 +102,19 @@ frozen label as their current value AND the comparison verdict (`match` /
 `mismatch`) as their status, so the operator can judge each suggestion against
 the value the score measures.
 
-## Task settings a copy carries
+## Task settings a retry carries
 
 The wizard's two task-level decisions — the script-LLM allowance and the test-set
 recipe — are recorded on the run's MANIFEST at creation (`llm_budget`,
-`validation_config`), not only on the planning pass row / the frozen set. A
-duplicate (and the row menu's Retry, which deletes the run first) reads them back
+`validation_config`), not only on the planning pass row / the frozen set. The
+row menu's Retry (which deletes the run first) reads them back
 through `run_service.validation.run_validation_config`: the frozen set wins when
 there is one, the manifest's recipe otherwise, so a task whose set could not be
 built still hands on what the operator asked for. A custom recipe keeps its
-selector snippet and its sampled sharedIds, so a copy scores the SAME population
-instead of asking the model to choose again. A set that could not be built
-records a warning on the manifest, which the review page reports — silence read
+selector snippet and its sampled sharedIds, so the retry scores the SAME
+population instead of asking the model to choose again. A set that could not be
+built records a warning on the manifest, which the review page reports — silence
+read
 as "the validation table is broken".
 
 ## Runs table

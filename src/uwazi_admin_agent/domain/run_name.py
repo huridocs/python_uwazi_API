@@ -42,11 +42,9 @@ __all__ = ["free_copy_name", "validate_run_name"]
 def free_copy_name(run_id: str, taken: Iterable[str]) -> str:
     """The first ``"<run_id> copy"``, ``"... copy 2"``, … not in ``taken`` (pure).
 
-    The Duplicate action used to hardcode ``"<run_id> copy"``. Duplicating the
-    same run twice therefore targeted the SAME run folder: generation overwrote
-    the first copy's script + manifest (nothing new appeared) and, when a wizard
-    check did fire, it was on a screen the prefilled wizard skips. Numbering the
-    name makes every duplication land on a fresh run id.
+    A caller that copies a name must not target the original run's folder:
+    generation would overwrite the original's script + manifest. Numbering the
+    name makes each collision land on a fresh run id.
     """
     existing = set(taken)
     base = f"{run_id} copy"

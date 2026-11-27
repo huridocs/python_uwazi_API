@@ -374,10 +374,12 @@ def _change_table(state: dict[str, Any]) -> None:
             <div class="truncate">{{ props.row.template || '—' }}</div>
           </q-td>
           <q-td key="recommendation" :props="props">
-            <div class="truncate rec-cell">{{ props.row.recommendation || '—' }}
-              <q-tooltip v-if="props.row.recommendation_full"
-                         class="wide-tooltip">{{ props.row.recommendation_full }}</q-tooltip>
-            </div>
+            <template v-if="!props.expand">
+              <div class="truncate rec-cell">{{ props.row.recommendation || '—' }}
+                <q-tooltip v-if="props.row.recommendation_full"
+                           class="wide-tooltip">{{ props.row.recommendation_full }}</q-tooltip>
+              </div>
+            </template>
           </q-td>
           <q-td key="ops" :props="props">
             <div class="row items-center no-wrap q-gutter-xs">
@@ -385,7 +387,7 @@ def _change_table(state: dict[str, Any]) -> None:
             </div>
           </q-td>
           <q-td key="run_status" :props="props">
-            <template v-if="props.row.status_text">
+            <template v-if="!props.expand && props.row.status_text">
               <div class="row items-center no-wrap">
                 <q-badge class="status-pill" :class="'status-' + props.row.status_kind">{{ props.row.status_text }}</q-badge>
               </div>
@@ -496,9 +498,7 @@ def _change_table(state: dict[str, Any]) -> None:
                 </div>
               </div>
             </q-td>
-            <q-td key="ops">
-              <q-badge v-if="c.op" outline color="grey-7" class="op-pill">{{ c.op }}</q-badge>
-            </q-td>
+            <q-td key="ops"></q-td>
             <q-td key="run_status">
               <q-badge class="status-pill" :class="'status-' + c.status_kind">{{ c.status }}</q-badge>
             </q-td>
@@ -1810,24 +1810,20 @@ def _holdout_pairs_in_selection(state: dict[str, Any], ids: list[int]) -> set[tu
 
 
 def _performance_row(state: dict[str, Any]) -> None:
-    """The dismissible performance banner above the card.
+    """The performance banner above the card, toggled from the header menu.
 
     A run with no test set starts with the banner HIDDEN: there is no score to
     show, and the empty strip took the top of the page from the table. The
-    Settings menu's "Show performance" brings it back (dismissing it hides it
-    again). A scored run shows the same figure the old always-on line carried,
-    in the same strip, so the page's top stays one calm sentence instead of a
-    stack of counter cards.
+    hamburger menu's "Show performance" item brings it back (the same item then
+    reads "Hide performance"). A scored run shows the same figure the old
+    always-on line carried, in the same strip, so the page's top stays one calm
+    sentence instead of a stack of counter cards.
     """
     banner = ui.element("div").classes("uw-info-banner w-full")
     state["_performance_banner"] = banner
     with banner:
-        with ui.row().classes("w-full items-center justify-between no-wrap"):
-            holder = ui.row().classes("items-center gap-2 no-wrap grow")
-            state["_performance_holder"] = holder
-            ui.button(icon="close", on_click=lambda: _dismiss_performance(state)).props(
-                "flat dense round color=grey-8"
-            ).classes("uw-banner-close").tooltip("Dismiss")
+        state["_performance_holder"] = ui.row().classes("w-full flex-wrap items-center gap-2 grow")
+    state["_performance_shown"] = False
     _render_performance(state)
 
 
@@ -1838,13 +1834,31 @@ def _show_performance(state: dict[str, Any]) -> None:
     _render_performance(state)
 
 
-def _dismiss_performance(state: dict[str, Any]) -> None:
-    """Hide the performance banner until the Settings menu shows it again."""
+def _hide_performance(state: dict[str, Any]) -> None:
+    """Hide the performance banner until the menu shows it again."""
     state["_performance_dismissed"] = True
     state["_performance_forced"] = False
+    _set_performance_visible(state, False)
+
+
+def _toggle_performance(state: dict[str, Any]) -> None:
+    """The menu's one performance control: show it when hidden, hide it when shown."""
+    if state.get("_performance_shown"):
+        _hide_performance(state)
+    else:
+        _show_performance(state)
+
+
+def _set_performance_visible(state: dict[str, Any], visible: bool) -> None:
+    """Show/hide the banner and keep the menu item's label in step."""
+    state["_performance_shown"] = bool(visible)
     banner = state.get("_performance_banner")
     if banner is not None and not banner.is_deleted:
-        banner.set_visibility(False)
+        banner.set_visibility(bool(visible))
+    label = state.get("_performance_menu_label")
+    if label is not None and not label.is_deleted:
+        label.text = "Hide performance" if visible else "Show performance"
+        label.update()
 
 
 def _render_performance(state: dict[str, Any]) -> None:
@@ -1854,24 +1868,23 @@ def _render_performance(state: dict[str, Any]) -> None:
     if holder is None or holder.is_deleted or banner is None or banner.is_deleted:
         return
     if state.get("_performance_dismissed"):
-        banner.set_visibility(False)
+        _set_performance_visible(state, False)
         return
     try:
         summary = validation_summary(state["instance_url"], state["run_id"])
     except Exception as exc:  # noqa: BLE001 — the line degrades, the page never breaks
         logger.warning("validation banner failed: {}", exc)
-        banner.set_visibility(False)
+        _set_performance_visible(state, False)
         return
     validation = summary.get("set")
     if validation is None and not state.get("_performance_forced"):
         # No test set means no measurement: the table keeps the top of the page
-        # until the operator asks for the banner from the Settings menu.
-        banner.set_visibility(False)
+        # until the operator asks for the banner from the header menu.
+        _set_performance_visible(state, False)
         return
-    banner.set_visibility(True)
+    _set_performance_visible(state, True)
     holder.clear()
     with holder:
-        ui.icon("info").classes("uw-banner-icon")
         if validation is None:
             with ui.row().classes("items-baseline gap-1 no-wrap"):
                 ui.label("Performance —").classes("uw-banner-title")

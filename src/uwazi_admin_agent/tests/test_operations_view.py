@@ -472,15 +472,18 @@ def test_suboperation_row_carries_an_empty_context_when_there_is_none() -> None:
     assert row["context"] == ""
 
 
-def test_sub_values_full_keeps_the_whole_proposed_value_and_the_cell_clips_it() -> None:
-    """The table cell clips; the tooltip/parent recommendation needs the full text."""
-    long_text = "x" * 300
-    sub = _sub(1, proposed=long_text)
+def test_sub_values_keep_current_whole_and_clip_the_one_line_proposal() -> None:
+    """The current cell may grow; the proposal stays one line with a full tooltip."""
+    long_current = "y" * 300
+    long_proposed = "x" * 300
+    sub = _sub(1, proposed=long_proposed, current=long_current)
 
-    _current_full, proposed_full = view.sub_values_full(sub)
-    _current, proposed = view.sub_values(sub)
+    current_full, proposed_full = view.sub_values_full(sub)
+    current, proposed = view.sub_values(sub)
 
-    assert proposed_full == long_text
+    assert current_full == long_current
+    assert current == long_current
+    assert proposed_full == long_proposed
     assert len(proposed) == 121
     assert proposed.endswith("…")
 

@@ -125,16 +125,16 @@ async def create_and_generate(
     name = validate_run_name(name)
     # A run folder that already holds a manifest IS a task the operator can see
     # and review. Generating into it would overwrite that run's script and
-    # manifest without adding anything to the table — which is exactly how a
-    # repeated Duplicate looked like "the second task was never created". The
-    # retry path deletes the failed run before calling here, so it is unaffected.
+    # manifest without adding anything to the table — which made a repeated
+    # generation look like "the second task was never created". The retry path
+    # deletes the failed run before calling here, so it is unaffected.
     existing = _paths(url).runs_path / name / "manifest.json"
     if existing.exists():
         raise GenerateError(f"A run named {name!r} already exists — pick another name.")
     # The holdout is resolved and frozen BEFORE the generation turn: sampling
     # reads the instance once, and from the moment the set exists every
     # authoring read through build_runtime excludes those entities. AFTER the
-    # existence check: a refused duplicate must not overwrite another run's set.
+    # existence check: a refused generation must not overwrite another run's set.
     #
     # A set that could NOT be built is a normal outcome of a test-set recipe with
     # no matching entities (the operator may even WANT a small scope): it is

@@ -92,7 +92,12 @@ body { overflow-x: hidden; }
 .nicegui-content { padding: 0; gap: 0; }
 .q-layout, .q-page-container, .q-page { background: transparent; }
 .q-drawer, .q-menu { background: var(--uw-paper); color: var(--uw-ink); }
-.q-menu { border: 1px solid var(--uw-border); border-radius: var(--uw-radius); box-shadow: var(--uw-shadow-lg); }
+.q-menu {
+  border: 1px solid var(--uw-border);
+  border-radius: var(--uw-radius);
+  box-shadow: var(--uw-shadow-lg);
+  min-width: 210px;
+}
 .q-item { color: var(--uw-ink-secondary); border-radius: var(--uw-radius-sm); }
 .q-item.q-router-link--active, .q-item--active { color: var(--uw-ink); background: var(--uw-warm); }
 .q-separator { background: var(--uw-border-soft); }
@@ -296,6 +301,47 @@ body { overflow-x: hidden; }
 }
 .uw-dialog-wide { width: 900px; max-width: 95vw; }
 
+/* --- review page: fill the viewport, scroll only the table ---------------- */
+.uw-review-shell {
+  width: 100%;
+  height: calc(100dvh - 56px);
+  min-height: 0;
+  overflow: hidden;
+}
+.uw-page.uw-review-page {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  /* Room for the always-visible sticky bulk-action bar. */
+  padding-bottom: 76px;
+}
+.uw-review-page > .uw-info-banner { flex: 0 0 auto; }
+.uw-review-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.uw-review-card > .uw-card-header,
+.uw-review-card > .uw-search-row,
+.uw-review-card > .uw-filter-row,
+.uw-review-card > .uw-card-footer { flex: 0 0 auto; }
+.uw-review-card > .uw-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.uw-review-card .q-table__middle {
+  max-height: none !important;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.uw-review-card .q-table__bottom { flex: 0 0 auto; }
+
 /* --- banners and pills ---------------------------------------------------- */
 .uw-info-banner {
   background: var(--uw-warning-light);
@@ -305,11 +351,9 @@ body { overflow-x: hidden; }
   display: flex;
   align-items: center;
 }
-.uw-banner-icon { color: #b45309; font-size: 20px; }
 .uw-banner-title { font-weight: 700; font-size: 13px; color: var(--uw-ink); }
 .uw-banner-text { font-size: 13px; color: var(--uw-ink-secondary); }
 .uw-banner-value { color: var(--uw-ink); }
-.uw-banner-close { color: var(--uw-ink-tertiary); }
 .op-pill { border-radius: var(--uw-radius-sm); font-size: 11px; font-weight: 600; padding: 2px 8px; }
 .status-pill { border-radius: 999px; font-size: 11px; font-weight: 600; padding: 3px 9px; line-height: 1.3; }
 .status-pending { background: var(--uw-warning-light); color: #92400e; }
@@ -534,7 +578,16 @@ body { overflow-x: hidden; }
   color: var(--uw-ink-tertiary);
 }
 .rec-value { font-size: 13px; color: var(--uw-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rec-current .rec-value { color: var(--uw-ink-tertiary); }
+.rec-current .rec-line { align-items: flex-start; }
+.rec-current .rec-value {
+  color: var(--uw-ink-tertiary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  max-height: 12em;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 .rec-values { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .rec-values .q-chip { height: auto; min-height: 20px; padding: 1px 8px; font-size: 11px; }
 .rec-extra { font-size: 12px; color: var(--uw-ink-secondary); }
@@ -546,7 +599,7 @@ body { overflow-x: hidden; }
   overflow-wrap: anywhere;
   border-left: 3px solid var(--uw-border-soft);
   padding-left: 8px;
-  max-height: 9em;
+  max-height: 15em;
   overflow-y: auto;
   user-select: text;
 }
@@ -563,7 +616,7 @@ tr:hover .row-actions { visibility: visible; }
   padding-bottom: 8px;
 }
 .child-row td:first-child { border-left: 2px solid var(--uw-ink); }
-.child-target { padding-left: 16px; font-size: 13px; color: var(--uw-ink-secondary); }
+.child-target { padding-left: 32px; font-size: 13px; color: var(--uw-ink-secondary); }
 .uw-page-label { font-size: 12px; color: var(--uw-ink-tertiary); }
 .uw-card-footer .page-btn {
   min-width: 30px;

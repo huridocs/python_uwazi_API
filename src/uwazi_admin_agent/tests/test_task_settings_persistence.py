@@ -1,12 +1,8 @@
-"""Isolated tests for the settings a DUPLICATE task carries (per AGENTS.md).
+"""Isolated tests for the task settings persisted with a run (per AGENTS.md).
 
-The report: copying a task dropped its validation set and its LLM budget. Both
-were only ever persisted by the PLANNING pass (a SQLite row) and by the frozen
-``validation.yaml`` — so a task that failed to generate, or whose set could not
-be built, handed nothing on. They now live on the manifest, recorded at task
-creation, and are read back through the validation service's dict round-trip.
-
-Literal values, real models, no instance and no mocks.
+The validation set and the LLM budget live on the manifest at task creation, so
+a retry (or a later read) can recover them even when the run never reached a
+planning pass. Literal values, real models, no instance and no mocks.
 """
 
 from __future__ import annotations
@@ -46,7 +42,7 @@ def _config() -> ValidationConfig:
 
 
 def test_a_manifests_recipe_round_trips_through_plain_data() -> None:
-    """The manifest stores a dict (no import edge), and a copy reads it back whole."""
+    """The manifest stores a dict (no import edge), and a retry reads it back whole."""
     manifest = MigrationManifest(
         run_id="run-1",
         created_at=NOW,
@@ -64,7 +60,7 @@ def test_a_manifests_recipe_round_trips_through_plain_data() -> None:
     assert manifest.llm_budget is not None and manifest.llm_budget.max_cost == 2.5
     restored = validation_config_from_dict(manifest.validation_config)
     assert restored == _config()
-    # The sample's MEMBERS travel, so the copy scores the same population.
+    # The sample's MEMBERS travel, so a retry scores the same population.
     assert restored is not None and restored.shared_ids == ["rec-1", "rec-2"]
 
 
@@ -85,7 +81,7 @@ def test_a_generation_failure_still_records_the_settings() -> None:
     assert not hasattr(manifest, "warnings")
 
 
-def test_a_frozen_set_reproduces_its_recipe_for_a_copy() -> None:
+def test_a_frozen_set_reproduces_its_recipe_for_a_later_read() -> None:
     frozen = ValidationSet(
         run_id="run-1",
         property_name="states",

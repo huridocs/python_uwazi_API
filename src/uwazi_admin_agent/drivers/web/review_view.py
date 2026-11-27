@@ -405,11 +405,11 @@ def full_value(value: Any, property_type: str | None = None) -> str:
 TITLE_CELL_CHARS: int = 97
 
 # How much of a row's recorded INPUT TEXT the review table prints. The cell
-# wraps, but an unbounded passage (a whole page) would push everything else off
-# the screen, so the payload carries a window instead. 2,500 characters is a
-# substantial passage: enough to judge the extraction without opening the
-# document, while still bounding the row's height.
-CONTEXT_CELL_CHARS: int = 2_500
+# wraps and scrolls, but an unbounded passage (a whole page) would still push
+# everything else off the screen, so the payload carries a window instead. The
+# old 2,500-character window filled only a few lines in practice; 12,500 keeps
+# five times as much context available while still bounding the row.
+CONTEXT_CELL_CHARS: int = 12_500
 
 # Column widths (CSS px) for the review table's fixed columns. The Target column
 # takes whatever is left and absorbs the shrink; naming the rest here is what

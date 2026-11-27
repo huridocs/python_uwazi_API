@@ -8,7 +8,6 @@ from typing import Any
 from loguru import logger
 from nicegui import app, context, ui
 
-from uwazi_admin_agent.domain.run_name import free_copy_name
 from uwazi_admin_agent.domain.task_import import assign_names, parse_tasks_csv
 from uwazi_admin_agent.drivers.web import operation_gate
 
@@ -17,7 +16,6 @@ from uwazi_admin_agent.drivers.web import operation_gate
 from uwazi_admin_agent.drivers.web import review_page as _review_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web import task_page as _task_page_module  # noqa: F401
 from uwazi_admin_agent.drivers.web.instances import page_link
-from uwazi_admin_agent.drivers.web.prompt_chat_dialog import prompt_chat_dialog
 from uwazi_admin_agent.drivers.web.run_service import (
     current_pass,
     delete_run,
@@ -126,22 +124,19 @@ def _build_runs_table() -> ui.table:
         """,
     )
 
-    # Actions: execute, revert, info, then the row menu button LAST. The menu
-    # itself is a page-level ``ui.menu`` (``_build_row_menu``): a menu nested in
-    # the cell is unmounted whenever the 5s rows update re-renders the table
-    # body — exactly the bug this design avoids. The ``rowmenu`` event carries
-    # the row and the click event so the server can replay it on an off-screen
-    # anchor at the cursor position.
+    # Actions: review, then the row menu button LAST. The menu itself is a
+    # page-level ``ui.menu`` (``_build_row_menu``): a menu nested in the cell is
+    # unmounted whenever the 5s rows update re-renders the table body — exactly
+    # the bug this design avoids. The ``rowmenu`` event carries the row and the
+    # click event so the server can replay it on an off-screen anchor at the
+    # cursor position.
     table.add_slot(
         "body-cell-actions",
         f"""
         <q-td :props="props" class="text-no-wrap">
-            <q-btn dense flat icon="fact_check" color="secondary" title="Review &amp; apply"
+            <q-btn dense flat icon="fact_check" color="grey-8" title="Review &amp; apply"
                    :disable="props.row.status === 'creating'"
                    @click="$parent.$emit('review', props.row)" />
-            <q-btn dense flat icon="description" color="grey-8" title="Show prompt"
-                   :disable="props.row.status === 'creating'"
-                   @click="$parent.$emit('info', props.row)" />
             <q-btn dense flat icon="more_vert" color="grey-8"
                    :disable="props.row.busy || {_IN_FLIGHT_JS}"
                    @click="$parent.$emit('rowmenu', props.row, $event)" />
@@ -160,7 +155,6 @@ def _build_runs_table() -> ui.table:
 
     table.on_select(_on_select)
     table.on("review", _on_review)
-    table.on("info", _on_info)
     table.on("rowmenu", _on_rowmenu)
     table.on("errors", _on_errors)
     table.on("delete", _on_delete)
@@ -189,7 +183,6 @@ def _build_row_menu() -> None:
             errors_item = ui.menu_item("Error details", lambda: _row_menu_action(_error_dialog))
             ui.separator()
             ui.menu_item("Rename", lambda: _row_menu_action(_rename_dialog))
-            ui.menu_item("Duplicate", lambda: _row_menu_action(_rowmenu_duplicate))
             ui.menu_item("Delete", lambda: _row_menu_action(_delete_dialog)).classes("text-negative")
     retry_item.set_visibility(False)
     errors_item.set_visibility(False)
@@ -264,64 +257,9 @@ def _rowmenu_retry(run_id: str) -> None:
     )
 
 
-def _rowmenu_duplicate(run_id: str) -> None:
-    """Open the new-task wizard prefilled with this run's prompt + a free name.
-
-    No busy claim: duplicating only opens a dialog; the claim is taken by
-    ``_start_generation`` when the operator presses Generate.
-
-    The prefill carries the run's FULL prompt — ``validated_prompt`` when it has
-    one, i.e. the original request plus the validation step's resolved
-    clarifications (and, after a chat Run, the whole conversation). Passing only
-    ``detail.prompt`` dropped those clarifications, so a second generation
-    planned a weaker request and could be refused with an empty table even
-    though the first run worked.
-
-    The name is numbered against the existing runs (``"<id> copy"``,
-    ``"<id> copy 2"``, …) instead of being hardcoded: the prefilled wizard jumps
-    straight to the Generate step, which skips ``_wizard_name_next``'s
-    existing-name check — so a repeated duplicate silently regenerated the SAME
-    run folder instead of creating a second task.
-    """
-    instance = page_instance_url()
-    try:
-        detail = get_run(instance, run_id)
-        # In-flight generations have no manifest yet, so ``list_runs`` cannot see
-        # them; their claims are exactly what a second duplicate would collide
-        # with (and the claim is what ``_start_generation`` would refuse).
-        taken = [run.run_id for run in list_runs(instance)]
-        taken.extend(claim.run_id for claim in operation_gate.run_claims(instance))
-        # A duplicate copies the task's SETTINGS, not just its prompt: the
-        # approved LLM allowance and the test-set recipe (measured property,
-        # sampling mode/filter) belong to the task, and dropping them silently
-        # made the copy a weaker task that spent the default allowance and had
-        # no performance score. The recipe comes from the FROZEN SET when the run
-        # has one, else from the manifest (`detail`), which records it at
-        # creation — so a task whose set could not be built still hands on what
-        # the operator asked for.
-        pass_row = current_pass(instance, run_id)
-        prefill_validation = run_validation_config(instance, run_id)
-        prefill_budget = pass_row.budget if pass_row is not None else detail.llm_budget
-    except Exception as exc:  # noqa: BLE001
-        ui.notify(f"Failed to load run: {exc}", type="negative", multi_line=True)
-        return
-    _new_task_wizard(
-        prefill_name=free_copy_name(run_id, taken),
-        prefill_prompt=detail.prompt,
-        prefill_validated_prompt=detail.validated_prompt,
-        prefill_budget=prefill_budget,
-        prefill_validation=prefill_validation,
-    )
-
-
 def _on_errors(e: Any) -> None:
     run_id = e.args["name"] if isinstance(e.args, dict) else e.args
     _error_dialog(run_id)
-
-
-def _on_info(e: Any) -> None:
-    run_id = e.args["name"] if isinstance(e.args, dict) else e.args
-    prompt_chat_dialog(run_id)
 
 
 def _on_select(e: Any) -> None:
