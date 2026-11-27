@@ -329,13 +329,13 @@ def test_mark_prompts_applied_flips_only_operator_prompts() -> None:
 
 
 def test_prompt_bubble_css_paints_received_bubbles_with_the_requested_color() -> None:
-    """The bubble background is the requested color, on received prompt bubbles.
+    """The bubble background is the Uwazi carbon tint, on received prompt bubbles.
 
     Quasar fills a received bubble with ``currentColor``, so the color has to be
     set on ``.q-message-text--received`` scoped to the prompt-bubble class (the
     inner content stays black).
     """
-    assert PROMPT_BUBBLE_BACKGROUND == "rgb(198, 220, 236)"
+    assert PROMPT_BUBBLE_BACKGROUND == "var(--uw-carbon-tint)"
     assert f".{PROMPT_BUBBLE_CLASS} .q-message-text--received" in _PROMPT_BUBBLE_CSS
     assert PROMPT_BUBBLE_BACKGROUND in _PROMPT_BUBBLE_CSS
 

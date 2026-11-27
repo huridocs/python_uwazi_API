@@ -110,18 +110,18 @@ def _new_task_wizard(
         state["_prompt_base"] = base_prompt
         state["validated_prompt"] = base_prompt
 
-    with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl uw-dialog uw-dialog-wide"):
         dialog.props("persistent")
         modal_header(dialog, "New task")
         # The Quasar header lays the branchy steps out over two ragged rows, so
         # the wizard shows one line instead: "Step n of N · <title>". It follows
         # the steps the chosen task actually walks. The stepper's own header is
-        # hidden with CSS (.wizard-stepper in page.py): it lists branches the
+        # hidden by the shared theme (.uw-wizard): it lists branches the
         # task will not visit and allows answers to be skipped.
         with ui.column().classes("w-full gap-1"):
-            state["_step_label"] = ui.label().classes("text-caption text-grey-7")
-            state["_step_progress"] = ui.linear_progress(value=0, show_value=False).classes("w-full")
-        with ui.stepper().classes("wizard-stepper w-full") as stepper:
+            state["_step_label"] = ui.label().classes("uw-step-label")
+            state["_step_progress"] = ui.linear_progress(value=0, show_value=False).classes("w-full uw-step-progress")
+        with ui.stepper().classes("wizard-stepper uw-wizard w-full") as stepper:
             state["_dialog"] = dialog
             state["_stepper"] = stepper
             _wizard_step_task(state, stepper, dialog, prefill_name=prefill_name, prefill_prompt=prefill_prompt)
@@ -180,31 +180,39 @@ def _wizard_step_task(
 ) -> None:
     """Build the opening run-name screen, task-type choice, and custom prompt."""
     with ui.step(name="name", title="Name", icon="edit"):
-        ui.label("Name the run").classes("text-h6 q-mb-md")
-        name_input = ui.input(
-            "Run name",
-            placeholder="e.g. classify-judgments-2026",
-            value=prefill_name,
-            validation={"Required": lambda v: bool(v and v.strip())},
-        ).classes("w-full text-h6")
+        ui.label("Name the run").classes("uw-question-title q-mb-md")
+        name_input = (
+            ui.input(
+                "Run name",
+                placeholder="e.g. classify-judgments-2026",
+                value=prefill_name,
+                validation={"Required": lambda v: bool(v and v.strip())},
+            )
+            .props("outlined dense")
+            .classes("w-full")
+        )
         state["_details_name_input"] = name_input
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_name_next(state)).props("color=primary")
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_name_next(state)).props(
+                "unelevated no-caps color=primary"
+            )
 
     with ui.step(name="goal", title="Task type", icon="category"):
-        ui.label("What would you like to do?").classes("text-h6 q-mb-md")
+        ui.label("What would you like to do?").classes("uw-question-title q-mb-md")
         goal_input = ui.radio(
             {goal: GOAL_DESCRIPTIONS[goal] for goal in GOALS},
             value=GOAL_FILL,
         ).classes("wizard-options wizard-goal-options w-full")
         state["_goal_input"] = goal_input
         with ui.row().classes("q-mt-lg w-full justify-between"):
-            ui.button("Back", on_click=lambda: stepper.set_value("name")).props("color=grey-7 flat")
-            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_goal_next(state)).props("color=primary")
+            ui.button("Back", on_click=lambda: stepper.set_value("name")).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_goal_next(state)).props(
+                "unelevated no-caps color=primary"
+            )
 
     with ui.step(name="custom", title="Custom task", icon="edit_note"):
-        ui.label("Describe the custom analysis or data-processing rule.").classes("text-h6 q-mb-md")
+        ui.label("Describe the custom analysis or data-processing rule.").classes("uw-question-title q-mb-md")
         prompt_input = (
             ui.textarea(
                 "Task description",
@@ -217,8 +225,10 @@ def _wizard_step_task(
         )
         state["_details_prompt_input"] = prompt_input
         with ui.row().classes("q-mt-lg w-full justify-between"):
-            ui.button("Back", on_click=lambda: stepper.set_value("goal")).props("color=grey-7 flat")
-            ui.button("Next", icon="arrow_forward", on_click=lambda: _custom_prompt_next(state)).props("color=primary")
+            ui.button("Back", on_click=lambda: stepper.set_value("goal")).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Next", icon="arrow_forward", on_click=lambda: _custom_prompt_next(state)).props(
+                "unelevated no-caps color=primary"
+            )
 
 
 def _wizard_name_next(state: dict[str, Any]) -> None:
@@ -381,10 +391,12 @@ def _render_validate_idle(state: dict[str, Any], container: Any) -> None:
             else "Ask the LLM what it understood from your prompt before generating."
         ).classes("text-body1 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
-            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
-            ui.button("Check with the AI", icon="help", on_click=lambda: _start_validation(state)).props("color=primary")
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Check with the AI", icon="help", on_click=lambda: _start_validation(state)).props(
+                "unelevated no-caps color=primary"
+            )
 
 
 def _wizard_validate_back(state: dict[str, Any]) -> None:
@@ -452,9 +464,9 @@ def _render_validation_error(state: dict[str, Any], container: Any, exc: Excepti
         ui.label("Validation failed").classes("text-h6 text-negative")
         ui.label(str(exc)).classes("text-body2 text-red-10 q-mb-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
-            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=primary")
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("unelevated no-caps color=primary")
 
 
 def _render_validation(state: dict[str, Any], container: Any) -> None:
@@ -470,7 +482,7 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
         if understanding.questions:
             ui.label("Clarifying questions").classes("text-subtitle1 text-grey-7 q-mt-md")
             for question in understanding.questions:
-                with ui.card().classes("w-full q-mb-sm"):
+                with ui.card().classes("w-full q-mb-sm uw-subcard"):
                     ui.label(question.question).classes("text-body1 text-weight-medium")
                     option_checkboxes = [
                         ui.checkbox(option, on_change=lambda: _refresh_final_prompt(state)) for option in question.options
@@ -479,7 +491,11 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
                     # operator types there is folded into the prompt, with no
                     # extra checkbox to forget. Gating it on a checkbox is how
                     # a typed correction silently vanished.
-                    custom_input = ui.input("Your answer", on_change=lambda: _refresh_final_prompt(state)).classes("w-full")
+                    custom_input = (
+                        ui.input("Your answer", on_change=lambda: _refresh_final_prompt(state))
+                        .props("outlined dense")
+                        .classes("w-full")
+                    )
                     answer_widgets.append(
                         {
                             "question": question.question,
@@ -491,7 +507,7 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
 
         ui.label("Additional notes").classes("text-subtitle1 text-grey-7 q-mt-md")
         notes_input = (
-            ui.textarea("Notes", on_change=lambda: _refresh_final_prompt(state)).classes("w-full").props("autogrow")
+            ui.textarea("Notes", on_change=lambda: _refresh_final_prompt(state)).classes("w-full").props("outlined autogrow")
         )
         state["_notes_input"] = notes_input
 
@@ -499,10 +515,10 @@ def _render_validation(state: dict[str, Any], container: Any) -> None:
         # exact text that will be sent, so showing it twice made the operator
         # read the same thing on two consecutive screens.
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("color=grey-7 flat")
-            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("color=grey-7 flat")
-            ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("color=primary")
+            ui.button("Cancel", on_click=lambda: state["_dialog"].close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_validate_back(state)).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Skip", on_click=lambda: _wizard_skip(state)).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Confirm", on_click=lambda: _wizard_confirm(state)).props("unelevated no-caps color=primary")
 
         _refresh_final_prompt(state)
 
@@ -683,10 +699,10 @@ def _render_test_set_step(state: dict[str, Any], *, visited: bool = False) -> No
         with ui.column().classes("w-full") as fields:
             state["_validation_fields"] = fields
         with ui.row().classes("q-mt-lg w-full justify-between"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_validation_back(state)).props("color=grey-7 flat")
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_validation_back(state)).props("flat no-caps").classes("uw-btn-ghost")
             ui.button("Next", icon="arrow_forward", on_click=lambda: _wizard_validation_next(state, stepper)).props(
-                "color=primary"
+                "unelevated no-caps color=primary"
             )
         _render_validation_fields(state)
 
@@ -1009,7 +1025,7 @@ def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
     """
     with ui.step(name="caps", title="AI allowance", icon="payments"):
         ui.label("May the task use the AI?").classes("text-body1 q-mb-md")
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full uw-subcard"):
             # Unchecked by default: the generated script derives its values from
             # the data itself unless the operator deliberately opts in.
             state["_caps_use_llm"] = ui.checkbox(
@@ -1038,13 +1054,13 @@ def _wizard_step_caps(state: dict[str, Any], stepper: Any, dialog: Any) -> None:
             "questions (and its restatement) to what the task can actually afford."
         ).classes("text-body2 text-grey-7 q-mt-md")
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_caps_back(state)).props("color=grey-7 flat")
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_caps_back(state)).props("flat no-caps").classes("uw-btn-ghost")
             ui.button(
                 "Next",
                 icon="arrow_forward",
                 on_click=lambda: stepper.set_value("understand"),
-            ).props("color=primary")
+            ).props("unelevated no-caps color=primary")
     _sync_caps_fields(state)
 
 
@@ -1068,7 +1084,7 @@ def _wizard_caps_back(state: dict[str, Any]) -> None:
 def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> None:
     with ui.step(name="generate", title="Generate", icon="auto_awesome"):
         ui.label("Review and generate the task.").classes("text-body1 q-mb-md")
-        ui.label().bind_text_from(state, "name", backward=lambda v: f"Run: {v}").classes("text-h6")
+        ui.label().bind_text_from(state, "name", backward=lambda v: f"Run: {v}").classes("uw-question-title")
         # A DUPLICATE opens on this step, so this is the only place the settings it
         # carried over are visible before Generate: the approved AI allowance and
         # the test set it will score against. Without it the copy went straight to
@@ -1082,13 +1098,13 @@ def _wizard_step_generate(state: dict[str, Any], dialog: Any, stepper: Any) -> N
         )
         state["_generate_prompt_display"] = prompt_display
         with ui.row().classes("q-mt-lg w-full justify-end"):
-            ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
-            ui.button("Back", on_click=lambda: _wizard_generate_back(state)).props("color=grey-7 flat")
+            ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
+            ui.button("Back", on_click=lambda: _wizard_generate_back(state)).props("flat no-caps").classes("uw-btn-ghost")
             ui.button(
                 "Generate",
                 icon="auto_awesome",
                 on_click=lambda: _wizard_generate(state, dialog),
-            )
+            ).props("unelevated no-caps color=primary")
     _render_generate_settings(state)
 
 

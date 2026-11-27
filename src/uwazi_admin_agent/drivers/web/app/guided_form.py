@@ -225,14 +225,18 @@ def _render_schema_error(state: dict[str, Any], exc: Exception) -> None:
     state["_guided_loading"] = False
     container.clear()
     with container:
-        ui.label("Could not read the instance's templates").classes("text-h6 text-negative")
+        ui.label("Could not read the instance's templates").classes("uw-question-title text-negative")
         ui.label(str(exc)).classes("text-body2 q-mb-sm")
         ui.label("Retry, or describe the task in your own words instead.").classes("text-body2 text-grey-7")
         with ui.row().classes("q-mt-md w-full justify-between"):
-            ui.button("Back", on_click=lambda: state["_guided_back_to_details"]()).props("color=grey-7 flat")
+            ui.button("Back", on_click=lambda: state["_guided_back_to_details"]()).props("flat no-caps").classes(
+                "uw-btn-ghost"
+            )
             with ui.row():
-                ui.button("Use custom task", on_click=lambda: state["_guided_free_text"]()).props("color=grey-7 flat")
-                ui.button("Retry", icon="refresh", on_click=lambda: _retry(state)).props("color=primary")
+                ui.button("Use custom task", on_click=lambda: state["_guided_free_text"]()).props("flat no-caps").classes(
+                    "uw-btn-ghost"
+                )
+                ui.button("Retry", icon="refresh", on_click=lambda: _retry(state)).props("unelevated no-caps color=primary")
 
 
 def _retry(state: dict[str, Any]) -> None:
@@ -295,9 +299,9 @@ def _render_question(state: dict[str, Any]) -> None:
     container = state["_guided_container"]
     container.clear()
     with container:
-        ui.label(GOAL_LABELS[answers.goal]).classes("text-overline text-primary")
-        ui.label(f"Question {index + 1} of {len(questions)}").classes("text-caption text-grey-7")
-        ui.linear_progress(value=(index + 1) / len(questions), show_value=False).classes("w-full q-mb-lg")
+        ui.label(GOAL_LABELS[answers.goal]).classes("uw-eyebrow text-primary")
+        ui.label(f"Question {index + 1} of {len(questions)}").classes("uw-question-counter")
+        ui.linear_progress(value=(index + 1) / len(questions), show_value=False).classes("w-full uw-step-progress q-mb-lg")
         title = _QUESTION_TITLES.get(current, "Question")
         if answers.goal == GOAL_CREATE:
             if current == TEMPLATE_QUESTION:
@@ -305,7 +309,7 @@ def _render_question(state: dict[str, Any]) -> None:
             elif current == SCOPE_FILTER_QUESTION:
                 title = "What filter or condition selects the source entities?"
         with ui.row().classes("w-full items-center no-wrap"):
-            ui.label(title).classes("text-h6 q-mb-none")
+            ui.label(title).classes("uw-question-title")
             # The template/property questions read the instance's LIVE schema
             # (cached): a template or property added in Uwazi since the wizard
             # opened will not be in the options until this is pressed.
@@ -315,13 +319,19 @@ def _render_question(state: dict[str, Any]) -> None:
         with ui.column().classes("w-full min-h-40"):
             _render_question_control(state, current, answers)
         with ui.row().classes("q-mt-lg w-full items-center justify-between no-wrap"):
-            ui.button("Cancel", on_click=lambda: state["_guided_dialog"].close()).props("color=grey-7 flat")
+            ui.button("Cancel", on_click=lambda: state["_guided_dialog"].close()).props("flat no-caps").classes(
+                "uw-btn-ghost"
+            )
             with ui.row().classes("no-wrap"):
-                ui.button("Back", on_click=lambda: _back(state)).props("color=grey-7 flat")
+                ui.button("Back", on_click=lambda: _back(state)).props("flat no-caps").classes("uw-btn-ghost")
                 if current == REVIEW_QUESTION:
-                    ui.button("Use prompt", icon="arrow_forward", on_click=lambda: _submit(state)).props("color=primary")
+                    ui.button("Use prompt", icon="arrow_forward", on_click=lambda: _submit(state)).props(
+                        "unelevated no-caps color=primary"
+                    )
                 else:
-                    ui.button("Continue", icon="arrow_forward", on_click=lambda: _next(state)).props("color=primary")
+                    ui.button("Continue", icon="arrow_forward", on_click=lambda: _next(state)).props(
+                        "unelevated no-caps color=primary"
+                    )
 
 
 _AUTO_ADVANCE_QUESTIONS = frozenset(
@@ -569,7 +579,7 @@ def _rules_textarea(
 
 def _input(state: dict[str, Any], field: str, value: str, label: str) -> None:
     state["_guided_draft_text"] = value
-    widget = ui.input(label, value=value).classes("w-full")
+    widget = ui.input(label, value=value).props("outlined dense").classes("w-full")
     widget.on_value_change(lambda event: state.update(_guided_draft_text=event.value or ""))
     state["_guided_draft_field"] = field
 

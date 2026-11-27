@@ -49,16 +49,16 @@ def _confirm_dialog(
     """
     instance = instance or page_instance_url()
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card():
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg uw-dialog"):
             modal_header(dialog, title)
-            ui.label(message).classes("text-body1")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=lambda: dialog.close())
+            ui.label(message).classes("text-body2")
+            with ui.row().classes("uw-dialog-footer"):
+                ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
                 ui.button(
                     "Confirm",
                     color="negative",
                     on_click=lambda: _confirm_and_close(dialog, on_confirm, success_msg, instance, run_id, kind),
-                )
+                ).props("unelevated no-caps")
     dialog.open()
 
 
@@ -69,21 +69,25 @@ def _rename_dialog(run_id: str) -> None:
     auto-refresh doesn't destroy it.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg uw-dialog"):
             dialog.props("persistent")
             modal_header(dialog, f"Rename task — {run_id}")
-            name_input = ui.input(
-                "New name",
-                value=run_id,
-                validation={"Required": lambda v: bool(v and v.strip())},
-            ).classes("w-full text-h6")
-            with ui.row().classes("q-mt-lg w-full justify-end"):
-                ui.button("Cancel", on_click=lambda: dialog.close()).props("color=grey-7 flat")
+            name_input = (
+                ui.input(
+                    "New name",
+                    value=run_id,
+                    validation={"Required": lambda v: bool(v and v.strip())},
+                )
+                .props("outlined dense")
+                .classes("w-full")
+            )
+            with ui.row().classes("uw-dialog-footer q-mt-md"):
+                ui.button("Cancel", on_click=lambda: dialog.close()).props("flat no-caps").classes("uw-btn-ghost")
                 ui.button(
                     "Rename",
                     icon="edit",
                     on_click=lambda: _rename_confirm(dialog, run_id, name_input),
-                )
+                ).props("unelevated no-caps color=primary")
     dialog.open()
 
 
@@ -105,7 +109,7 @@ def _error_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full uw-dialog").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(dialog, f"Error details — {run_id}")
@@ -142,7 +146,7 @@ def _error_dialog(run_id: str) -> None:
                             columns=columns,
                             row_key="time",
                             pagination={"rowsPerPage": 0},
-                        ).classes("w-full")
+                        ).props("flat separator=none").classes("w-full uw-table")
     dialog.open()
 
 
@@ -296,12 +300,16 @@ def _entity_section(
             row["restored_shared_id"] = entity.restored_shared_id or "—"
         rows.append(row)
 
-    table = ui.table(
-        rows=rows,
-        columns=columns,
-        row_key="shared_id",
-        pagination={"rowsPerPage": 25},
-    ).classes("w-full")
+    table = (
+        ui.table(
+            rows=rows,
+            columns=columns,
+            row_key="shared_id",
+            pagination={"rowsPerPage": 25},
+        )
+        .props("flat separator=none")
+        .classes("w-full uw-table")
+    )
     table.add_slot(
         "body-cell-title",
         """
@@ -351,7 +359,9 @@ def _rewired_section(rewired: list[Any]) -> None:
         {"name": "before", "label": "Before", "field": "before", "align": "left", "sortable": False},
     ]
     rows = [{"entity": r.entity.shared_id, "property": r.property_name, "before": _format_value(r.before)} for r in rewired]
-    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).props("flat separator=none").classes(
+        "w-full uw-table"
+    )
 
 
 def _files_section(files: list[Any]) -> None:
@@ -366,7 +376,9 @@ def _files_section(files: list[Any]) -> None:
         {"name": "source", "label": "Source", "field": "source", "align": "left", "sortable": True},
     ]
     rows = [{"shared_id": f.shared_id, "originalname": f.originalname, "kind": f.kind, "source": f.source} for f in files]
-    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+    ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).props("flat separator=none").classes(
+        "w-full uw-table"
+    )
 
 
 def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
@@ -376,7 +388,10 @@ def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
     dialog was built, so this is pure rendering — no fetch, no I/O.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").style("min-width: 600px; height: 85dvh"):
+        with (
+            ui.dialog() as dialog,
+            ui.card().classes("w-full uw-dialog").style("min-width: 600px; height: 85dvh"),
+        ):
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(dialog, f"Changes — {row['title']}")
                 ui.label(f"sharedId {row['shared_id']}").classes("text-caption text-grey-7")
@@ -396,7 +411,11 @@ def _changes_dialog(row: dict[str, Any], changes: list[PropertyChange]) -> None:
                     for c in changes
                 ]
                 with ui.column().classes("w-full grow").style("overflow-y: auto; min-height: 0"):
-                    table = ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0}).classes("w-full")
+                    table = (
+                        ui.table(rows=rows, columns=columns, pagination={"rowsPerPage": 0})
+                        .props("flat separator=none")
+                        .classes("w-full uw-table")
+                    )
                     table.add_slot(
                         "body-cell-property",
                         """
@@ -424,7 +443,7 @@ def _segmentation_dialog(row: dict[str, Any]) -> None:
     runs; failure degrades to an error label rather than a crash.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full uw-dialog").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(dialog, f"Document segmentation — {row['title']}")

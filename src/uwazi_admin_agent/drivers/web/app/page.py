@@ -23,6 +23,7 @@ from uwazi_admin_agent.drivers.web.session import (
     session_is_active,
 )
 
+from ..theme import install_theme
 from .broadcast import _refresh_rows_client
 from .login import _logout
 from .runs_table import _build_row_menu, _build_runs_table, _selection_toolbar
@@ -32,53 +33,35 @@ from .state import _STATIC_DIR
 def _build_page() -> None:
     """Build the single-page layout."""
     bind_client_instance()
-    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
-    ui.add_head_html(
-        """
-        <style>
-        .q-stepper, .q-stepper__header, .q-stepper__step, .q-stepper__step-content,
-        .q-stepper__step-inner, .q-stepper__content, .q-panel {
-          width: 100% !important; max-width: none !important;
-        }
-        /* The wizard renders its own one-line step indicator. Quasar's own
-           header lays the eight branchy steps out over two ragged rows and
-           has no prop to hide it on QStepper (no-header belongs to other
-           components), so it is removed here. */
-        .wizard-stepper .q-stepper__header { display: none !important; }
-        .wizard-options { gap: 12px; }
-        .wizard-options .q-radio {
-          width: 100%; margin: 0; padding: 14px 16px; align-items: flex-start;
-          border: 1px solid #dfe4ea; border-radius: 10px;
-          background: #fff; transition: border-color .15s, background .15s, box-shadow .15s;
-        }
-        .wizard-options .q-radio:hover { border-color: #90a4ae; background: #f8fafc; }
-        .wizard-options .q-radio[aria-checked="true"] {
-          border-color: var(--q-primary); background: #f2f6f8;
-          box-shadow: 0 0 0 1px var(--q-primary);
-        }
-        .wizard-options .q-radio__inner { margin-top: 1px; }
-        .wizard-options .q-radio__label { line-height: 1.5; }
-        .wizard-goal-options .q-radio { min-height: 70px; }
-        </style>
-        """
-    )
-    with ui.header().classes("items-center justify-between"):
-        with ui.row().classes("items-center"):
-            ui.label("Uwazi Admin Agent").classes("text-h6 q-mr-md")
-        with ui.row().classes("items-center"):
-            ui.icon("link", color="secondary").classes("q-mr-xs")
-            ui.link(page_instance_url(), page_instance_url(), new_tab=True).classes("text-white")
-            with ui.row().classes("items-center q-ml-md"):
-                with ui.button(icon="menu").props("flat round color=secondary"):
-                    with ui.menu():
-                        ui.menu_item("Log out", _logout)
+    install_theme()
+    with ui.header().classes("uw-header items-center justify-between"):
+        with ui.row().classes("items-center gap-3 no-wrap"):
+            with ui.element("div").classes("brand-mark"):
+                ui.label("u")
+            with ui.column().classes("gap-0"):
+                ui.label("Uwazi Admin Agent").classes("brand-name")
+                ui.label("Task runs").classes("brand-sub")
+            ui.element("div").classes("header-separator")
+            ui.label("Tasks").classes("header-tab header-tab-active")
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.link("Open Uwazi", page_instance_url(), new_tab=True).classes("header-tab")
+            with ui.button(icon="menu").props("flat round"):
+                with ui.menu():
+                    ui.menu_item("Log out", _logout)
 
     with ui.column().classes("w-full items-center"):
-        with ui.card().classes("w-full max-w-6xl"):
-            # The row above the table: bulk Delete over the checkbox selection + New Task.
-            _selection_toolbar()
-            table = _build_runs_table()
-            context.client._runs_table = table  # noqa: SLF001 — per-client handle for in-place refresh
+        with ui.element("div").classes("uw-page w-full"):
+            with ui.element("div").classes("uw-card w-full"):
+                with ui.row().classes("uw-card-header w-full items-center justify-between no-wrap"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("Tasks").classes("uw-card-title")
+                        ui.label(
+                            "Every task generated for this instance. Open one to review and accept its suggestions."
+                        ).classes("uw-card-subtitle")
+                    # The row above the table: bulk Delete over the checkbox selection + New Task.
+                    _selection_toolbar()
+                table = _build_runs_table()
+                context.client._runs_table = table  # noqa: SLF001 — per-client handle for in-place refresh
     _build_row_menu()
 
     ui.timer(5.0, _refresh_rows_client)

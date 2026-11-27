@@ -101,8 +101,8 @@ def _build_runs_table() -> ui.table:
             # toggles from.
             pagination={"rowsPerPage": 0, "sortBy": "created", "descending": True},
         )
-        .props("selection=multiple")
-        .classes("w-full")
+        .props("selection=multiple flat separator=none")
+        .classes("w-full uw-table uw-table-select")
     )
     # The checkbox selection: the run ids the toolbar's Delete will remove.
     # Kept per client and pruned on refresh, so the 5s row push never leaves
@@ -115,7 +115,7 @@ def _build_runs_table() -> ui.table:
         <q-td :props="props">
             <div class="column items-start">
                 <q-badge :color="({_STATUS_COLOR_JS})[props.row.status] || 'grey'"
-                         class="q-px1 q-py-2xs items-center">
+                         class="status-pill q-px-sm q-py-2xs items-center">
                     <q-spinner v-if="{_IN_FLIGHT_JS}" size="12px" color="white" class="q-mr-xs" />
                     <span class="text-capitalize">{{{{ props.row.status }}}}</span>
                 </q-badge>
@@ -156,7 +156,7 @@ def _build_runs_table() -> ui.table:
         </q-td>
         """,
     )
-    table.add_slot("no-data", '<div class="text-body1 text-grey-7 q-pa-md">No tasks</div>')
+    table.add_slot("no-data", '<div class="uw-empty q-pa-lg">No tasks yet — create one with “New Task”.</div>')
 
     table.on_select(_on_select)
     table.on("review", _on_review)
@@ -351,19 +351,23 @@ def _selection_toolbar() -> None:
     "New Task" is never disabled: creating a script does not change Uwazi, so
     an in-flight write elsewhere must not stop an operator from generating.
     """
-    with ui.row().classes("w-full items-center q-mb-sm gap-2"):
+    with ui.row().classes("items-center gap-2 no-wrap"):
         # Solid primary matches the review UI's Run button (`color="primary"`).
-        ui.button("New Task", icon="add", on_click=_new_task_wizard).props("unelevated color=primary text-color=white")
-        delete_button = ui.button("Delete", icon="delete", on_click=_bulk_delete_selected).props("dense flat color=negative")
+        ui.button("New Task", icon="add", on_click=_new_task_wizard).props("unelevated no-caps color=primary")
+        delete_button = (
+            ui.button("Delete", icon="delete", on_click=_bulk_delete_selected)
+            .props("outline no-caps")
+            .classes("uw-btn-danger")
+        )
         # Export/Import are the portable side of a task: the prompts. Export is a
         # READ (no selection, never blocked); import recreates tasks and is
         # confirmed because each one is generated again.
-        ui.button("Export CSV", icon="download", on_click=_export_tasks_csv).props("dense flat color=grey-8").tooltip(
-            "Download every task with its prompt and validated prompt as a CSV"
-        )
-        ui.button("Import CSV", icon="upload", on_click=_import_tasks_csv).props("dense flat color=grey-8").tooltip(
-            "Recreate tasks from a CSV exported by this page (prompts only)"
-        )
+        ui.button("Export CSV", icon="download", on_click=_export_tasks_csv).props("flat no-caps").classes(
+            "uw-btn-ghost"
+        ).tooltip("Download every task with its prompt and validated prompt as a CSV")
+        ui.button("Import CSV", icon="upload", on_click=_import_tasks_csv).props("flat no-caps").classes(
+            "uw-btn-ghost"
+        ).tooltip("Recreate tasks from a CSV exported by this page (prompts only)")
         context.client._delete_selected_button = delete_button  # noqa: SLF001 — per-client enable state
 
 

@@ -6,15 +6,19 @@ from typing import Any
 
 from nicegui import context, ui
 
+from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
+
 
 def _simple_confirm(title: str, message: str, on_confirm: Any) -> None:
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
-            ui.label(title).classes("text-h6")
-            ui.label(message).classes("text-body1")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
-                ui.button("Confirm", color="negative", on_click=lambda: _fire(dialog, on_confirm))
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg uw-dialog"):
+            modal_header(dialog, title)
+            ui.label(message).classes("text-body2")
+            with ui.row().classes("uw-dialog-footer"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps").classes("uw-btn-ghost")
+                ui.button("Confirm", color="negative", on_click=lambda: _fire(dialog, on_confirm)).props(
+                    "unelevated no-caps"
+                )
     dialog.open()
 
 
@@ -38,18 +42,20 @@ def _reason_dialog(
     decision can be read back later.
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg uw-dialog"):
             if title:
-                ui.label(title).classes("text-h6")
-            ui.label(message).classes("text-body1")
-            reason_input = ui.textarea(reason_label).classes("w-full")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
+                modal_header(dialog, title)
+            else:
+                ui.button(icon="close", on_click=dialog.close).props("flat round").classes("uw-modal-close self-end")
+            ui.label(message).classes("text-body2")
+            reason_input = ui.textarea(reason_label).props("outlined autogrow").classes("w-full")
+            with ui.row().classes("uw-dialog-footer"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps").classes("uw-btn-ghost")
                 ui.button(
                     confirm_label,
                     color="negative",
                     on_click=lambda: _submit_reason(dialog, reason_input, on_submit),
-                )
+                ).props("unelevated no-caps")
     dialog.open()
 
 

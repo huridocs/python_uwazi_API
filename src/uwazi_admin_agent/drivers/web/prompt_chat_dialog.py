@@ -128,7 +128,7 @@ _PROMPT_STATUS_COLOR: dict[ChatPromptStatus, str] = {
 # so overriding the color there (leaving the inner content black) is what
 # changes the bubble background.
 PROMPT_BUBBLE_CLASS = "prompt-bubble"
-PROMPT_BUBBLE_BACKGROUND = "rgb(198, 220, 236)"
+PROMPT_BUBBLE_BACKGROUND = "var(--uw-carbon-tint)"
 _PROMPT_BUBBLE_CSS = (
     f"<style>.{PROMPT_BUBBLE_CLASS} .q-message-text--received {{ color: {PROMPT_BUBBLE_BACKGROUND} !important; }}</style>"
 )
@@ -255,30 +255,34 @@ def prompt_chat_dialog(
     state["_client"] = client
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl").props("style=height:85dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl uw-dialog").props("style=height:85dvh"):
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(dialog, f"Fix prompt — {run_id}" if correction is not None else f"Prompt — {run_id}")
-                ui.separator().classes("shrink-0")
                 scroll = ui.scroll_area().classes("w-full grow")
                 with scroll:
                     messages = ui.column().classes("w-full gap-2")
                     run_area = ui.row().classes("w-full q-mt-sm")
                 state["_scroll"] = scroll
                 state["_messages"] = messages
-                ui.separator().classes("shrink-0")
-                with ui.row().classes("w-full items-end no-wrap gap-2 shrink-0"):
+                with ui.row().classes("w-full items-end no-wrap gap-2 shrink-0 uw-chat-panel"):
                     request_input = (
                         ui.textarea(placeholder="Describe the change you want…")
                         .classes("w-full font-mono")
-                        .props("autogrow input-style='min-height: 60px;'")
+                        .props("outlined autogrow input-style='min-height: 60px;'")
                     )
-                    send_button = ui.button("Send", icon="send", on_click=lambda: _send(state, request_input))
+                    send_button = ui.button("Send", icon="send", on_click=lambda: _send(state, request_input)).props(
+                        "unelevated no-caps color=primary"
+                    )
                     state["_send_button"] = send_button
-                    compact_button = ui.button(
-                        "Compact",
-                        icon="compress",
-                        on_click=lambda: _compact_clicked(state),
-                    ).props("flat dense color=grey-7")
+                    compact_button = (
+                        ui.button(
+                            "Compact",
+                            icon="compress",
+                            on_click=lambda: _compact_clicked(state),
+                        )
+                        .props("flat dense no-caps")
+                        .classes("uw-btn-ghost")
+                    )
                     state["_compact_button"] = compact_button
 
             with run_area:
@@ -288,7 +292,7 @@ def prompt_chat_dialog(
                     "Run modifications",
                     icon="play_arrow",
                     on_click=lambda: _run_clicked(state, on_table_changed, on_run_started),
-                ).props("color=primary")
+                ).props("unelevated no-caps color=primary")
             run_button.set_visibility(False)
             spinner.set_visibility(False)
             state["_run_button"] = run_button
@@ -460,7 +464,7 @@ def _render_corrections_card(state: dict[str, Any]) -> None:
         return
     with client:
         with state["_messages"]:
-            with ui.card().classes("w-full bg-orange-1") as card:
+            with ui.card().classes("w-full uw-callout-warning") as card:
                 ui.label(f"Fixes to add to the prompt ({len(corrections)})").classes("text-subtitle2 text-weight-medium")
                 ui.label(
                     "Flag as many wrong suggestions as you need, then add them all to the "
@@ -470,15 +474,17 @@ def _render_corrections_card(state: dict[str, Any]) -> None:
                     ui.label(correction_summary(correction)).classes("text-caption text-grey-8 w-full").style(
                         "white-space: pre-wrap"
                     )
-                explanation = ui.textarea(label="Why are these suggestions wrong? (optional, applies to all)").classes(
-                    "w-full"
+                explanation = (
+                    ui.textarea(label="Why are these suggestions wrong? (optional, applies to all)")
+                    .props("outlined autogrow")
+                    .classes("w-full")
                 )
                 with ui.row().classes("w-full justify-end"):
                     ui.button(
                         "Add all fixes to the prompt",
                         icon="construction",
                         on_click=lambda: _send_corrections(state, explanation, card),
-                    ).props("color=deep-orange")
+                    ).props("unelevated no-caps color=negative")
     state["_correction_cards"].append(card)
 
 
@@ -627,19 +633,18 @@ def _open_questions_dialog(state: dict[str, Any], questions: list[Any]) -> None:
             previous.close()
             previous.delete()
 
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl").props("style=height:85dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl uw-dialog").props("style=height:85dvh"):
             dialog.props("persistent")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(dialog, "Clarifying questions")
-                ui.separator().classes("shrink-0")
-                with ui.scroll_area().classes("w-full grow"):
+                with ui.scroll_area().classes("w-full grow q-mt-sm"):
                     with ui.column().classes("w-full gap-2"):
                         answer_widgets: list[dict[str, Any]] = []
                         for question in questions:
-                            with ui.card().classes("w-full q-mb-sm"):
+                            with ui.card().classes("w-full q-mb-sm uw-subcard"):
                                 ui.label(question.question).classes("text-body1 text-weight-medium")
                                 option_checkboxes = [ui.checkbox(option) for option in question.options]
-                                custom_input = ui.input("Your answer").classes("w-full")
+                                custom_input = ui.input("Your answer").props("outlined dense").classes("w-full")
                                 answer_widgets.append(
                                     {
                                         "question": question.question,
@@ -647,14 +652,15 @@ def _open_questions_dialog(state: dict[str, Any], questions: list[Any]) -> None:
                                         "custom_input": custom_input,
                                     }
                                 )
-                ui.separator().classes("shrink-0")
-                with ui.row().classes("w-full justify-end no-wrap shrink-0"):
-                    ui.button("Skip", on_click=lambda: _skip_questions(state, dialog)).props("color=grey-7 flat")
+                with ui.row().classes("uw-dialog-footer no-wrap shrink-0"):
+                    ui.button("Skip", on_click=lambda: _skip_questions(state, dialog)).props("flat no-caps").classes(
+                        "uw-btn-ghost"
+                    )
                     ui.button(
                         "Send answers",
                         icon="send",
                         on_click=lambda: _submit_answers(state, dialog, answer_widgets),
-                    ).props("color=primary")
+                    ).props("unelevated no-caps color=primary")
         state["_questions_dialog"] = dialog
     dialog.open()
 

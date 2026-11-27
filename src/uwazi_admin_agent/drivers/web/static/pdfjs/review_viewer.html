@@ -4,29 +4,44 @@
   <meta charset="utf-8" />
   <title>Uwazi Admin Agent — entity document</title>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #525659; }
+    :root {
+      --uw-parchment: #f5f0e8;
+      --uw-paper: #ffffff;
+      --uw-warm: #fcfaf8;
+      --uw-ink: #1a1a1a;
+      --uw-ink-tertiary: #555555;
+      --uw-border: #ede7db;
+      --uw-border-soft: #e2dbc9;
+      --uw-shadow: 0 2px 8px rgb(0 0 0 / 0.16);
+    }
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      background: var(--uw-parchment); color: var(--uw-ink);
+      font-family: Inter, "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+    }
     #container {
       position: relative; width: 100%; height: 100%; overflow: auto;
-      box-sizing: border-box; padding-top: 46px;
+      box-sizing: border-box; padding-top: 56px;
     }
     #page-wrap { position: relative; margin: 0 auto; }
-    canvas.pdf-page { display: block; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-    #error { color: #fff; font: 14px/1.5 system-ui, sans-serif; padding: 16px; }
+    canvas.pdf-page { display: block; margin: 0 auto; box-shadow: var(--uw-shadow); }
+    #error { color: var(--uw-ink-tertiary); font: 14px/1.5 system-ui, sans-serif; padding: 16px; }
     #toolbar {
-      position: fixed; top: 8px; right: 12px; z-index: 10;
+      position: fixed; top: 10px; right: 12px; z-index: 10;
       display: flex; align-items: center; gap: 4px;
-      padding: 4px 6px; border-radius: 6px;
-      background: rgba(0, 0, 0, 0.65); color: #fff;
-      font: 13px/1 system-ui, sans-serif; box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+      padding: 4px 6px; border-radius: 8px;
+      background: var(--uw-paper); color: var(--uw-ink);
+      border: 1px solid var(--uw-border);
+      font: 13px/1 system-ui, sans-serif; box-shadow: 0 1px 4px rgb(0 0 0 / 0.08);
     }
     #toolbar button {
-      width: 26px; height: 26px; border: 0; border-radius: 4px;
-      background: rgba(255,255,255,0.15); color: #fff;
+      width: 28px; height: 28px; border: 1px solid transparent; border-radius: 6px;
+      background: transparent; color: var(--uw-ink-tertiary);
       font-size: 18px; line-height: 1; cursor: pointer;
     }
-    #toolbar button:hover { background: rgba(255,255,255,0.3); }
+    #toolbar button:hover { background: var(--uw-warm); border-color: var(--uw-border-soft); color: var(--uw-ink); }
     #toolbar button:disabled { opacity: 0.4; cursor: default; }
-    #zoom-label { min-width: 44px; text-align: center; user-select: none; }
+    #zoom-label { min-width: 48px; text-align: center; user-select: none; color: var(--uw-ink-tertiary); }
   </style>
 </head>
 <body>

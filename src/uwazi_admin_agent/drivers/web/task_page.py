@@ -39,6 +39,8 @@ from uwazi_admin_agent.drivers.web.session import (
     session_is_active,
 )
 
+from .theme import install_theme
+
 _STEP_COLORS: dict[str, str] = {
     "planned": "grey",
     "executed": "green",
@@ -60,7 +62,7 @@ def task_page(task_id: str, instance_url: str) -> None:
     if not session_is_active(instance_url):
         ui.navigate.to(page_link("/", instance_url))
         return
-    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    install_theme()
     _build_page(task_id)
 
 
@@ -77,22 +79,42 @@ def _build_page(task_id: str) -> None:
 
     state: dict[str, Any] = {"task_id": task_id, "instance_url": instance, "view": view, "cards": {}}
 
-    with ui.header().classes("items-center justify-between"):
-        with ui.row().classes("items-center"):
-            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
-            ui.label(view.name).classes("text-h6 q-ml-sm")
-            ui.badge(view.status).props(f"color={_task_color(view.status)}").classes("q-ml-sm")
-        with ui.row().classes("items-center"):
-            ui.button("Revert task", icon="undo", on_click=lambda: _revert_task(state)).props("flat color=warning")
-            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat color=secondary")
+    with ui.header().classes("uw-header items-center justify-between"):
+        with ui.row().classes("items-center gap-3 no-wrap"):
+            ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat round").classes(
+                "uw-btn-ghost"
+            )
+            with ui.element("div").classes("brand-mark"):
+                ui.label("u")
+            with ui.column().classes("gap-0"):
+                ui.label("Uwazi Admin Agent").classes("brand-name")
+                ui.label("Task").classes("brand-sub")
+            ui.element("div").classes("header-separator")
+            with ui.row().classes("items-center gap-1 no-wrap"):
+                ui.link("Tasks", page_link("/app")).classes("breadcrumb-link")
+                ui.icon("chevron_right").classes("breadcrumb-chevron")
+                ui.label(view.name).classes("breadcrumb-current")
+                ui.badge(view.status).props(f"color={_task_color(view.status)}").classes("q-ml-sm status-pill")
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.button("Revert task", icon="undo", on_click=lambda: _revert_task(state)).props("outline no-caps").classes(
+                "uw-btn-danger"
+            )
+            ui.button("Back to tasks", on_click=lambda: ui.navigate.to(page_link("/app"))).props("flat no-caps").classes(
+                "uw-btn-ghost"
+            )
 
     with ui.column().classes("w-full items-center"):
-        ui.label(
-            "Steps run in order. Running rows in a step's 'Review & apply' page is what writes, "
-            "straight into that step's run; 'Revert task' undoes every executed step, latest first."
-        ).classes("text-body2 text-grey-7 w-full max-w-6xl q-mb-sm")
-        with ui.card().classes("w-full max-w-6xl"):
-            _render_steps(state)
+        with ui.element("div").classes("uw-page w-full"):
+            with ui.element("div").classes("uw-card w-full"):
+                with ui.row().classes("uw-card-header w-full items-center justify-between no-wrap"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("Task steps").classes("uw-card-title")
+                        ui.label(
+                            "Steps run in order. Running rows in a step's “Review & apply” page is what writes, "
+                            "straight into that step's run; “Revert task” undoes every executed step, latest first."
+                        ).classes("uw-card-subtitle")
+                with ui.column().classes("uw-card-body w-full gap-3"):
+                    _render_steps(state)
 
     ui.timer(5.0, lambda: _refresh(state))
 
@@ -121,25 +143,25 @@ def _render_steps(state: dict[str, Any]) -> None:
 
 
 def _step_card(state: dict[str, Any], step: StepView, view: TaskView) -> None:
-    with ui.card().classes("w-full"):
+    with ui.card().classes("w-full uw-step-card"):
         with ui.row().classes("w-full items-center justify-between no-wrap"):
-            with ui.row().classes("items-center"):
-                ui.label(f"{step.step_no}. {step.title}").classes("text-subtitle1 text-bold")
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                ui.label(f"{step.step_no}. {step.title}").classes("uw-step-title")
                 status = step.status.value if step.status is not None else "missing"
-                ui.badge(status).props(f"color={_STEP_COLORS.get(status, 'grey')}")
-            with ui.row().classes("items-center no-wrap"):
+                ui.badge(status).props(f"color={_STEP_COLORS.get(status, 'grey')}").classes("status-pill")
+            with ui.row().classes("items-center no-wrap gap-1"):
                 ui.button(
                     "Review",
                     icon="fact_check",
                     on_click=lambda s=step: ui.navigate.to(page_link(f"/review/{s.run_id}")),
-                ).props("dense flat color=secondary")
+                ).props("flat no-caps color=primary")
                 ui.button(
                     "Show run",
                     icon="open_in_new",
                     on_click=lambda s=step: ui.navigate.to(page_link("/app")),
-                ).props("dense flat grey-8")
+                ).props("flat no-caps").classes("uw-btn-ghost")
         if step.description:
-            ui.label(step.description).classes("text-body2 text-grey-7")
+            ui.label(step.description).classes("uw-step-description")
 
 
 # --- actions -----------------------------------------------------------------
@@ -220,12 +242,14 @@ def _refresh(state: dict[str, Any]) -> None:
 
 def _confirm(title: str, message: str, on_confirm: Any) -> None:
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label(title).classes("text-h6")
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl uw-dialog"):
+            ui.label(title).classes("uw-modal-title")
             ui.label(message).classes("text-body2").style("white-space: pre-wrap")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=dialog.close).props("color=grey-7 flat")
-                ui.button("Confirm", color="negative", on_click=lambda: _fire(dialog, on_confirm))
+            with ui.row().classes("uw-dialog-footer"):
+                ui.button("Cancel", on_click=dialog.close).props("flat no-caps").classes("uw-btn-ghost")
+                ui.button("Confirm", color="negative", on_click=lambda: _fire(dialog, on_confirm)).props(
+                    "unelevated no-caps"
+                )
     dialog.open()
 
 

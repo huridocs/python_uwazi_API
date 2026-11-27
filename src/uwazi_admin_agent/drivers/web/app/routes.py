@@ -24,10 +24,25 @@ from uwazi_admin_agent.drivers.web.review_page.page import review_page
 from uwazi_admin_agent.drivers.web.task_page import task_page
 
 _DUMMY_HTML = (
-    "<!doctype html><html><head><meta charset='utf-8'><title>Uwazi Admin Agent</title></head>"
-    "<body style='font-family:sans-serif;color:#556;padding:2rem'>"
+    "<!doctype html><html><head><meta charset='utf-8'><title>Uwazi Admin Agent</title>"
+    "<style>"
+    ":root{color-scheme:light}"
+    "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+    "background:#f5f0e8;color:#1a1a1a;font-family:Inter,'Noto Sans',system-ui,sans-serif;padding:24px}"
+    ".card{width:100%;max-width:420px;background:#fff;border:1px solid #ede7db;border-radius:12px;"
+    "box-shadow:0 10px 15px -3px rgb(0 0 0 / .08);padding:28px}"
+    ".brand{display:flex;align-items:center;gap:10px;margin-bottom:18px}"
+    ".mark{width:28px;height:28px;border-radius:8px;background:#e8432a;color:#fff;display:flex;"
+    "align-items:center;justify-content:center;font-weight:800;font-size:15px}"
+    ".name{font-size:15px;font-weight:700}.sub{font-size:11px;color:#777}"
+    "h1{font-size:22px;line-height:1.2;margin:0 0 8px;letter-spacing:-.02em}"
+    "p{font-size:13px;line-height:1.5;color:#555;margin:0}"
+    "</style></head>"
+    "<body><div class='card'><div class='brand'><div class='mark'>u</div>"
+    "<div><div class='name'>Uwazi Admin Agent</div><div class='sub'>Task runs</div></div></div>"
+    "<h1>Instance not found</h1>"
     "<p>This address does not name a configured Uwazi instance.</p>"
-    "</body></html>"
+    "</div></body></html>"
 )
 
 

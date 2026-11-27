@@ -24,8 +24,10 @@ from uwazi_admin_agent.drivers.web.session import page_instance_url
 
 
 def close_button(dialog: Any, dense: bool = False) -> Any:
-    """Standard modal dismiss button (X icon + label), flat."""
-    button = ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+    """Standard modal dismiss button: one predictable X in the top-right."""
+    button = (
+        ui.button(icon="close", on_click=dialog.close).props("flat round dense").classes("uw-modal-close").tooltip("Close")
+    )
     if dense:
         button.props("dense")
     return button
@@ -43,9 +45,9 @@ def modal_header(dialog: Any, title: str, trailing: Callable[[], Any] | None = N
     whose middle section scrolls, and a compressible header would be squeezed
     to nothing once the scroll content stops shrinking (``shrink-0`` children).
     """
-    with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
-        ui.label(title).classes("text-h6")
-        with ui.row().classes("items-center no-wrap"):
+    with ui.row().classes("uw-modal-header"):
+        ui.label(title).classes("uw-modal-title")
+        with ui.row().classes("items-center no-wrap gap-1"):
             if trailing is not None:
                 trailing()
             close_button(dialog)
@@ -75,7 +77,7 @@ def copy_to_clipboard(text: str | Callable[[], str], label: str = "Copy") -> Non
         ui.run_javascript(js)
         ui.notify("Copied to clipboard", type="positive", timeout=1.5)
 
-    ui.button(label, icon="content_copy", on_click=_do_copy).props("flat dense color=grey-7")
+    ui.button(label, icon="content_copy", on_click=_do_copy).props("flat dense no-caps").classes("uw-btn-ghost")
 
 
 def script_dialog(run_id: str) -> None:
@@ -104,7 +106,7 @@ def script_dialog(run_id: str) -> None:
         return
 
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full uw-dialog").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 modal_header(

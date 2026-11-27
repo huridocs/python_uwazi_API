@@ -146,21 +146,21 @@ _DRIFT_LABELS: dict[str, str] = {
 }
 
 _DRIFT_DOT_COLORS: dict[str, str] = {
-    "valid": "#16A34A",
-    "drifted": "#DC2626",
-    "error": "#DC2626",
-    "unknown": "#9CA3AF",
-    "checking": "#F59E0B",
-    "syncing": "#1C64F2",
+    "valid": "var(--uw-success)",
+    "drifted": "var(--uw-emphasis)",
+    "error": "var(--uw-emphasis)",
+    "unknown": "var(--uw-ink-muted)",
+    "checking": "var(--uw-warning)",
+    "syncing": "var(--uw-carbon)",
 }
 
 _DRIFT_TEXT_COLORS: dict[str, str] = {
-    "valid": "#6B7280",
-    "drifted": "#DC2626",
-    "error": "#DC2626",
-    "unknown": "#6B7280",
-    "checking": "#6B7280",
-    "syncing": "#6B7280",
+    "valid": "var(--uw-ink-tertiary)",
+    "drifted": "var(--uw-emphasis)",
+    "error": "var(--uw-emphasis)",
+    "unknown": "var(--uw-ink-tertiary)",
+    "checking": "var(--uw-ink-tertiary)",
+    "syncing": "var(--uw-ink-tertiary)",
 }
 
 
@@ -200,10 +200,10 @@ def _apply_drift_state(
         self_text = _DRIFT_LABELS.get(key, "Not checked yet") + drift_banner_time(stored.checked_at)
         full_text = drift_banner_text(status=key, detail=stored.detail)
     label.text = self_text
-    label.style(replace=f"color: {_DRIFT_TEXT_COLORS.get(key, '#6B7280')};")
+    label.style(replace=f"color: {_DRIFT_TEXT_COLORS.get(key, 'var(--uw-ink-tertiary)')};")
     if dot is not None and not dot.is_deleted:
         dot.classes(replace="sync-dot" + (" sync-dot-pulse" if key in ("checking", "syncing") else ""))
-        dot.style(f"background: {_DRIFT_DOT_COLORS.get(key, '#9CA3AF')};")
+        dot.style(f"background: {_DRIFT_DOT_COLORS.get(key, 'var(--uw-ink-muted)')};")
     tooltip = state.get("_drift_tooltip")
     if tooltip is not None and not tooltip.is_deleted:
         tooltip.text = full_text
@@ -937,10 +937,10 @@ def _expanded_changed(state: dict[str, Any], event: Any) -> None:
 
 
 def _modal_header(dialog: Any, title: str) -> None:
-    """Modal title row with a top-right Close button (matches app.py's helper)."""
-    with ui.row().classes("w-full items-center justify-between no-wrap shrink-0"):
-        ui.label(title).classes("text-h6")
-        ui.button("Close", icon="close", on_click=dialog.close).props("flat")
+    """Modal title row with a top-right Close button (matches task_dialogs)."""
+    with ui.row().classes("uw-modal-header"):
+        ui.label(title).classes("uw-modal-title")
+        ui.button(icon="close", on_click=dialog.close).props("flat round dense").classes("uw-modal-close").tooltip("Close")
 
 
 def _on_table_select(state: dict[str, Any], event: Any) -> None:
@@ -2246,11 +2246,11 @@ def _set_drift_error(state: dict[str, Any], text: str) -> None:
     if label is None or label.is_deleted:
         return
     label.text = "Check failed"
-    label.style(replace="color: #DC2626;")
+    label.style(replace="color: var(--uw-emphasis);")
     dot = state.get("_drift_icon")
     if dot is not None and not dot.is_deleted:
         dot.classes(replace="sync-dot")
-        dot.style("background: #DC2626;")
+        dot.style("background: var(--uw-emphasis);")
     tooltip = state.get("_drift_tooltip")
     if tooltip is not None and not tooltip.is_deleted:
         tooltip.text = text

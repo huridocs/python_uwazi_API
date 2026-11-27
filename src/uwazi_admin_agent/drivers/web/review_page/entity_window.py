@@ -74,9 +74,9 @@ from uwazi_admin_agent.drivers.web.run_service import (
     get_entity_suggestions,
     get_suggestion_entity_languages,
     get_templates,
+    promote_validation_row,
     property_labels_for,
     property_types_for,
-    promote_validation_row,
     read_validation_label,
     rescore_run,
     resolve_entity_document,
@@ -145,7 +145,7 @@ def _open_entity_window(
     # reloads the entity the operator is already reading.
     previous_row, next_row = row_neighbours(_navigation_pairs(state), (shared_id, language))
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full").props("style=height:100dvh"):
+        with ui.dialog() as dialog, ui.card().classes("w-full uw-dialog").props("style=height:100dvh"):
             dialog.props("maximized")
             with ui.column().classes("w-full h-full items-stretch no-wrap"):
                 # The header and the properties panel are their own hosts: a
@@ -578,17 +578,23 @@ def _entity_header(
                 "Run this row",
                 icon="play_arrow",
                 on_click=lambda: _run_refs(state, refs, confirm=False),
-            ).props("flat dense color=primary")
+            ).props("flat no-caps color=primary")
             if not refs:
                 run_button.disable()
-            revert_button = ui.button(
-                "Delete (undo create)" if created else "Revert this entity",
-                icon="delete" if created else "undo",
-                on_click=lambda: _revert_entity_clicked(state, shared_id),
-            ).props(f"flat dense color={'negative' if created else 'indigo'}")
+            revert_button = (
+                ui.button(
+                    "Delete (undo create)" if created else "Revert this entity",
+                    icon="delete" if created else "undo",
+                    on_click=lambda: _revert_entity_clicked(state, shared_id),
+                )
+                .props("flat no-caps")
+                .classes("uw-btn-danger")
+            )
             if not revertable:
                 revert_button.disable()
-            ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat dense")
+            ui.button("Close", icon="close", on_click=lambda: _close_entity_window(state)).props("flat no-caps").classes(
+                "uw-btn-ghost"
+            )
 
 
 def _template_labels(run_id: str) -> dict[str, dict[str, str]]:
@@ -897,9 +903,9 @@ def _entity_suggestions(
             # property value of their own: the structural cards below show
             # their file move (and, for a merge, its source deletes).
             continue
-        classes = "w-full"
+        classes = "w-full uw-subcard"
         if focus_property is not None and suggestion.property_name == focus_property:
-            classes = "w-full bg-blue-1"
+            classes = "w-full uw-subcard bg-blue-1"
         with ui.card().classes(classes):
             with ui.row().classes("w-full items-center justify-between no-wrap"):
                 with ui.column().classes("items-start no-wrap").style("min-width: 0"):
@@ -1074,7 +1080,10 @@ def _entity_fix_prompt_button(
     with (
         ui.row()
         .classes("fixed bottom-4 right-4 z-40 q-pa-sm q-gutter-x-sm items-center")
-        .style("background: rgba(255, 255, 255, 0.9); border-radius: 8px")
+        .style(
+            "background: var(--uw-paper); border: 1px solid var(--uw-border); "
+            "box-shadow: var(--uw-shadow-lg); border-radius: 8px"
+        )
     ):
         _entity_validation_button(state, suggestions or [])
         if len(corrections) == 1:

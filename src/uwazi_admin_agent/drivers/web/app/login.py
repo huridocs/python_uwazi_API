@@ -20,15 +20,23 @@ from uwazi_agent.adapters.uwazi_api.uwazi_api_adapter import UwaziApiAdapter
 from uwazi_api.domain.credentials import MISSING_CREDENTIALS_MESSAGE, has_credentials
 from uwazi_api.domain.exceptions import CredentialsRejectedError
 
+from ..theme import install_theme
+
 
 def _guidance_page() -> None:
     """Bare root: no instance is named, so point at the shared link (no form)."""
-    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
-    with ui.column().classes("w-full items-center justify-center min-h-screen"):
-        with ui.card().classes("w-full max-w-sm"):
-            ui.label("Uwazi Admin Agent").classes("text-h6")
-            ui.label(MISSING_INSTANCE_MESSAGE).classes("text-body1 q-mt-sm")
-            ui.label("Ask the person who sent you the link for the correct URL.").classes("text-body2 text-grey-7 q-mt-sm")
+    install_theme()
+    with ui.column().classes("uw-auth-page"):
+        with ui.element("div").classes("uw-auth-card"):
+            with ui.row().classes("uw-auth-brand"):
+                with ui.element("div").classes("brand-mark"):
+                    ui.label("u")
+                with ui.column().classes("gap-0"):
+                    ui.label("Uwazi Admin Agent").classes("brand-name")
+                    ui.label("Task runs for one instance").classes("brand-sub")
+            ui.label("Pick an instance link").classes("uw-auth-title")
+            ui.label(MISSING_INSTANCE_MESSAGE).classes("uw-auth-subtitle")
+            ui.label("Ask the person who sent you the link for the correct URL.").classes("uw-card-subtitle q-mt-md")
 
 
 def _login_page(instance_url: str, user_param: str = "") -> None:
@@ -57,7 +65,7 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
     current-user/role endpoint; the account's own Uwazi authorisation is the
     boundary.
     """
-    ui.colors(primary="#2c3e50", secondary="#18bc9c", accent="#f39c12")
+    install_theme()
     # A login client is unregistered: no instance-bound toast or table refresh
     # may reach it, even if this client object was reused after a logout.
     clear_client_instance()
@@ -67,29 +75,39 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
         ui.navigate.to(page_link("/app", instance_url))
         return
     user = (user_param or "").strip()
-    with ui.column().classes("w-full items-center justify-center min-h-screen"):
-        with ui.card().classes("w-full max-w-sm"):
-            ui.label("Uwazi Admin Agent").classes("text-h6")
-            ui.label("Log in with the Uwazi account used to administer the instance. ").classes("text-body1 q-mt-sm")
+    with ui.column().classes("uw-auth-page"):
+        with ui.element("div").classes("uw-auth-card"):
+            with ui.row().classes("uw-auth-brand"):
+                with ui.element("div").classes("brand-mark"):
+                    ui.label("u")
+                with ui.column().classes("gap-0"):
+                    ui.label("Uwazi Admin Agent").classes("brand-name")
+                    ui.label("Admin sign in").classes("brand-sub")
+            ui.label("Sign in").classes("uw-auth-title")
+            ui.label("Log in with the Uwazi account used to administer the instance. ").classes("uw-auth-subtitle")
             # Show WHERE the credentials are going, ONCE: the full target url
             # (the exact host the password is sent to) and, when the link named
             # one, the account being used.
-            with ui.row().classes("items-center gap-3 no-wrap w-full bg-grey-2 rounded-borders q-pa-sm q-mt-sm"):
-                ui.icon("dns", color="grey-8")
+            with ui.element("div").classes("uw-instance-box w-full"):
+                ui.icon("dns")
                 with ui.column().classes("gap-0 min-w-0"):
-                    ui.label("Signing in to").classes("text-caption text-grey-7")
-                    ui.label(instance_url).classes("text-body2 text-weight-medium break-all")
+                    ui.label("Signing in to").classes("uw-eyebrow")
+                    ui.label(instance_url).classes("uw-instance-url")
                     if user:
-                        ui.label(f"as {user}").classes("text-caption text-grey-8")
-            error_label = ui.label().classes("text-negative text-body2")
+                        ui.label(f"as {user}").classes("uw-instance-user")
+            error_label = ui.label().classes("uw-auth-error q-mt-sm")
 
             # The username field is shown only when the link did not name the
             # account; the instance is decided by the URL's path prefix, never
             # by a picker.
             user_input = None
             if not user:
-                user_input = ui.input("Username").classes("w-full text-h6")
-            password_input = ui.input("Password", password=True).classes("w-full text-h6")
+                user_input = ui.input("Username").props("outlined dense").classes("w-full q-mt-md")
+            password_input = (
+                ui.input("Password", password=True, password_toggle_button=True)
+                .props("outlined dense")
+                .classes("w-full q-mt-sm")
+            )
 
             def _submit() -> None:
                 # Never fall back to a default account: an empty submit must not
@@ -139,8 +157,9 @@ def _login_page(instance_url: str, user_param: str = "") -> None:
                 ui.navigate.to(page_link("/app", instance_url))
 
             password_input.on("keydown.enter", _submit)
-            with ui.row().classes("q-mt-lg"):
-                ui.button("Log in", color="primary", on_click=_submit)
+            ui.button("Log in", icon="login", on_click=_submit).props("unelevated no-caps color=primary").classes(
+                "w-full q-mt-lg"
+            )
 
 
 def _logout() -> None:

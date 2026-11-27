@@ -35,6 +35,7 @@ from uwazi_admin_agent.domain.llm_budget import (
     estimate_pass_cost,
     format_money,
 )
+from uwazi_admin_agent.drivers.web.task_dialogs import modal_header
 
 
 class SpendEstimate(BaseModel):
@@ -135,38 +136,44 @@ def confirm_llm_spend(
     opened (e.g. a pending message in a chat).
     """
     with context.client.layout:
-        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl"):
-            ui.label(estimate.title).classes("text-h6")
-            with ui.column().classes("w-full gap-0"):
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-2xl uw-dialog"):
+            modal_header(dialog, estimate.title)
+            with ui.column().classes("uw-callout w-full gap-0"):
                 for label, value in _estimate_rows(estimate):
                     with ui.row().classes("w-full items-center justify-between no-wrap"):
                         ui.label(label).classes("text-body2 text-grey-7")
-                        ui.label(value).classes("text-body2 text-bold")
+                        ui.label(value).classes("text-body2 text-weight-bold")
             if estimate.detail:
                 ui.label(estimate.detail).classes("text-body2 q-mt-sm")
-            ui.separator()
             ui.label("Hard limits enforced at runtime (the projection above is only an estimate):").classes(
-                "text-body2 text-bold"
+                "text-body2 text-weight-bold q-mt-md"
             )
-            with ui.row().classes("w-full items-center gap-2"):
-                cost_input = ui.number(
-                    "Max cost ($)", value=estimate.default_max_cost, min=0.01, step=0.5, format="%.2f"
-                ).classes("grow")
-                requests_input = ui.number(
-                    "Max requests (backstop)", value=estimate.default_max_requests, min=1, step=1
-                ).classes("grow")
+            with ui.row().classes("w-full items-center gap-2 q-mt-xs"):
+                cost_input = (
+                    ui.number("Max cost ($)", value=estimate.default_max_cost, min=0.01, step=0.5, format="%.2f")
+                    .props("outlined dense")
+                    .classes("grow")
+                )
+                requests_input = (
+                    ui.number("Max requests (backstop)", value=estimate.default_max_requests, min=1, step=1)
+                    .props("outlined dense")
+                    .classes("grow")
+                )
             for note in estimate.notes:
                 ui.label(note).classes("text-body2 text-grey-7")
             ui.label(
                 "The pass aborts cleanly the moment the estimated cost of the calls so far would pass the dollar "
                 "cap. Predictions never write to Uwazi, so an aborted pass keeps everything it already recorded."
             ).classes("text-body2 text-grey-7")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=lambda: _cancel(dialog, on_cancel)).props("color=grey-7 flat")
+            with ui.row().classes("uw-dialog-footer"):
+                ui.button("Cancel", on_click=lambda: _cancel(dialog, on_cancel)).props("flat no-caps").classes(
+                    "uw-btn-ghost"
+                )
                 ui.button(
                     "Approve and run",
+                    icon="play_arrow",
                     on_click=lambda: _approve(dialog, estimate, on_approve, cost_input, requests_input),
-                )
+                ).props("unelevated no-caps color=primary")
     dialog.open()
 
 
